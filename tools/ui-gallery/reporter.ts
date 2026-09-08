@@ -82,11 +82,13 @@ export default class GalleryReporter implements Reporter {
     }
     const packageData = JSON.parse(readFileSync(require.resolve('@playwright/test/package.json'), 'utf8')) as { version?: unknown };
     const rows = galleryCases.map((selected) => ({ ...selected, attempts: this.results.get(selected.id) ?? [] }));
+    if (rows.some((row) => row.attempts.length === 0)) this.artifactErrors.push('The full declared gallery did not execute.');
+    const finalStatus = this.artifactErrors.length > 0 ? 'failed' : result.status;
     const manifest = {
       schemaVersion: 1, runId: this.options.runId, generatedAt: new Date().toISOString(),
       scope: 'CLIENT / SYNTHETIC', visualReview: 'ROOT_REQUIRED_NOT_PERFORMED_BY_HARNESS',
       limitations: ['Not native shell/UAC Secure Desktop evidence', 'Not Android Keystore/auth/notification or package-lifecycle evidence', 'Not latency, OS delivery, approval, or pixel-baseline proof'],
-      runnerStatus: result.status, expectedCases: galleryCases.length, executedCases: this.results.size,
+      runnerStatus: result.status, finalStatus, expectedCases: galleryCases.length, executedCases: this.results.size,
       environment: { os: platform(), osRelease: release(), architecture: arch(), node: process.version,
         playwright: typeof packageData.version === 'string' ? packageData.version : null,
         browser: 'chromium', locale: 'ko-KR', timezone: 'Asia/Seoul', reducedMotion: 'reduce',
@@ -103,7 +105,7 @@ export default class GalleryReporter implements Reporter {
       }).join('');
       return `<section><h2>${escapeHtml(row.id)}</h2><p>${escapeHtml(row.fixture)} · ${String(row.viewport.width)}×${String(row.viewport.height)} · ${escapeHtml(row.colorScheme)} · forced-colors ${escapeHtml(row.forcedColors)}</p>${attempts || '<p>실행되지 않음. 캡처/검수 증거가 없습니다.</p>'}</section>`;
     }).join('');
-    writeFileSync(resolve(output, 'index.html'), `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CLIENT · SYNTHETIC 갤러리</title><style>body{margin:0;padding:24px;background:#f2f6f7;color:#152c35;font:16px/1.6 system-ui,sans-serif}header,section{max-width:1280px;margin:0 auto 24px;padding:20px;background:#fbfdfd;border:1px solid #d4e0e5;border-radius:12px}h1,h2{overflow-wrap:anywhere}h2{font-size:18px}a{color:#0b7285}figure{display:inline-block;vertical-align:top;margin:12px 16px 12px 0;max-width:100%;width:420px}img{display:block;width:100%;height:auto;border:1px solid #d4e0e5}pre{white-space:pre-wrap;overflow-wrap:anywhere}summary{cursor:pointer}a:focus-visible,summary:focus-visible{outline:3px solid #0b7285;outline-offset:3px}</style><header><h1>CLIENT · SYNTHETIC 화면 갤러리</h1><p>화면 예시 · 실제 연결 아님. 자동 실행 결과는 시각 검수나 네이티브 서비스·UAC·휴대폰 인증의 성공 증거가 아닙니다.</p><p>ROOT가 실제 이미지와 화면 상태를 검토해야 합니다. 실패 이미지·trace도 첨부 파일로 보존됩니다.</p><p><a href="manifest.json">JSON 매니페스트</a> · 실행기: ${escapeHtml(result.status)} · 실행 ${String(this.results.size)}/${String(galleryCases.length)}</p><details><summary>빌드·HEAD·환경·실행 실패</summary><pre>${escapeHtml(JSON.stringify({ build, environment: manifest.environment, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors }, null, 2))}</pre></details></header>${cards}</html>\n`);
+    writeFileSync(resolve(output, 'index.html'), `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CLIENT · SYNTHETIC 갤러리</title><style>body{margin:0;padding:24px;background:#f2f6f7;color:#152c35;font:16px/1.6 system-ui,sans-serif}header,section{max-width:1280px;margin:0 auto 24px;padding:20px;background:#fbfdfd;border:1px solid #d4e0e5;border-radius:12px}h1,h2{overflow-wrap:anywhere}h2{font-size:18px}a{color:#0b7285}figure{display:inline-block;vertical-align:top;margin:12px 16px 12px 0;max-width:100%;width:420px}img{display:block;width:100%;height:auto;border:1px solid #d4e0e5}pre{white-space:pre-wrap;overflow-wrap:anywhere}summary{cursor:pointer}a:focus-visible,summary:focus-visible{outline:3px solid #0b7285;outline-offset:3px}</style><header><h1>CLIENT · SYNTHETIC 화면 갤러리</h1><p>화면 예시 · 실제 연결 아님. 자동 실행 결과는 시각 검수나 네이티브 서비스·UAC·휴대폰 인증의 성공 증거가 아닙니다.</p><p>ROOT가 실제 이미지와 화면 상태를 검토해야 합니다. 실패 이미지·trace도 첨부 파일로 보존됩니다.</p><p><a href="manifest.json">JSON 매니페스트</a> · 갤러리 최종 상태: ${escapeHtml(finalStatus)} · 실행 ${String(this.results.size)}/${String(galleryCases.length)}</p><details><summary>빌드·HEAD·환경·실행 실패</summary><pre>${escapeHtml(JSON.stringify({ build, environment: manifest.environment, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors }, null, 2))}</pre></details></header>${cards}</html>\n`);
     if (this.artifactErrors.length > 0) return { status: 'failed' };
   }
 }

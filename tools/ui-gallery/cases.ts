@@ -30,6 +30,7 @@ export const galleryCases: readonly GalleryCase[] = [
   row('phone-empty-390', 'phone-empty', 390, 844),
   row('phone-unavailable-390', 'phone-unavailable', 390, 844),
   row('phone-pending-390', 'phone-pending', 390, 844),
+  row('phone-terminal-390', 'phone-terminal', 390, 844, 'details'),
   row('phone-pending-landscape-844', 'phone-pending', 844, 390),
   row('phone-details-dark-390', 'phone-pending', 390, 844, 'details', 'dark'),
   row('phone-hostile-long-text-390', 'phone-long-request', 390, 844, 'long-details'),

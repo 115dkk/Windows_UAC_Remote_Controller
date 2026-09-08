@@ -27,6 +27,7 @@ export default defineConfig({
   use: {
     browserName: 'chromium',
     headless: true,
+    serviceWorkers: 'block',
     baseURL: 'http://127.0.0.1:4173',
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',

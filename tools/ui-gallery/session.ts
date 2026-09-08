@@ -11,12 +11,16 @@ export class GallerySession {
   private readonly pageErrors: string[] = [];
   private readonly failedRequests: string[] = [];
   private readonly captures: { stage: string; caption: string }[] = [];
+  private hasConsoleProblem = false;
+  private consoleTruncated = false;
   private selected: GalleryCase | null = null;
   private measurements: unknown[] = [];
 
   constructor(private readonly page: Page, private readonly browser: Browser, private readonly info: TestInfo) {
     page.on('console', (message) => {
+      if (message.type() === 'error' || message.type() === 'warning') this.hasConsoleProblem = true;
       if (this.consoleMessages.length < maxMessages) this.consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) });
+      else this.consoleTruncated = true;
     });
     page.on('pageerror', (error) => { if (this.pageErrors.length < maxMessages) this.pageErrors.push(error.message.slice(0, 2000)); });
     page.on('requestfailed', (request) => {
@@ -31,6 +35,10 @@ export class GallerySession {
     this.selected = selected;
     await this.page.setViewportSize(selected.viewport);
     await this.page.emulateMedia({ colorScheme: selected.colorScheme, forcedColors: selected.forcedColors, reducedMotion: 'reduce' });
+    await this.page.routeWebSocket('**/*', async (socket) => {
+      if (this.failedRequests.length < maxMessages) this.failedRequests.push('Unexpected WebSocket in the synthetic gallery.');
+      await socket.close();
+    });
     // Fixtures have no network owner. Unexpected nonlocal requests are a failure,
     // never a request to a real relay or an injected successful backend response.
     await this.page.route('**/*', async (route) => {
@@ -92,10 +100,11 @@ export class GallerySession {
       scope: 'CLIENT / SYNTHETIC', visualReview: 'not-performed-by-harness',
       fixture: this.selected, browserName: 'chromium', browserVersion: this.browser.version(),
       context, captures: this.captures, layoutMeasurements: this.measurements,
-      console: this.consoleMessages, pageErrors: this.pageErrors, failedRequests: this.failedRequests,
+      console: this.consoleMessages, consoleTruncated: this.consoleTruncated,
+      hasConsoleProblem: this.hasConsoleProblem, pageErrors: this.pageErrors, failedRequests: this.failedRequests,
     };
     await this.info.attach('gallery-observation', { body: Buffer.from(JSON.stringify(data, null, 2)), contentType: 'application/json' });
-    expect.soft(this.consoleMessages.filter((message) => message.type === 'error' || message.type === 'warning'), 'rendered client console errors/warnings').toEqual([]);
+    expect.soft(this.hasConsoleProblem, 'rendered client console errors/warnings, including beyond the retained sample').toBe(false);
     expect.soft(this.pageErrors, 'rendered client page errors').toEqual([]);
     expect.soft(this.failedRequests, 'failed or unintended client requests').toEqual([]);
   }

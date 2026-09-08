@@ -28,11 +28,16 @@ for (const selected of galleryCases) {
       await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
       await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(1);
     }
-    if (fixture === 'phone-pending' || fixture === 'phone-long-request') {
+    if (fixture === 'phone-pending' || fixture === 'phone-long-request' || fixture === 'phone-terminal') {
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeEnabled();
       await expect(page.getByRole('button', { name: '거부', exact: true })).toBeEnabled();
       await expect(page.getByRole('heading', { name: '휴대폰 화면 잠금이 필요해요', exact: true })).toHaveCount(0);
       await expect(page.locator('.path-output')).toContainText('C:\\');
+    }
+    if (fixture === 'phone-terminal') {
+      await expect(page.getByRole('heading', { name: 'PowerShell', exact: true })).toBeVisible();
+      await expect(page.locator('.path-output')).toContainText('pwsh.exe');
+      await expect(page.getByText(/Write-Output/u)).toHaveCount(0);
     }
     if (fixture === 'phone-settings') {
       await expect(page.getByRole('radio', { name: '요일과 시간 지정', exact: true })).toBeChecked();
@@ -62,6 +67,7 @@ for (const selected of galleryCases) {
       await page.getByRole('button', { name: '더 보기', exact: true }).click();
       const region = page.getByRole('region', { name: '프로그램 요청 세부 내용', exact: true });
       await expect(region).toBeVisible();
+      if (fixture === 'phone-terminal') await expect(region.locator('pre')).toContainText('Write-Output');
       await expect(page.getByRole('button', { name: '접기', exact: true })).toHaveAttribute('aria-expanded', 'true');
       if (selected.action === 'long-details') {
         await expect(region.locator('pre')).toContainText('<img src=x onerror="exampleOnly()">');
@@ -73,6 +79,12 @@ for (const selected of galleryCases) {
       await page.keyboard.press('ArrowDown');
       await expect(region).toBeFocused();
       await gallery.capture('details-keyboard', '원문은 실행되지 않는 텍스트 · 키보드 접근 가능한 세부 영역');
+      if (selected.action === 'long-details') {
+        await page.getByRole('button', { name: '승인', exact: true }).scrollIntoViewIfNeeded();
+        await expect(page.getByRole('button', { name: '승인', exact: true })).toBeInViewport({ ratio: 1 });
+        await expect(page.getByRole('button', { name: '거부', exact: true })).toBeInViewport({ ratio: 1 });
+        await gallery.capture('long-request-actions', '긴 원문 아래의 동작도 내부 스크롤로 접근 · 실제 승인 실행 없음');
+      }
     }
     if (selected.action === 'schedule') {
       await page.getByRole('button', { name: '저장', exact: true }).scrollIntoViewIfNeeded();
