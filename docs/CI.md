@@ -22,7 +22,8 @@ command, process launch failure, timeout or signal. It runs:
   a substitute for the release's corresponding-source and notice bundle.
 
 `node tools/quality.mjs --extended` additionally runs Android Rust **core** Clippy,
-excluding exactly `controller-app`. Install the target first
+excluding `controller-app` and the host-only `controller-uniffi-bindgen` tool.
+The host jobs check the generator. Install the target first
 with `rustup target add aarch64-linux-android`. CI runs these same checks across
 its separate host and Android-core jobs. This exclusion does not establish an
 Android app build. The full shell needs SDK, NDK, Gradle, Kotlin and device gates.
@@ -70,6 +71,37 @@ cached bytes, dimensions, CSP, capabilities and runtime code are unchanged;
 rustc checks the exact length. See `vendor/tauri-codegen/LOCAL_PATCH.md` for
 provenance and removal criteria. Generated context is still analyzed.
 
+The local Wry 0.55.1 override updates two Android Kotlin templates without ignoring
+app warnings: unused deprecated WebSQL enablement is removed and the disabled
+Back callback uses the dispatcher. Three Rust typing/cfg expressions are made
+explicit for the pinned analyzer after CI exposed dependency-source diagnostics.
+There is no vendor-directory analyzer exclusion. See
+`vendor/wry/LOCAL_PATCH.md`; fresh target CI is required after each change.
+
+## Native Android package and client gallery
+
+`android-package.yml` builds the real Tauri arm64 debug APK on Ubuntu with Java 17,
+Kotlin 2.2.21, AGP 8.11.0, Gradle 8.14.3, API 36 and NDK 28.2.13676358. It then executes
+the real Gradle JVM tests and passively inspects the packaged Rust components and
+JNA library for required ABI, bounded ELF ranges and 16KiB load-segment alignment.
+The inspector emits hashes and metadata, never loads native code. It does not
+prove release signing, device startup, 16KiB device compatibility or authentication.
+
+The first successful actual package build was [run 34288751092](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34288751092)
+at source `aebb662ea05c3368e42394c43ac68602b70a96c9`: 44 JVM tests passed, none skipped,
+and the APK contains exactly the three expected arm64 libraries. ROOT downloaded
+the reports/APK and matched its SHA256. This historical package success does not
+claim that later revisions or the separate full-quality job passed. Upstream
+Tauri's separately compiled Android library still emits warnings; app warnings
+remain errors.
+
+`ui-gallery.yml` builds a separate synthetic-state entry using the same React
+components, then captures Chromium on Windows and Linux. That entry cannot build
+into the production output. These are client screenshots, not Android screenshots
+or native Windows/UAC proof. The user authorized CI captures after local screen
+permission was unavailable. Reviewed representative images are in
+[issue 1](https://github.com/115dkk/Windows_UAC_Remote_Controller/issues/1).
+
 ## Action/runtime selection
 
 Checked against upstream releases on 2026-09-08:
@@ -78,6 +110,8 @@ Checked against upstream releases on 2026-09-08:
 | --- | --- | --- | --- |
 | actions/checkout | [7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) | `3d3c42e5aac5ba805825da76410c181273ba90b1` | Node 24 |
 | actions/setup-node | [7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0) | `820762786026740c76f36085b0efc47a31fe5020` | Node 24 |
+| actions/setup-java | [6.0.0](https://github.com/actions/setup-java/releases/tag/v6.0.0) | `dd06d9cba3e5552c54d9f8ea23572deb30010f7c` | Node 24 |
+| actions/upload-artifact | [7.0.1](https://github.com/actions/upload-artifact/releases/tag/v7.0.1) | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | Node 24 |
 
 Both PR and main jobs have read-only repository permission. Checkout does not
 persist credentials. Dependency/build caches are not shared with privileged
@@ -90,8 +124,9 @@ not a functioning installable remote UAC controller.
 No release is published from these libraries as though it were the product.
 The main-push installer build/automatic release workflow remains required and
 will be added with the Windows/Android applications, source bundle and signing
-contract. No remote Actions run or repository branch-protection change has been
-performed merely by writing this workflow.
+contract. Feature-branch CI has run; actual PR/main events and release execution
+remain separate requirements. Repository branch-protection settings have not
+been changed by writing these workflows.
 
 ## Current local environment limitations
 
@@ -101,8 +136,10 @@ permission. No security policy or developer-mode setting was changed, and no
 copy/alternate packaging path was used to evade that denial. A separate Kotlin
 compilation/unit-test attempt stopped earlier in Gradle's immutable transform
 cache rename, including with a new task-private Gradle cache. It did not run the
-eight authored JVM tests. Native and browser screen-control permissions were
-also denied; neither rendered surface has a successful capture yet.
+authored JVM tests locally. Native and browser screen-control permissions were
+also denied. Subsequent user-authorized Linux CI successfully built the APK and
+ran 44 JVM tests, while Windows/Linux CI produced reviewed client galleries. This
+does not change the local permissions or establish installed-app/device behavior.
 
 Rust 1.97 reports the Korean MSVC import-library progress line as a
 `linker_messages` warning when linking a cdylib. This matches the documented

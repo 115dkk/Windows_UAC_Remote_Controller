@@ -1,0 +1,22 @@
+{
+  "sourceCommit": "449a9418af379d465cee23cbbd93cb68c12d43f0",
+  "run": "https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34289874447",
+  "scope": "Actual Chromium renders of synthetic React client state, not Android Settings or a notification permission grant",
+  "renderer": "Playwright 1.63.0 / Chromium 153.0.8010.12",
+  "images": [
+    {
+      "file": "phone-notification-settings.png",
+      "case": "phone-notifications-denied-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "FD8B55D4E68B2F0624F557D0B7471BEED22F265EC5F4EC2DF8EE1CDECB6ACCA3"
+    },
+    {
+      "file": "phone-notification-settings-narrow.png",
+      "case": "phone-notifications-narrow-320",
+      "stage": "gallery-settings-handoff-simulated",
+      "runner": "ubuntu-24.04",
+      "sha256": "DA33A75E08A9D459360D93A481DE812905DD06608346CC6B2282E779AC139622"
+    }
+  ]
+}

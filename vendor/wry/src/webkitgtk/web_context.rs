@@ -248,7 +248,7 @@ impl WebContextExt for super::WebContext {
         let webview_id: String = request
           .web_view()
           .and_then(|w| unsafe { w.data::<String>(super::WEBVIEW_ID) })
-          .map(|id| unsafe { id.as_ref().clone() })
+          .map(|id: std::ptr::NonNull<String>| unsafe { id.as_ref().clone() })
           .unwrap_or_default();
 
         handler(&webview_id, http_request, RequestAsyncResponder { responder });

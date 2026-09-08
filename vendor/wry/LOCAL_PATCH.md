@@ -16,10 +16,12 @@ files are not patched by hand.
    restores callback enablement if the downstream handler throws.
    [Dispatcher contract](https://developer.android.com/reference/androidx/activity/OnBackPressedDispatcher#onBackPressed())
 
-3. Explicitly type the existing GTK WebView identifier as `String`, matching the
-   value already produced by the generic GLib lookup. The pinned Rust Analyzer
+3. Explicitly type the existing GTK WebView identifier as `String` and the map
+   input as `NonNull<String>`, matching the generic GLib lookup. The pinned Rust Analyzer
    reported eight inference errors at this expression in CI 34288751131 although
-   the actual compiler, Clippy and tests passed.
+   the actual compiler, Clippy and tests passed. The result annotation alone left
+   one pointer-inference diagnostic in CI34289874403, so the closure input is also
+   explicit; no cast, pointer dereference or ownership change is introduced.
 4. Put the two existing Windows optional tracing macro calls inside blocks with
    the same `#[cfg(feature = "tracing")]`. Their availability and execution are
    unchanged. The pinned analyzer otherwise attempts to resolve those macros in
