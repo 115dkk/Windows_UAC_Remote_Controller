@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.io.File
 
 plugins {
     id("com.android.application")
@@ -85,7 +86,7 @@ dependencies {
 // The primary Tauri packaging path/permission requirements remain unchanged.
 val controllerRepository = rootProject.projectDir.resolve("../../..").canonicalFile
 val controllerCargoTarget = providers.environmentVariable("CARGO_TARGET_DIR").map { configured ->
-    val selected = java.io.File(configured)
+    val selected = File(configured)
     (if (selected.isAbsolute) selected else controllerRepository.resolve(configured)).canonicalFile
 }.orElse(controllerRepository.resolve("target"))
 listOf("debug", "release").forEach { variant ->

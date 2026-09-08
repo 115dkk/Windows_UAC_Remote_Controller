@@ -537,6 +537,11 @@ fn validate_regular(metadata: &Metadata) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // An already-open inode that was unlinked is an external replacement,
+        // not a newly supplied hard-linked entry. Both paths still fail closed.
+        if metadata.nlink() == 0 {
+            return Err(StoreError::ExternalChange);
+        }
         if metadata.nlink() != 1 {
             return Err(StoreError::UnsafeEntry);
         }
