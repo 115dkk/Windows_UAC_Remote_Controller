@@ -33,7 +33,7 @@ class PolicyOwnerRulesTest {
         assertEquals(8, state.pendingCount())
         assertEquals(PolicyStatus.BUSY, state.admit())
         assertEquals(8, state.pendingCount())
-        assertTrue(state.initialized())
+        assertTrue(state.initialized(0, 0))
         assertEquals(PolicyOwnerPhase.READY, state.phase())
         state.release()
         assertNull(state.admit())
@@ -44,7 +44,7 @@ class PolicyOwnerRulesTest {
         state.start()
         assertNull(state.admit())
         state.fail(PolicyStatus.STORAGE_UNAVAILABLE)
-        assertFalse(state.initialized())
+        assertFalse(state.initialized(0, 0))
         assertFalse(state.start())
         assertEquals(PolicyStatus.STORAGE_UNAVAILABLE, state.admit())
         assertEquals(1, state.pendingCount())
@@ -56,13 +56,13 @@ class PolicyOwnerRulesTest {
     @Test fun timeoutFailureDoesNotReopenAfterQueuedCallsFinish() {
         val state = PolicyOwnerLifecycle()
         state.start()
-        state.initialized()
+        state.initialized(0, 0)
         repeat(8) { assertNull(state.admit()) }
         state.fail(PolicyStatus.UNAVAILABLE)
         repeat(8) { state.release() }
         assertEquals(0, state.pendingCount())
         assertEquals(PolicyStatus.UNAVAILABLE, state.admit())
-        assertFalse(state.initialized())
+        assertFalse(state.initialized(0, 0))
         assertFalse(state.start())
     }
 
@@ -70,7 +70,7 @@ class PolicyOwnerRulesTest {
         val state = PolicyOwnerLifecycle()
         state.start()
         state.stop()
-        assertFalse(state.initialized())
+        assertFalse(state.initialized(0, 0))
         assertEquals(PolicyStatus.UNAVAILABLE, state.admit())
         state.closed()
         state.stop()
@@ -82,6 +82,20 @@ class PolicyOwnerRulesTest {
     @Test(expected = IllegalStateException::class)
     fun aDuplicateReleaseCannotUnderflowTheAdmissionBound() {
         PolicyOwnerLifecycle().release()
+    }
+
+    @Test fun delayedMainHandlerCannotMakeLateInitializationReady() {
+        for (now in listOf(15_000L, 20_000L, -1L)) {
+            val state = PolicyOwnerLifecycle()
+            state.start()
+            assertFalse(state.initialized(0, now))
+            assertEquals(PolicyOwnerPhase.FAILED, state.phase())
+            assertEquals(PolicyStatus.UNAVAILABLE, state.admit())
+            assertFalse(state.initialized(0, 1))
+        }
+        val timely = PolicyOwnerLifecycle()
+        timely.start()
+        assertTrue(timely.initialized(0, 14_999))
     }
 
     @Test fun utf8ByteBoundIsNotACharacterCountOrSchemaValidation() {

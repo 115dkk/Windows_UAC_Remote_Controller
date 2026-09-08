@@ -31,6 +31,67 @@ const ALLOWED_DIRECTORIES = new Set([
   'kotlin/dev/dkk115/uacremote/nativecore',
 ]);
 const ALLOWED_FILES = new Set([MARKER, CONFIG, KOTLIN_RELATIVE]);
+// Only exact source-owned messages may reach the build log. Never print an
+// arbitrary Error.message/stack/cause or environment-derived path/value.
+const FIXED_PREFLIGHT_MESSAGES = new Set([
+  'Android binding tooling supports Windows and Linux hosts only.',
+  'Android core checking supports Windows and Linux hosts only.',
+  'Unsupported Android binding arguments. Use --help.',
+  'Duplicate Android binding option. Use --help.',
+  'Unsupported Android binding option. Use --help.',
+  'Only the arm64-v8a ABI is implemented; no other ABI was built.',
+  'Variant must be debug or release.',
+  'Rust host metadata is unavailable or oversized.',
+  'Rust host metadata must contain one supported host target.',
+  'The installed NDK host toolchain requires a matching x86_64 Windows or Linux Rust host.',
+  'Unsupported Android binding plan.',
+  'Relative CARGO_TARGET_DIR must stay inside the workspace.',
+  'CARGO_TARGET_DIR must not use a drive-relative or network path.',
+  'CARGO_TARGET_DIR must be a dedicated build directory, not a root or workspace ancestor.',
+  'The build plan requires the pinned NDK revision.',
+  'NDK tools must match the selected pinned toolchain layout.',
+  'Configured RUSTC must be one executable path, without control characters.',
+  'Generated output escaped its fixed parent.',
+  'Generated output exceeds its fixed tree bound.',
+  'Generated output has duplicate entries.',
+  'Generated output contains an unknown, linked, or nonregular entry; nothing was cleaned.',
+  'Generated output file exceeds its bound.',
+  'Generated output ownership marker does not match this build.',
+  'Generated configuration changed; inspect it before rebuilding.',
+  'Existing output has no matching generated ownership marker.',
+  'A required build directory is unavailable.',
+  'Build directory aliases, symlinks and non-directory entries are not supported.',
+  'Generated metadata is not a bounded regular file.',
+  'Generated metadata exceeds its byte bound.',
+  'Generated output contains unknown files; nothing was cleaned.',
+  'Generated output contains a linked or nonregular entry.',
+  'The successful Android build did not produce the expected regular cdylib.',
+  'The built cdylib has an unexpected hard-link relationship.',
+  'The generator did not produce the expected Kotlin bindings.',
+  `No NDK location is configured. Set NDK_HOME or an Android SDK path containing NDK ${NDK_REVISION}.`,
+  `NDK source.properties must specify exactly one Pkg.Revision = ${NDK_REVISION}.`,
+  `Selected NDK directory is unavailable. Install NDK ${NDK_REVISION} or correct the explicit SDK/NDK location.`,
+  'NDK source.properties exceeds its metadata size bound.',
+  'Pinned NDK source.properties could not be read.',
+  ...['Workspace', 'CARGO_TARGET_DIR'].flatMap((label) => [
+    `${label} is not a supported local path.`, `${label} must be an absolute local path.`,
+    `${label} must not use ambiguous Windows path components.`,
+  ]),
+  ...['NDK_HOME', 'ANDROID_NDK_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'LOCALAPPDATA', 'NDK root', 'Resolved NDK root'].flatMap((label) => [
+    `${label} is not configured.`, `${label} must be an absolute path.`,
+  ]),
+  ...['source.properties', 'clang', 'llvm-ar'].map((label) => `Pinned NDK ${label} must be an existing file inside the selected NDK.`),
+]);
+const FIXED_IO_DIAGNOSTICS = new Map([
+  ['EACCES', 'Filesystem access was denied; no permissions were changed.'],
+  ['EPERM', 'Filesystem access was denied; no permissions were changed.'],
+  ['ENOENT', 'A required build file or directory is missing.'],
+  ['EEXIST', 'An exclusive generated-file creation encountered existing state.'],
+  ['ENOTDIR', 'A required build directory has an incompatible entry.'],
+  ['ELOOP', 'A build path contains an unsupported link.'],
+  ['ENOSPC', 'Build storage has insufficient space.'],
+  ['EIO', 'A build filesystem operation failed.'],
+]);
 const HELP = `Usage: node tools/build-android-bindings.mjs [--abi arm64-v8a] [--variant debug|release] [--dry-run]\n\nBuilds android-bindings with installed NDK ${NDK_REVISION}, API ${ANDROID_API}, then\nruns the matching UniFFI ${UNIFFI_VERSION} host generator on that actual Android .so.\nDefault: arm64-v8a, debug. Other ABIs are not implemented in this slice.\nCARGO_TARGET_DIR is honored; otherwise the workspace target directory is used.\nKotlin output is fixed under app/build/generated/controllerUniffi/<variant>/<abi>.\n--dry-run prints a plan only: no child process, installed-tool validation or writes.\n--help prints this text. No APK build, library copying, installation or deployment.\n`;
 
 function pathsFor(platform) {
@@ -177,7 +238,9 @@ export function createBuildPlan({ options, environment, platform, cwd, ndk, host
   };
 }
 
-/** Pure validation of bounded filesystem metadata; no file contents except two small owned text files. */
+/** Pure validation. Returns true only when a file-free known directory scaffold
+ * needs its first marker; false for an already owned tree. No unowned file may
+ * be adopted, even if its name/content matches a generated artifact. */
 export function validateGeneratedEntries(entries, markerText) {
   if (!Array.isArray(entries) || entries.length > MAX_TREE_ENTRIES) throw new Error('Generated output exceeds its fixed tree bound.');
   const seen = new Set();
@@ -193,7 +256,14 @@ export function validateGeneratedEntries(entries, markerText) {
     if (entry.path === MARKER && entry.text !== markerText) throw new Error('Generated output ownership marker does not match this build.');
     if (entry.path === CONFIG && entry.text !== CONFIG_TEXT) throw new Error('Generated configuration changed; inspect it before rebuilding.');
   }
-  if (entries.length !== 0 && !seen.has(MARKER)) throw new Error('Existing output has no matching generated ownership marker.');
+  const needsMarker = !seen.has(MARKER);
+  // Gradle precreates declared outputs.dir(.../kotlin) before its Exec action.
+  // Known empty directories contain nothing to overwrite; any file still
+  // requires the exact ownership marker checked above.
+  if (needsMarker && entries.some((entry) => entry.kind !== 'directory')) {
+    throw new Error('Existing output has no matching generated ownership marker.');
+  }
+  return needsMarker;
 }
 
 function safeDirectory(path, platform, create = false) {
@@ -263,7 +333,9 @@ function prepareOutput(plan) {
   safeDirectory(plan.appDirectory, plan.platform);
   safeDirectory(plan.output, plan.platform, true);
   const entries = outputEntries(plan);
-  if (entries.length === 0) writeFileSync(plan.marker, plan.markerText, { flag: 'wx', mode: 0o600 });
+  if (validateGeneratedEntries(entries, plan.markerText)) {
+    writeFileSync(plan.marker, plan.markerText, { flag: 'wx', mode: 0o600 });
+  }
   // Existing exact marker + fixed whitelist is mandatory before any overwrite.
   outputEntries(plan);
   if (!entries.some((entry) => entry.path === CONFIG)) writeFileSync(plan.config, CONFIG_TEXT, { flag: 'wx', mode: 0o600 });
@@ -359,10 +431,24 @@ export function runAndroidBindings({
   return 0;
 }
 
+/** Bounded build-only logging policy; raw filesystem/environment details are
+ * intentionally not a diagnostic fallback. */
+export function bindingFailureDiagnostic(error) {
+  let detail;
+  if (error instanceof Error) {
+    if (typeof error.message === 'string' && error.message.length <= 256
+      && FIXED_PREFLIGHT_MESSAGES.has(error.message)) detail = error.message;
+    else if (typeof error.code === 'string' && error.code.length <= 16) detail = FIXED_IO_DIAGNOSTICS.get(error.code);
+  }
+  return detail
+    ? `Android binding preflight failed: ${detail} No fallback was attempted.`
+    : 'Android binding setup or artifact verification failed. Inspect the selected local build paths and pinned toolchain; no fallback was attempted.';
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { process.exitCode = runAndroidBindings(); }
-  catch {
-    process.stderr.write('Android binding setup or artifact verification failed. Inspect the selected local build paths and pinned toolchain; no fallback was attempted.\n');
+  catch (error) {
+    process.stderr.write(`${bindingFailureDiagnostic(error)}\n`);
     process.exitCode = 1;
   }
 }

@@ -82,8 +82,13 @@ internal class PolicyOwnerLifecycle {
         return true
     }
 
-    @Synchronized fun initialized(): Boolean {
+    @Synchronized fun initialized(startedMillis: Long, nowMillis: Long): Boolean {
         if (phase != PolicyOwnerPhase.STARTING) return false
+        if (PolicyOwnerBounds.responseExpired(startedMillis, nowMillis)) {
+            phase = PolicyOwnerPhase.FAILED
+            failure = PolicyStatus.UNAVAILABLE
+            return false
+        }
         phase = PolicyOwnerPhase.READY
         return true
     }

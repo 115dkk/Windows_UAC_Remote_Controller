@@ -45,6 +45,11 @@ Extracted package libraries are used so JNA needs no writable cache fallback.
 does not itself prove this APK's loading or 16-KB compatibility; inspect the built
 artifact and exercise the device separately.
 
+The Gradle build uses Kotlin 2.2.21 with Gradle 8.14.3 and AGP 8.11.0, inside the
+published [Kotlin/Gradle compatibility range](https://kotlinlang.org/docs/gradle-configure-project.html).
+The earlier isolated Kotlin 1.9.25 compilation is only source/ABI evidence, not
+proof of this complete Android dependency graph. Compiler warnings remain errors.
+
 ROOT compiles and tests. The Kotlin worker and security auditor do not execute
 validation. The user will later perform actual UAC approval and phone-authentication
 acceptance; browser galleries, unit tests and an APK build do not replace those.

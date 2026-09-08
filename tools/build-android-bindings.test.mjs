@@ -6,7 +6,7 @@ import test from 'node:test';
 import { ndkToolPaths, NDK_REVISION } from './android-core-check.mjs';
 import {
   createBuildPlan, parseArguments, parseRustHost, runAndroidBindings,
-  validateGeneratedEntries,
+  validateGeneratedEntries, bindingFailureDiagnostic,
 } from './build-android-bindings.mjs';
 
 function planFixture({ platform = 'linux', environment = {}, options = parseArguments([]) } = {}) {
@@ -169,6 +169,66 @@ test('owned generated tree requires its exact marker and refuses unknown/link/no
     [marker, { ...config, text: '[bindings.kotlin]\nomit_checksums=true\n' }],
     [marker, marker], Array(17).fill(marker),
   ]) assert.throws(() => validateGeneratedEntries(entries, plan.markerText));
+});
+
+test('a Gradle-precreated known directory-only scaffold can receive a new exclusive marker', () => {
+  const plan = planFixture();
+  const directories = [
+    'kotlin', 'kotlin/dev', 'kotlin/dev/dkk115', 'kotlin/dev/dkk115/uacremote',
+    'kotlin/dev/dkk115/uacremote/nativecore',
+  ].map((path) => ({ path, kind: 'directory' }));
+  assert.equal(validateGeneratedEntries([], plan.markerText), true);
+  assert.equal(validateGeneratedEntries(directories.slice(0, 1), plan.markerText), true);
+  assert.equal(validateGeneratedEntries(directories, plan.markerText), true);
+  const marker = { path: '.controller-uniffi.generated.json', kind: 'file', links: 1,
+    size: Buffer.byteLength(plan.markerText), text: plan.markerText };
+  assert.equal(validateGeneratedEntries([...directories, marker], plan.markerText), false);
+});
+
+test('an unowned scaffold never adopts even an empty known file or any unknown/link entry', () => {
+  const plan = planFixture();
+  const directories = [{ path: 'kotlin', kind: 'directory' }];
+  const knownKotlin = { path: 'kotlin/dev/dkk115/uacremote/nativecore/uac_android_controller.kt',
+    kind: 'file', links: 1, size: 0 };
+  const validConfig = { path: 'uniffi-global.toml', kind: 'file', links: 1,
+    size: Buffer.byteLength(plan.configText), text: plan.configText };
+  for (const extra of [knownKotlin, validConfig,
+    { path: 'kotlin/private', kind: 'directory' },
+    { path: 'kotlin/private.txt', kind: 'file', links: 1, size: 0 },
+    { path: 'kotlin/dev', kind: 'link' },
+    { ...knownKotlin, links: 2 },
+  ]) assert.throws(() => validateGeneratedEntries([...directories, extra], plan.markerText));
+  const marker = { path: '.controller-uniffi.generated.json', kind: 'file', links: 1,
+    size: Buffer.byteLength(plan.markerText), text: plan.markerText };
+  assert.throws(() => validateGeneratedEntries([...directories, { ...marker, text: 'wrong marker' }], plan.markerText));
+  assert.throws(() => validateGeneratedEntries([...directories, marker, { ...knownKotlin, links: 2 }], plan.markerText));
+  assert.throws(() => validateGeneratedEntries([...directories, marker, { ...validConfig, text: 'changed config' }], plan.markerText));
+});
+
+test('build preflight diagnostics expose only bounded fixed reasons, never raw error details', () => {
+  for (const message of [
+    'Existing output has no matching generated ownership marker.',
+    'Generated output ownership marker does not match this build.',
+    'Generated configuration changed; inspect it before rebuilding.',
+    'Build directory aliases, symlinks and non-directory entries are not supported.',
+    'The built cdylib has an unexpected hard-link relationship.',
+    `NDK source.properties must specify exactly one Pkg.Revision = ${NDK_REVISION}.`,
+  ]) {
+    const diagnostic = bindingFailureDiagnostic(new Error(message));
+    assert.ok(diagnostic.includes(message));
+    assert.ok(diagnostic.length <= 512);
+  }
+  const secret = 'SYNTHETIC_ENV_VALUE_MUST_NOT_APPEAR';
+  const denied = Object.assign(new Error(`EACCES at /private/${secret}`), { code: 'EACCES', path: secret });
+  for (const error of [denied, new Error(secret), new Error(`Existing output has no matching generated ownership marker. ${secret}`),
+    new Error(secret.repeat(1024)), secret, { message: secret },
+  ]) {
+    const diagnostic = bindingFailureDiagnostic(error);
+    assert.ok(!diagnostic.includes(secret));
+    assert.ok(diagnostic.length <= 512);
+    assert.ok(!diagnostic.includes('\n'));
+  }
+  assert.ok(bindingFailureDiagnostic(denied).includes('Filesystem access was denied'));
 });
 
 test('runner invokes exactly host probe, locked Android build and locked host generation without a shell', () => {

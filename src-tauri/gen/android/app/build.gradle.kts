@@ -1,5 +1,6 @@
 import java.util.Properties
 import java.io.File
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -50,10 +51,6 @@ android {
             )
         }
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-        allWarningsAsErrors = true
-    }
     buildFeatures {
         buildConfig = true
     }
@@ -79,6 +76,13 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_1_8)
+        allWarningsAsErrors.set(true)
+    }
 }
 
 // This separate native component is packaged alongside, not instead of, the

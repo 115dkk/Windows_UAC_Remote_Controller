@@ -37,12 +37,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     fun start() {
         if (!lifecycle.start()) return
+        val started = SystemClock.elapsedRealtime()
         if (!main.postDelayed(initializationTimeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
             lifecycle.fail(PolicyStatus.UNAVAILABLE)
             worker.shutdown()
             return
         }
-        try { worker.execute { initialize() } }
+        try { worker.execute { initialize(started) } }
         catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE) }
     }
 
@@ -65,16 +66,23 @@ internal class ApplicationPolicyActor(private val application: Application) {
         requestWorkerCleanup()
     }
 
-    private fun initialize() {
+    private fun initialize(started: Long) {
         try {
             if (lifecycle.phase() != PolicyOwnerPhase.STARTING) return
+            if (PolicyOwnerBounds.responseExpired(started, SystemClock.elapsedRealtime())) {
+                failOwner(PolicyStatus.UNAVAILABLE)
+                return
+            }
             PackagedControllerLibrary.prepare(application)
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
             // Rust alone decides initial creation versus adoption/migration.
             // In particular Kotlin never pre-clears notifications or retries a
             // failed open by creating a new store.
             controller = MobileController.openOrInitialize(AndroidNativePlatform(application))
-            if (!lifecycle.initialized()) return
+            if (!lifecycle.initialized(started, SystemClock.elapsedRealtime())) {
+                failOwner(lifecycle.failure())
+                return
+            }
         } catch (failure: Throwable) {
             rethrowFatal(failure)
             failOwner(failureStatus(failure, initializing = true))
