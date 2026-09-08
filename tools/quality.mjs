@@ -11,7 +11,7 @@ const commands = [
   // Build the real production UI before Rust's Tauri/custom-protocol targets
   // inspect frontendDist. The UI runner also enforces TS, ESLint and Vitest.
   [process.execPath, ['tools/ui-quality.mjs']],
-  [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs']],
+  [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs', 'tools/verify-android-apk.test.mjs']],
   ['cargo', ['fmt', '--all', '--', '--check']],
   ['cargo', ['clippy', '--workspace', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings']],
   ['cargo', ['test', '--workspace', '--all-targets', '--all-features', '--locked']],

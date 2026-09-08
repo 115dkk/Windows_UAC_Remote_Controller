@@ -35,6 +35,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Test the passive APK inspector
+        run: node --test tools/verify-android-apk.test.mjs
       - name: Install locked frontend dependencies
         run: npm ci
       - name: Install Rust and the actual Android target
@@ -62,17 +64,13 @@ jobs:
           export NDK_HOME="$android_sdk_path/ndk/28.2.13676358"
           bash gradlew :app:testUniversalDebugUnitTest --no-daemon \
             -PabiList=arm64-v8a -ParchList=arm64 -PtargetList=aarch64
-      - name: Check the APK contains both Rust components and JNA
+      - name: Inspect packaged arm64 Rust and JNA library structure
         shell: bash
         run: |
-          mapfile -t packages < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk')
+          mapfile -d '' -t packages < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print0)
           test "${#packages[@]}" -gt 0
           for package in "${packages[@]}"; do
-            members="$(unzip -Z1 "$package")"
-            for library in libcontroller_app_lib.so libuac_android_controller.so libjnidispatch.so; do
-              grep -Fxq "lib/arm64-v8a/$library" <<< "$members"
-            done
-            sha256sum "$package"
+            node tools/verify-android-apk.mjs "$package" > "$package.inspection.json"
           done
       - name: Retain the debug APK and test reports
         if: ${{ !cancelled() }}
@@ -81,6 +79,7 @@ jobs:
           name: android-arm64-debug-${{ github.sha }}
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            src-tauri/gen/android/app/build/outputs/apk/**/*.inspection.json
             src-tauri/gen/android/app/build/test-results/**/*.xml
             src-tauri/gen/android/app/build/reports/tests/
           if-no-files-found: error

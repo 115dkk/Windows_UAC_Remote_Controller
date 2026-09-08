@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/tauri-codegen"]
+exclude = ["vendor/tauri-codegen", "vendor/wry"]
 members = [
     "crates/approval-protocol",
     "crates/approval-core",
@@ -64,3 +64,5 @@ debug-assertions = true
 # Upstream context generation with an explicit cached-icon array length; see
 # vendor/tauri-codegen/LOCAL_PATCH.md. No runtime/security behavior is replaced.
 tauri-codegen = { path = "vendor/tauri-codegen" }
+# Android template API compatibility only; see vendor/wry/LOCAL_PATCH.md.
+wry = { path = "vendor/wry" }
