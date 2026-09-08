@@ -60,6 +60,8 @@ for (const selected of galleryCases) {
       await expect(page.getByRole('alert')).toContainText('요청 상태를 확인하지 못했어요.');
       await expect(page.getByText('연결을 확인한 뒤 다시 시도해 주세요.', { exact: true })).toBeVisible();
       await expect(page.getByText('synthetic_unavailable', { exact: true })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toHaveCount(0);
     }
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
 

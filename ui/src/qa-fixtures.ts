@@ -42,7 +42,7 @@ export function qaCase(name: string): QaCase {
     case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true } } };
     case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false } } };
     case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false } } };
-    case 'errors': return { page: 'requests', snapshot: { ...phone, issue: { code: 'synthetic_unavailable', message: '요청 상태를 확인하지 못했어요.', nextAction: '연결을 확인한 뒤 다시 시도해 주세요.' } } };
+    case 'errors': return { page: 'requests', snapshot: { ...phone, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' }, issue: { code: 'synthetic_unavailable', message: '요청 상태를 확인하지 못했어요.', nextAction: '연결을 확인한 뒤 다시 시도해 주세요.' } } };
     default: return { page: 'status', snapshot: windows };
   }
 }
