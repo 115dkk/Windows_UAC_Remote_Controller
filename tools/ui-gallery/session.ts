@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+import { test as base, expect } from '@playwright/test';
+import type { Browser, Page, TestInfo } from '@playwright/test';
+import type { GalleryCase } from './cases';
+
+const bannerText = '화면 예시 · 실제 연결 아님';
+const maxMessages = 50;
+
+export class GallerySession {
+  private readonly consoleMessages: { type: string; text: string }[] = [];
+  private readonly pageErrors: string[] = [];
+  private readonly failedRequests: string[] = [];
+  private readonly captures: { stage: string; caption: string }[] = [];
+  private selected: GalleryCase | null = null;
+  private measurements: unknown[] = [];
+
+  constructor(private readonly page: Page, private readonly browser: Browser, private readonly info: TestInfo) {
+    page.on('console', (message) => {
+      if (this.consoleMessages.length < maxMessages) this.consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) });
+    });
+    page.on('pageerror', (error) => { if (this.pageErrors.length < maxMessages) this.pageErrors.push(error.message.slice(0, 2000)); });
+    page.on('requestfailed', (request) => {
+      if (this.failedRequests.length < maxMessages) this.failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText ?? ''}`.slice(0, 2000));
+    });
+    page.on('response', (response) => {
+      if (response.status() >= 400 && this.failedRequests.length < maxMessages) this.failedRequests.push(`${String(response.status())} ${response.url()}`.slice(0, 2000));
+    });
+  }
+
+  async open(selected: GalleryCase): Promise<void> {
+    this.selected = selected;
+    await this.page.setViewportSize(selected.viewport);
+    await this.page.emulateMedia({ colorScheme: selected.colorScheme, forcedColors: selected.forcedColors, reducedMotion: 'reduce' });
+    // Fixtures have no network owner. Unexpected nonlocal requests are a failure,
+    // never a request to a real relay or an injected successful backend response.
+    await this.page.route('**/*', async (route) => {
+      if (new URL(route.request().url()).origin === 'http://127.0.0.1:4173') await route.continue();
+      else {
+        if (this.failedRequests.length < maxMessages) this.failedRequests.push(`Blocked external request: ${route.request().url()}`.slice(0, 2000));
+        await route.abort('blockedbyclient');
+      }
+    });
+    const response = await this.page.goto(`/qa.html?case=${encodeURIComponent(selected.fixture)}`, { waitUntil: 'load' });
+    expect(response?.status()).toBe(200);
+    const heading = selected.fixture === 'desktop-devices' ? '연결된 휴대폰'
+      : selected.fixture === 'desktop-history' ? '활동 기록'
+        : selected.fixture.startsWith('desktop-') ? 'PC 상태'
+          : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' ? '알림 시간' : '요청';
+    await expect(this.page.getByRole('heading', { name: heading, exact: true, level: 1 })).toBeVisible();
+    await expect(this.page.getByRole('button', { name: '다시 확인', exact: true })).toBeEnabled();
+    await this.page.evaluate(async () => { await document.fonts.ready; });
+    await expect(this.page.getByText(bannerText, { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(this.page.locator('input[type="password"]')).toHaveCount(0);
+  }
+
+  async capture(stage: string, caption: string): Promise<void> {
+    if (!this.selected) throw new Error('Gallery capture has no declared fixture.');
+    if (!/^[a-z0-9-]+$/u.test(stage)) throw new Error('Invalid gallery stage name.');
+    await this.page.evaluate(async () => { await document.fonts.ready; });
+    await expect(this.page.getByText(bannerText, { exact: true })).toBeVisible();
+    await expect(this.page.getByText(bannerText, { exact: true })).toBeInViewport({ ratio: 1 });
+    const layout = await this.page.evaluate(() => {
+      const selectors = ['html', 'body', '#root', '.app-shell', '.main-scroll', 'dialog[open]'];
+      const owners = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)).map((element) => ({
+        selector, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+      })));
+      const main = document.querySelector<HTMLElement>('.main-scroll');
+      const nav = document.querySelector<HTMLElement>('.phone-shell .navigation-shell');
+      return {
+        owners, mainScrollTop: main?.scrollTop ?? null,
+        phoneMainBottom: main && nav ? main.getBoundingClientRect().bottom : null,
+        phoneNavTop: nav?.getBoundingClientRect().top ?? null,
+      };
+    });
+    this.measurements.push({ stage, ...layout });
+    for (const owner of layout.owners) expect(owner.scrollWidth, `${owner.selector} horizontal overflow`).toBeLessThanOrEqual(owner.clientWidth + 1);
+    if (layout.phoneMainBottom !== null && layout.phoneNavTop !== null) expect(layout.phoneMainBottom, 'phone navigation must not cover the main scroll owner').toBeLessThanOrEqual(layout.phoneNavTop + 1);
+    const path = this.info.outputPath(`${this.selected.id}--${stage}.png`);
+    await this.page.screenshot({ path, fullPage: false, animations: 'disabled', caret: 'hide', scale: 'css', timeout: 7_000 });
+    await this.info.attach(`gallery-${stage}`, { path, contentType: 'image/png' });
+    this.captures.push({ stage, caption });
+  }
+
+  async finish(): Promise<void> {
+    const context = this.page.isClosed() ? null : await this.page.evaluate(() => ({
+      userAgent: navigator.userAgent, language: navigator.language,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      fontsStatus: document.fonts.status, declaredFontFamily: getComputedStyle(document.body).fontFamily,
+      devicePixelRatio: window.devicePixelRatio,
+    })).catch(() => null);
+    const data = {
+      scope: 'CLIENT / SYNTHETIC', visualReview: 'not-performed-by-harness',
+      fixture: this.selected, browserName: 'chromium', browserVersion: this.browser.version(),
+      context, captures: this.captures, layoutMeasurements: this.measurements,
+      console: this.consoleMessages, pageErrors: this.pageErrors, failedRequests: this.failedRequests,
+    };
+    await this.info.attach('gallery-observation', { body: Buffer.from(JSON.stringify(data, null, 2)), contentType: 'application/json' });
+    expect.soft(this.consoleMessages.filter((message) => message.type === 'error' || message.type === 'warning'), 'rendered client console errors/warnings').toEqual([]);
+    expect.soft(this.pageErrors, 'rendered client page errors').toEqual([]);
+    expect.soft(this.failedRequests, 'failed or unintended client requests').toEqual([]);
+  }
+}
+
+export const test = base.extend<{ gallery: GallerySession }>({
+  gallery: async ({ page, browser }, use, info) => {
+    const gallery = new GallerySession(page, browser, info);
+    try { await use(gallery); } finally { await gallery.finish(); }
+  },
+});
+
+export { expect };

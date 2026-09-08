@@ -1,0 +1,81 @@
+name: UI gallery
+
+on:
+  pull_request:
+    paths:
+      - 'ui/**'
+      - 'tools/ui-gallery/**'
+      - 'tools/ui-quality.mjs'
+      - 'tools/ui-build-policy.test.mjs'
+      - '*config*'
+      - 'package*.json'
+      - '.node-version'
+      - '.npmrc'
+      - '.github/workflows/ui-gallery.yml'
+  push:
+    branches: [main, 'codex/ci-ui-gallery']
+    paths:
+      - 'ui/**'
+      - 'tools/ui-gallery/**'
+      - 'tools/ui-quality.mjs'
+      - 'tools/ui-build-policy.test.mjs'
+      - '*config*'
+      - 'package*.json'
+      - '.node-version'
+      - '.npmrc'
+      - '.github/workflows/ui-gallery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-gallery-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gallery:
+    name: Chromium client gallery (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      GALLERY_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Check out the exact gallery revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install locked frontend and gallery dependencies
+        run: npm ci
+      - name: Check the client and build the production entry
+        run: node tools/ui-quality.mjs
+      - name: Build the separate synthetic gallery entry
+        run: npm run build:qa
+      - name: Install Korean glyph coverage on the Linux runner
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
+      - name: Install the pinned Chromium build
+        # Browser rendering only. No native UAC/authentication prompts are opened.
+        run: node node_modules/playwright/cli.js install --with-deps chromium
+      - name: Capture and check the client gallery
+        run: npm run gallery
+      - name: Retain screenshots and reports even if a case fails
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: ui-gallery-${{ matrix.os }}-${{ github.sha }}
+          path: target/ui-gallery/
+          if-no-files-found: error
+          retention-days: 14
