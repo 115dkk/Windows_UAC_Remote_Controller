@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Read-only capability observations, never Windows request or approval proof.
+//!
+//! Call only inside the future fixed-installed, supervised native helper. This
+//! blocking function is NOT a hard five-second boundary: a native/UIA call may
+//! block despite configured timeouts. A separate process supervisor must enforce
+//! the five-second helper lifetime. No service launch/supervisor is wired here.
+//! All owned handles/interfaces are scoped before a result is returned. An
+//! observed cleanup failure is retained alongside the original failure.
+#![deny(unsafe_code)]
+
+use std::fmt;
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[allow(unsafe_code)]
+mod ffi;
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+mod policy;
+
+pub const MAX_TOP_LEVEL_WINDOWS: usize = 128;
+pub const MAX_UIA_ELEMENTS: usize = 128;
+pub const MAX_UIA_DEPTH: u8 = 16;
+pub const SUPERVISOR_BUDGET_MILLIS: u64 = 5_000;
+pub const UIA_TIMEOUT_MILLIS: u32 = 1_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeOperation {
+    NativeArchitecture,
+    OpenThreadToken,
+    OpenProcessToken,
+    TokenUser,
+    TokenIntegrity,
+    TokenSession,
+    ProcessSession,
+    WindowStation,
+    DesktopName,
+    DesktopInput,
+    OpenInputDesktop,
+    CloseDesktop,
+    CloseToken,
+    CloseProcess,
+    EnumerateWindows,
+    WindowOwner,
+    OpenProcess,
+    ProcessImage,
+    SystemDirectory,
+    ProcessTimes,
+    ProcessLiveness,
+    CompareImagePath,
+    AttachWorkerDesktop,
+    ComInitialize,
+    CreateAutomation,
+    ConfigureAutomationTimeout,
+    ElementFromWindow,
+    TreeWalker,
+    ElementProperty,
+    PatternAvailability,
+    ClearProperty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeFailure {
+    UnsupportedPlatform,
+    Native64Unsupported,
+    ThreadImpersonationPresent,
+    SystemUserRequired,
+    SystemIntegrityRequired,
+    InteractiveSessionRequired,
+    InteractiveWindowStationRequired,
+    SecureInputDesktopProfileRequired,
+    NoQualifiedConsentWindow,
+    AmbiguousConsentWindows,
+    TopLevelWindowLimit,
+    ElementLimit,
+    DepthLimit,
+    CooperativeBudgetExceeded,
+    ObservationChanged,
+    ProviderOwnerMismatch,
+    WorkerUnavailable,
+    WorkerPanicked,
+    CleanupFailed,
+    MalformedNativeData(NativeOperation),
+    NativeCall {
+        operation: NativeOperation,
+        hresult: i32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CleanupFailure {
+    pub failures: u16,
+    pub first_operation: NativeOperation,
+    pub first_hresult: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeError {
+    failure: ProbeFailure,
+    cleanup: Option<CleanupFailure>,
+}
+
+impl ProbeError {
+    pub const fn failure(self) -> ProbeFailure {
+        self.failure
+    }
+    pub const fn cleanup(self) -> Option<CleanupFailure> {
+        self.cleanup
+    }
+    pub(crate) const fn new(failure: ProbeFailure) -> Self {
+        Self {
+            failure,
+            cleanup: None,
+        }
+    }
+}
+impl fmt::Display for ProbeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:?}; cleanup={:?}", self.failure, self.cleanup)
+    }
+}
+impl std::error::Error for ProbeError {}
+
+/// Counts only. None of these fields conveys authentication or permission.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProbeCounts {
+    pub top_level_windows: u16,
+    pub qualified_candidates: u16,
+    pub elements: u16,
+    pub password_nodes_skipped: u16,
+    pub enabled_elements: u16,
+    pub offscreen_elements: u16,
+    pub native_window_elements: u16,
+    pub button_elements: u16,
+    pub invoke_pattern_available: u16,
+    pub value_pattern_available: u16,
+    pub legacy_accessible_pattern_available: u16,
+    pub maximum_depth: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeReport {
+    counts: ProbeCounts,
+}
+impl ProbeReport {
+    pub const fn counts(self) -> ProbeCounts {
+        self.counts
+    }
+}
+
+/// Own SYSTEM/system IL/nonzero session/interactive-station checks precede any
+/// bounded UIA traversal. The candidate's OS-resolved System32 image-path match
+/// is NOT mapped-image, Authenticode, requested-executable or atomic identity proof.
+/// No caller-supplied process, window, desktop, session, text or action is accepted.
+pub fn probe_once() -> Result<ProbeReport, ProbeError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::probe()
+    }
+    #[cfg(all(windows, not(target_pointer_width = "64")))]
+    {
+        Err(ProbeError::new(ProbeFailure::Native64Unsupported))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ProbeError::new(ProbeFailure::UnsupportedPlatform))
+    }
+}
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+pub(crate) fn finish_with_cleanup<T>(
+    result: Result<T, ProbeError>,
+    cleanup: Option<CleanupFailure>,
+) -> Result<T, ProbeError> {
+    match (result, cleanup) {
+        (Ok(value), None) => Ok(value),
+        (Err(error), None) => Err(error),
+        (result, Some(cleanup)) => Err(ProbeError {
+            failure: result
+                .err()
+                .map_or(ProbeFailure::CleanupFailed, |error| error.failure),
+            cleanup: Some(cleanup),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_failure_is_preserved_alongside_cleanup_failure() {
+        let cleanup = CleanupFailure {
+            failures: 2,
+            first_operation: NativeOperation::CloseDesktop,
+            first_hresult: -1,
+        };
+        let result = finish_with_cleanup::<()>(
+            Err(ProbeError::new(ProbeFailure::ThreadImpersonationPresent)),
+            Some(cleanup),
+        )
+        .unwrap_err();
+        assert_eq!(result.failure(), ProbeFailure::ThreadImpersonationPresent);
+        assert_eq!(result.cleanup(), Some(cleanup));
+        assert_eq!(
+            finish_with_cleanup(Ok(()), Some(cleanup))
+                .unwrap_err()
+                .failure(),
+            ProbeFailure::CleanupFailed
+        );
+    }
+
+    #[test]
+    fn clean_result_stays_clean_and_diagnostics_contain_fixed_metadata_only() {
+        assert_eq!(finish_with_cleanup(Ok(7), None), Ok(7));
+        let error = ProbeError::new(ProbeFailure::NoQualifiedConsentWindow);
+        assert_eq!(format!("{error}"), "NoQualifiedConsentWindow; cleanup=None");
+        assert_eq!(finish_with_cleanup::<()>(Err(error), None), Err(error));
+    }
+}

@@ -14,7 +14,8 @@ use notification_policy::{
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use phone_request_core::{
     AlertMode, CapacityLimits, ClockReading, Effect, InboxClock, InboxFault, InboxIssue,
-    InboxUpdate, LocalTime, MonotonicTime, NotificationPolicy, PhoneInbox, RequestKey, request_key,
+    InboxUpdate, LocalTime, MonotonicTime, NotificationPolicy, OutcomeAcknowledgment, PhoneInbox,
+    RequestKey, request_key,
 };
 use service_protocol::{
     ClockCorrelation, ClockProbe, PcEvent, PcPublicKey, RequestResolution, ServiceTick,
@@ -374,7 +375,7 @@ fn checkpoint_codec_is_bounded_body_free_and_rejects_every_partial_record() {
     extra.push(0);
     assert!(InboxCheckpoint::from_bytes(&extra).is_err());
     let mut bad_version = bytes.clone();
-    bad_version[9] = 2;
+    bad_version[9] = 3;
     assert_eq!(
         InboxCheckpoint::from_bytes(&bad_version).unwrap_err(),
         InboxCheckpointError::UnsupportedVersion
@@ -1187,6 +1188,18 @@ fn retired_guard_uses_the_same_capacity_budget_and_quarantines_untracked_request
     no_show_or_history(&inbox.observe_service_clock(&all_expired, clock(210, 600)));
     assert!(!inbox.is_quarantined());
     assert_eq!(inbox.quarantine_until_nanos(), None);
+    // This pure guard-budget fixture now explicitly consumes its pending
+    // terminal delivery before expecting a new active reservation. Native
+    // consumers must durably deduplicate journal insertion before durable ACK.
+    assert_eq!(inbox.pending_outcomes().len(), 1);
+    let pending = inbox.pending_outcomes()[0];
+    assert_eq!(pending.key(), key(&first));
+    assert_eq!(pending.outcome(), RequestOutcome::ExpiredLocally);
+    assert_eq!(
+        inbox.acknowledge_outcome(pending.delivery_id()),
+        OutcomeAcknowledgment::Removed
+    );
+    assert!(inbox.pending_outcomes().is_empty());
     let new = opened(3, 210, 220);
     assert!(
         inbox

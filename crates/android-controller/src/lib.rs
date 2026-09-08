@@ -22,5 +22,6 @@ mod types;
 
 pub use owner::DurableInbox;
 pub use types::{
-    CommittedCheck, CommittedUpdate, DurableFailure, DurableFault, InboxCounts, NotificationCleanup,
+    CommittedCheck, CommittedOutcomeAcknowledgment, CommittedUpdate, DurableFailure, DurableFault,
+    InboxCounts, NotificationCleanup,
 };

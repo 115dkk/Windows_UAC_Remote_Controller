@@ -53,6 +53,34 @@ fresh disk read or a current permission to act. `fault()` reports the fixed owne
 failure category. A successfully persisted domain fault remains distinguishable
 from a filesystem/codec owner failure.
 
+## Commit-backed pending outcomes
+
+`pending_outcomes() -> Result<&[PendingOutcome], DurableFault>` is the sole native
+journal delivery source from the last committed state. `Effect::RecordOutcome`
+is only a compatibility/wake hint. Original binding/issuance/outcome and stable
+delivery IDs live in the same body-free checkpoint as the lifecycle transition.
+Retrying rows never recreates notifications, off-hours history or old deadlines.
+
+The recipient must durably insert/deduplicate each ID before calling
+`acknowledge_outcome(id)`. This method uses the ordinary intent/candidate/commit
+path and returns `CommittedOutcomeAcknowledgment` with `receipt()` and
+`acknowledgment()`. Removed means a matching row was removed by that commit;
+NotPending means only that this queue has no such ID. Neither proves a native
+journal/OS operation. Duplicate/unknown ACK completes a no-change transaction.
+
+A journal insertion followed by process death before ACK leaves the same ID
+pending across reopen/boot change. A failed/uncertain ACK returns no committed
+removal; existing dirty-intent/staging reconciliation rules still apply. This
+adds no automatic recovery, journal insertion or exactly-once cross-store claim.
+Native journal uniqueness/idempotency remains required integration.
+
+The core reserves one future outcome slot per active/recovering request. If an
+unexpected retention failure occurs, checkpoint encoding is prohibited and the
+owner cannot release a committed update missing that outcome. ACK changes no
+clock, policy, request window or fault latch. Policy-only preflight rejects pending
+outcomes before consuming them; schema1 migration is restricted to fully validated
+healthy policy-only state and is committed through ordinary open.
+
 ## Commit boundary and failure
 
 Every mutable call follows one private path:
@@ -137,8 +165,11 @@ resolution/source watermark, failed intent/staging, invalid/missing saved state,
 committed domain faults, redacted Debug, and real Windows share-delete blockers
 that prevent candidate Show/Restore/body/policy results from escaping. Native
 factories reject actual Windows file-only receipts; a Linux-only case exercises
-its real directory-sync receipt. There are 19 authored cases (18 applicable to
-Windows, 14 to Linux); only ROOT executes them.
+its real directory-sync receipt. The newer outbox cases cover reopen/reboot
+retry, unknown/duplicate ACK, policy-only guard, preflight/rename ACK failures
+and committed legacy policy migration. Only ROOT executes them.
+ROOT confirmed all26 applicable durable-owner tests plus affected core/integrity
+tests and all-target/all-feature Clippy. This is not native journal/device proof.
 
 ROOT owns all execution, workspace/lock integration, fmt,
 Clippy with `-D warnings`, actual Rust Analyzer, host filesystem failure tests,

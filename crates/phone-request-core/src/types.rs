@@ -61,6 +61,8 @@ pub enum InboxFault {
     NotificationEngine(EngineFault),
     #[error("the inbox and notification engine cannot be reconciled")]
     InconsistentState,
+    #[error("a terminal outcome could not be retained; this state cannot be committed")]
+    OutcomeRetentionFailed,
 }
 
 /// Fixed categories only. None contain request text, key bytes, or raw errors.
@@ -82,6 +84,8 @@ pub enum InboxIssue {
     Clock(ClockError),
     #[error("the bounded original-mapping guard cache is full")]
     GuardCapacity,
+    #[error("pending outcome delivery leaves no terminal-result reservation for a new request")]
+    OutcomeCapacity,
     #[error("new request identities are quarantined until untracked guards expire")]
     GuardQuarantine,
     #[error("the receiving owner is faulted: {0}")]
@@ -90,6 +94,8 @@ pub enum InboxIssue {
 
 /// Every transition carries withdrawals even when the input has an issue.
 /// Native callers must apply effects before reading any current request view.
+/// RecordOutcome is only a compatibility/wake hint: pending_outcomes is the
+/// sole source for journal delivery, with its stable idempotency identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboxUpdate {
     pub(crate) effects: Vec<Effect>,

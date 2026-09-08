@@ -5,6 +5,7 @@
 mod checkpoint;
 mod checkpoint_codec;
 mod inbox;
+mod outbox;
 mod types;
 
 pub use checkpoint::{InboxCheckpoint, InboxCheckpointError, PhoneBootId};
@@ -13,4 +14,5 @@ pub use notification_policy::{
     AlertMode, CapacityLimits, ClockReading, Effect, LocalTime, MonotonicTime, NotificationPolicy,
     RequestKey,
 };
+pub use outbox::{OutcomeAcknowledgment, OutcomeDeliveryId, PendingOutcome};
 pub use types::{InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, PendingRequest};

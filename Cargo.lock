@@ -2651,6 +2651,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service-protocol",
+ "sha2",
  "thiserror 2.0.20",
 ]
 
@@ -4994,6 +4995,13 @@ name = "windows-observer"
 version = "0.1.0-alpha.1"
 dependencies = [
  "thiserror 2.0.20",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "windows-prompt-probe"
+version = "0.1.0-alpha.1"
+dependencies = [
  "windows 0.62.2",
 ]
 

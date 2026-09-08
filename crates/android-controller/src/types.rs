@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-use phone_request_core::{InboxCheck, InboxCheckpointError, InboxUpdate};
+use phone_request_core::{InboxCheck, InboxCheckpointError, InboxUpdate, OutcomeAcknowledgment};
 use phone_state_store::{CommitReceipt, StoreError};
 use thiserror::Error;
 
@@ -104,6 +104,25 @@ impl CommittedUpdate {
     }
     pub fn into_parts(self) -> (CommitReceipt, InboxUpdate) {
         (self.receipt, self.update)
+    }
+}
+
+/// Checkpoint-backed acknowledgment, not a native journal or OS delivery receipt.
+/// A crash after journal insertion but before this commit leaves the same ID
+/// pending, so the recipient must durably deduplicate before acknowledging again.
+#[must_use = "check the committed removal result; NotPending is not delivery proof"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommittedOutcomeAcknowledgment {
+    pub(crate) receipt: CommitReceipt,
+    pub(crate) acknowledgment: OutcomeAcknowledgment,
+}
+
+impl CommittedOutcomeAcknowledgment {
+    pub const fn receipt(self) -> CommitReceipt {
+        self.receipt
+    }
+    pub const fn acknowledgment(self) -> OutcomeAcknowledgment {
+        self.acknowledgment
     }
 }
 

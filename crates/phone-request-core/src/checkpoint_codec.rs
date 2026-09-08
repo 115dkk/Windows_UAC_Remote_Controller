@@ -2,9 +2,10 @@
 //! Strict, bounded, body-free metadata. Checksums belong to the byte store;
 //! neither parsing nor a checksum authenticates storage/native observations.
 use crate::{
-    InboxCheckpoint, InboxCheckpointError as Error, InboxFault, PhoneBootId,
+    InboxCheckpoint, InboxCheckpointError as Error, InboxFault, PendingOutcome, PhoneBootId,
     checkpoint::RetainedCheckpoint,
     inbox::{SourceKey, SourceState},
+    outbox::{outcome_from_tag, outcome_tag},
     request_key,
 };
 use approval_protocol::{
@@ -17,10 +18,11 @@ use notification_policy::{
 };
 use serde::Deserialize;
 use service_protocol::{MAX_REQUEST_LIFETIME_NANOS, MappedRequestWindow, ServiceTick};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAGIC: &[u8; 8] = b"UACINBX\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
+const POLICY_ONLY_LEGACY_VERSION: u16 = 1;
 const MAX_BYTES: usize = 384 * 1024;
 const MAX_POLICY: usize = 16 * 1024;
 const MILLI: u64 = 1_000_000;
@@ -104,6 +106,13 @@ impl InboxCheckpoint {
             out.optional(entry.recovery_until_nanos);
             out.u8(*engine_states.get(&request_key(entry.binding)).unwrap_or(&0));
         }
+        out.u16(self.pending_outcomes.len() as u16);
+        for pending in &self.pending_outcomes {
+            out.0.extend_from_slice(pending.delivery_id().as_bytes());
+            out.binding(pending.binding());
+            out.u64(pending.issued_at().as_nanos_since_epoch());
+            out.u8(outcome_tag(pending.outcome()));
+        }
         if out.0.len() > MAX_BYTES {
             return Err(Error::TooLarge);
         }
@@ -121,7 +130,8 @@ impl InboxCheckpoint {
         if input.take(8)? != MAGIC {
             return Err(Error::InvalidState);
         }
-        if input.u16()? != VERSION {
+        let version = input.u16()?;
+        if version != VERSION && version != POLICY_ONLY_LEGACY_VERSION {
             return Err(Error::UnsupportedVersion);
         }
         let phone_boot = PhoneBootId::from_native_boot_count(input.u32()?)?;
@@ -238,6 +248,26 @@ impl InboxCheckpoint {
                 recovery_until_nanos,
             });
         }
+        let mut pending_outcomes = Vec::new();
+        if version == VERSION {
+            let count = usize::from(input.u16()?);
+            if count > limits.max_retained() {
+                return Err(Error::InvalidState);
+            }
+            pending_outcomes
+                .try_reserve_exact(count)
+                .map_err(|_| Error::TooLarge)?;
+            for _ in 0..count {
+                let id = input.array()?;
+                let binding = input.binding()?;
+                let issued = ServiceTick::from_nanos_since_epoch(input.u64()?);
+                let outcome = outcome_from_tag(input.u8()?).ok_or(Error::InvalidState)?;
+                pending_outcomes.push(
+                    PendingOutcome::from_encoded(id, binding, issued, outcome)
+                        .ok_or(Error::InvalidState)?,
+                );
+            }
+        }
         if !input.0.is_empty() {
             return Err(Error::InvalidState);
         }
@@ -267,14 +297,29 @@ impl InboxCheckpoint {
             last_local,
             phone_boot,
             fault,
+            pending_outcomes,
         };
         checkpoint.validate()?;
+        // Only a fully validated, healthy policy-only schema-1 snapshot can
+        // migrate. Its missing outbox is known empty; request-bearing legacy
+        // state cannot establish which historical outcomes were delivered.
+        if version == POLICY_ONLY_LEGACY_VERSION && !checkpoint.is_policy_only() {
+            return Err(Error::LegacyOutcomeReconciliationRequired);
+        }
         Ok(checkpoint)
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        if self.fault == Some(InboxFault::OutcomeRetentionFailed) {
+            return Err(Error::OutcomeRetentionFailed);
+        }
         if self.retained.len() > self.limits.max_retained()
             || self.sources.len() > self.limits.max_retained()
+            || self
+                .pending_outcomes
+                .len()
+                .checked_add(self.retained.iter().filter(|row| row.was_active).count())
+                .is_none_or(|used| used > self.limits.max_retained())
             || self.last_phone_nanos.is_some() != self.last_local.is_some()
         {
             return Err(Error::InvalidState);
@@ -282,6 +327,7 @@ impl InboxCheckpoint {
         if self.last_phone_nanos.is_none()
             && (!self.retained.is_empty()
                 || !self.sources.is_empty()
+                || !self.pending_outcomes.is_empty()
                 || self.quarantine.is_some()
                 || self
                     .fault
@@ -423,6 +469,35 @@ impl InboxCheckpoint {
                 return Err(Error::InvalidState);
             }
         }
+        let mut delivery_ids = BTreeSet::new();
+        let mut outcome_keys = BTreeSet::new();
+        for pending in &self.pending_outcomes {
+            if !pending.valid()
+                || !delivery_ids.insert(pending.delivery_id())
+                || !outcome_keys.insert(pending.key())
+            {
+                return Err(Error::InvalidState);
+            }
+            let source = self
+                .sources
+                .get(&SourceKey {
+                    pc: pending.binding().pc(),
+                    epoch: pending.binding().epoch(),
+                })
+                .ok_or(Error::InvalidState)?;
+            if let Some(original) = entries.get(&pending.key()) {
+                if original.binding != pending.binding()
+                    || original.issued_at != pending.issued_at()
+                    || original.was_active
+                {
+                    return Err(Error::InvalidState);
+                }
+            } else if source.watermark < pending.binding().expiry().as_nanos_since_epoch() {
+                // A removed guard must still have its original source-expiry
+                // proof; ACK must not delete the only protection for a live ID.
+                return Err(Error::InvalidState);
+            }
+        }
         Ok(())
     }
 }
@@ -439,6 +514,7 @@ fn encode_fault(value: Option<InboxFault>) -> u8 {
         Some(InboxFault::NotificationEngine(EngineFault::FutureIssueTime)) => 7,
         Some(InboxFault::InconsistentState) => 8,
         Some(InboxFault::ReceivingOwnerStopped) => 9,
+        Some(InboxFault::OutcomeRetentionFailed) => 10,
     }
 }
 fn decode_fault(value: u8) -> Result<Option<InboxFault>, Error> {
@@ -455,6 +531,7 @@ fn decode_fault(value: u8) -> Result<Option<InboxFault>, Error> {
         7 => Some(InboxFault::NotificationEngine(EngineFault::FutureIssueTime)),
         8 => Some(InboxFault::InconsistentState),
         9 => Some(InboxFault::ReceivingOwnerStopped),
+        10 => Some(InboxFault::OutcomeRetentionFailed),
         _ => return Err(Error::InvalidState),
     })
 }

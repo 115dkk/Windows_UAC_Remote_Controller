@@ -3,13 +3,19 @@
 use std::fmt;
 
 use notification_policy::{CapacityLimits, NotificationPolicy, RequestKey};
-use phone_request_core::{InboxCheckpoint, InboxClock, InboxFault, PhoneBootId, PhoneInbox};
+use phone_request_core::{
+    InboxCheckpoint, InboxClock, InboxFault, OutcomeDeliveryId, PendingOutcome, PhoneBootId,
+    PhoneInbox,
+};
 use phone_state_store::{
     CommitReceipt, Durability, NativePrivateDirectory, SnapshotStore, Transition,
 };
 use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
-use crate::{CommittedCheck, CommittedUpdate, DurableFailure, DurableFault, InboxCounts};
+use crate::{
+    CommittedCheck, CommittedOutcomeAcknowledgment, CommittedUpdate, DurableFailure, DurableFault,
+    InboxCounts,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum RequiredDurability {
@@ -179,6 +185,30 @@ impl DurableInbox {
             retained_bodies: self.inbox.retained_body_count(),
             recovering: self.inbox.recovering_count(),
             sources: self.inbox.source_count(),
+        })
+    }
+
+    /// Sole source for native outcome delivery, from the last committed state.
+    /// Insert each row idempotently into the durable journal by delivery_id,
+    /// then call acknowledge_outcome. Reading/retrying is not OS delivery and
+    /// does not emit notifications/history or change a request's original life.
+    pub fn pending_outcomes(&self) -> Result<&[PendingOutcome], DurableFault> {
+        self.ensure_healthy()?;
+        Ok(self.inbox.pending_outcomes())
+    }
+
+    /// Commit-backed removal only, after the native journal has durably inserted
+    /// or deduplicated this exact delivery ID. This API cannot prove that journal
+    /// operation occurred. Unknown/duplicate IDs report NotPending, never delivered.
+    /// No clock or request state is fabricated merely to acknowledge metadata.
+    pub fn acknowledge_outcome(
+        &mut self,
+        id: OutcomeDeliveryId,
+    ) -> Result<CommittedOutcomeAcknowledgment, DurableFailure> {
+        let (receipt, acknowledgment) = self.transition(|inbox| inbox.acknowledge_outcome(id))?;
+        Ok(CommittedOutcomeAcknowledgment {
+            receipt,
+            acknowledgment,
         })
     }
 

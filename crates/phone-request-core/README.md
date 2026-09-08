@@ -9,7 +9,9 @@ notification delivery, OS authentication or Windows applying a decision.
 
 Status: ROOT host contracts checked; native Android integration remains pending.
 Only ROOT runs formatting, builds, tests, Clippy, Rust Analyzer and device checks.
-Current recovery/codecs have 54 host tests; these are not installed-app evidence.
+ROOT's affected host tests (including all54 prior core cases and10 new outbox
+cases) and all-target/all-feature Clippy passed. Native integration and broader
+workspace/device gates remain separate.
 
 ## Inputs and public API
 
@@ -25,6 +27,8 @@ poll(&mut self, InboxClock) -> InboxUpdate
 update_policy(&mut self, NotificationPolicy, InboxClock) -> InboxUpdate
 check_pending(&mut self, RequestKey, InboxClock) -> InboxCheck
 observe_service_clock(&mut self, &ClockCorrelation, InboxClock) -> InboxUpdate
+pending_outcomes(&self) -> &[PendingOutcome]
+acknowledge_outcome(&mut self, OutcomeDeliveryId) -> OutcomeAcknowledgment
 
 request_key(RequestBinding) -> RequestKey
 ```
@@ -158,7 +162,7 @@ cache/engine count consistency and faults on an inconsistent active-body state.
   the owner's source for distinguishing those terminal results. Do not label
   `CompletedByPc` alone as "Windows approved".
 - Off-hours/disabled/capacity drops and schedule-change withdrawals do not create
-  user-history outcomes. The inbox stores no user history itself. A poll that
+  user-history outcomes. The inbox stores no delivered history journal. A poll that
   also expires some *other previously admitted* request may legitimately return
   that request's existing engine RecordOutcome; do not confuse it with the drop.
 
@@ -169,6 +173,42 @@ failures are likewise explicit. For a wrapper-detected fault the invalid engine 
 instead of feeding it a fabricated clock to trigger its private latch. Actual
 engine faults/effects are forwarded. No public reset or clear-fault API exists.
 
+## Pending outcome delivery
+
+Every engine `RecordOutcome` is captured with its original full binding and
+service issuance before withdrawal/guard retirement. The existing effect is
+only a compatibility/wake hint. `pending_outcomes()` is the sole delivery source;
+native code must not independently append both the hint and the outbox.
+
+Each immutable `PendingOutcome` contains a delivery ID, original binding,
+issuance and existing coarse outcome. The ID hashes the fixed
+`Windows-UAC-Remote-Controller/outcome-delivery/v1\0` domain, all canonical
+big-endian RequestBinding fields, original u64 issuance and fixed outcome byte:
+CancelledByPc=1, ExpiredByPc=2, ExpiredLocally=3, CompletedByPc=4. No Debug/JSON,
+body, command, private key, retry/phone-boot time or OS-success flag is included.
+Completed keeps its previous meaning, not successful Windows approval.
+
+Pending rows plus the union of active and recovering requests fit the configured
+max-retained count (at most512). Active/recovering requests reserve one future
+outcome slot; restoring a body does not reserve twice. Without capacity, a newly
+showable request gets `InboxIssue::OutcomeCapacity` and an original body-free
+capacity-drop guard. ACK may free space for new IDs, never revive that dropped
+request. Off-hours/Never/schedule-only/pre-open drops create no outcomes. Pending
+rows are never evicted, expire with a notification, or vanish on guard retirement
+or phone reboot. Existing original-window/source-expiry classification remains.
+
+Unexpected missing metadata, conflicting terminal rows, allocation failure or
+reservation inconsistency sets an irreversible retention-failure latch. That
+candidate cannot be checkpointed even after owner cleanup or another fault, so
+the durable owner cannot commit a lost outcome as ordinary fault state.
+
+Core ACK changes memory only. Native recipients must durably insert/deduplicate
+by delivery ID, then use `DurableInbox::acknowledge_outcome`. Removed and
+NotPending describe queue state, not delivery proof. A crash after insertion but
+before ACK leaves the same ID for retry. This is an at-least-once handoff requiring
+recipient idempotency, not an exactly-once cross-store transaction or a native
+journal implementation. Retrying rows emits no Show/Restore or additional history.
+
 ## Body-free restart checkpoints
 
 `with_phone_boot(policy, limits, PhoneBootId)` binds the native nonnegative
@@ -177,6 +217,18 @@ process-only API and cannot produce a checkpoint. `checkpoint().to_bytes()` and
 `InboxCheckpoint::from_bytes()` use a strict, versioned, <=384KiB binary format
 with <=16KiB required-field policy JSON; no body/command/private-key bytes are
 included. Structure checks are not storage authenticity or native provenance.
+Schema2 appends a u16 count and fixed221-byte outcome rows (32-byte ID,
+180-byte binding, u64 issuance, u8 outcome). Decode recomputes IDs, rejects
+duplicate IDs/request keys and validates original guard/source relationships.
+The conservative combined maximum of512 worst-case guards,512 sources,512 rows,
+16-KiB policy and fixed headers is286,279 bytes; the384-KiB cap is unchanged.
+
+Schema1 migrates only after complete validation as healthy policy-only state.
+It normalizes to schema2 with a known-empty outbox; a durable open commits that
+migration. Legacy request/source/fault-bearing state returns
+`LegacyOutcomeReconciliationRequired`, not an invented empty delivery queue.
+Malformed/unknown bytes never initialize defaults. `is_policy_only()` explicitly
+requires an empty pending outbox.
 
 `restore_checkpoint(checkpoint, current_boot, clock)` returns an inbox and an
 uncommitted update. On the same phone boot, previously active metadata has no

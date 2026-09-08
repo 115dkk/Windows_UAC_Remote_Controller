@@ -18,7 +18,10 @@ use notification_policy::{
     NotificationPolicy, RequestOutcome, Schedule, TimeWindow, Weekday, WeeklySchedule,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
-use phone_request_core::{InboxCheckpointError, InboxClock, InboxFault, PhoneBootId, request_key};
+use phone_request_core::{
+    InboxCheckpointError, InboxClock, InboxFault, OutcomeAcknowledgment, PendingOutcome,
+    PhoneBootId, PhoneInbox, request_key,
+};
 use phone_state_store::{
     Durability, INTENT_FILE_NAME, LOCK_FILE_NAME, NativePrivateDirectory, SNAPSHOT_FILE_NAME,
     STAGING_FILE_NAME, SnapshotStore, StoreError,
@@ -141,6 +144,210 @@ fn fresh_owner(temp: &tempfile::TempDir, policy: NotificationPolicy) -> DurableI
     .expect("explicit synthetic host-model owner");
     assert!(initialized.update().effects().is_empty());
     owner
+}
+
+#[test]
+fn pending_outcome_survives_reopen_until_commit_backed_acknowledgment() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    let event = opened(9_001, 0, 1_000);
+    let admitted = owner
+        .receive_opened(&event, &mut correlation(0, 0), clock(0, 600))
+        .unwrap();
+    assert!(
+        admitted
+            .update()
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Show(_)))
+    );
+    let expired = owner.poll(clock(1_000, 600)).unwrap();
+    assert!(expired.update().effects().iter().any(|effect| matches!(
+        effect,
+        Effect::RecordOutcome {
+            outcome: RequestOutcome::ExpiredLocally,
+            ..
+        }
+    )));
+    let pending = owner.pending_outcomes().unwrap()[0];
+    assert_eq!(pending.outcome(), RequestOutcome::ExpiredLocally);
+    assert_eq!(pending.key(), key(&event));
+    drop(owner);
+
+    let (mut reopened, restored) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_100, 600))
+            .unwrap();
+    assert_eq!(reopened.pending_outcomes().unwrap(), &[pending]);
+    assert!(restored.update().effects().iter().all(|effect| !matches!(
+        effect,
+        Effect::Show(_) | Effect::Restore(_) | Effect::RecordOutcome { .. }
+    )));
+    // A real journal must first durably insert/deduplicate this delivery ID.
+    // This test exercises only the subsequent checkpoint acknowledgment.
+    let acknowledged = reopened.acknowledge_outcome(pending.delivery_id()).unwrap();
+    assert_eq!(
+        acknowledged.acknowledgment(),
+        OutcomeAcknowledgment::Removed
+    );
+    assert!(acknowledged.receipt().changed());
+    let duplicate_ack = reopened.acknowledge_outcome(pending.delivery_id()).unwrap();
+    assert_eq!(
+        duplicate_ack.acknowledgment(),
+        OutcomeAcknowledgment::NotPending
+    );
+    assert!(!duplicate_ack.receipt().changed());
+    drop(reopened);
+
+    let (reopened, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_200, 600))
+            .unwrap();
+    assert!(reopened.pending_outcomes().unwrap().is_empty());
+}
+
+fn owner_with_pending(temp: &tempfile::TempDir, id: u64) -> (DurableInbox, PendingOutcome) {
+    let mut owner = fresh_owner(temp, NotificationPolicy::default());
+    let event = opened(id, 0, 1_000);
+    let _admitted = owner
+        .receive_opened(&event, &mut correlation(0, 0), clock(0, 600))
+        .unwrap();
+    let _expired = owner.poll(clock(1_000, 600)).unwrap();
+    let row = owner.pending_outcomes().unwrap()[0];
+    (owner, row)
+}
+
+#[test]
+fn durable_outbox_retries_across_boot_change_without_reemitting_notifications_or_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, row) = owner_with_pending(&temp, 9_002);
+    drop(owner);
+    let next_boot = PhoneBootId::from_native_boot_count(8).unwrap();
+    let (reopened, update) =
+        DurableInbox::open_existing_host_model(directory(&temp), next_boot, clock(0, 600)).unwrap();
+    assert_eq!(reopened.pending_outcomes().unwrap(), &[row]);
+    assert!(update.update().effects().iter().all(|effect| !matches!(
+        effect,
+        Effect::Show(_) | Effect::Restore(_) | Effect::RecordOutcome { .. }
+    )));
+    drop(reopened);
+    let (reopened, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), next_boot, clock(1, 600)).unwrap();
+    assert_eq!(reopened.pending_outcomes().unwrap(), &[row]);
+}
+
+#[test]
+fn unknown_outcome_ack_is_committed_absence_not_delivery_and_removes_nothing() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let (mut owner, row) = owner_with_pending(&first, 9_003);
+    let (other, unknown) = owner_with_pending(&second, 9_004);
+    drop(other);
+    let acknowledged = owner.acknowledge_outcome(unknown.delivery_id()).unwrap();
+    assert_eq!(
+        acknowledged.acknowledgment(),
+        OutcomeAcknowledgment::NotPending
+    );
+    assert!(!acknowledged.receipt().changed());
+    assert_eq!(owner.pending_outcomes().unwrap(), &[row]);
+}
+
+#[test]
+fn pending_outcome_keeps_policy_only_preflight_closed_after_guard_retirement() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, row) = owner_with_pending(&temp, 9_005);
+    let _retired = owner
+        .observe_service_clock(&correlation(1_001, 1_000), clock(1_001, 600))
+        .unwrap();
+    assert_eq!(owner.counts().unwrap().retained(), 0);
+    assert_eq!(owner.pending_outcomes().unwrap(), &[row]);
+    drop(owner);
+    let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
+    let failure =
+        DurableInbox::open_existing_policy_only(directory(&temp), boot(), clock(1_002, 600))
+            .unwrap_err();
+    assert_eq!(failure.cause(), DurableFault::LifecycleIntegrationRequired);
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+        before
+    );
+    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+}
+
+#[test]
+fn failed_ack_preflight_preserves_pending_delivery_in_the_prior_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, row) = owner_with_pending(&temp, 9_006);
+    let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
+    let injected = temp.path().join(STAGING_FILE_NAME);
+    fs::write(&injected, b"test-owned external blocker").unwrap();
+    let failure = owner.acknowledge_outcome(row.delivery_id()).unwrap_err();
+    assert_eq!(
+        failure.cause(),
+        DurableFault::Storage(StoreError::RecoveryRequired)
+    );
+    assert!(owner.pending_outcomes().is_err());
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+        before
+    );
+    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+    drop(owner);
+    // Remove only this known test-injected obstacle. The product provides no
+    // automatic staging/intent recovery or cleanup operation.
+    fs::remove_file(injected).unwrap();
+    let (reopened, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_100, 600))
+            .unwrap();
+    assert_eq!(reopened.pending_outcomes().unwrap(), &[row]);
+}
+
+#[cfg(windows)]
+#[test]
+fn ack_rename_failure_returns_no_ack_receipt_and_keeps_explicit_uncertain_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, row) = owner_with_pending(&temp, 9_007);
+    let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
+    let blocker = block_snapshot_rename(&temp);
+    let failure = owner.acknowledge_outcome(row.delivery_id()).unwrap_err();
+    assert_eq!(
+        failure.cause(),
+        DurableFault::Storage(StoreError::CommitUncertain)
+    );
+    assert!(owner.pending_outcomes().is_err());
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+        before
+    );
+    drop(blocker);
+    drop(owner);
+    let reopened =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_100, 600))
+            .unwrap_err();
+    assert_eq!(
+        reopened.cause(),
+        DurableFault::Storage(StoreError::RecoveryRequired)
+    );
+}
+
+#[test]
+fn valid_schema1_policy_snapshot_is_migrated_only_by_a_real_committed_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = NotificationPolicy::new(Some(Schedule::Never), AlertMode::Silent);
+    let mut core = PhoneInbox::with_phone_boot(policy.clone(), CapacityLimits::default(), boot());
+    core.poll(clock(0, 600));
+    let mut legacy = core.checkpoint().unwrap().to_bytes().unwrap();
+    assert_eq!(&legacy[legacy.len() - 2..], &[0, 0]);
+    legacy.truncate(legacy.len() - 2);
+    legacy[8..10].copy_from_slice(&1_u16.to_be_bytes());
+    let (store, _) = SnapshotStore::create_fresh(directory(&temp), &legacy).unwrap();
+    drop(store);
+    let (owner, migrated) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1, 600)).unwrap();
+    assert_eq!(owner.policy().unwrap(), &policy);
+    assert!(owner.pending_outcomes().unwrap().is_empty());
+    assert!(migrated.receipt().changed());
+    drop(owner);
+    let store = SnapshotStore::open_existing(directory(&temp)).unwrap();
+    assert_eq!(&store.snapshot().unwrap()[8..10], &2_u16.to_be_bytes());
 }
 
 #[test]

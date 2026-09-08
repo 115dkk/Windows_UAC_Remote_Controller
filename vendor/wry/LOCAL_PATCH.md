@@ -21,7 +21,10 @@ files are not patched by hand.
    reported eight inference errors at this expression in CI 34288751131 although
    the actual compiler, Clippy and tests passed. The result annotation alone left
    one pointer-inference diagnostic in CI34289874403, so the closure input is also
-   explicit; no cast, pointer dereference or ownership change is introduced.
+   explicit. A standalone ROOT reproduction showed that method-call inference
+   still fails for `NonNull::as_ref`, while fully qualified `NonNull::<String>::as_ref`
+   and `String::clone` pass the real analyzer. The lookup now uses those exact
+   calls; no cast, additional pointer dereference or ownership change is introduced.
 4. Put the two existing Windows optional tracing macro calls inside blocks with
    the same `#[cfg(feature = "tracing")]`. Their availability and execution are
    unchanged. The pinned analyzer otherwise attempts to resolve those macros in

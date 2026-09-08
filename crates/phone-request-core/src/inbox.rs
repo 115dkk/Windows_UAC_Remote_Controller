@@ -14,8 +14,8 @@ use service_protocol::{
 };
 
 use crate::{
-    InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, PendingRequest, PhoneBootId,
-    types::NANOS_PER_MILLI,
+    InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, OutcomeAcknowledgment,
+    OutcomeDeliveryId, PendingOutcome, PendingRequest, PhoneBootId, types::NANOS_PER_MILLI,
 };
 
 const MAX_GUARD_HORIZON_NANOS: u64 = MAX_REQUEST_LIFETIME_NANOS + MAX_CLOCK_PROBE_RTT_NANOS;
@@ -95,6 +95,10 @@ pub struct PhoneInbox {
     pub(crate) last_local: Option<LocalTime>,
     pub(crate) phone_boot: Option<PhoneBootId>,
     pub(crate) fault: Option<InboxFault>,
+    pub(crate) pending_outcomes: Vec<PendingOutcome>,
+    // Independent irreversible integrity latch: another domain fault must not
+    // accidentally make a candidate missing an outcome encodable again.
+    pub(crate) outcome_retention_failed: bool,
 }
 
 impl fmt::Debug for PhoneInbox {
@@ -104,6 +108,7 @@ impl fmt::Debug for PhoneInbox {
             .field("active_count", &self.active_count())
             .field("retained_count", &self.retained.len())
             .field("source_count", &self.sources.len())
+            .field("pending_outcome_count", &self.pending_outcomes.len())
             .field("fault", &self.fault)
             .finish_non_exhaustive()
     }
@@ -122,6 +127,8 @@ impl PhoneInbox {
             last_local: None,
             phone_boot: None,
             fault: None,
+            pending_outcomes: Vec::new(),
+            outcome_retention_failed: false,
         }
     }
 
@@ -145,6 +152,43 @@ impl PhoneInbox {
     }
     pub const fn fault(&self) -> Option<InboxFault> {
         self.fault
+    }
+
+    /// Sole source for outcome delivery. In this core these are in-memory rows,
+    /// not commit receipts; a native journal must use DurableInbox and insert
+    /// idempotently by delivery_id before acknowledging the row.
+    pub fn pending_outcomes(&self) -> &[PendingOutcome] {
+        &self.pending_outcomes
+    }
+
+    /// In-memory acknowledgment only; the durable owner must commit this change
+    /// before treating the row as removed. Unknown/repeated IDs are NotPending,
+    /// not proof of any journal/OS delivery. No notification state is revived.
+    pub fn acknowledge_outcome(&mut self, id: OutcomeDeliveryId) -> OutcomeAcknowledgment {
+        if let Some(index) = self
+            .pending_outcomes
+            .iter()
+            .position(|row| row.delivery_id() == id)
+        {
+            self.pending_outcomes.remove(index);
+            OutcomeAcknowledgment::Removed
+        } else {
+            OutcomeAcknowledgment::NotPending
+        }
+    }
+
+    fn reserved_outcome_slots(&self) -> usize {
+        self.retained
+            .values()
+            .filter(|entry| entry.content.is_some() || entry.recovering)
+            .count()
+    }
+
+    fn outcome_slot_available(&self) -> bool {
+        self.pending_outcomes
+            .len()
+            .checked_add(self.reserved_outcome_slots())
+            .is_some_and(|used| used < self.limits.max_retained())
     }
 
     /// Downward-only owner failure transition. It releases bodies and withdraws
@@ -407,6 +451,35 @@ impl PhoneInbox {
             return self.finish(update);
         }
 
+        // A terminal outcome may outlive its retired replay guard. Never admit
+        // another active binding under that still-pending delivery identity.
+        if let Some(pending) = self.pending_outcomes.iter().find(|row| row.key() == key) {
+            if pending.binding() != binding {
+                update.issue = Some(InboxIssue::ConflictingBinding);
+            } else if pending.issued_at() != issued_at {
+                update.issue = Some(InboxIssue::ConflictingIssuedAt);
+            } else {
+                update.effects.push(Effect::Drop {
+                    key,
+                    // Preserve the original guard's local expiry classification;
+                    // a newer correlation never supplies a replacement deadline.
+                    reason: if self.source_expired(binding)
+                        || self
+                            .retained
+                            .get(&key)
+                            .and_then(|entry| entry.metadata)
+                            .is_some_and(|metadata| {
+                                metadata.expires_at() <= clock.reading.monotonic
+                            }) {
+                        DropReason::Expired
+                    } else {
+                        DropReason::PreviouslySuppressed
+                    },
+                });
+            }
+            return self.finish(update);
+        }
+
         if let Some(existing) = self.retained.get(&key) {
             if existing.binding != binding {
                 update.issue = Some(InboxIssue::ConflictingBinding);
@@ -553,14 +626,28 @@ impl PhoneInbox {
         } else {
             None
         };
-        let effects = match metadata {
-            Some(metadata) if metadata.expires_at() > clock.reading.monotonic => {
-                self.engine_transition(kind, metadata, clock)
-            }
-            _ => vec![Effect::Drop {
+        let outcome_capacity = matches!(kind, EventKind::Opened(_))
+            && self.policy.allows(clock.reading.local)
+            && metadata.is_some_and(|metadata| metadata.expires_at() > clock.reading.monotonic)
+            && !self.outcome_slot_available();
+        let effects = if outcome_capacity {
+            // Keep the original bounded non-body guard below. An ACK may free
+            // capacity for a NEW request, never resurrect this suppressed one.
+            update.issue = Some(InboxIssue::OutcomeCapacity);
+            vec![Effect::Drop {
                 key,
-                reason: DropReason::Expired,
-            }],
+                reason: DropReason::ActiveCapacity,
+            }]
+        } else {
+            match metadata {
+                Some(metadata) if metadata.expires_at() > clock.reading.monotonic => {
+                    self.engine_transition(kind, metadata, clock)
+                }
+                _ => vec![Effect::Drop {
+                    key,
+                    reason: DropReason::Expired,
+                }],
+            }
         };
         let active = effects
             .iter()
@@ -811,6 +898,23 @@ impl PhoneInbox {
     }
 
     fn apply_effects(&mut self, effects: Vec<Effect>, update: &mut InboxUpdate) {
+        // Capture original binding/issuance before Withdraw clears activity and
+        // before begin/observe_source can retire any guard. The ordinary effect
+        // remains only a wake/compatibility hint, not the delivery source.
+        if !self.retain_outcomes(&effects) {
+            self.outcome_retention_failed = true;
+            self.latch_fault(InboxFault::OutcomeRetentionFailed, update);
+            update
+                .effects
+                .retain(|effect| matches!(effect, Effect::Withdraw { .. } | Effect::Drop { .. }));
+            update.effects.extend(
+                effects.into_iter().filter(|effect| {
+                    matches!(effect, Effect::Withdraw { .. } | Effect::Drop { .. })
+                }),
+            );
+            update.fault = self.fault;
+            return;
+        }
         for effect in &effects {
             match effect {
                 Effect::Withdraw { key, .. } => {
@@ -838,6 +942,52 @@ impl PhoneInbox {
         }
     }
 
+    fn retain_outcomes(&mut self, effects: &[Effect]) -> bool {
+        let mut additions: Vec<PendingOutcome> = Vec::new();
+        for effect in effects {
+            let Effect::RecordOutcome { key, outcome } = *effect else {
+                continue;
+            };
+            let Some(original) = self.retained.get(&key) else {
+                return false;
+            };
+            let candidate = PendingOutcome::new(original.binding, original.issued_at, outcome);
+            if !candidate.valid() {
+                return false;
+            }
+            if let Some(existing) = self
+                .pending_outcomes
+                .iter()
+                .chain(additions.iter())
+                .find(|row| row.key() == key || row.delivery_id() == candidate.delivery_id())
+            {
+                if *existing != candidate {
+                    return false;
+                }
+                continue;
+            }
+            if self
+                .pending_outcomes
+                .len()
+                .checked_add(additions.len())
+                .is_none_or(|used| used >= self.limits.max_retained())
+                || additions.try_reserve_exact(1).is_err()
+            {
+                return false;
+            }
+            additions.push(candidate);
+        }
+        if self
+            .pending_outcomes
+            .try_reserve_exact(additions.len())
+            .is_err()
+        {
+            return false;
+        }
+        self.pending_outcomes.extend(additions);
+        true
+    }
+
     fn latch_fault(&mut self, fault: InboxFault, update: &mut InboxUpdate) {
         if self.fault.is_some() {
             return;
@@ -862,6 +1012,15 @@ impl PhoneInbox {
     }
 
     pub(crate) fn finish(&mut self, mut update: InboxUpdate) -> InboxUpdate {
+        if self
+            .pending_outcomes
+            .len()
+            .checked_add(self.reserved_outcome_slots())
+            .is_none_or(|used| used > self.limits.max_retained())
+        {
+            self.outcome_retention_failed = true;
+            self.latch_fault(InboxFault::OutcomeRetentionFailed, &mut update);
+        }
         if self.fault.is_none() {
             let consistent = self.engine.as_ref().is_some_and(|engine| {
                 engine.active_count() == self.active_count() + self.recovering_count()
@@ -884,6 +1043,11 @@ impl PhoneInbox {
             }
         }
         update.fault = self.fault;
+        if self.outcome_retention_failed {
+            update
+                .effects
+                .retain(|effect| matches!(effect, Effect::Withdraw { .. } | Effect::Drop { .. }));
+        }
         update
     }
 
@@ -995,4 +1159,52 @@ fn push_guard_drop(key: RequestKey, issue: InboxIssue, update: &mut InboxUpdate)
     };
     update.effects.push(Effect::Drop { key, reason });
     update.issue = Some(issue);
+}
+
+#[cfg(test)]
+mod outcome_integrity_tests {
+    use super::*;
+    use notification_policy::{ClockReading, RequestOutcome};
+
+    #[test]
+    fn an_impossible_outcome_without_original_metadata_latches_an_unencodable_state() {
+        let mut state = PhoneInbox::with_phone_boot(
+            NotificationPolicy::default(),
+            CapacityLimits::new(1, 1).unwrap(),
+            PhoneBootId::from_native_boot_count(7).unwrap(),
+        );
+        let clock = InboxClock::new(
+            ClockReading::new(
+                MonotonicTime::from_millis(0),
+                LocalTime::new(Weekday::Monday, 600).unwrap(),
+            ),
+            0,
+        )
+        .unwrap();
+        let mut update = state.poll(clock);
+        // Fault injection only: the real engine must never emit an outcome for
+        // an absent original binding. No production injection API is exposed.
+        state.apply_effects(
+            vec![Effect::RecordOutcome {
+                key: RequestKey::new([1; 32], [2; 32], [3; 32]),
+                outcome: RequestOutcome::CancelledByPc,
+            }],
+            &mut update,
+        );
+        assert_eq!(state.fault(), Some(InboxFault::OutcomeRetentionFailed));
+        assert!(state.pending_outcomes().is_empty());
+        assert!(update.effects().iter().all(|effect| !matches!(
+            effect,
+            Effect::Show(_) | Effect::Restore(_) | Effect::RecordOutcome { .. }
+        )));
+        assert_eq!(
+            state.checkpoint().unwrap_err(),
+            crate::InboxCheckpointError::OutcomeRetentionFailed
+        );
+        drop(state.stop_for_owner_failure());
+        assert_eq!(
+            state.checkpoint().unwrap_err(),
+            crate::InboxCheckpointError::OutcomeRetentionFailed
+        );
+    }
 }

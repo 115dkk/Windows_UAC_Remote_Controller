@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Body-free native lifecycle checkpoints, never an authentication assertion.
 use crate::{
-    InboxClock, InboxFault, InboxUpdate, PhoneInbox,
+    InboxClock, InboxFault, InboxUpdate, PendingOutcome, PhoneInbox,
     inbox::{RetainedRequest, SourceKey, SourceState},
     request_key,
 };
@@ -50,6 +50,10 @@ pub enum InboxCheckpointError {
     UnsupportedVersion,
     #[error("the inbox checkpoint exceeds its byte bound")]
     TooLarge,
+    #[error("legacy request-bearing state needs explicit outcome-delivery reconciliation")]
+    LegacyOutcomeReconciliationRequired,
+    #[error("an outcome was not retained and the candidate cannot be checkpointed")]
+    OutcomeRetentionFailed,
 }
 
 #[derive(Clone)]
@@ -78,12 +82,14 @@ pub struct InboxCheckpoint {
     pub(crate) last_local: Option<LocalTime>,
     pub(crate) phone_boot: PhoneBootId,
     pub(crate) fault: Option<InboxFault>,
+    pub(crate) pending_outcomes: Vec<PendingOutcome>,
 }
 impl fmt::Debug for InboxCheckpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InboxCheckpoint")
             .field("retained_count", &self.retained.len())
             .field("source_count", &self.sources.len())
+            .field("pending_outcome_count", &self.pending_outcomes.len())
             .finish_non_exhaustive()
     }
 }
@@ -91,6 +97,7 @@ impl InboxCheckpoint {
     /// Staging compatibility predicate only, not authentication or readiness.
     pub fn is_policy_only(&self) -> bool {
         self.retained.is_empty()
+            && self.pending_outcomes.is_empty()
             && self.sources.is_empty()
             && self.fault.is_none()
             && self.quarantine.is_none()
@@ -110,6 +117,9 @@ impl InboxCheckpoint {
 
 impl PhoneInbox {
     pub fn checkpoint(&self) -> Result<InboxCheckpoint, InboxCheckpointError> {
+        if self.outcome_retention_failed || self.fault == Some(InboxFault::OutcomeRetentionFailed) {
+            return Err(InboxCheckpointError::OutcomeRetentionFailed);
+        }
         let phone_boot = self.phone_boot.ok_or(InboxCheckpointError::MissingBoot)?;
         Ok(InboxCheckpoint {
             policy: self.policy.clone(),
@@ -134,6 +144,7 @@ impl PhoneInbox {
             last_local: self.last_local,
             phone_boot,
             fault: self.fault,
+            pending_outcomes: self.pending_outcomes.clone(),
         })
     }
 
@@ -212,6 +223,8 @@ impl PhoneInbox {
             },
             phone_boot: Some(current_boot),
             fault: checkpoint.fault,
+            pending_outcomes: checkpoint.pending_outcomes,
+            outcome_retention_failed: false,
         };
         let update = inbox.begin(clock);
         let update = inbox.finish(update);
