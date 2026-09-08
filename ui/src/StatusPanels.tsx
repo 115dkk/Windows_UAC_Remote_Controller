@@ -37,13 +37,13 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
   </>;
 }
 
-export function MobileNotices({ mobile, disabled, onOpenLock }: {
-  mobile: MobileReadiness | null; disabled: boolean; onOpenLock: () => void;
+export function MobileNotices({ mobile, disabled, onOpenLock, onOpenNotifications }: {
+  mobile: MobileReadiness | null; disabled: boolean; onOpenLock: () => void; onOpenNotifications: () => void;
 }) {
   const missing = mobile?.screenLock === 'missing';
   return <div className="mobile-notices">
     {(!mobile || mobile.screenLock !== 'configured') && <section className={`notice-box ${missing ? 'warning' : ''}`} aria-labelledby="lock-heading"><Icon name="lock" /><div><h2 id="lock-heading">{missing ? ko.lockMissing : ko.lockUnknown}</h2><p>{missing ? ko.lockMissingBody : ko.lockUnknownBody}</p>{missing && mobile?.canOpenLockSettings && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenLock}>{ko.openLockSettings}</button>}</div></section>}
-    {mobile?.notifications === 'denied' && <section className="notice-box warning"><Icon name="alert" /><div><h2>{ko.notificationsDenied}</h2><p>{ko.notificationsDeniedBody}</p></div></section>}
+    {mobile?.notifications === 'denied' && <section className="notice-box warning"><Icon name="alert" /><div><h2>{ko.notificationsDenied}</h2><p>{ko.notificationsDeniedBody}</p>{mobile.canOpenNotificationSettings && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenNotifications}>{ko.openNotificationSettings}</button>}</div></section>}
     {mobile?.notifications === 'unavailable' && <p className="supporting-text">{ko.notificationsUnknown}</p>}
   </div>;
 }

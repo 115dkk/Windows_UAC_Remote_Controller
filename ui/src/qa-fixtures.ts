@@ -10,7 +10,7 @@ export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): Ap
   return {
     schemaVersion: 1, platform, computerName: '화면 예시 PC',
     service: platform === 'windows' ? { installed: false, state: null, allowedActions: [], controlHint: 'needs_installer', remoteRequestsReady: false } : null,
-    mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false } : null,
+    mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false } : null,
     policy: { schedule: { mode: 'always' }, alert: 'sound' },
     devices: [], requests: [], activity: [],
     dataAvailability: { devices: 'available', requests: 'available', activity: 'available' },
@@ -39,9 +39,9 @@ export function qaCase(name: string): QaCase {
     case 'phone-empty': return { page: 'requests', snapshot: phone };
     case 'phone-unavailable': return { page: 'requests', snapshot: { ...phone, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'phone-settings': return { page: 'schedule', snapshot: { ...phone, policy: { schedule: { mode: 'weekly', windows: [{ days: 31, start_minute: 9 * 60, end_minute: 18 * 60 }] }, alert: 'vibrate_only' } } };
-    case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true } } };
-    case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false } } };
-    case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false } } };
+    case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true, canOpenNotificationSettings: false } } };
+    case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false, canOpenNotificationSettings: false } } };
+    case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false, canOpenNotificationSettings: true } } };
     case 'errors': return { page: 'requests', snapshot: { ...phone, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' }, issue: { code: 'synthetic_unavailable', message: '요청 상태를 확인하지 못했어요.', nextAction: '연결을 확인한 뒤 다시 시도해 주세요.' } } };
     default: return { page: 'status', snapshot: windows };
   }
@@ -62,5 +62,6 @@ export function createQaBridge(initial: AppSnapshot): ControllerBridge {
     decide: (id) => reply({ ...value, requests: value.requests.map((request) => request.id === id ? { ...request, state: 'sending', canApprove: false, canDeny: false } : request) }),
     clearActivity: () => reply({ ...value, activity: [] }),
     openLockSettings: () => Promise.resolve(),
+    openNotificationSettings: () => Promise.resolve(),
   };
 }

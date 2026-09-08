@@ -1,9 +1,10 @@
-# Wry 0.55.1 Android API compatibility patch
+# Wry 0.55.1 Android API and analyzer compatibility patch
 
 Upstream: crates.io `wry` 0.55.1, the version required by tauri-runtime-wry 2.11.4.
 All original licensing files and source notices are retained. This dependency is
 not relicensed as original project code. The local Cargo patch changes two Kotlin
-source templates; generated application files are not patched by hand.
+source templates and three explicit Rust typing/cfg sites; generated application
+files are not patched by hand.
 
 1. Remove the unused WebSQL `settings.databaseEnabled = true` assignment. The
    application stores policy in Rust, not WebSQL. Android deprecated this API in
@@ -15,10 +16,21 @@ source templates; generated application files are not patched by hand.
    restores callback enablement if the downstream handler throws.
    [Dispatcher contract](https://developer.android.com/reference/androidx/activity/OnBackPressedDispatcher#onBackPressed())
 
-No Rust implementation, IPC authorization, media settings, navigation policy or
-user-visible copy changes. No warning suppression is added. This addresses the
-actual `compileUniversalDebugKotlin` warnings-as-errors in CI run 34287120337.
-Full APK build and real Android Back/navigation behavior require separate checks.
+3. Explicitly type the existing GTK WebView identifier as `String`, matching the
+   value already produced by the generic GLib lookup. The pinned Rust Analyzer
+   reported eight inference errors at this expression in CI 34288751131 although
+   the actual compiler, Clippy and tests passed.
+4. Put the two existing Windows optional tracing macro calls inside blocks with
+   the same `#[cfg(feature = "tracing")]`. Their availability and execution are
+   unchanged. The pinned analyzer otherwise attempts to resolve those macros in
+   the disabled feature branch and reports two errors in that same CI run.
+
+No IPC authorization, media settings, navigation policy, logging contents or
+user-visible copy changes. No warning suppression or analyzer exclusion is added.
+The Kotlin changes address the actual `compileUniversalDebugKotlin` warnings-as-
+errors in CI 34287120337; APK 34288751092 later built with all44Kotlin tests passing.
+Real Android Back/navigation behavior still requires separate device checks.
+The Rust compatibility changes require fresh Windows/Linux quality results.
 
 Original template SHA-256:
 

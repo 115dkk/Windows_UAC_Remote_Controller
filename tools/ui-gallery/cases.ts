@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny';
+export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings';
 export interface GalleryCase {
   readonly id: string;
   readonly fixture: string;
@@ -40,7 +40,8 @@ export const galleryCases: readonly GalleryCase[] = [
   row('phone-deny-keyboard-simulated-390', 'phone-pending', 390, 844, 'deny'),
   row('phone-lock-missing-390', 'phone-lock-missing', 390, 844),
   row('phone-lock-unknown-390', 'phone-lock-unknown', 390, 844),
-  row('phone-notifications-denied-390', 'phone-notifications-denied', 390, 844),
+  row('phone-notifications-denied-390', 'phone-notifications-denied', 390, 844, 'notification-settings'),
+  row('phone-notifications-narrow-320', 'phone-notifications-denied', 320, 740, 'notification-settings'),
   row('phone-owner-error-390', 'errors', 390, 844),
   row('desktop-dialog-keyboard-forced-colors-760', 'desktop-devices', 760, 580, 'dialog', 'light', 'active'),
   row('phone-draft-keyboard-cancel-390', 'phone-settings', 390, 844, 'draft'),

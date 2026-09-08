@@ -57,6 +57,24 @@ const fn mobile_issue() -> AppIssue {
     }
 }
 
+pub(crate) fn open_notification_settings(app: &tauri::AppHandle) -> Result<(), AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let _: serde_json::Value = app
+            .state::<DeviceState>()
+            .0
+            .run_mobile_plugin("openNotificationSettings", ())
+            .map_err(|_| mobile_issue())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(mobile_issue())
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]

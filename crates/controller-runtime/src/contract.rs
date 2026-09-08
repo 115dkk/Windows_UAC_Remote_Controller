@@ -77,6 +77,7 @@ pub struct MobileReadiness {
     pub screen_lock: ScreenLockState,
     pub notifications: NotificationPermission,
     pub can_open_lock_settings: bool,
+    pub can_open_notification_settings: bool,
 }
 
 impl MobileReadiness {
@@ -84,6 +85,7 @@ impl MobileReadiness {
         screen_lock: ScreenLockState::Unavailable,
         notifications: NotificationPermission::Unavailable,
         can_open_lock_settings: false,
+        can_open_notification_settings: false,
     };
 }
 

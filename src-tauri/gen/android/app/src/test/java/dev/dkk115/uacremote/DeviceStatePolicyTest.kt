@@ -10,6 +10,38 @@ import org.junit.Test
 /** Synthetic mapping probes only: not Android lock, permission or settings QA. */
 class DeviceStatePolicyTest {
     @Test
+    fun notificationSettingsAreAdvertisedOnlyForDeniedAndResolvableState() {
+        for (enabled in listOf<Boolean?>(true, false, null)) {
+            for (resolvable in listOf(false, true)) {
+                var resolutions = 0
+                val observed = observeDeviceReadiness(
+                    foreground = true,
+                    readSecureLock = { true },
+                    readNotificationsEnabled = { enabled },
+                    settingsResolvable = { error("configured lock must not resolve settings") },
+                    notificationSettingsResolvable = { resolutions += 1; resolvable },
+                )
+                assertEquals(enabled == false && resolvable, observed.canOpenNotificationSettings)
+                assertEquals(if (enabled == false) 1 else 0, resolutions)
+                assertFalse(observed.canOpenLockSettings)
+            }
+        }
+    }
+
+    @Test
+    fun notificationSettingsResolutionFailureDoesNotInventPermissionState() {
+        val observed = observeDeviceReadiness(
+            foreground = true,
+            readSecureLock = { true },
+            readNotificationsEnabled = { false },
+            settingsResolvable = { false },
+            notificationSettingsResolvable = { throw SecurityException("synthetic resolver failure") },
+        )
+        assertEquals(NotificationObservation.DENIED, observed.notifications)
+        assertFalse(observed.canOpenNotificationSettings)
+    }
+
+    @Test
     fun secureLockTrueFalseAndUnavailableHaveDistinctWireValues() {
         assertEquals("configured", readSecureLockObservation { true }.wireValue)
         assertEquals("missing", readSecureLockObservation { false }.wireValue)
@@ -112,6 +144,7 @@ class DeviceStatePolicyTest {
             readSecureLock = { probes += 1; false },
             readNotificationsEnabled = { probes += 1; true },
             settingsResolvable = { probes += 1; true },
+            notificationSettingsResolvable = { probes += 1; true },
         )
         assertEquals(DeviceReadinessObservation.UNAVAILABLE, observed)
         assertEquals(0, probes)

@@ -412,6 +412,7 @@ fn android_lock_configured_missing_and_unavailable_remain_distinct() {
             screen_lock,
             notifications: NotificationPermission::Denied,
             can_open_lock_settings: true,
+            can_open_notification_settings: false,
         };
         runtime
             .update_mobile_readiness_from_native(readiness)
@@ -497,6 +498,7 @@ fn native_mobile_readiness_input_is_rejected_on_windows() {
                 screen_lock: ScreenLockState::Configured,
                 notifications: NotificationPermission::Allowed,
                 can_open_lock_settings: true,
+                can_open_notification_settings: true,
             })
             .expect_err("not Android")
             .code,
@@ -532,17 +534,26 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
         screen_lock: ScreenLockState::Configured,
         notifications: NotificationPermission::Allowed,
         can_open_lock_settings: true,
+        can_open_notification_settings: false,
     };
     assert_eq!(
         serde_json::to_value(readiness).expect("readiness JSON"),
         json!({
-            "screenLock": "configured", "notifications": "allowed", "canOpenLockSettings": true
+            "screenLock": "configured", "notifications": "allowed", "canOpenLockSettings": true,
+            "canOpenNotificationSettings": false
         })
     );
     assert!(
         serde_json::from_value::<MobileReadiness>(json!({
             "screenLock": "configured", "notifications": "allowed", "canOpenLockSettings": true,
+            "canOpenNotificationSettings": false,
             "authenticated": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<MobileReadiness>(json!({
+            "screenLock": "configured", "notifications": "denied", "canOpenLockSettings": false
         }))
         .is_err()
     );

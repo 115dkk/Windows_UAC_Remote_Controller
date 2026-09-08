@@ -7,6 +7,9 @@
         <intent>
             <action android:name="android.settings.SECURITY_SETTINGS" />
         </intent>
+        <intent>
+            <action android:name="android.settings.APP_NOTIFICATION_SETTINGS" />
+        </intent>
     </queries>
 
     <application

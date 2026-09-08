@@ -10,7 +10,8 @@ export type ClientCommand =
   | { readonly kind: 'clear' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
-  | { readonly kind: 'lock-settings' };
+  | { readonly kind: 'lock-settings' }
+  | { readonly kind: 'notification-settings' };
 
 interface ViewState {
   readonly owner: ControllerBridge;
@@ -52,10 +53,11 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
     }
     case 'policy': return snapshot.platform === 'android';
     case 'lock-settings': return snapshot.mobile?.screenLock === 'missing' && snapshot.mobile.canOpenLockSettings;
+    case 'notification-settings': return snapshot.platform === 'android' && snapshot.mobile?.notifications === 'denied' && snapshot.mobile.canOpenNotificationSettings;
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return bridge.beginPairing();
@@ -106,8 +108,9 @@ export function useController(bridge: ControllerBridge) {
     const attempt = ++revision.current; // A command supersedes an older snapshot request.
     publish({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
     try {
-      if (command.kind === 'lock-settings') {
-        await bridge.openLockSettings();
+      if (command.kind === 'lock-settings' || command.kind === 'notification-settings') {
+        if (command.kind === 'lock-settings') await bridge.openLockSettings();
+        else await bridge.openNotificationSettings();
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;

@@ -87,6 +87,7 @@ pub fn run() {
             commands::decide_request,
             commands::clear_activity,
             commands::open_lock_settings,
+            commands::open_notification_settings,
         ])
         .run(tauri::generate_context!())
         .expect("native application host could not run");

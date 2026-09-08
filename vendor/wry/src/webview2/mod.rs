@@ -1170,7 +1170,9 @@ impl InnerWebView {
         err.message()
       );
       #[cfg(feature = "tracing")]
-      tracing::error!("{msg}");
+      {
+        tracing::error!("{msg}");
+      }
       #[cfg(debug_assertions)]
       eprintln!("{msg}");
     }

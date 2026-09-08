@@ -10,6 +10,7 @@ fn main() {
         "decide_request",
         "clear_activity",
         "open_lock_settings",
+        "open_notification_settings",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("Tauri application build configuration must be valid");

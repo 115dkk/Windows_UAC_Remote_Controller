@@ -91,6 +91,7 @@ export const ko = {
   lockUnknownBody: '잠금 설정을 바꾸기 전에 앱 상태를 다시 확인해 주세요.',
   notificationsDenied: '휴대폰 알림이 꺼져 있어요',
   notificationsDeniedBody: '알림을 받으려면 휴대폰 설정에서 이 앱의 알림을 켜 주세요.',
+  openNotificationSettings: '앱 알림 설정',
   notificationsUnknown: '휴대폰 알림 권한을 확인하지 못했어요.',
   scheduleIntro: '요청을 받을 시간과 알림 방식을 정하세요.',
   scheduleWhen: '요청을 받을 시간',

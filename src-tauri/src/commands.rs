@@ -229,3 +229,17 @@ pub(crate) async fn open_lock_settings(
     .await
     .map_err(|_| worker_issue())?
 }
+
+#[tauri::command]
+pub(crate) async fn open_notification_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<(), AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        crate::mobile::open_notification_settings(&app)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}

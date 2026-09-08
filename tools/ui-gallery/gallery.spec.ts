@@ -65,6 +65,18 @@ for (const selected of galleryCases) {
     }
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
 
+    if (selected.action === 'notification-settings') {
+      const settings = page.getByRole('button', { name: '앱 알림 설정', exact: true });
+      await settings.scrollIntoViewIfNeeded();
+      await settings.focus();
+      await expect(settings).toBeInViewport({ ratio: 1 });
+      await expect(settings).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(page.getByText('설정을 마치면 앱으로 돌아와 다시 확인해 주세요.', { exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 알림이 꺼져 있어요', exact: true })).toBeVisible();
+      await gallery.capture('settings-handoff-simulated', '설정 이동 후에도 허용 상태를 가정하지 않음 · 실제 Android 설정 화면 아님');
+    }
+
     if (selected.action === 'details' || selected.action === 'long-details') {
       await page.getByRole('button', { name: '더 보기', exact: true }).click();
       const region = page.getByRole('region', { name: '프로그램 요청 세부 내용', exact: true });

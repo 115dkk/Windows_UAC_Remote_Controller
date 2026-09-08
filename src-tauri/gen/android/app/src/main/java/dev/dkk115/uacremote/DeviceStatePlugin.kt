@@ -113,11 +113,15 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
                 settingsResolvable = {
                     !settingsLaunchPending && resolveSecuritySettings() != null
                 },
+                notificationSettingsResolvable = {
+                    !settingsLaunchPending && resolveNotificationSettings() != null
+                },
             )
             val result = JSObject()
             result.put("screenLock", observation.screenLock.wireValue)
             result.put("notifications", observation.notifications.wireValue)
             result.put("canOpenLockSettings", observation.canOpenLockSettings)
+            result.put("canOpenNotificationSettings", observation.canOpenNotificationSettings)
             invoke.resolve(result)
         }
     }
@@ -192,6 +196,33 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
             currentHost.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
     }
 
+    @Command
+    fun openNotificationSettings(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        activity.runOnUiThread {
+            if (!isForeground() || settingsLaunchPending) {
+                rejectNotificationSettings(invoke)
+                return@runOnUiThread
+            }
+            val intent = try { resolveNotificationSettings() } catch (_: Exception) { null }
+            if (intent == null || !isForeground()) {
+                rejectNotificationSettings(invoke)
+                return@runOnUiThread
+            }
+            settingsLaunchPending = true
+            try {
+                activity.startActivity(intent)
+            } catch (_: Exception) {
+                settingsLaunchPending = false
+                rejectNotificationSettings(invoke)
+                return@runOnUiThread
+            }
+            // Launch only. The OS owns the setting; no permission grant or
+            // notification delivery is inferred from startActivity returning.
+            invoke.resolve()
+        }
+    }
+
     private fun deviceSecure(): Boolean? {
         // isKeyguardSecure includes a SIM PIN; isDeviceLocked is only a current
         // lock observation. Neither answers whether a secure device lock exists.
@@ -205,12 +236,19 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
             ?.areNotificationsEnabled()
     }
 
-    private fun resolveSecuritySettings(): Intent? {
+    private fun resolveSecuritySettings(): Intent? = resolveSystemSettings(Intent(Settings.ACTION_SECURITY_SETTINGS))
+
+    private fun resolveNotificationSettings(): Intent? = resolveSystemSettings(
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName),
+    )
+
+    /** The only callers construct fixed native actions and this app's own package. */
+    private fun resolveSystemSettings(intent: Intent): Intent? {
         val manager = activity.packageManager
-        val intent = Intent(Settings.ACTION_SECURITY_SETTINGS)
-        val candidates = querySystemSecuritySettings(manager, intent)
+        val candidates = querySystemSettings(manager, intent)
         if (candidates.size > MAX_SETTINGS_CANDIDATES) return null
-        val resolved = resolveSystemSecuritySettings(manager, intent)?.activityInfo ?: return null
+        val resolved = resolveSystemSettings(manager, intent)?.activityInfo ?: return null
         // A generic system chooser is not an actual handler for this action.
         if (candidates.none { candidate ->
                 candidate.activityInfo?.let { info ->
@@ -236,7 +274,7 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Suppress("DEPRECATION") // Typed flags were added at API 33; minSdk is 30.
-    private fun querySystemSecuritySettings(manager: PackageManager, intent: Intent): List<ResolveInfo> {
+    private fun querySystemSettings(manager: PackageManager, intent: Intent): List<ResolveInfo> {
         val flags = PackageManager.MATCH_DEFAULT_ONLY or PackageManager.MATCH_SYSTEM_ONLY
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             manager.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
@@ -246,7 +284,7 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Suppress("DEPRECATION") // Typed flags were added at API 33; minSdk is 30.
-    private fun resolveSystemSecuritySettings(manager: PackageManager, intent: Intent): ResolveInfo? {
+    private fun resolveSystemSettings(manager: PackageManager, intent: Intent): ResolveInfo? {
         val flags = PackageManager.MATCH_DEFAULT_ONLY or PackageManager.MATCH_SYSTEM_ONLY
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             manager.resolveActivity(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
@@ -275,6 +313,10 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
         invoke.reject("보안 설정 화면을 열지 못했어요. 휴대폰 설정에서 확인해 주세요.", "lock_settings_unavailable")
     }
 
+    private fun rejectNotificationSettings(invoke: Invoke) {
+        invoke.reject("알림 설정 화면을 열지 못했어요. 휴대폰 설정에서 이 앱의 알림을 확인해 주세요.", "notification_settings_unavailable")
+    }
+
     private companion object {
         const val MAX_SETTINGS_CANDIDATES = 32
         const val MAX_EMPTY_ARGUMENT_LENGTH = 32
@@ -297,11 +339,13 @@ internal data class DeviceReadinessObservation(
     val screenLock: SecureLockObservation,
     val notifications: NotificationObservation,
     val canOpenLockSettings: Boolean,
+    val canOpenNotificationSettings: Boolean,
 ) {
     companion object {
         val UNAVAILABLE = DeviceReadinessObservation(
             SecureLockObservation.UNAVAILABLE,
             NotificationObservation.UNAVAILABLE,
+            false,
             false,
         )
     }
@@ -323,6 +367,7 @@ internal fun observeDeviceReadiness(
     readSecureLock: () -> Boolean?,
     readNotificationsEnabled: () -> Boolean?,
     settingsResolvable: () -> Boolean,
+    notificationSettingsResolvable: () -> Boolean = { false },
 ): DeviceReadinessObservation {
     if (!foreground) return DeviceReadinessObservation.UNAVAILABLE
     val secureLock = readSecureLockObservation(readSecureLock)
@@ -340,5 +385,10 @@ internal fun observeDeviceReadiness(
     } catch (_: Exception) {
         false
     }
-    return DeviceReadinessObservation(secureLock, notifications, canOpenSettings)
+    val canOpenNotificationSettings = notifications == NotificationObservation.DENIED && try {
+        notificationSettingsResolvable()
+    } catch (_: Exception) {
+        false
+    }
+    return DeviceReadinessObservation(secureLock, notifications, canOpenSettings, canOpenNotificationSettings)
 }

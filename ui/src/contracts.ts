@@ -25,6 +25,7 @@ export interface MobileReadiness {
   readonly screenLock: 'configured' | 'missing' | 'unavailable';
   readonly notifications: 'allowed' | 'denied' | 'unavailable';
   readonly canOpenLockSettings: boolean;
+  readonly canOpenNotificationSettings: boolean;
 }
 export interface PairedDeviceView {
   readonly id: string;
@@ -79,4 +80,5 @@ export interface ControllerBridge {
   decide(requestId: string, decision: 'approve' | 'deny'): Promise<AppSnapshot>;
   clearActivity(): Promise<AppSnapshot>;
   openLockSettings(): Promise<void>;
+  openNotificationSettings(): Promise<void>;
 }

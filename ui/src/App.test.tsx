@@ -67,6 +67,45 @@ describe('native snapshot truth in the client', () => {
     expect(await screen.findByRole('heading', { name: ko.lockUnknown })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.openLockSettings })).not.toBeInTheDocument();
     expect(screen.queryByText(ko.lockMissingBody)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.openNotificationSettings })).not.toBeInTheDocument();
+  });
+
+  it('opens notification settings once without claiming the permission was granted', async () => {
+    const pending = deferred<void>();
+    const openNotificationSettings = vi.fn<ControllerBridge['openNotificationSettings']>(() => pending.promise);
+    const fixture = qaCase('phone-notifications-denied');
+    const user = userEvent.setup();
+    render(<App bridge={bridgeFor(fixture.snapshot, { openNotificationSettings })} initialPage={fixture.page} />);
+    const button = await screen.findByRole('button', { name: ko.openNotificationSettings });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(openNotificationSettings).toHaveBeenCalledOnce();
+    expect(button).toBeDisabled();
+    await act(async () => { pending.resolve(); await pending.promise; });
+    expect(await screen.findByText(ko.returnFromSettings)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: ko.notificationsDenied })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    expect(screen.getByRole('heading', { name: ko.notificationsDenied })).toBeInTheDocument();
+  });
+
+  it('keeps manual notification directions when the native settings destination is unavailable', async () => {
+    const fixture = qaCase('phone-notifications-denied');
+    const snapshot = { ...fixture.snapshot, mobile: { ...fixture.snapshot.mobile!, canOpenNotificationSettings: false } };
+    render(<App bridge={bridgeFor(snapshot)} initialPage={fixture.page} />);
+    expect(await screen.findByText(ko.notificationsDeniedBody)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.openNotificationSettings })).not.toBeInTheDocument();
+  });
+
+  it('reports a failed settings handoff without exposing a native exception', async () => {
+    const fixture = qaCase('phone-notifications-denied');
+    const openNotificationSettings = () => Promise.reject(new Error('RAW_SETTINGS_COMPONENT synthetic-private-detail'));
+    const user = userEvent.setup();
+    render(<App bridge={bridgeFor(fixture.snapshot, { openNotificationSettings })} initialPage={fixture.page} />);
+    await user.click(await screen.findByRole('button', { name: ko.openNotificationSettings }));
+    expect(await screen.findByText(ko.actionFailure)).toBeInTheDocument();
+    expect(screen.queryByText(/RAW_SETTINGS_COMPONENT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.returnFromSettings)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.openNotificationSettings })).toBeDisabled();
   });
 
   it('shows native cancellation copy without raw codes or fabricated success', async () => {

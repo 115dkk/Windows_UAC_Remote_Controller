@@ -245,7 +245,7 @@ impl WebContextExt for super::WebContext {
         #[cfg(feature = "tracing")]
         let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
 
-        let webview_id = request
+        let webview_id: String = request
           .web_view()
           .and_then(|w| unsafe { w.data::<String>(super::WEBVIEW_ID) })
           .map(|id| unsafe { id.as_ref().clone() })

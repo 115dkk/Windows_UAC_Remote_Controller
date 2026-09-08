@@ -18,4 +18,5 @@ export const controllerBridge: ControllerBridge = {
   decide: (requestId, decision) => native<AppSnapshot>('decide_request', { requestId, decision }),
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openLockSettings: () => native<void>('open_lock_settings'),
+  openNotificationSettings: () => native<void>('open_notification_settings'),
 };
