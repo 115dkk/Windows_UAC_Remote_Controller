@@ -1,0 +1,24 @@
+[package]
+name = "android-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Commit-before-effects native phone inbox ownership"
+
+[dependencies]
+notification-policy = { path = "../notification-policy" }
+phone-request-core = { path = "../phone-request-core" }
+phone-state-store = { path = "../phone-state-store" }
+service-protocol = { path = "../service-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+approval-protocol = { path = "../approval-protocol" }
+p256.workspace = true
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

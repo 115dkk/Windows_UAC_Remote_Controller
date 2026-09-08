@@ -1,0 +1,28 @@
+[package]
+name = "phone-state-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Bounded fail-closed native phone checkpoint byte storage"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Constants for safe std no-follow/directory opens only; no libc calls.
+libc = "0.2.177"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Rust 1.97 std File::try_lock is unsupported on Android. Safe borrowed-fd
+# flock only; no first-party FFI and no unlocked fallback.
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

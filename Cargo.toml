@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+exclude = ["vendor/tauri-codegen"]
+members = [
+    "crates/approval-protocol",
+    "crates/approval-core",
+    "crates/notification-policy",
+    "crates/activity-journal",
+    "crates/windows-observer",
+    "crates/windows-service-host",
+    "crates/windows-identity",
+    "crates/controller-runtime",
+    "crates/service-protocol",
+    "crates/secure-channel",
+    "crates/phone-request-core",
+    "crates/phone-state-store",
+    "crates/android-controller",
+    "crates/android-bindings",
+    "tools/controller-uniffi-bindgen",
+    "crates/relay-service",
+    "crates/framed-transport",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/115dkk/Windows_UAC_Remote_Controller"
+publish = false
+
+[workspace.dependencies]
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+getrandom = "0.3.4"
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+overflow-checks = true
+
+[profile.dev]
+debug = 1
+debug-assertions = true
+
+[patch.crates-io]
+# Upstream context generation with an explicit cached-icon array length; see
+# vendor/tauri-codegen/LOCAL_PATCH.md. No runtime/security behavior is replaced.
+tauri-codegen = { path = "vendor/tauri-codegen" }

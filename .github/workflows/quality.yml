@@ -1,0 +1,115 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/native-runtime']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # Keep the existing check name; this full workspace suite now includes the
+    # real production UI and controller-app, not just the shared Rust crates.
+    name: Rust quality (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up Node LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install Tauri Linux native build dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        # Official Debian/Ubuntu prerequisites, not a release/packaging action:
+        # https://v2.tauri.app/start/prerequisites/#linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Install repository-pinned Rust components
+        run: rustup show active-toolchain
+      - name: UI checks/build, full Rust quality, actual analyzer canaries and licenses
+        run: node tools/quality.mjs
+
+  android-core:
+    name: Android Rust core Clippy (not an Android app build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Test Android toolchain selection and child environment wiring
+        run: node --test tools/android-core-check.test.mjs
+      - name: Install the pinned Android NDK with the official SDK manager
+        shell: bash
+        # Package/version syntax: https://developer.android.com/tools/sdkmanager
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$android_sdk_path" || "$android_sdk_path" != /* ]]; then
+            echo 'An absolute Android SDK path is required on this runner.' >&2
+            exit 1
+          fi
+          ndk_sdkmanager="$android_sdk_path/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$ndk_sdkmanager" ]]; then
+            echo 'The official Android SDK manager is unavailable on this runner.' >&2
+            exit 1
+          fi
+          "$ndk_sdkmanager" --sdk_root="$android_sdk_path" --install "ndk;28.2.13676358" --channel=0 </dev/null
+      - name: Install repository-pinned Rust and Android target
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-linux-android
+      - name: Check Android runtime/core; host generator is checked in host jobs
+        # This intentionally does not build the Tauri/Kotlin/Gradle app or APK.
+        # A separately provisioned Android app job is still required for that.
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          NDK_HOME="$android_sdk_path/ndk/28.2.13676358" node tools/android-core-check.mjs
+      - name: Build Android arm64 controller and matching Kotlin ABI (not APK)
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          NDK_HOME="$android_sdk_path/ndk/28.2.13676358" node tools/build-android-bindings.mjs --abi arm64-v8a --variant debug
+      - name: Install the frontend inputs for the Android shell
+        run: npm ci
+      - name: Build the product frontend for the Android shell
+        run: npm run build
+      - name: Check the actual Android Tauri Rust shell (not APK)
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          NDK_HOME="$android_sdk_path/ndk/28.2.13676358" node tools/android-app-check.mjs

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "휴대폰 승인",
+  "version": "0.1.0-alpha.1",
+  "identifier": "dev.dkk115.uacremote",
+  "build": {
+    "beforeDevCommand": "node tools/build-ui.mjs dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "node tools/build-ui.mjs build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [{
+      "label": "main",
+      "title": "휴대폰 승인",
+      "create": false,
+      "width": 980,
+      "height": 740,
+      "minWidth": 760,
+      "minHeight": 580,
+      "decorations": true,
+      "resizable": true
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost https://ipc.localhost ws://127.0.0.1:1420 http://127.0.0.1:1420; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'",
+      "capabilities": ["main"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "shortDescription": "휴대폰에서 PC의 권한 요청을 확인합니다.",
+    "category": "Utility",
+    "windows": { "nsis": { "installMode": "perMachine", "languages": ["Korean", "English"], "displayLanguageSelector": false } },
+    "android": { "minSdkVersion": 30 },
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
+  }
+}

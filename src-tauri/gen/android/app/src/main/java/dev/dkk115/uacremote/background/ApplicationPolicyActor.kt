@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+package dev.dkk115.uacremote.background
+
+import android.app.Application
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import dev.dkk115.uacremote.nativecore.BridgeException
+import dev.dkk115.uacremote.nativecore.MobileController
+import dev.dkk115.uacremote.nativecore.bridgeVersion
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * One Application-lifetime worker and one real generated controller. No Activity,
+ * generic work submission, request ingress, signing or notification posting API.
+ * Callbacks run on main, but all JNA/filesystem work stays on the sole worker.
+ */
+internal class ApplicationPolicyActor(private val application: Application) {
+    private val lifecycle = PolicyOwnerLifecycle()
+    private val main = Handler(Looper.getMainLooper())
+    private val pending = ConcurrentHashMap<PendingCall, Unit>()
+    private val worker = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(PolicyOwnerBounds.MAX_PENDING),
+        { action -> Thread(action, "uac-native-policy-owner").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+    // Worker-thread-only. Never expose/clone this generated handle.
+    private var controller: MobileController? = null
+    private val cleanup = ControllerCleanupState()
+    private val explicitCleanupRetry = AtomicBoolean(false)
+    private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
+
+    fun start() {
+        if (!lifecycle.start()) return
+        if (!main.postDelayed(initializationTimeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
+            lifecycle.fail(PolicyStatus.UNAVAILABLE)
+            worker.shutdown()
+            return
+        }
+        try { worker.execute { initialize() } }
+        catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE) }
+    }
+
+    fun readPolicy(callback: (PolicyReply) -> Unit) = submit(null, callback)
+
+    fun savePolicy(policyJson: String, callback: (PolicyReply) -> Unit) {
+        if (!PolicyOwnerBounds.validPolicyString(policyJson)) {
+            deliverImmediate(callback, PolicyReply.Failed(PolicyStatus.INVALID_POLICY))
+            return
+        }
+        submit(policyJson, callback)
+    }
+
+    /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
+    fun shutdown() {
+        lifecycle.stop()
+        explicitCleanupRetry.set(true)
+        main.removeCallbacks(initializationTimeout)
+        finishAll(PolicyStatus.UNAVAILABLE)
+        requestWorkerCleanup()
+    }
+
+    private fun initialize() {
+        try {
+            if (lifecycle.phase() != PolicyOwnerPhase.STARTING) return
+            PackagedControllerLibrary.prepare(application)
+            check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
+            // Rust alone decides initial creation versus adoption/migration.
+            // In particular Kotlin never pre-clears notifications or retries a
+            // failed open by creating a new store.
+            controller = MobileController.openOrInitialize(AndroidNativePlatform(application))
+            if (!lifecycle.initialized()) return
+        } catch (failure: Throwable) {
+            rethrowFatal(failure)
+            failOwner(failureStatus(failure, initializing = true))
+        } finally {
+            main.removeCallbacks(initializationTimeout)
+            cleanupIfStopped()
+        }
+    }
+
+    private fun submit(policyJson: String?, callback: (PolicyReply) -> Unit) {
+        val rejected = lifecycle.admit()
+        if (rejected != null) {
+            deliverImmediate(callback, PolicyReply.Failed(rejected))
+            return
+        }
+        val call = PendingCall(SystemClock.elapsedRealtime(), callback)
+        pending[call] = Unit
+        if (!main.postDelayed(call.timeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
+            abandon(call)
+            failOwner(PolicyStatus.UNAVAILABLE)
+            return
+        }
+        try { worker.execute { runCall(call, policyJson) } }
+        catch (_: RejectedExecutionException) {
+            deliver(call, PolicyReply.Failed(if (lifecycle.phase() == PolicyOwnerPhase.READY) PolicyStatus.BUSY else lifecycle.failure()))
+        }
+    }
+
+    private fun runCall(call: PendingCall, policyJson: String?) {
+        try {
+            if (call.finished()) return
+            if (PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())) {
+                failOwner(PolicyStatus.UNAVAILABLE)
+                return
+            }
+            if (lifecycle.phase() != PolicyOwnerPhase.READY) {
+                deliver(call, PolicyReply.Failed(lifecycle.failure()))
+                return
+            }
+            val owner = controller ?: throw IllegalStateException("Native policy owner unavailable")
+            val committed = if (policyJson == null) owner.notificationPolicyJson()
+                else owner.saveNotificationPolicy(policyJson)
+            if (!PolicyOwnerBounds.validPolicyString(committed)) throw IllegalStateException("Native policy result unavailable")
+            // Only a Rust-returned committed result can become an ok reply.
+            deliver(call, PolicyReply.Committed(committed))
+        } catch (failure: Throwable) {
+            rethrowFatal(failure)
+            val status = failureStatus(failure)
+            if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY) failOwner(status)
+            deliver(call, PolicyReply.Failed(status))
+        } finally {
+            cleanupIfStopped()
+        }
+    }
+
+    private fun failOwner(status: PolicyStatus) {
+        lifecycle.fail(status)
+        main.removeCallbacks(initializationTimeout)
+        finishAll(status)
+        requestWorkerCleanup()
+    }
+
+    private fun finishAll(status: PolicyStatus) {
+        // Admission counts active plus queued calls, so this walk is at most 8.
+        for (call in pending.keys) deliver(call, PolicyReply.Failed(status))
+    }
+
+    private fun deliver(call: PendingCall, reply: PolicyReply) {
+        val action = Runnable {
+            val callback = call.takeCallback() ?: return@Runnable
+            main.removeCallbacks(call.timeout)
+            pending.remove(call)
+            lifecycle.release()
+            val expired = PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())
+            if (expired) failOwner(PolicyStatus.UNAVAILABLE)
+            val actual = if (expired || (reply is PolicyReply.Committed && lifecycle.phase() != PolicyOwnerPhase.READY)) {
+                PolicyReply.Failed(lifecycle.failure())
+            } else reply
+            safelyCallback(callback, actual)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) action.run()
+        else if (!main.post(action)) abandon(call)
+    }
+
+    private fun deliverImmediate(callback: (PolicyReply) -> Unit, reply: PolicyReply) {
+        if (Looper.myLooper() == Looper.getMainLooper()) safelyCallback(callback, reply)
+        else main.post { safelyCallback(callback, reply) }
+    }
+
+    private fun abandon(call: PendingCall) {
+        if (call.takeCallback() != null) {
+            main.removeCallbacks(call.timeout)
+            pending.remove(call)
+            lifecycle.release()
+        }
+        lifecycle.fail(PolicyStatus.UNAVAILABLE)
+    }
+
+    private fun requestWorkerCleanup() {
+        try { worker.execute { cleanupIfStopped() } }
+        catch (_: RejectedExecutionException) {
+            // A full bounded queue already has worker jobs whose finally blocks
+            // perform this cleanup. A stopped executor has already been cleaned.
+        }
+    }
+
+    private fun cleanupIfStopped() {
+        if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
+        val owner = controller
+        if (owner != null) {
+            val action = cleanup.next(explicitCleanupRetry.getAndSet(false))
+            if (action == ControllerCleanupAction.NONE) return
+            if (action == ControllerCleanupAction.SHUTDOWN_THEN_DESTROY) {
+                try {
+                    owner.shutdownNativeOwner()
+                    cleanup.shutdownSucceeded()
+                } catch (failure: Throwable) {
+                    rethrowFatal(failure)
+                    cleanup.failed()
+                    // Rust may already be closed while retaining cleanupPending.
+                    // Keep its handle and this worker for an explicit retry.
+                    return
+                }
+            }
+            try {
+                owner.close()
+                cleanup.destroyed()
+                controller = null
+            } catch (failure: Throwable) {
+                rethrowFatal(failure)
+                cleanup.failed()
+                return
+            }
+        }
+        lifecycle.closed()
+        worker.shutdown()
+    }
+
+    private inner class PendingCall(val started: Long, callback: (PolicyReply) -> Unit) {
+        private var callback: ((PolicyReply) -> Unit)? = callback
+        val timeout = Runnable { if (!finished()) failOwner(PolicyStatus.UNAVAILABLE) }
+        @Synchronized fun takeCallback(): ((PolicyReply) -> Unit)? = callback.also { callback = null }
+        @Synchronized fun finished(): Boolean = callback == null
+    }
+
+    private fun safelyCallback(callback: (PolicyReply) -> Unit, reply: PolicyReply) {
+        try { callback(reply) } catch (_: Exception) {
+            // A detached UI callback is not a reason to undo committed policy or
+            // report a fabricated failure/success to another Activity.
+        }
+    }
+
+    private fun failureStatus(error: Throwable, initializing: Boolean = false): PolicyStatus = when (error) {
+        is BridgeException.InvalidPolicy -> if (initializing) PolicyStatus.STORAGE_UNAVAILABLE else PolicyStatus.INVALID_POLICY
+        is BridgeException.Busy -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.BUSY
+        is BridgeException.StorageUnavailable, is BridgeException.LifecycleIntegrationRequired,
+        is BridgeException.OwnerFaulted -> PolicyStatus.STORAGE_UNAVAILABLE
+        else -> PolicyStatus.UNAVAILABLE
+    }
+
+    private fun rethrowFatal(error: Throwable) {
+        if (error is VirtualMachineError || error is ThreadDeath) throw error
+    }
+    override fun toString(): String = "ApplicationPolicyActor(single_native_worker)"
+}

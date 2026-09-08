@@ -1,0 +1,22 @@
+[package]
+name = "service-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Bounded signed PC request and lifecycle messages"
+
+[dependencies]
+approval-protocol = { path = "../approval-protocol" }
+p256.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+approval-core = { path = "../approval-core" }
+notification-policy = { path = "../notification-policy" }

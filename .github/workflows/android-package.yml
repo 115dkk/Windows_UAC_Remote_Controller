@@ -1,0 +1,87 @@
+name: Android package
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/native-runtime']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android arm64 debug APK and Kotlin tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0, Node 24
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Install Rust and the actual Android target
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-linux-android
+      - name: Install pinned SDK inputs
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$android_sdk_path"
+          "$android_sdk_path/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$android_sdk_path" \
+            --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' --channel=0 </dev/null
+      - name: Build the actual Tauri Android APK without launching it
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          export NDK_HOME="$android_sdk_path/ndk/28.2.13676358"
+          npm run tauri -- android build --debug --target aarch64 --apk --ci
+      - name: Run actual Android Gradle local unit tests
+        working-directory: src-tauri/gen/android
+        shell: bash
+        run: |
+          android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          export NDK_HOME="$android_sdk_path/ndk/28.2.13676358"
+          bash gradlew :app:testUniversalDebugUnitTest --no-daemon \
+            -PabiList=arm64-v8a -ParchList=arm64 -PtargetList=aarch64
+      - name: Check the APK contains both Rust components and JNA
+        shell: bash
+        run: |
+          mapfile -t packages < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk')
+          test "${#packages[@]}" -gt 0
+          for package in "${packages[@]}"; do
+            members="$(unzip -Z1 "$package")"
+            for library in libcontroller_app_lib.so libuac_android_controller.so libjnidispatch.so; do
+              grep -Fxq "lib/arm64-v8a/$library" <<< "$members"
+            done
+            sha256sum "$package"
+          done
+      - name: Retain the debug APK and test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: android-arm64-debug-${{ github.sha }}
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            src-tauri/gen/android/app/build/test-results/**/*.xml
+            src-tauri/gen/android/app/build/reports/tests/
+          if-no-files-found: error
+          retention-days: 14

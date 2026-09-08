@@ -1,0 +1,23 @@
+[package]
+name = "phone-request-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Bounded phone request inbox over verified service events and notification policy"
+
+[dependencies]
+approval-protocol = { path = "../approval-protocol" }
+notification-policy = { path = "../notification-policy" }
+service-protocol = { path = "../service-protocol" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+p256.workspace = true
+
+[lints]
+workspace = true
