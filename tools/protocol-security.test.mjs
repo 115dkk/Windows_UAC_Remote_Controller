@@ -20,6 +20,7 @@ test('exit zero does not turn falsified/incomplete/unknown into proof', () => {
   assert.equal(parse({ ...result(text), status: 1 }, expected).ok, false);
   assert.equal(parse({ ...result(text), signal: 'SIGTERM' }, expected).ok, false);
   assert.equal(parse({ ...result(text), error: new Error('missing tool') }, expected).ok, false);
+  assert.equal(parse({ ...result(text), stderr: 'checking version: WARNING: returned unsupported version' }, expected).ok, false);
 });
 test('negative control requires a real counterexample to a named production lemma', () => {
   const wanted = { auth: { trace: 'all-traces', verdict: 'falsified' } };

@@ -20,6 +20,15 @@ test('disabled/exported/non-direct-boot/wrong-type components fail', () => {
 test('missing permissions/actions, another process and secret-backup enablement fail', () => {
   for (const bad of [xml.replace('android.permission.RECEIVE_BOOT_COMPLETED','wrong.permission'), xml.replace('android.intent.action.LOCKED_BOOT_COMPLETED','wrong.action'), xml.replace('<service ', '<service android:process=":other" '), xml.replace('<service ', '<service android:isolatedProcess="true" '), xml.replace('<application ', '<application android:enabled="false" '), xml.replace('android:allowBackup="false"','android:allowBackup="true"')]) assert.throws(() => inspectBootManifest(bad));
 });
+test('SDK-limited required permissions cannot satisfy the boot/foreground gate', () => {
+  for (const permission of ['RECEIVE_BOOT_COMPLETED', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_CONNECTED_DEVICE', 'CHANGE_NETWORK_STATE']) {
+    const original = `<uses-permission android:name="android.permission.${permission}"/>`;
+    const limited = original.replace('/>', ' android:maxSdkVersion="28"/>');
+    assert.throws(() => inspectBootManifest(xml.replace(original, limited)), /Missing unambiguous unbounded/);
+    assert.throws(() => inspectBootManifest(xml.replace(original, limited + original)), /Missing unambiguous unbounded/);
+    assert.throws(() => inspectBootManifest(xml.replace(original, original + original)), /Missing unambiguous unbounded/);
+  }
+});
 test('malformed/DOCTYPE/oversized input cannot become a declaration pass', () => {
   for (const bad of ['', xml + '<broken>', '<!DOCTYPE manifest>' + xml, 'x'.repeat(1024 * 1024)]) assert.throws(() => inspectBootManifest(bad));
 });

@@ -93,8 +93,14 @@ impl LeaseRegistry {
     ) -> Result<NativePeerLease, PeerLeaseError> {
         // A revoked but still-held lease is deliberately NOT evicted. Only a
         // genuinely dead Weak releases capacity; clones share the same entry.
-        self.entries
-            .retain(|entry: &Weak<LeaseState>| entry.strong_count() != 0);
+        let mut index = 0;
+        while index < self.entries.len() {
+            if Weak::<LeaseState>::upgrade(&self.entries[index]).is_none() {
+                self.entries.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
         if self.entries.len() >= MAX_LEASES {
             return Err(PeerLeaseError::Capacity);
         }
@@ -125,9 +131,11 @@ impl LeaseRegistry {
         local_keys: &LocalKeyLedger,
     ) {
         let healthy = inbox.fault().is_none();
-        self.entries.retain(|entry: &Weak<LeaseState>| {
-            let Some(state) = entry.upgrade() else {
-                return false;
+        let mut index = 0;
+        while index < self.entries.len() {
+            let Some(state) = Weak::<LeaseState>::upgrade(&self.entries[index]) else {
+                self.entries.swap_remove(index);
+                continue;
             };
             if !healthy
                 || associations.resolve(state.association.reference()) != Some(&state.association)
@@ -141,8 +149,8 @@ impl LeaseRegistry {
             {
                 state.revoked.store(true, Ordering::Release);
             }
-            true
-        });
+            index += 1;
+        }
     }
 
     pub(crate) fn begin_transition(&mut self) -> LeaseTransition<'_> {

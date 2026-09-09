@@ -31,9 +31,8 @@ jobs:
       - name: Install signed distribution prover dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends maude graphviz
-          maude --version
-      - name: Install SHA-256 pinned upstream Tamarin
+          sudo apt-get install --yes --no-install-recommends graphviz unzip
+      - name: Install SHA-256 pinned upstream Tamarin and supported Maude
         id: tamarin
         run: node tools/install-tamarin.mjs
       - name: Check proof verdict and negative-control gates

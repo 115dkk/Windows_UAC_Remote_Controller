@@ -198,7 +198,7 @@ lemma request_accepted_at_most_once:
       first_purpose second_purpose #i #j.
     RequestAccepted(pc, first_device, first_revision, binding, first_purpose) @i
     & RequestAccepted(pc, second_device, second_revision, binding, second_purpose) @j
-    ==> i = j"
+    ==> #i = #j"
 
 lemma no_accept_after_revision_revoked:
   "All pc device revision binding purpose #r #a.

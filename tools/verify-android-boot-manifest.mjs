@@ -24,9 +24,10 @@ export function inspectBootManifest(xml) {
     requireThat(qualified(attr(application, 'name')) === `${packageName}.ControllerApplication`, 'Missing actual Application owner.');
     requireThat(attr(application, 'enabled') === null || attr(application, 'enabled') === 'true', 'Application must default enabled.');
     requireThat(attr(application, 'allowBackup') === 'false', 'Private state backup must remain disabled.');
-    const permissions = new Set([...manifest.children].filter((child) => child.tagName === 'uses-permission').map((child) => attr(child, 'name')));
+    const permissions = [...manifest.children].filter((child) => child.tagName === 'uses-permission');
     for (const permission of ['RECEIVE_BOOT_COMPLETED', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_CONNECTED_DEVICE', 'CHANGE_NETWORK_STATE']) {
-      requireThat(permissions.has(`android.permission.${permission}`), `Missing boot/foreground requirement: ${permission}`);
+      const matches = permissions.filter((declaration) => attr(declaration, 'name') === `android.permission.${permission}`);
+      requireThat(matches.length === 1 && attr(matches[0], 'maxSdkVersion') === null, `Missing unambiguous unbounded boot/foreground requirement: ${permission}`);
     }
     function component(tag, suffix) {
       const matches = [...application.children].filter((child) => child.tagName === tag && qualified(attr(child, 'name')) === `${packageName}.background.${suffix}`);

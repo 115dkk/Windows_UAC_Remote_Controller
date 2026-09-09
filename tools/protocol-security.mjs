@@ -13,6 +13,7 @@ export function parseProofSummary(result, expected, knownNames = Object.keys(exp
   const reasons = [];
   if (!Object.keys(expected).length) reasons.push('no required lemmas');
   if (result.error || result.signal || result.status !== 0) reasons.push('prover did not exit successfully');
+  if (/checking version:\s*WARNING:|returned unsupported version/.test(output)) reasons.push('unsupported prover dependency');
   const index = output.lastIndexOf('summary of summaries:');
   if (index < 0) reasons.push('missing final prover summary');
   if ((output.match(/summary of summaries:/g) ?? []).length !== 1) reasons.push('ambiguous prover summaries');
@@ -89,7 +90,7 @@ function runProtocolSecurityImpl(root) {
   }
   const binary = process.env.TAMARIN_BIN || 'tamarin-prover';
   const version = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 30_000 });
-  if (version.status !== 0 || version.error || version.signal || !/tamarin[- ]prover\s+1\.12\.0\b/i.test(version.stdout + version.stderr)) throw new Error('Pinned Tamarin 1.12.0 is required; missing tools never pass.');
+  if (version.status !== 0 || version.error || version.signal || /WARNING:|unsupported/i.test(version.stdout + version.stderr) || !/tamarin[- ]prover\s+1\.12\.0\b/i.test(version.stdout + version.stderr)) throw new Error('Pinned Tamarin 1.12.0 and supported Maude are required; missing/unsupported tools never pass.');
   const directory = resolve(root, 'artifacts/protocol-security');
   mkdirSync(directory, { recursive: true });
   const runs = [];

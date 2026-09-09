@@ -484,7 +484,7 @@ impl DurableInbox {
     ) -> Result<CommitReceipt, LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let candidate: LocalKeyLedger = self.liveness.preserve_on_return(
+        let mut candidate: LocalKeyLedger = self.liveness.preserve_on_return(
             || -> Result<LocalKeyLedger, LocalKeyMutationError> {
                 let mut candidate = self.local_keys.clone();
                 candidate
@@ -497,7 +497,7 @@ impl DurableInbox {
             },
         )?;
         self.transition_all(move |_, _, keys| {
-            *keys = candidate;
+            std::mem::swap(keys, &mut candidate);
             Ok(())
         })
         .map(|(receipt, ())| receipt)
@@ -513,7 +513,7 @@ impl DurableInbox {
     ) -> Result<(CommitReceipt, LocalKeyObservation), LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let (candidate, observation): (LocalKeyLedger, LocalKeyObservation) =
+        let (mut candidate, observation): (LocalKeyLedger, LocalKeyObservation) =
             self.liveness.preserve_on_return(
                 || -> Result<(LocalKeyLedger, LocalKeyObservation), LocalKeyMutationError> {
                     let mut candidate = self.local_keys.clone();
@@ -527,7 +527,7 @@ impl DurableInbox {
                 },
             )?;
         self.transition_all(move |_, _, keys| {
-            *keys = candidate;
+            std::mem::swap(keys, &mut candidate);
             Ok(observation)
         })
         .map_err(LocalKeyMutationError::Owner)
