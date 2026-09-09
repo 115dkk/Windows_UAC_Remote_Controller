@@ -57,7 +57,7 @@
         },
         {
           "id": "missing-replay-consumption",
-          "mutation": { "from": "// CANARY_REPLAY_GUARD", "to": ", Pending(pc, binding)" },
+          "mutation": { "from": "// CANARY_REPLAY_GUARD", "to": ", RequestSlot(request_id, pc, binding, 'pending')" },
           "expected": { "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "falsified" } }
         }
       ]
