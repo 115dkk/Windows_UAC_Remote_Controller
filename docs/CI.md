@@ -102,6 +102,49 @@ or native Windows/UAC proof. The user authorized CI captures after local screen
 permission was unavailable. Reviewed representative images are in
 [issue 1](https://github.com/115dkk/Windows_UAC_Remote_Controller/issues/1).
 
+## Stateful protocol security
+
+The separate `Protocol security (Tamarin)` job runs official Tamarin 1.12.0 with
+supported Maude 3.5.1. `tools/install-tamarin.mjs` verifies the pinned archive
+SHA-256 values before extraction and checks the actual executable versions.
+No local Windows prover installation is needed for this CI job.
+
+`security/tamarin/manifest.json` requires thirteen baseline properties and three
+mechanism-removal controls. Honest traces must exist; the secure models must
+verify their safety properties; pin/signature/replay-guard removal must produce
+actual counterexamples to the named properties. Missing, false, unfinished,
+warning-bearing, timed-out or wrong-input summaries fail. A zero process exit
+alone is not a proof verdict. Immutable model snapshots, source-binding hashes,
+exact arguments, full bounded logs and partial results are retained as artifacts.
+
+Each baseline lemma runs separately under a bounded process owner; witness
+search uses BFS and safety search uses DFS. These are search strategies, not
+trace/depth bounds or permission to skip obligations. The runner's own tests
+exercise timeout/cancellation, output limits and rejection of stale or mixed
+evidence. The Linux job also executes its POSIX descendant-cleanup tests.
+
+After a completed failed normal run, a separate diagnostic helper may investigate
+one failed request lemma with proof depth8, at most60seconds and4MiB combined
+output. It retains a labelled proof-method skeleton/log, not an accepted proof
+or a dump of all unsolved constraints. Its metadata always says
+`eligibleAsProof:false`, even if the diagnostic unexpectedly finishes. Normal
+proof artifacts are uploaded first; diagnostic artifacts use a separate name
+and directory. The normal failed step still fails the job; there is no
+`continue-on-error`, replacement verdict, automatic deeper retry or ingestion of
+the diagnostic output as a production theory.
+
+The [model contract](../security/tamarin/README.md) documents the trusted
+enrollment/authentication premises, explicit mutable registry and one-shot
+request lifecycle, code mapping and cryptographic abstractions. These models do
+not prove native OS isolation, hardware-key behavior, complete implementation
+refinement or real network latency. Their existence in CI does not mean all
+required proofs have passed; current results are recorded in [PROGRESS.md](PROGRESS.md).
+
+The Android package job additionally decodes each actual merged APK manifest
+and requires the default-enabled private boot receiver, foreground-service
+declarations and unbounded required permissions. This supplements Kotlin/Rust
+lifecycle tests; it does not simulate a physical reboot or first-unlock event.
+
 ## Action/runtime selection
 
 Checked against upstream releases on 2026-09-08:

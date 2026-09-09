@@ -113,7 +113,26 @@ tamarin-prover security/tamarin/RequestAuthorization.spthy --quit-on-warning --p
 
 Use the exact selected 1.12 executable and ROOT's bounded process/CI timeout. The documented CLI supports `--prove=lemma_name`; `--quit-on-warning` prevents ignoring model well-formedness warnings. See the [1.12 command-line manual](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/003_example.md#running-tamarin-on-the-command-line).
 
-ROOT must require every listed lemma's actual completed verdict, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished proof or missing lemma is not success. Preserve exact source/artifact identity and prover output. No proof filters, assumed source lemmas or hand-written `by sorry` proofs are supplied.
+ROOT must require every listed lemma's actual completed verdict, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished proof or missing lemma is not success. Preserve exact source/artifact identity and prover output. Normal invocations select each registered lemma separately; all are required by the aggregate gate. No assumed source lemmas or hand-written `by sorry` proofs are supplied in the production theories.
+
+### Failure diagnostics are not proof evidence
+
+The CI-only diagnostic helper is separate from the normal runner and its
+artifacts. It admits a completed, failed normal result only after checking the
+full planned run set and its current manifest/model/source bindings. It selects
+at most one failed request baseline, never a replacement acceptance criterion.
+
+The depth8 / heuristic `i` / stop-on-trace `NONE` invocation is limited to60seconds
+and4MiB combined stdout/stderr. Without an output-file flag, Tamarin prints its
+analyzed theory and proof-method skeleton into that bounded log. Cut leaves are
+unproved; this is not a full dump of unresolved constraint systems or an actual
+honest/attack witness. A timeout can still leave only partial output. Metadata is
+always `eligibleAsProof:false`, even for an unexpectedly completed diagnostic.
+The helper never rewrites a normal summary/model, reruns with increasing bounds,
+or supplies its generated text as a production proof. The normal failed step
+keeps CI red. The [pinned batch implementation](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/src/Main/Mode/Batch.hs)
+and [proof-depth implementation](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/lib/theory/src/Theory/Proof.hs)
+define this output and cutoff behavior.
 
 ## Required negative controls: exact single-fragment mutations
 

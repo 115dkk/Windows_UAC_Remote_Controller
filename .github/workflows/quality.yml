@@ -17,7 +17,8 @@ jobs:
   protocol-security:
     name: Protocol security (Tamarin)
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Leave artifact/diagnostic time after all independently bounded proofs.
+    timeout-minutes: 40
     steps:
       - name: Check out this revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
@@ -36,8 +37,9 @@ jobs:
         id: tamarin
         run: node tools/install-tamarin.mjs
       - name: Check proof verdict and negative-control gates
-        run: node --test tools/protocol-security.test.mjs tools/prover-process.test.mjs
+        run: node --test tools/protocol-security.test.mjs tools/prover-process.test.mjs tools/protocol-diagnostic.test.mjs
       - name: Prove protocol properties and expose broken-model attacks
+        id: proof
         env:
           TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
         run: node tools/protocol-security.mjs
@@ -47,6 +49,21 @@ jobs:
         with:
           name: protocol-security-${{ github.sha }}
           path: artifacts/protocol-security/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Capture depth-limited diagnostic only after failed normal proof
+        id: diagnostic
+        # No continue-on-error: the failed normal proof keeps this job RED.
+        if: ${{ failure() && !cancelled() && steps.proof.outcome == 'failure' }}
+        env:
+          TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
+        run: node tools/protocol-diagnostic.mjs
+      - name: Retain diagnostic-only output separately from proof evidence
+        if: ${{ !cancelled() && steps.diagnostic.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: protocol-diagnostic-${{ github.sha }}
+          path: artifacts/protocol-diagnostic/
           if-no-files-found: error
           retention-days: 14
 
