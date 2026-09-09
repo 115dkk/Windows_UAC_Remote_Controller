@@ -124,7 +124,7 @@ exercise timeout/cancellation, output limits and rejection of stale or mixed
 evidence. The Linux job also executes its POSIX descendant-cleanup tests.
 
 After a completed failed normal run, a separate diagnostic helper may investigate
-one failed request lemma with proof depth16, at most60seconds and4MiB combined
+one failed request lemma with proof depth12, at most60seconds and4MiB combined
 output. It retains a labelled proof-method skeleton/log, not an accepted proof
 or a dump of all unsolved constraints. Its metadata always says
 `eligibleAsProof:false`, even if the diagnostic unexpectedly finishes. Normal
@@ -133,10 +133,12 @@ and directory. The normal failed step still fails the job; there is no
 `continue-on-error`, replacement verdict, automatic deeper retry or ingestion of
 the diagnostic output as a production theory.
 
-The depth was raised from8 to16 after reviewing the actual `ce69210` skeleton,
-which stopped after the key-source premises. The model and its search ranking
-are unchanged. This does not guarantee that a larger skeleton will finish within
-60seconds, and proof-step counts are not the same as proof depth.
+The `ce69210` depth8 skeleton stopped after the key-source premises. A depth16
+diagnostic on `b5b3b19` hit the fixed60second limit without a completed skeleton.
+The next isolated observation uses their midpoint12; the model and search ranking
+remain unchanged. This does not guarantee completion within60seconds, and
+proof-step counts are not the same as proof depth. Each CI run still performs
+only one diagnostic, never an automatic retry/search-depth loop.
 
 The [model contract](../security/tamarin/README.md) documents the trusted
 enrollment/authentication premises, explicit mutable registry and one-shot

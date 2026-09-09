@@ -15,9 +15,9 @@ const REQUEST_MODEL = 'request-authorization';
 const ROWS = 16;
 export const DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
 export const DIAGNOSTIC_TIMEOUT_MS = 60_000;
-// The ce69210 depth8 skeleton stops after key-source premises. This single
-// deeper observation changes no normal proof bound, model or accepted verdict.
-export const DIAGNOSTIC_DEPTH = 16;
+// Depth8 produced a skeleton, but b5b3b19 depth16 exhausted the fixed60s cap.
+// Observe their midpoint once; no normal proof bound/model/verdict changes.
+export const DIAGNOSTIC_DEPTH = 12;
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const reject = () => { throw new Error('Diagnostic admission rejected inconsistent or unavailable evidence.'); };
 const hash = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
