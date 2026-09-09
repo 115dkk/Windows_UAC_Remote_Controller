@@ -39,10 +39,13 @@ privilege through this service. Keep Secure Desktop and other OS protections on.
 
 ## Current implementation boundary
 
-Shared libraries and local quality gates have been implemented and tested by root;
-the product remains in development. The Windows observer reads desktop categories
-without detecting or operating a UAC prompt. Enrolled-key initialization
-interfaces are trusted-host interfaces, not public IPC. No real Windows approval,
-credential-entry adapter, Android authentication/notification integration, trusted
-QR ceremony or encrypted network transport has yet been proven. See
+Shared libraries, actual local TCP/TLS test paths, Android Application policy and
+history ownership, and hosted Windows/Linux/Android quality builds have been
+implemented and verified by root. The product remains in development. The Windows
+observer/probe and dormant service supervisor do not implement request-bound UAC
+approval. Enrolled-key initialization interfaces are trusted-host interfaces, not
+public IPC. No real Windows approval/credential-entry adapter, native phone
+authentication/notification journey, trusted QR enrollment, or deployed cross-device
+transport has yet been proven. Application startup remains policy-only until the
+trusted identity and authenticated intake/effect owners are integrated. See
 [the implementation plan](docs/IMPLEMENTATION_PLAN.md) for remaining work.

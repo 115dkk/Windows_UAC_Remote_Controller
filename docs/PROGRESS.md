@@ -2,6 +2,40 @@
 
 2026-09-09 · **개발 진행 중. 원격 UAC 승인기 전체가 완성된 상태는 아니다.**
 
+## 현재 기준: `dac04a9`
+
+- [전체 품질 CI](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34298828002)는
+  Windows·Linux의 fmt, Clippy 경고 0, Cargo 테스트, 실제 Rust Analyzer와
+  정상/오류/경고 판정 검사를 통과했다. Android Rust 코어와 Tauri 연결부
+  Clippy도 통과했다. 과거 단계의 테스트 실패 수치를 현재 결과로 읽지 않는다.
+- [Android 패키지 CI](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34298827988)는
+  실제 arm64 디버그 APK를 만들었으며 Kotlin Gradle 테스트 47개가 통과했다.
+  ROOT가 내려받은 APK의 SHA-256은
+  `e35d6faf8ad06a8601232854c9b23e711ab882d92b628e75c2ecfcc30d4a4c91`이다.
+  설치·시작·생체/PIN 인증을 실행한 결과는 아니다.
+- 수신함과 표시용 기록을 한 저장 트랜잭션으로 묶었다. 기록 보관은 최대
+  512건/30일이며, 기록을 지워도 요청 재전송 방지 상태는 지워지지 않는다.
+  실제 Android Application 소유자에 기록 조회·삭제를 연결했지만, 등록과
+  인증된 요청 수신이 미구현이므로 초기화는 계속 설정 전용 상태만 허용한다.
+- Windows 읽기 전용 보조 프로세스의 제한된 실행·인증 통신·종료 소유자를
+  작성하고 CI로 검사했다. 이 경로를 서비스에 활성화하거나 실제 UAC를
+  조작하지 않았다. 실제 프롬프트 식별·승인 어댑터는 아직 없다.
+- [화면 갤러리 CI](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34298827980)는
+  Windows·Linux 각각 29개 시나리오/44개 이미지를 생성했다. ROOT가 새 기록
+  화면을 양쪽에서 확인했다. [대표 화면 12장](gallery/2026-09-09/README.md)은
+  합성 데이터를 실제 Chromium으로 렌더링한 것이며 Android 캡처가 아니다.
+
+남은 핵심은 소유자가 선택한 휴대폰만 등록하는 QR 절차, 영속 등록부,
+실제 요청 수신·알림·요청별 인증, Windows 프롬프트에 대한 동작 적용이다.
+일반 화면에서 복사한 QR이나 하드웨어 키 증명만으로 등록을 허용하지 않는다.
+등록할 기기를 확인하는 보호된 화면·입력 절차는 아직 결정·실증이 필요하다.
+실제 UAC 승인과 휴대폰 인증 수동 검증은 사용자에게 유보되어 있다.
+PR/main 실행·자동 릴리스, 완료 후 보안 감사와 새 아키텍처 리팩터링도 남았다.
+
+아래는 **이전 단계의 이력**이다. 각 단계의 ‘최신’·‘미해결’·실패 수치 및
+아직 연결되지 않았다는 표현은 당시 범위이며, 현재 판정은 위 커밋과 실제
+CI 링크를 기준으로 한다. 과거 실패와 미검증 기록은 삭제하지 않고 보존한다.
+
 ## Android Application 소유자·실제 소켓 경로
 
 Android에 한 개의 Application 작업자와 Rust 정책 소유자를 연결했다. Android
