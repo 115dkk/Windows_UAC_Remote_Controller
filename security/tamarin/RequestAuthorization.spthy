@@ -40,11 +40,9 @@ rule OpenActualRequest:
         ~content_digest, ~expiry>
   in
   [ !HostContext(pc, epoch, session_id, logon_luid),
-    RegistrySlot(revision, pc, device, 'active'),
     Fr(~request_id), Fr(~nonce), Fr(~content_digest), Fr(~expiry) ]
   -->
-  [ RegistrySlot(revision, pc, device, 'active'),
-    RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]
+  [ RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]
 
 // Immutable keys originate ONLY in TrustedEnrollment. The previous theory also
 // kept these keys unchanged across every revision; current membership remains

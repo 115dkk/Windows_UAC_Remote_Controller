@@ -38,6 +38,42 @@ There is deliberately **no global `PcAvailable` owner token**. Enrollment requir
 
 Removing the global token retains former traces while adding behavior. A completed proof of the same six all-traces request-safety lemmas would therefore not weaken their conclusions. The three exists-trace lemmas demonstrate non-vacuity of the enlarged model, not automatically the realizability of every witness in the real serialized owner. ROOT must inspect actual prover witnesses. That earlier token-removal step added no restriction, derived fact, assumed lemma, session bound or signature/authentication change. The separate immutable-provenance representation below preserves this already-enlarged model's traces.
 
+#### Preparatory open: a separate conservative overapproximation
+
+OpenActualRequest no longer consumes/reproduces an arbitrary active RegistrySlot.
+It now permits preparatory binding/building-slot allocation even before an active
+registration exists. It still requires the existing HostContext and the same fresh
+request ID/nonce/content digest/expiry. No public RequestOpened event occurs there:
+PublishRequest still needs a nonempty captured full Snapshot, and capture still
+requires that device's exact active revision while the request is building. Neither
+Capture, Publish, acceptance/current-registry checks nor any signature/auth rule
+was changed by this step.
+
+This is NOT removal of the real Rust eligibility precondition.
+`crates/approval-core/src/lib.rs::open_from_privileged_host` still returns
+NoEligibleDevices for an empty registry and atomically clones its complete eligible
+map before returning the request. Open+Capture+Publish collectively abstract that
+one operation; preparatory Open alone no longer has its exact nonempty precondition.
+The model already permits interleaved/subset collection; those differences remain.
+
+For every former execution, a modified Open step leaves the active token untouched
+instead of consuming and reproducing it, with the identical resulting state. Thus
+former traces remain admitted. A NEW completed proof of the same six all-traces
+properties covers the former traces, but this is only conservative inclusion, not
+trace equivalence or permission to reuse old verdicts. Earlier representation-only
+bijection arguments below do not describe this semantic guard deletion.
+
+The actual b622c36 depth12 diagnostic reached Open's unrelated second-premise
+RegistrySlot goal and seven producer branches after signature knowledge; removing
+that obligation motivates this isolated change, not a promised speedup. Capture
+and Accept still have active-registry provenance and cycles. ROOT must obtain fresh
+results for all13 normal obligations and all3 required controls, with all15 rules
+and all9 request formulas retained. New existential or canary witnesses are not
+automatically source-realizable: ROOT must separately inspect enrollment-before-
+Open, full serial capture and unchanged-source correspondence using the ordinary
+witness candidates below. No origin fact, assumption, bound or ranking change is
+introduced by this step.
+
 #### Immutable provenance without new trust assumptions
 
 `EnrollmentKeys(pc, device, approval_key, denial_key)` is produced **only by the existing TrustedEnrollment rule**, from the same fresh keys already placed in PhoneKeys and public output. RegistrySlot retains revision/PC/device and its exact phase; capture, acceptance and same-key re-enrollment/replacement join the immutable keys when needed. The frozen Snapshot still carries the complete keys, revision and binding. This is not persistent membership: revocation still removes the active phase, and the surviving key fact cannot authorize an acceptance without that exact active revision and global pending request slot.
@@ -94,7 +130,7 @@ Revision freshness abstracts the real allocator's no-reuse behavior, not u64 ari
 | Bounded/cancellable native socket ownership | `crates/framed-transport/src/socket.rs`: `SocketDriver`; deadlines, guard polling, partial IO and resource bounds are **not** established by the symbolic model |
 | Native transport key callbacks | `crates/android-bindings/src/transport.rs`: opaque transport binding/CertificateVerify; `crates/windows-identity/src/lib.rs`: protected PC identity signing; native ownership is outside this proof |
 | Full canonical statement and separate signature domains | `crates/approval-protocol/src/lib.rs`: `RequestBinding`, `UnsignedDecision::signing_bytes`, `SignedDecision::from_wire`/`verify` |
-| Per-device registry revisions, frozen multi-device eligibility and global Pending | `crates/approval-core/src/lib.rs`: privileged enroll/replace/revoke; `open_from_privileged_host` atomically clones eligibility (the model additionally allows interleaved collection); `submit_decision` consumes the single request regardless of winning device; cancel/expire |
+| Per-device registry revisions, frozen multi-device eligibility and global Pending | `crates/approval-core/src/lib.rs`: privileged enroll/replace/revoke; `open_from_privileged_host` rejects an empty registry and atomically clones complete eligibility. Model Open+Capture+Publish collectively overapproximate it with permissive preparatory Open and interleaved/subset capture; `submit_decision` consumes the single request regardless of winning device; cancel/expire |
 | Persisted allocator history | `crates/approval-core/src/registry_checkpoint.rs` and `crates/windows-service-host/src/trust_registry.rs`; symbolic fresh revisions do not prove these codecs/filesystem commits |
 | PC-origin original binding, content digest, issuance and expiry | `crates/service-protocol/src/message.rs`; this request model does not prove PC-event encoding/signature checking or clock correlation |
 | Exact-binding per-use phone approval plan | `crates/android-controller/src/approval.rs` and native auth owner; `ApprovalTicket` abstracts this trusted boundary, not Android execution |
