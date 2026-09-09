@@ -40,6 +40,28 @@ supplied service names, accounts, executables, paths, credentials or arguments.
 Non-Windows operations return `UnsupportedPlatform`; native 64-bit Windows is
 the supported installation target.
 
+### Startup diagnostic metadata
+
+SCM service-specific exit codes are distinct from the CLI's small process-exit
+classes. Identity policy, malformed-data, encoding, uncertain creation/cleanup
+and pre-identity startup failures retain explicit E1–E5 categories. No raw key,
+path, command body or native error message is included.
+
+An `IdentityWindows` error with HRESULT prefix `0x8009xxxx` is projected as
+`0xE6OOCCCC`: `OO` is the stable explicit operation code in `contract.rs`, and
+`0x80090000 | CCCC` reconstructs that HRESULT. This prefix includes NTE, SSPI and
+CRYPT errors; it is not an NTE-only selector. For example, `0xE6070030`
+means OpenProvider returned `0x80090030`; `0xE60C0030` means ReadKeyPolicy returned
+the same error. These are application diagnostics, not HRESULTs or a diagnosis
+of hardware failure. The original typed error still retains both fields.
+
+HRESULTs outside that prefix pass through unchanged. Consequently this DWORD projection is
+not an injective encoding of arbitrary HRESULTs plus operations: an arbitrary
+outside-prefix value could collide with an application namespace. It is diagnostic
+metadata only, never input to authorization, retry, cleanup or recovery policy.
+The deployed lab service predates this operation-preserving projection; a future
+authorized native run is required to identify its observed failing operation.
+
 ## Protected installation and registration
 
 The native Program Files known folder, not an environment variable, determines

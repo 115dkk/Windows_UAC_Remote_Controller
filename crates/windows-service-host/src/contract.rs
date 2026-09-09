@@ -289,12 +289,24 @@ pub enum ServiceError {
 impl ServiceError {
     /// SCM DWORD diagnostic, distinct from the small process exit class.
     /// Explicit tables are stable even if upstream enum declaration order changes.
+    /// Identity failures with HRESULT prefix 0x8009 use namespace 0xE6OOCCCC, NOT
+    /// an HRESULT: OO is the explicit operation code and the original HRESULT
+    /// is 0x80090000 | CCCC. This carries no diagnosis or property/secret data.
+    /// This prefix includes NTE, SSPI and CRYPT errors. Other HRESULT prefixes
+    /// and the raw Copy ServiceError remain unchanged.
     pub const fn service_diagnostic_code(self) -> u32 {
         match self {
             #[cfg(windows)]
             Self::IdentityPolicy(policy) => 0xE100_0000 | identity_policy_code(policy),
             #[cfg(windows)]
-            Self::IdentityWindows { hresult, .. } => hresult as u32,
+            Self::IdentityWindows { operation, hresult } => {
+                let raw = hresult as u32;
+                if raw & 0xFFFF_0000 == 0x8009_0000 {
+                    0xE600_0000 | (identity_operation_code(operation) << 16) | (raw & 0xFFFF)
+                } else {
+                    raw
+                }
+            }
             #[cfg(windows)]
             Self::IdentityMalformed(operation) => 0xE200_0000 | identity_operation_code(operation),
             Self::IdentityEncoding { code } => 0xE300_0000 | code as u32,
@@ -506,8 +518,136 @@ mod tests {
             operation: O::OpenProvider,
             hresult: 0x8009_0029_u32 as i32,
         });
-        assert_eq!(native.service_diagnostic_code(), 0x8009_0029);
+        assert_eq!(native.service_diagnostic_code(), 0xE607_0029);
         assert_eq!(native.exit_code(), 1);
+        assert_eq!(
+            native,
+            ServiceError::IdentityWindows {
+                operation: O::OpenProvider,
+                hresult: 0x8009_0029_u32 as i32,
+            }
+        );
+    }
+
+    #[cfg(windows)]
+    fn explicit_identity_operations() -> [(windows_identity::IdentityOperation, u32); 20] {
+        use windows_identity::IdentityOperation as O;
+        [
+            (O::OpenProcessToken, 1),
+            (O::OpenThreadToken, 2),
+            (O::ReadProcessUser, 3),
+            (O::ReadProcessGroups, 4),
+            (O::LookupServiceSid, 5),
+            (O::CloseToken, 6),
+            (O::OpenProvider, 7),
+            (O::ReadProviderPolicy, 8),
+            (O::CheckAlgorithmSupport, 9),
+            (O::OpenKey, 10),
+            (O::CreateKey, 11),
+            (O::ReadKeyPolicy, 12),
+            (O::SetKeyPolicy, 13),
+            (O::BuildSecurityDescriptor, 14),
+            (O::FreeSecurityDescriptor, 15),
+            (O::FinalizeKey, 16),
+            (O::ExportPublicKey, 17),
+            (O::SignDigest, 18),
+            (O::CloseKey, 19),
+            (O::CloseProvider, 20),
+        ]
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn security_prefix_diagnostics_round_trip_twenty_operations_and_low_word_boundaries() {
+        let low_words = [
+            // SSPI SEC_E_INSUFFICIENT_MEMORY (0x300) and CRYPT_E_NOT_FOUND
+            // (0x2004) share this prefix; the projection is not NTE-only.
+            0_u32, 1, 0x16, 0x29, 0x30, 0xFF, 0x100, 0x300, 0x1234, 0x2004, 0x8000, 0xFFFF,
+        ];
+        let mut unique = std::collections::BTreeSet::new();
+        for (operation, operation_code) in explicit_identity_operations() {
+            // Existing malformed-native-data namespace must keep the same table.
+            assert_eq!(
+                ServiceError::IdentityMalformed(operation).service_diagnostic_code(),
+                0xE200_0000 | operation_code
+            );
+            for low in low_words {
+                let raw = 0x8009_0000 | low;
+                let error = ServiceError::IdentityWindows {
+                    operation,
+                    hresult: raw as i32,
+                };
+                let encoded = error.service_diagnostic_code();
+                assert_eq!(encoded, 0xE600_0000 | (operation_code << 16) | low);
+                assert_eq!(encoded & 0xFF00_0000, 0xE600_0000);
+                assert_eq!((encoded >> 16) & 0xFF, operation_code);
+                assert_eq!(0x8009_0000 | (encoded & 0xFFFF), raw);
+                assert!(unique.insert(encoded));
+                assert_eq!(error.exit_code(), 1);
+                // The mapping consumes only a Copy value, not its stored metadata.
+                assert_eq!(
+                    error,
+                    ServiceError::IdentityWindows {
+                        operation,
+                        hresult: raw as i32
+                    }
+                );
+            }
+        }
+        assert_eq!(unique.len(), 20 * low_words.len());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn other_hresult_prefixes_are_bit_exact_passthrough() {
+        for (operation, _) in explicit_identity_operations() {
+            for raw in [
+                0_u32,
+                0x8007_0005,
+                0x8008_FFFF,
+                0x800A_0000,
+                0x8028_4008,
+                0xC000_0001,
+                0xE607_0030,
+                u32::MAX,
+            ] {
+                let error = ServiceError::IdentityWindows {
+                    operation,
+                    hresult: raw as i32,
+                };
+                assert_eq!(error.service_diagnostic_code(), raw);
+                assert_eq!(error.exit_code(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn nte_valued_uncertainty_and_cleanup_do_not_become_plain_native_failures() {
+        let nte = 0x8009_0030_u32 as i32;
+        for (error, expected) in [
+            (ServiceError::IdentityEncoding { code: 7 }, 0xE300_0007),
+            (ServiceError::IdentityKeyAlreadyExists, 0xE400_0001),
+            (ServiceError::IdentityKeyNotFound, 0xE400_0002),
+            (ServiceError::IdentityHandleAlreadyReleased, 0xE400_0003),
+            (
+                ServiceError::IdentityCreationUncertain { hresult: nte },
+                0xE400_0004,
+            ),
+            (
+                ServiceError::IdentityCleanupFailed { hresult: nte },
+                0xE400_0005,
+            ),
+            (
+                ServiceError::StartupFailure {
+                    stage: 4,
+                    detail: nte as u32,
+                },
+                0xE500_0004,
+            ),
+        ] {
+            assert_eq!(error.service_diagnostic_code(), expected);
+            assert_eq!(error.exit_code(), 1);
+        }
     }
 
     #[cfg(windows)]
