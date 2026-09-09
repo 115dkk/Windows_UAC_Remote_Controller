@@ -73,7 +73,10 @@ ${StrLoc}
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
 
-!if "${INSTALLWEBVIEW2MODE}" != "skip"
+; Tauri's NSIS data maps JSON webviewInstallMode=skip to the empty string, not
+; the literal "skip". windows-packaging.mjs separately requires the exact JSON
+; skip overlay. Nonempty bootstrapper modes are never accepted by this template.
+!if "${INSTALLWEBVIEW2MODE}" != ""
   !error "Use npm run package:windows; this package requires prerequisite-only WebView2."
 !endif
 {{#each binaries}}

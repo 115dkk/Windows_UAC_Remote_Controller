@@ -11,6 +11,22 @@ pub enum LaunchPrivilege {
     IncreaseQuota,
     AssignPrimaryToken,
 }
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+impl LaunchPrivilege {
+    /// Attribute policy only; the native owner still proves the actual token,
+    /// exact privilege LUID, service identity and unchanged restrictions.
+    /// CreateProcessAsUser temporarily enables its already-held privileges;
+    /// the preceding TokenSessionId change requires Tcb already enabled.
+    pub(crate) const fn accepts_attributes(self, attributes: Option<u32>) -> bool {
+        const ENABLED: u32 = 0x2;
+        const REMOVED: u32 = 0x4;
+        let Some(attributes) = attributes else {
+            return false;
+        };
+        attributes & REMOVED == 0 && (!matches!(self, Self::Tcb) || attributes & ENABLED != 0)
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupervisorStage {
@@ -227,6 +243,47 @@ mod tests {
             crate::SERVICE_EXECUTABLE,
             windows_prompt_probe::supervision::SERVICE_EXECUTABLE
         );
+    }
+
+    #[test]
+    fn documented_default_disabled_launch_privileges_are_usable_without_adjustment() {
+        for privilege in [
+            LaunchPrivilege::IncreaseQuota,
+            LaunchPrivilege::AssignPrimaryToken,
+        ] {
+            assert!(privilege.accepts_attributes(Some(0)));
+            assert!(privilege.accepts_attributes(Some(1))); // Enabled-by-default is not enabled now.
+            assert!(privilege.accepts_attributes(Some(2)));
+            assert!(privilege.accepts_attributes(Some(3)));
+        }
+        assert!(!LaunchPrivilege::Tcb.accepts_attributes(Some(0)));
+        assert!(!LaunchPrivilege::Tcb.accepts_attributes(Some(1)));
+        assert!(LaunchPrivilege::Tcb.accepts_attributes(Some(2)));
+        assert!(LaunchPrivilege::Tcb.accepts_attributes(Some(3)));
+    }
+
+    #[test]
+    fn removed_privileges_never_satisfy_any_launch_requirement() {
+        for privilege in [
+            LaunchPrivilege::Tcb,
+            LaunchPrivilege::IncreaseQuota,
+            LaunchPrivilege::AssignPrimaryToken,
+        ] {
+            for attributes in [4, 5, 6, 7, u32::MAX] {
+                assert!(!privilege.accepts_attributes(Some(attributes)));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_privileges_are_not_treated_as_present_but_disabled() {
+        for privilege in [
+            LaunchPrivilege::Tcb,
+            LaunchPrivilege::IncreaseQuota,
+            LaunchPrivilege::AssignPrimaryToken,
+        ] {
+            assert!(!privilege.accepts_attributes(None));
+        }
     }
     #[test]
     fn synthetic_deadline_is_absolute_and_exact_boundary_is_expired() {

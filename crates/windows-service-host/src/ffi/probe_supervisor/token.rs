@@ -8,8 +8,8 @@ use windows::{
         Foundation::{ERROR_NO_TOKEN, HANDLE, LUID},
         Security::{
             DuplicateTokenEx, GetTokenInformation, LookupPrivilegeValueW,
-            SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_PRIVILEGE_ENABLED, SE_TCB_NAME,
-            SID_AND_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_SESSIONID,
+            SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_TCB_NAME, SID_AND_ATTRIBUTES,
+            SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_SESSIONID,
             TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
             TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenGroups,
             TokenHasRestrictions, TokenIntegrityLevel, TokenPrimary, TokenPrivileges,
@@ -337,11 +337,12 @@ fn require_privileges(facts: &Facts) -> Result<(), Error> {
         // initialized scalar out. Lookup does not enable or add a privilege.
         unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut id) }
             .map_err(|error| native(Stage::TokenQuery, error))?;
-        if !facts
+        let attributes = facts
             .privileges
             .iter()
-            .any(|(value, flags)| *value == luid(id) && flags & SE_PRIVILEGE_ENABLED.0 != 0)
-        {
+            .find(|(value, _)| *value == luid(id))
+            .map(|(_, flags)| *flags);
+        if !kind.accepts_attributes(attributes) {
             return Err(Error::RequiredPrivilegeNotEnabled(kind));
         }
     }

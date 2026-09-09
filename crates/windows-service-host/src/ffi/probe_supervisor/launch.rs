@@ -118,8 +118,10 @@ pub(super) fn child(run: &mut ActiveRun) -> Result<(), Error> {
     // Only quoted argv[0] for that fixed module, no extra arguments, no std
     // handles and bInheritHandles=false (Windows
     // disallows cross-session inheritance). Trusted minimal Unicode environment,
-    // pinned working directory and fixed desktop all outlive this call. Three
-    // conservative required privileges were already enabled, never activated here.
+    // pinned working directory and fixed desktop all outlive this call. Tcb was
+    // already enabled; quota/assignment privileges were present and not removed.
+    // Windows documents temporarily enabling its necessary held privileges for
+    // this call. We never grant/adjust privileges or substitute a different token.
     // Process stays suspended until the caller owns/authenticates/assigns it.
     unsafe {
         CreateProcessAsUserW(

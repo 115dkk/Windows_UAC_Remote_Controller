@@ -112,7 +112,9 @@ test('source contract omits basename process killing and installer-owned app aut
 
 test('source contract makes WebView2 a machine prerequisite only before installation', () => {
   assert.equal(overlay.bundle.windows.webviewInstallMode.type, 'skip');
-  rejectingGuard(template, '!if "${INSTALLWEBVIEW2MODE}" != "skip"');
+  // Actual Tauri bundler rendering uses an empty string for the strict JSON
+  // skip overlay; literal "skip" rejected the real 58cbbee CI assembly.
+  rejectingGuard(template, '!if "${INSTALLWEBVIEW2MODE}" != ""');
   assert.ok(position(template, 'Section WebView2') < position(template, 'Section Install'));
   const webview = section('WebView2');
   const versionRead = 'ReadRegStr $0 HKLM "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\${WEBVIEW2APPGUID}" "pv"';

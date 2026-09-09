@@ -48,6 +48,10 @@ cannot leave a prior `passed:true` result in place.
 Ordinary `tauri build` without the Windows overlay must fail NSIS compilation:
 the template requires both exact service sidecars and prerequisite-only WebView2.
 Linux/Android builds do not acquire these Windows sidecar requirements.
+Tauri renders the JSON `webviewInstallMode: { type: "skip" }` choice as an empty
+NSIS mode string. The build script enforces the exact JSON overlay; the template
+rejects nonempty bootstrapper modes. The JSON and rendered representations must
+not be compared as if they were the same string.
 
 ## Installed lifecycle
 
