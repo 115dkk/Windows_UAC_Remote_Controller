@@ -157,6 +157,16 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn withdraw_requests(
+            &self,
+            requests: Vec<crate::NativeRequestSelection>,
+        ) -> Result<(), BridgeError> {
+            if requests.is_empty() {
+                Ok(())
+            } else {
+                Err(BridgeError::LifecycleIntegrationRequired)
+            }
+        }
         fn reopen_local_key_sets(
             &self,
             _: Vec<crate::NativeLocalKeySet>,

@@ -97,13 +97,7 @@ pub trait NativePlatform: Send + Sync {
     /// No Activity, permission prompt or authentication may be opened here.
     fn clear_request_notifications(&self) -> Result<(), BridgeError>;
     /// Downward-only exact committed withdrawals, including native held views.
-    fn withdraw_requests(&self, requests: Vec<NativeRequestSelection>) -> Result<(), BridgeError> {
-        if requests.is_empty() {
-            Ok(())
-        } else {
-            Err(BridgeError::LifecycleIntegrationRequired)
-        }
-    }
+    fn withdraw_requests(&self, requests: Vec<NativeRequestSelection>) -> Result<(), BridgeError>;
 }
 
 struct Admission<'a>(&'a AtomicBool);
@@ -582,6 +576,16 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn withdraw_requests(
+            &self,
+            requests: Vec<NativeRequestSelection>,
+        ) -> Result<(), BridgeError> {
+            if requests.is_empty() {
+                Ok(())
+            } else {
+                Err(BridgeError::LifecycleIntegrationRequired)
+            }
+        }
         fn reopen_local_key_sets(&self, _: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
             let mut state = self.key_callbacks.lock().unwrap();
             state.reopens += 1;
