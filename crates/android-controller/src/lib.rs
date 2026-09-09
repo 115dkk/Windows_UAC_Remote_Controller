@@ -22,6 +22,7 @@
 mod approval;
 mod associated_request;
 mod checkpoint;
+mod denial;
 mod liveness;
 mod local_keys;
 mod owner;
@@ -38,6 +39,7 @@ pub use associated_request::{
     RequestSourceFailure,
 };
 pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
+pub use denial::{DenialAttempt, DenialError, DenialOwner, DenialTransition, PreparedDenial};
 pub use liveness::{NativePeerLease, PeerLeaseError};
 pub use local_keys::{
     LocalAttestationChallenge, LocalKeyError, LocalKeyHandle, LocalKeyLedger, LocalKeyObservation,

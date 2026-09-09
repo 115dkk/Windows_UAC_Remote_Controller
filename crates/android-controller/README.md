@@ -113,6 +113,41 @@ returns the same signature/deadline. The native foreground owner must still driv
 socket/policy/time-change wakes; the API does not start that owner automatically.
 See [ADR0012](../../docs/adr/0012-bound-native-transport-and-send.md).
 
+## Request-bound denial preparation
+
+`DenialOwner` uses one process-local `begin -> DenialAttempt -> finish` slot;
+there is no approval-plan claim or wait-for-authentication stage. It consumes the
+existing observational `ApprovalClock`/`ApprovalTime` contract, not an auth event.
+Begin binds the original mapped window/boot, original receiving generation,
+recipient device, current association and exact local public-key tuple. Its
+`NativePeerLease` also withdraws retained handles on actual domain/association
+changes, durable-owner failure or Drop. A lease alone is not a timer or permission.
+
+The attempt exposes only fixed canonical `DecisionPurpose::Deny` signing bytes.
+Finish consumes its slot before checking returned DER, verifies only with the
+current original DENIAL public key, and observes fresh native time after blocking
+maintenance and signature verification. It cannot accept Approve-purpose bytes
+even when signed with the denial key. Cancellation is immediate/downward-only;
+the containing native owner must confirm actual key-operation quiescence before
+`retire_after_native_cleanup` permits slot reuse. Retirement alone preserves a
+valid `PreparedDenial`, whereas explicit cancellation or either owner closing
+invalidates it. Callback/clock/boot and durable faults do not rearm the owner.
+
+`DenialTransition` retains every committed downward check on rejection, including
+post-I/O expiry or schedule withdrawal. No local prepare/sign operation resolves
+the request or records a Windows-denied outcome/history row. `PreparedDenial` is
+non-Clone and is signature data, not remote acceptance. Its consuming data
+extraction is not a send permit: a future typed sender must retain its original
+context and recheck native time, request, source, cancellation and write deadlines.
+
+This slice does not wire Application/UniFFI/Kotlin/UI or socket delivery and does
+not change policy-only startup. Before user-denial key use, the future native
+owner must freshly require configured secure screen lock and cancel/quiesce
+concurrent approval UI and any retained same-request approval transmission. The
+DENIAL operation itself must not request BiometricPrompt/per-use authentication.
+Public key metadata and software-signature fixtures are not hardware-policy or
+enrollment proof. The new host tests are authored for ROOT execution only.
+
 ## Public interface
 
 Native factories require actual `DirectorySynced` receipts:
