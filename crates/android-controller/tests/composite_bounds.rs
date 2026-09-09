@@ -325,9 +325,18 @@ fn all_512_original_sources_and_four_maximum_components_fit_without_new_cap() {
     let mut active_alias = peer_bytes.clone();
     const PEER_HEADER_BYTES: usize = 24;
     const PEER_ROW_BYTES: usize = 278;
-    active_alias[PEER_HEADER_BYTES + PEER_ROW_BYTES - 8..PEER_HEADER_BYTES + PEER_ROW_BYTES]
+    // The first row is PC1, which legitimately owns historical generation1.
+    // Assign that generation to the SECOND row (PC2) to create a real conflict.
+    active_alias
+        [PEER_HEADER_BYTES + 2 * PEER_ROW_BYTES - 8..PEER_HEADER_BYTES + 2 * PEER_ROW_BYTES]
         .copy_from_slice(&1_u64.to_be_bytes());
-    assert!(PeerAssociationLedger::from_bytes(&active_alias).is_ok());
+    let aliased = PeerAssociationLedger::from_bytes(&active_alias).unwrap();
+    assert_eq!(aliased.lookup_current(pc(2)).unwrap().generation(), 1);
+    assert!(
+        checkpoint
+            .receiving_sources()
+            .any(|(source_pc, generation)| source_pc == pc(1) && generation.get() == 1)
+    );
     assert!(matches!(
         ControllerCheckpoint::from_bytes(&envelope(
             &inbox_bytes,
