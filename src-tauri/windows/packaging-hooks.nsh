@@ -16,7 +16,7 @@ LangString UacUnsafe 1042 "정해진 프로그램 위치나 권한을 확인하�
 LangString UacStopFailed 1033 "The existing service could not be confirmed stopped. Its program files were not replaced. Close active operations and retry installation."
 LangString UacStopFailed 1042 "기존 서비스가 중지됐는지 확인하지 못했습니다. 프로그램 파일은 교체하지 않았습니다. 진행 중인 작업을 마친 뒤 설치를 다시 시도해 주세요."
 LangString UacInstallFailed 1033 "Service setup did not finish. Program files, history, settings and device connection information are retained; service registration or automatic-start settings may remain. Review the service status before retrying."
-LangString UacInstallFailed 1042 "서비스 설치를 마치지 못했습니다. 프로그램 파일, 기록, 설정과 기기 연결 정보는 보존했으며, 서비스 등록이나 자동 시작 설정이 남아 있을 수 있습니다. 서비스 상태를 확인한 뒤 다시 시도해 주세요."
+LangString UacInstallFailed 1042 "서비스 설치를 마치지 못했습니다. 프로그램 파일, 기록, 설정과 기기 연결 정보는 보존했으며 서비스 등록이나 자동 시작 설정이 남아 있을 수 있습니다. 서비스 상태를 확인한 뒤 다시 시도해 주세요."
 LangString UacStartFailed 1033 "Service installation configured automatic start, but starting it was not confirmed. Setup is incomplete; program files, history, settings and device connection information are retained. Review the service status before retrying."
 LangString UacStartFailed 1042 "서비스의 자동 시작은 설정했지만 실행을 확인하지 못했습니다. 설치가 완료되지 않았으며 프로그램 파일, 기록, 설정과 기기 연결 정보는 보존했습니다. 서비스 상태를 확인한 뒤 다시 시도해 주세요."
 LangString UacRemoveFailed 1033 "Service removal was not confirmed. Program files, history, settings and device connection information are retained. Close active operations and retry removal."

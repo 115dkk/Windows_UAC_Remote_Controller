@@ -39,11 +39,39 @@ invalidates any previous successful inspection record.
 `inspect` reads the assembled file as data: bounded PE executable/stub checks,
 exactly one outer NSIS archive descriptor, unique root names and exact hashes of
 all three executable payloads extracted by `7z` **to stdout**, never executed.
-Its receipt binds the actual installer, manifest and payload hashes and labels
+The inspector also reverses only the already-validated marker in a memory copy
+and compares its full hash with the pre-recorded build-source hash. It never
+changes an expected hash to match archive content. Its receipt binds the actual
+installer, manifest and payload hashes and labels
 its scope `passive-nsis-payload-only`. A generated manifest is build provenance,
 not an Authenticode publisher identity or permission to execute an old file.
 Inspection also invalidates its old receipt before starting, so a failed run
 cannot leave a prior `passed:true` result in place.
+
+### Tauri's packaged-main transformation
+
+Manifest schema2 records each executable's `sourceSha256`, expected packaged
+`sha256`, unchanged byte length and a closed transformation description. For the
+two service/helper binaries the transformation is identity and both hashes must
+match. The app has one narrowly supported transformation, matching
+`tauri-bundler 2.9.4` `src/bundle.rs::patch_binary`: replace exactly one ASCII
+`__TAURI_BUNDLE_TYPE_VAR_UNK` marker with equal-length
+`__TAURI_BUNDLE_TYPE_VAR_NSS`. Its offset and both fixed strings are recorded.
+Missing, duplicate, already-patched or mixed markers fail; every other byte stays
+unchanged. Tauri restores the unpatched main after assembling NSIS, which is why
+the restored build output and packaged app legitimately have different hashes.
+
+The expected packaged hash is calculated from a copy of that actual restored
+Cargo/Tauri build output—not learned from the installer. `inspect` still compares
+the complete raw extracted executable against this expectation; it does not mask
+the marker or skip hashing any region. Schema1 manifests are rejected because
+they cannot express this distinction.
+
+This marker-only profile rejects configured Windows signing, opaque Tauri config
+overrides, extra platform config files and payload PE certificate tables. Signing
+can alter more bytes after the marker replacement; supporting it requires a
+separately reviewed capture of the actual post-signing inputs **before** archive
+assembly, not prediction from the extracted output or a disabled hash check.
 
 Ordinary `tauri build` without the Windows overlay must fail NSIS compilation:
 the template requires both exact service sidecars and prerequisite-only WebView2.
