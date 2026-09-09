@@ -6,6 +6,7 @@ import android.app.KeyguardManager
 import android.content.Context
 import android.os.Build
 import android.os.Looper
+import android.os.UserManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
@@ -20,7 +21,6 @@ import java.security.PublicKey
 import java.security.UnrecoverableKeyException
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
-import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Closed, purpose-separated identity roles. These names are not user input. */
@@ -42,10 +42,16 @@ internal enum class DeviceKeyError {
     INVALID_ATTESTATION_CHALLENGE,
     REQUEST_ALREADY_CONSUMED,
     WRONG_THREAD,
+    CREDENTIAL_STORAGE_LOCKED,
+    CREDENTIAL_STORAGE_UNAVAILABLE,
     LOCK_MISSING,
     LOCK_UNAVAILABLE,
     REFERENCE_CAPACITY_REACHED,
     UNKNOWN_REFERENCE,
+    OWNER_CLOSED,
+    OWNER_CONFLICT,
+    REGISTRATION_CONFLICT,
+    NAMESPACE_MISMATCH,
     ALIAS_COLLISION,
     KEY_MISSING,
     KEY_INVALIDATED,
@@ -146,18 +152,17 @@ internal class UnverifiedKeyMaterial internal constructor(
 
 /** Created locally but NOT paired, enrolled, attestation-verified or authorized. */
 internal class UncommittedDeviceKeySet internal constructor(
-    references: Map<DeviceKeyRole, DeviceKeyReference>,
+    internal val registration: KeySetRegistration,
     material: Map<DeviceKeyRole, UnverifiedKeyMaterial>,
 ) {
-    private val references = references.toMap()
     private val material = material.toMap()
-    fun reference(role: DeviceKeyRole): DeviceKeyReference = references.getValue(role)
+    fun reference(role: DeviceKeyRole): DeviceKeyReference = registration.reference(role)
     fun publicMaterial(role: DeviceKeyRole): UnverifiedKeyMaterial = material.getValue(role)
     override fun toString(): String = "UncommittedDeviceKeySet([redacted])"
 }
 
 /**
- * AndroidKeyStore creation/inspection only, for a trusted native pairing owner.
+ * AndroidKeyStore creation, exact existing-key reopening and inspection only.
  *
  * Call off the main thread. No constructor/static initializer generates keys.
  * There is no Tauri command, Binder/receiver entry point, sign(bytes), exported
@@ -170,10 +175,14 @@ internal class UncommittedDeviceKeySet internal constructor(
  * across the app UID's processes. Fresh unpredictable handles and collision
  * checks precede every generation. A crash is not a transaction rollback.
  * Paired-key persistence, recovery/revocation and remote attestation verification
- * are not implemented here. References are bounded and process-local only.
+ * are not implemented here. Reopening only observes existing keys named by the
+ * trusted owner's already committed exact metadata; it never generates on error.
+ * References are bounded, instance-owned and process-local. Explicit release is
+ * memory-only, leaves all native aliases intact and cannot make bootstrap fresh.
  */
 internal class DeviceKeyStore(context: Context) {
     private val appContext = context.applicationContext
+    private val owner = KeyReferenceOwner()
 
     fun createKeySet(request: KeyCreationRequest): KeyStoreOutcome<UncommittedDeviceKeySet> {
         val input = request.consumeForKeyOwner()
@@ -193,19 +202,121 @@ internal class DeviceKeyStore(context: Context) {
     fun inspectPublicMaterial(reference: DeviceKeyReference): KeyStoreOutcome<UnverifiedKeyMaterial> {
         if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
         return synchronized(OWNER_LOCK) {
+            val inspection = InspectionAttempt()
             try {
+                val registration = registryValue(REFERENCES.resolve(owner, reference))
+                inspection.matched = registration
                 requireDeviceSecure()
-                val record = REFERENCES[reference] ?: fail(DeviceKeyError.UNKNOWN_REFERENCE)
-                if (record.role != reference.role) fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                val record = existingRecord(registration.descriptor, reference.role)
                 val material = inspectKey(openStore(), record)
                 requireDeviceSecure()
                 KeyStoreOutcome.Value(material)
             } catch (failure: OwnerFailure) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
                 KeyStoreOutcome.Failure(failure.error)
             } catch (failure: Exception) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
                 KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
             }
         }
+    }
+
+    /**
+     * No creation/import/authentication. Descriptor shape is NOT evidence of its
+     * committed provenance or of enrollment; only the trusted native storage
+     * owner may supply it. Preparing records and namespace scans are insufficient.
+     * All three native policies/keys are re-inspected even on a cache hit.
+     */
+    fun reopenExistingKeySet(descriptor: ReopenKeySetDescriptor): KeyStoreOutcome<ReopenedDeviceKeySet> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            val inspection = InspectionAttempt()
+            try {
+                val existing = registryValue(REFERENCES.findExact(owner, descriptor))
+                // Assigned only after owner + complete tuple match. Conflicting
+                // inputs must not invalidate another/rightful registration.
+                inspection.matched = existing
+                requireDeviceSecure()
+                val store = openStore()
+                val material = LinkedHashMap<DeviceKeyRole, UnverifiedKeyMaterial>()
+                for (role in DeviceKeyRole.values()) {
+                    material[role] = inspectKey(store, existingRecord(descriptor, role))
+                }
+                requireDeviceSecure()
+                val registered = if (existing == null) {
+                    registryValue(REFERENCES.publish(owner, descriptor, material))
+                } else {
+                    registryValue(REFERENCES.refresh(owner, existing, material))
+                }
+                KeyStoreOutcome.Value(registered.reopenedView())
+            } catch (failure: OwnerFailure) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
+                KeyStoreOutcome.Failure(failure.error)
+            } catch (failure: Exception) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
+                KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
+            }
+        }
+    }
+
+    /**
+     * Read-only exact controller namespace observation before/after a trusted
+     * startup batch. No incomplete, unknown or orphan controller alias is accepted.
+     * This is not an enrollment mapper and never discovers replacement handles.
+     */
+    fun validateRecordedNamespace(handles: List<ByteArray>): KeyStoreOutcome<Unit> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            var copied: List<ByteArray> = emptyList()
+            try {
+                registryValue(REFERENCES.requireOpen(owner))
+                copied = registryValue(KeyNamespaceObservation.copyHandles(handles))
+                val expected = LinkedHashSet<String>()
+                for (handle in copied) for (role in DeviceKeyRole.values()) expected.add(aliasFor(handle, role))
+                requireDeviceSecure()
+                val observation = KeyNamespaceObservation(expected)
+                val aliases = openStore().aliases()
+                while (aliases.hasMoreElements()) {
+                    // Check before fetching the next provider value. Native
+                    // enumeration itself may allocate; no unbounded list copy.
+                    observation.beforeNext()?.let { fail(it) }
+                    observation.observe(aliases.nextElement())?.let { fail(it) }
+                }
+                observation.finish()?.let { fail(it) }
+                requireDeviceSecure()
+                KeyStoreOutcome.Value(Unit)
+            } catch (failure: OwnerFailure) {
+                KeyStoreOutcome.Failure(failure.error)
+            } catch (failure: Exception) {
+                KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEYSTORE_UNAVAILABLE))
+            } finally {
+                copied.forEach { it.fill(0) }
+            }
+        }
+    }
+
+    /** Pure downward cleanup may run even when CE/screen-lock observations fail. */
+    fun releaseReferences(set: ReopenedDeviceKeySet): KeyStoreOutcome<Unit> = synchronized(OWNER_LOCK) {
+        REFERENCES.release(owner, set.registration)
+    }
+
+    /** Uncommitted creation uses the same lifetime accounting, not a second map. */
+    fun releaseReferences(set: UncommittedDeviceKeySet): KeyStoreOutcome<Unit> = synchronized(OWNER_LOCK) {
+        REFERENCES.release(owner, set.registration)
+    }
+
+    /** Closes only this instance's references permanently; never deletes native keys. */
+    fun closeReferences(): KeyStoreOutcome<Unit> = synchronized(OWNER_LOCK) { REFERENCES.close(owner) }
+
+    private fun existingRecord(descriptor: ReopenKeySetDescriptor, role: DeviceKeyRole): OwnedKey {
+        val handle = descriptor.copyHandle()
+        return try { OwnedKey(aliasFor(handle, role), role, descriptor.copySpki(role)) }
+        finally { handle.fill(0) }
+    }
+
+    private fun <T> registryValue(result: KeyStoreOutcome<T>): T = when (result) {
+        is KeyStoreOutcome.Value -> result.value
+        is KeyStoreOutcome.Failure -> fail(result.error)
     }
 
     private fun createLocked(input: ConsumedKeyRequest): KeyStoreOutcome<UncommittedDeviceKeySet> {
@@ -216,10 +327,8 @@ internal class DeviceKeyStore(context: Context) {
         // Kotlin 1.9's local-assignment analysis ignores the catch-only read.
         val generation = GenerationAttempt()
         return try {
+            registryValue(REFERENCES.checkNewCreation(owner, input.handle))
             requireDeviceSecure()
-            if (REFERENCES.size > DeviceKeyPolicy.MAX_REFERENCES - DeviceKeyPolicy.KEYS_PER_SET) {
-                fail(DeviceKeyError.REFERENCE_CAPACITY_REACHED)
-            }
             val currentStore = openStore()
             store = currentStore
             val aliases = DeviceKeyRole.values().associateWith { aliasFor(input.handle, it) }
@@ -259,12 +368,16 @@ internal class DeviceKeyStore(context: Context) {
             }
             if (!DeviceKeyPolicy.distinctPublicKeys(created.map { it.expectedSpki })) fail(DeviceKeyError.KEY_REUSE)
             requireDeviceSecure()
-            val references = created.associate { record ->
-                val reference = DeviceKeyReference(record.role)
-                REFERENCES[reference] = record
-                record.role to reference
-            }
-            KeyStoreOutcome.Value(UncommittedDeviceKeySet(references, material))
+            // Shape helper only: using the descriptor for registration does not
+            // claim that newly created keys have been durably committed/enrolled.
+            val descriptor = registryValue(ReopenKeySetDescriptor.fromTrustedStorage(
+                input.handle,
+                material.getValue(DeviceKeyRole.APPROVAL).copyPublicSpki(),
+                material.getValue(DeviceKeyRole.DENIAL).copyPublicSpki(),
+                material.getValue(DeviceKeyRole.TRANSPORT).copyPublicSpki(),
+            ))
+            val registered = registryValue(REFERENCES.publish(owner, descriptor, material))
+            KeyStoreOutcome.Value(UncommittedDeviceKeySet(registered, material))
         } catch (failure: OwnerFailure) {
             KeyStoreOutcome.Failure(failure.error, rollback(store, created, generation.alias))
         } catch (failure: Exception) {
@@ -321,6 +434,7 @@ internal class DeviceKeyStore(context: Context) {
     }
 
     private fun requireDeviceSecure() {
+        requireCredentialStorage()
         val state = try {
             DeviceKeyPolicy.lockState(appContext.getSystemService(KeyguardManager::class.java)?.isDeviceSecure)
         } catch (_: Exception) { DeviceLockState.UNAVAILABLE }
@@ -328,6 +442,19 @@ internal class DeviceKeyStore(context: Context) {
             DeviceLockState.CONFIGURED -> Unit
             DeviceLockState.MISSING -> fail(DeviceKeyError.LOCK_MISSING)
             DeviceLockState.UNAVAILABLE -> fail(DeviceKeyError.LOCK_UNAVAILABLE)
+        }
+    }
+
+    private fun requireCredentialStorage() {
+        val available = try {
+            if (appContext.isDeviceProtectedStorage) fail(DeviceKeyError.CREDENTIAL_STORAGE_UNAVAILABLE)
+            appContext.getSystemService(UserManager::class.java)?.isUserUnlocked
+        } catch (failure: OwnerFailure) { throw failure }
+        catch (_: Exception) { fail(DeviceKeyError.CREDENTIAL_STORAGE_UNAVAILABLE) }
+        when (available) {
+            true -> Unit
+            false -> fail(DeviceKeyError.CREDENTIAL_STORAGE_LOCKED)
+            null -> fail(DeviceKeyError.CREDENTIAL_STORAGE_UNAVAILABLE)
         }
     }
 
@@ -383,9 +510,8 @@ internal class DeviceKeyStore(context: Context) {
 
     private companion object {
         const val PROVIDER = "AndroidKeyStore"
-        const val ALIAS_NAMESPACE = "dev.dkk115.uacremote.keystore.v1."
         val OWNER_LOCK = Any()
-        val REFERENCES = IdentityHashMap<DeviceKeyReference, OwnedKey>()
+        val REFERENCES = KeyReferenceRegistry()
 
         fun aliasFor(handle: ByteArray, role: DeviceKeyRole): String {
             if (!DeviceKeyPolicy.validHandle(handle)) fail(DeviceKeyError.INVALID_ENROLLMENT_HANDLE)
@@ -395,7 +521,7 @@ internal class DeviceKeyStore(context: Context) {
                 DeviceKeyRole.DENIAL -> "denial"
                 DeviceKeyRole.TRANSPORT -> "transport"
             }
-            return "$ALIAS_NAMESPACE$hex.$suffix".also {
+            return "${DeviceKeyPolicy.ALIAS_NAMESPACE}$hex.$suffix".also {
                 if (it.length > DeviceKeyPolicy.MAX_ALIAS_CHARACTERS) fail(DeviceKeyError.INVALID_ENROLLMENT_HANDLE)
             }
         }
@@ -428,6 +554,12 @@ private class GenerationAttempt {
     override fun toString(): String = "GenerationAttempt([redacted])"
 }
 
+/** Explicit catch-path obligation; Kotlin1.9 does not track catch-only local assignments. */
+private class InspectionAttempt {
+    var matched: KeySetRegistration? = null
+    override fun toString(): String = "InspectionAttempt([redacted])"
+}
+
 private class OwnerFailure(val error: DeviceKeyError) : RuntimeException(null, null, false, false)
 
 /** Synthetic observations in unit tests are NOT AndroidKeyStore/device proof. */
@@ -454,6 +586,7 @@ internal data class KeyPolicyObservation(
 internal enum class RollbackDecision { NOTHING_TO_DELETE, DELETE_MATCHING_CREATED_KEY, LEAVE_UNCERTAIN }
 
 internal object DeviceKeyPolicy {
+    const val ALIAS_NAMESPACE = "dev.dkk115.uacremote.keystore.v1."
     const val HANDLE_BYTES = 32
     const val CHALLENGE_BYTES = 32
     const val PUBLIC_SPKI_BYTES = 91

@@ -18,12 +18,17 @@
 #![forbid(unsafe_code)]
 
 mod checkpoint;
+mod local_keys;
 mod owner;
 mod types;
 
 pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
+pub use local_keys::{
+    LocalAttestationChallenge, LocalKeyError, LocalKeyHandle, LocalKeyLedger, LocalKeyObservation,
+    LocalKeySetDescriptor, LocalKeySetPhase, MAX_LOCAL_KEY_LEDGER_BYTES, MAX_LOCAL_KEY_SETS,
+};
 pub use owner::DurableInbox;
 pub use types::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
-    DurableFailure, DurableFault, InboxCounts, NotificationCleanup,
+    DurableFailure, DurableFault, InboxCounts, LocalKeyMutationError, NotificationCleanup,
 };

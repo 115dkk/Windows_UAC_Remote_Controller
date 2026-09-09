@@ -138,7 +138,7 @@ class PolicyOwnerRulesTest {
             assertFalse(ControllerLibraryPolicy.permitsInitialProperties(listOf(name)))
         }
         assertEquals("uac_android_controller", ControllerLibraryPolicy.LIBRARY)
-        assertEquals(3u, ControllerLibraryPolicy.ABI_VERSION)
+        assertEquals(4u, ControllerLibraryPolicy.ABI_VERSION)
     }
 
     @Test fun loaderPropertyInspectionIsBounded() {
@@ -174,5 +174,22 @@ class PolicyOwnerRulesTest {
         assertTrue(PolicyOwnerBounds.validHistoryString("x".repeat(PolicyOwnerBounds.MAX_HISTORY_BYTES)))
         assertFalse(PolicyOwnerBounds.validHistoryString("x".repeat(PolicyOwnerBounds.MAX_HISTORY_BYTES + 1)))
         assertFalse(PolicyOwnerBounds.validHistoryString("\uD800"))
+    }
+
+    @Test fun constructorFailureRetainsMemoryKeyCleanupUntilAcknowledged() {
+        val keys = KeyReferenceCleanupState()
+        assertTrue(keys.shouldAttempt(false))
+        keys.failed()
+        assertFalse(keys.complete())
+        assertFalse(keys.shouldAttempt(false))
+        assertTrue(keys.shouldAttempt(true))
+        keys.failed()
+        assertFalse(keys.complete())
+        keys.succeeded()
+        assertTrue(keys.complete())
+        assertFalse(keys.shouldAttempt(false))
+        assertFalse(keys.shouldAttempt(true))
+        keys.failed()
+        assertTrue(keys.complete())
     }
 }

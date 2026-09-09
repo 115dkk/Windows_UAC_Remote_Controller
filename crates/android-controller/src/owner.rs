@@ -14,7 +14,9 @@ use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
 use crate::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
-    ControllerCheckpoint, DurableFailure, DurableFault, InboxCounts,
+    ControllerCheckpoint, DurableFailure, DurableFault, InboxCounts, LocalAttestationChallenge,
+    LocalKeyHandle, LocalKeyLedger, LocalKeyMutationError, LocalKeyObservation,
+    LocalKeySetDescriptor,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +59,7 @@ pub struct DurableInbox {
     store: SnapshotStore,
     inbox: PhoneInbox,
     history: OutcomeHistory,
+    local_keys: LocalKeyLedger,
     required_durability: RequiredDurability,
     fault: Option<DurableFault>,
 }
@@ -107,6 +110,7 @@ impl DurableInbox {
             clock,
             RequiredDurability::DirectorySynced,
             false,
+            |_| Ok(()),
         )
     }
 
@@ -123,6 +127,27 @@ impl DurableInbox {
             clock,
             RequiredDurability::DirectorySynced,
             true,
+            |_| Ok(()),
+        )
+    }
+
+    /// Native Application preflight runs under the existing byte-store lock,
+    /// after strict decoding and policy-only checks, but BEFORE migration or
+    /// restore writes. It may inspect/reopen native keys, never generate them.
+    /// The caller owns partial native-reference cleanup if its callback fails.
+    pub fn open_existing_policy_only_with_key_preflight(
+        directory: NativePrivateDirectory,
+        boot: PhoneBootId,
+        clock: InboxClock,
+        preflight: impl FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>,
+    ) -> Result<(Self, CommittedUpdate), DurableFailure> {
+        Self::open_with_durability(
+            directory,
+            boot,
+            clock,
+            RequiredDurability::DirectorySynced,
+            true,
+            preflight,
         )
     }
 
@@ -160,7 +185,74 @@ impl DurableInbox {
             clock,
             RequiredDurability::ExplicitHostModel,
             false,
+            |_| Ok(()),
         )
+    }
+
+    /// Explicit host filesystem test profile for the identical preflight order;
+    /// never compiled into Android and never a native durability fallback.
+    #[cfg(not(target_os = "android"))]
+    pub fn open_existing_host_model_with_key_preflight(
+        directory: NativePrivateDirectory,
+        boot: PhoneBootId,
+        clock: InboxClock,
+        preflight: impl FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>,
+    ) -> Result<(Self, CommittedUpdate), DurableFailure> {
+        Self::open_with_durability(
+            directory,
+            boot,
+            clock,
+            RequiredDurability::ExplicitHostModel,
+            true,
+            preflight,
+        )
+    }
+
+    pub fn local_keys(&self) -> Result<&LocalKeyLedger, DurableFault> {
+        self.ensure_healthy()?;
+        Ok(&self.local_keys)
+    }
+
+    /// Local generation bookkeeping, not pairing or permission to retry native
+    /// creation. A caller must generate handle/challenge through the trusted
+    /// pairing owner, durably reserve here, then consume its native request once.
+    pub fn begin_local_key_creation(
+        &mut self,
+        handle: LocalKeyHandle,
+        challenge: LocalAttestationChallenge,
+    ) -> Result<CommitReceipt, LocalKeyMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
+        let mut candidate = self.local_keys.clone();
+        candidate
+            .begin_creation(handle, challenge)
+            .map_err(LocalKeyMutationError::Rejected)?;
+        self.transition_all(|_, _, keys| {
+            *keys = candidate;
+            Ok(())
+        })
+        .map(|(receipt, ())| receipt)
+        .map_err(LocalKeyMutationError::Owner)
+    }
+
+    /// Preserve only exact native-observed public key identities. This does not
+    /// attest them or enroll a PC. On a failed write, surviving native aliases
+    /// must not be deleted or recreated as a purported rollback.
+    pub fn record_local_key_creation(
+        &mut self,
+        descriptor: LocalKeySetDescriptor,
+    ) -> Result<(CommitReceipt, LocalKeyObservation), LocalKeyMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
+        let mut candidate = self.local_keys.clone();
+        let observation = candidate
+            .record_created(descriptor)
+            .map_err(LocalKeyMutationError::Rejected)?;
+        self.transition_all(|_, _, keys| {
+            *keys = candidate;
+            Ok(observation)
+        })
+        .map_err(LocalKeyMutationError::Owner)
     }
 
     pub const fn fault(&self) -> Option<DurableFault> {
@@ -350,7 +442,8 @@ impl DurableInbox {
     ) -> Result<(Self, CommittedUpdate), DurableFailure> {
         let mut inbox = PhoneInbox::with_phone_boot(policy, limits, boot);
         let history = OutcomeHistory::new(OutcomeHistoryLimits::default());
-        let initial = match encode(&inbox, &history) {
+        let local_keys = LocalKeyLedger::default();
+        let initial = match encode(&inbox, &history, &local_keys) {
             Ok(initial) => initial,
             Err(cause) => return Err(stop_unowned(&mut inbox, cause)),
         };
@@ -365,6 +458,7 @@ impl DurableInbox {
             store,
             inbox,
             history,
+            local_keys,
             required_durability,
             fault: None,
         };
@@ -380,6 +474,7 @@ impl DurableInbox {
         clock: InboxClock,
         required_durability: RequiredDurability,
         policy_only: bool,
+        preflight: impl FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>,
     ) -> Result<(Self, CommittedUpdate), DurableFailure> {
         let mut store = SnapshotStore::open_existing(directory)
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
@@ -389,24 +484,27 @@ impl DurableInbox {
             .snapshot()
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?
             .to_vec();
-        if policy_only {
-            let preview = ControllerCheckpoint::from_bytes(&bytes)
-                .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
-            if !preview.inbox().is_policy_only() {
-                return Err(DurableFailure::new(
-                    DurableFault::LifecycleIntegrationRequired,
-                ));
-            }
+        let preview = ControllerCheckpoint::from_bytes(&bytes)
+            .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
+        if policy_only && !preview.inbox().is_policy_only() {
+            return Err(DurableFailure::new(
+                DurableFault::LifecycleIntegrationRequired,
+            ));
         }
+        preflight(&preview).map_err(DurableFailure::new)?;
         let transition = store
             .begin_transition()
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
-        let (checkpoint, history) = ControllerCheckpoint::from_bytes(&bytes)
-            .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?
-            .into_parts();
+        let (checkpoint, history, local_keys) = preview.into_parts();
         let (mut inbox, update) = PhoneInbox::restore_checkpoint(checkpoint, boot, clock)
             .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
-        let receipt = match commit_candidate(transition, &inbox, &history, required_durability) {
+        let receipt = match commit_candidate(
+            transition,
+            &inbox,
+            &history,
+            &local_keys,
+            required_durability,
+        ) {
             Ok(receipt) => receipt,
             Err(cause) => return Err(stop_unowned(&mut inbox, cause)),
         };
@@ -415,6 +513,7 @@ impl DurableInbox {
                 store,
                 inbox,
                 history,
+                local_keys,
                 required_durability,
                 fault: None,
             },
@@ -437,6 +536,17 @@ impl DurableInbox {
         &mut self,
         operation: impl FnOnce(&mut PhoneInbox, &mut OutcomeHistory) -> Result<T, DurableFault>,
     ) -> Result<(CommitReceipt, T), DurableFailure> {
+        self.transition_all(|inbox, history, _| operation(inbox, history))
+    }
+
+    fn transition_all<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut PhoneInbox,
+            &mut OutcomeHistory,
+            &mut LocalKeyLedger,
+        ) -> Result<T, DurableFault>,
+    ) -> Result<(CommitReceipt, T), DurableFailure> {
         self.ensure_healthy().map_err(DurableFailure::new)?;
         // Read-only APIs must not expose a candidate if an unexpected unwind is
         // caught by a native caller. Only complete durable success clears this.
@@ -445,6 +555,7 @@ impl DurableInbox {
             &mut self.store,
             &mut self.inbox,
             &mut self.history,
+            &mut self.local_keys,
             self.required_durability,
             operation,
         );
@@ -461,9 +572,13 @@ impl DurableInbox {
     }
 }
 
-fn encode(inbox: &PhoneInbox, history: &OutcomeHistory) -> Result<Vec<u8>, DurableFault> {
+fn encode(
+    inbox: &PhoneInbox,
+    history: &OutcomeHistory,
+    local_keys: &LocalKeyLedger,
+) -> Result<Vec<u8>, DurableFault> {
     let checkpoint = inbox.checkpoint().map_err(DurableFault::Checkpoint)?;
-    ControllerCheckpoint::new(checkpoint, history.clone())
+    ControllerCheckpoint::with_local_keys(checkpoint, history.clone(), local_keys.clone())
         .and_then(|value| value.to_bytes())
         .map_err(DurableFault::Composite)
 }
@@ -472,9 +587,10 @@ fn commit_candidate(
     transition: Transition<'_>,
     inbox: &PhoneInbox,
     history: &OutcomeHistory,
+    local_keys: &LocalKeyLedger,
     required_durability: RequiredDurability,
 ) -> Result<CommitReceipt, DurableFault> {
-    let bytes = encode(inbox, history)?;
+    let bytes = encode(inbox, history, local_keys)?;
     let receipt = transition.commit(&bytes).map_err(DurableFault::Storage)?;
     required_durability.check(receipt)
 }
@@ -503,19 +619,25 @@ fn run_transition<T>(
     store: &mut SnapshotStore,
     inbox: &mut PhoneInbox,
     history: &mut OutcomeHistory,
+    local_keys: &mut LocalKeyLedger,
     required_durability: RequiredDurability,
-    operation: impl FnOnce(&mut PhoneInbox, &mut OutcomeHistory) -> Result<T, DurableFault>,
+    operation: impl FnOnce(
+        &mut PhoneInbox,
+        &mut OutcomeHistory,
+        &mut LocalKeyLedger,
+    ) -> Result<T, DurableFault>,
 ) -> Result<(CommitReceipt, T), DurableFault> {
     let transition = store.begin_transition().map_err(DurableFault::Storage)?;
     let mut candidate_owner = UncommittedInbox {
         inbox,
         completed: false,
     };
-    let candidate = operation(&mut *candidate_owner.inbox, history)?;
+    let candidate = operation(&mut *candidate_owner.inbox, history, local_keys)?;
     let receipt = commit_candidate(
         transition,
         &*candidate_owner.inbox,
         history,
+        local_keys,
         required_durability,
     )?;
     candidate_owner.completed = true;

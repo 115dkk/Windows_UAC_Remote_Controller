@@ -16,9 +16,16 @@ queued terminal outcomes before clearing that view. See
 failure semantics. This is not a second filesystem store or an independent
 exactly-once recipient.
 
+V2 also retains a bounded LocalKeyLedger in the same transaction. Preparing is
+committed before any future native creation; exact observed public keys become
+CreatedUnverified, not enrolled authority. Native policy-only startup preflights
+keys under the store lock before V1 migration/write. No missing-key regeneration,
+key deletion, additional file or Kotlin writer is introduced. Policy/history
+changes retain the ledger. See [ADR0008](../../docs/adr/0008-phone-local-key-lifecycle.md).
+
 This is a storage/domain integration layer, not an Android runtime, notification
 plugin, signing API, enrollment authority, or implementation of Windows UAC. There
-are no native callbacks, network operations, private keys, FFI, renderer commands,
+are no native implementations, network operations, private keys, FFI, renderer commands,
 or boolean authentication shortcuts.
 
 ## Public interface

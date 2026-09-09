@@ -33,6 +33,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
     )
     // Worker-thread-only. Never expose/clone this generated handle.
     private var controller: MobileController? = null
+    // Retain even if the Rust constructor fails after partially reopening keys.
+    // This adapter owns only its own in-process references, never aliases.
+    private val platform = AndroidNativePlatform(application)
+    private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
     private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
@@ -85,7 +89,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             // Rust alone decides initial creation versus adoption/migration.
             // In particular Kotlin never pre-clears notifications or retries a
             // failed open by creating a new store.
-            controller = MobileController.openOrInitialize(AndroidNativePlatform(application))
+            controller = MobileController.openOrInitialize(platform)
             if (!lifecycle.initialized(started, SystemClock.elapsedRealtime())) {
                 failOwner(lifecycle.failure())
                 return
@@ -205,9 +209,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     private fun cleanupIfStopped() {
         if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
+        val explicitRetry = explicitCleanupRetry.getAndSet(false)
         val owner = controller
         if (owner != null) {
-            val action = cleanup.next(explicitCleanupRetry.getAndSet(false))
+            val action = cleanup.next(explicitRetry)
             if (action == ControllerCleanupAction.NONE) return
             if (action == ControllerCleanupAction.SHUTDOWN_THEN_DESTROY) {
                 try {
@@ -228,6 +233,19 @@ internal class ApplicationPolicyActor(private val application: Application) {
             } catch (failure: Throwable) {
                 rethrowFatal(failure)
                 cleanup.failed()
+                return
+            }
+        }
+        if (!keyReferenceCleanup.complete()) {
+            if (!keyReferenceCleanup.shouldAttempt(explicitRetry)) return
+            try {
+                platform.releaseLocalKeyReferences()
+                keyReferenceCleanup.succeeded()
+            } catch (failure: Throwable) {
+                rethrowFatal(failure)
+                keyReferenceCleanup.failed()
+                // Keep this worker/adapter for an explicit retry even if no
+                // Rust handle was returned by the failed constructor.
                 return
             }
         }
@@ -254,7 +272,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
         is BridgeException.Busy -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.BUSY
         is BridgeException.HistoryTimeUnavailable -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.HISTORY_UNAVAILABLE
         is BridgeException.StorageUnavailable, is BridgeException.LifecycleIntegrationRequired,
-        is BridgeException.OwnerFaulted -> PolicyStatus.STORAGE_UNAVAILABLE
+        is BridgeException.OwnerFaulted, is BridgeException.LocalKeysReconciliationRequired,
+        is BridgeException.LocalKeysUnavailable -> PolicyStatus.STORAGE_UNAVAILABLE
         else -> PolicyStatus.UNAVAILABLE
     }
 

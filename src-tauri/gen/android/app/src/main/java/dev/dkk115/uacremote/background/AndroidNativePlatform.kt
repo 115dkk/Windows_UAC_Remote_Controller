@@ -8,6 +8,10 @@ import android.os.Looper
 import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.NativeClock
 import dev.dkk115.uacremote.nativecore.NativePlatform
+import dev.dkk115.uacremote.nativecore.NativeLocalKeySet
+import dev.dkk115.uacremote.security.DeviceKeyStore
+import dev.dkk115.uacremote.security.KeyStoreOutcome
+import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
 
 /**
  * Generated-trait adapter only. The Application owner calls it from a bounded
@@ -18,9 +22,44 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val application = application
     private val environment = NativeEnvironment(application)
     private val legacy = LegacyPolicyObservation(application)
+    private val keyStore = DeviceKeyStore(application)
 
     override fun legacyPolicyDocument(): String? = legacy.legacyPolicyDocument()
     override fun hasDeviceKeys(): Boolean = legacy.hasDeviceKeys()
+
+    override fun reopenLocalKeySets(keys: List<NativeLocalKeySet>) {
+        if (Looper.myLooper() == Looper.getMainLooper() || keys.isEmpty() || keys.size > 32) {
+            throw BridgeException.LocalKeysUnavailable()
+        }
+        // This is committed LOCAL metadata, not paired-device authorization.
+        // Copy/validate the whole tuple list before any reference publication.
+        val descriptors = keys.map { key ->
+            keyValue(ReopenKeySetDescriptor.fromTrustedStorage(
+                key.handle, key.approvalSpki, key.denialSpki, key.transportSpki,
+            ))
+        }
+        val handles = descriptors.map { it.copyHandle() }
+        try {
+            keyValue(keyStore.validateRecordedNamespace(handles))
+            for (descriptor in descriptors) keyValue(keyStore.reopenExistingKeySet(descriptor))
+            keyValue(keyStore.validateRecordedNamespace(handles))
+        } catch (_: Exception) {
+            // Close this adapter's references only. A failed close remains
+            // retryable through the Application-retained adapter; never touch
+            // aliases/snapshot bytes or an unrelated instance's registrations.
+            keyStore.closeReferences()
+            throw BridgeException.LocalKeysUnavailable()
+        }
+    }
+
+    override fun releaseLocalKeyReferences() {
+        keyValue(keyStore.closeReferences())
+    }
+
+    private fun <T> keyValue(result: KeyStoreOutcome<T>): T = when (result) {
+        is KeyStoreOutcome.Value -> result.value
+        is KeyStoreOutcome.Failure -> throw BridgeException.LocalKeysUnavailable()
+    }
 
     override fun unixMillis(): ULong {
         if (Looper.myLooper() == Looper.getMainLooper()) throw BridgeException.NativeUnavailable()

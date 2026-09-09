@@ -157,6 +157,15 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn reopen_local_key_sets(
+            &self,
+            _: Vec<crate::NativeLocalKeySet>,
+        ) -> Result<(), BridgeError> {
+            unreachable!("bootstrap does not reopen keys")
+        }
+        fn release_local_key_references(&self) -> Result<(), BridgeError> {
+            unreachable!("bootstrap does not release key references")
+        }
         fn state_directory(&self) -> Result<String, BridgeError> {
             unreachable!("not a directory resolver test")
         }

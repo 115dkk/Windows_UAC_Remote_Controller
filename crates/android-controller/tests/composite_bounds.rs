@@ -9,18 +9,23 @@ use activity_journal::{
     MAX_OUTCOME_HISTORY_BYTES, MAX_OUTCOME_HISTORY_RECORDS, OutcomeHistory, OutcomeHistoryError,
     OutcomeHistoryLimits,
 };
-use android_controller::{ControllerCheckpoint, ControllerCheckpointError};
+use android_controller::{
+    ControllerCheckpoint, ControllerCheckpointError, LocalAttestationChallenge, LocalKeyHandle,
+    LocalKeyLedger, LocalKeySetDescriptor, MAX_LOCAL_KEY_LEDGER_BYTES,
+};
 use approval_protocol::{
     BootEpoch, ChallengeNonce, ExpiryTick, OsSession, PcIdentity, RequestBinding, RequestContent,
     RequestId,
 };
 use notification_policy::Weekday;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+use p256::pkcs8::EncodePublicKey;
 use phone_request_core::{
     CapacityLimits, ClockReading, Effect, InboxClock, LocalTime, MonotonicTime, NotificationPolicy,
     PhoneBootId, PhoneInbox,
 };
 use phone_state_store::MAX_SNAPSHOT_BYTES;
+use secure_channel::TlsPublicKey;
 use service_protocol::{
     ClockCorrelation, ClockProbe, PcEvent, PcPublicKey, RequestResolution, ServiceTick,
     UnsignedPcEvent, VerifiedPcEvent,
@@ -29,8 +34,8 @@ use service_protocol::{
 const MILLI: u64 = 1_000_000;
 const RECORD_CAP: usize = 512;
 const BODY_MARKER: &str = "SYNTHETIC_COMPOSITE_BODY_NOT_PERSISTED";
-// Published v1 format sizes; no access to private constructors or state fields.
-const COMPOSITE_HEADER_BYTES: usize = 18;
+// Published v2 format sizes; no access to private constructors or state fields.
+const COMPOSITE_HEADER_BYTES: usize = 22;
 const HISTORY_HEADER_BYTES: usize = 22;
 
 fn pc(peer: u16) -> PcIdentity {
@@ -176,16 +181,48 @@ fn full_disjoint_history(pending_ids: &BTreeSet<[u8; 32]>) -> OutcomeHistory {
     history
 }
 
-fn envelope(inbox: &[u8], history: &[u8]) -> Vec<u8> {
+fn full_local_keys() -> LocalKeyLedger {
+    fn public(seed: u8) -> TlsPublicKey {
+        let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
+        let key = p256::PublicKey::from_sec1_bytes(
+            signing.verifying_key().to_encoded_point(false).as_bytes(),
+        )
+        .unwrap();
+        TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
+    }
+    let mut keys = LocalKeyLedger::default();
+    for index in 0..32_u8 {
+        let handle = LocalKeyHandle::from_bytes([index + 1; 32]).unwrap();
+        let challenge = LocalAttestationChallenge::from_bytes([index + 64; 32]).unwrap();
+        keys.begin_creation(handle, challenge).unwrap();
+        keys.record_created(
+            LocalKeySetDescriptor::new(
+                handle,
+                challenge,
+                public(2 + index * 3),
+                public(3 + index * 3),
+                public(4 + index * 3),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    keys
+}
+
+fn envelope(inbox: &[u8], history: &[u8], keys: &[u8]) -> Vec<u8> {
     // ControllerCheckpoint::new remains native-private. Supplying the published
     // envelope to its public strict decoder tests the same boundary as a load.
-    let mut bytes = Vec::with_capacity(COMPOSITE_HEADER_BYTES + inbox.len() + history.len());
+    let mut bytes =
+        Vec::with_capacity(COMPOSITE_HEADER_BYTES + inbox.len() + history.len() + keys.len());
     bytes.extend_from_slice(b"UACOWNR\0");
-    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&2_u16.to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(inbox.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(history.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&u32::try_from(keys.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(inbox);
     bytes.extend_from_slice(history);
+    bytes.extend_from_slice(keys);
     bytes
 }
 
@@ -205,10 +242,13 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
     assert_eq!(pending_ids.len(), RECORD_CAP);
     let history = full_disjoint_history(&pending_ids);
     let history_bytes = history.to_bytes().unwrap();
-    let bytes = envelope(&inbox_bytes, &history_bytes);
+    let keys = full_local_keys();
+    let key_bytes = keys.to_bytes().unwrap();
+    assert_eq!(key_bytes.len(), MAX_LOCAL_KEY_LEDGER_BYTES);
+    let bytes = envelope(&inbox_bytes, &history_bytes, &key_bytes);
     assert_eq!(
         bytes.len(),
-        COMPOSITE_HEADER_BYTES + inbox_bytes.len() + history_bytes.len()
+        COMPOSITE_HEADER_BYTES + inbox_bytes.len() + history_bytes.len() + key_bytes.len()
     );
     assert!(
         bytes.len() <= MAX_SNAPSHOT_BYTES,
@@ -228,6 +268,7 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
         inbox.pending_outcomes()
     );
     assert_eq!(composite.history().records(), history.records());
+    assert_eq!(composite.local_keys(), &keys);
     let encoded = composite.to_bytes().unwrap();
     assert_eq!(encoded, bytes);
     assert!(encoded.len() <= MAX_SNAPSHOT_BYTES);
@@ -253,7 +294,7 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
         .copy_from_slice(inbox.pending_outcomes()[0].delivery_id().as_bytes());
     assert!(OutcomeHistory::from_bytes(&overlapping_history).is_ok());
     assert_eq!(
-        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &overlapping_history))
+        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &overlapping_history, &key_bytes))
             .unwrap_err(),
         ControllerCheckpointError::RecordedPendingOverlap
     );
@@ -261,12 +302,14 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
     let mut excessive_count = history_bytes;
     excessive_count[20..22].copy_from_slice(&513_u16.to_be_bytes());
     assert_eq!(
-        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &excessive_count)).unwrap_err(),
+        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &excessive_count, &key_bytes))
+            .unwrap_err(),
         ControllerCheckpointError::History(OutcomeHistoryError::TooManyRecords)
     );
     for (start, claimed_length) in [
         (10, MAX_SNAPSHOT_BYTES + 1),
         (14, MAX_OUTCOME_HISTORY_BYTES + 1),
+        (18, MAX_LOCAL_KEY_LEDGER_BYTES + 1),
     ] {
         let mut excess_nested = bytes.clone();
         excess_nested[start..start + 4]

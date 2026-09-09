@@ -10,10 +10,14 @@ use phone_request_core::{InboxCheckpoint, InboxCheckpointError};
 use phone_state_store::MAX_SNAPSHOT_BYTES;
 use thiserror::Error;
 
+use crate::{LocalKeyError, LocalKeyLedger, MAX_LOCAL_KEY_LEDGER_BYTES};
+
 const MAGIC: &[u8; 8] = b"UACOWNR\0";
 const LEGACY_MAGIC: &[u8; 8] = b"UACINBX\0";
-const VERSION: u16 = 1;
-const HEADER_BYTES: usize = 18;
+const VERSION: u16 = 2;
+const LEGACY_COMPOSITE_VERSION: u16 = 1;
+const LEGACY_HEADER_BYTES: usize = 18;
+const HEADER_BYTES: usize = 22;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ControllerCheckpointError {
@@ -33,12 +37,15 @@ pub enum ControllerCheckpointError {
     Inbox(InboxCheckpointError),
     #[error("the nested outcome history is invalid")]
     History(OutcomeHistoryError),
+    #[error("the nested local key metadata is invalid")]
+    LocalKeys(LocalKeyError),
 }
 
 /// Strict metadata-only representation; not a runtime, permission or action token.
 pub struct ControllerCheckpoint {
     inbox: InboxCheckpoint,
     history: OutcomeHistory,
+    local_keys: LocalKeyLedger,
 }
 
 impl fmt::Debug for ControllerCheckpoint {
@@ -54,7 +61,19 @@ impl ControllerCheckpoint {
         inbox: InboxCheckpoint,
         history: OutcomeHistory,
     ) -> Result<Self, ControllerCheckpointError> {
-        let value = Self { inbox, history };
+        Self::with_local_keys(inbox, history, LocalKeyLedger::default())
+    }
+
+    pub(crate) fn with_local_keys(
+        inbox: InboxCheckpoint,
+        history: OutcomeHistory,
+        local_keys: LocalKeyLedger,
+    ) -> Result<Self, ControllerCheckpointError> {
+        let value = Self {
+            inbox,
+            history,
+            local_keys,
+        };
         value.validate_relationship()?;
         Ok(value)
     }
@@ -65,8 +84,11 @@ impl ControllerCheckpoint {
     pub fn history(&self) -> &OutcomeHistory {
         &self.history
     }
-    pub(crate) fn into_parts(self) -> (InboxCheckpoint, OutcomeHistory) {
-        (self.inbox, self.history)
+    pub fn local_keys(&self) -> &LocalKeyLedger {
+        &self.local_keys
+    }
+    pub(crate) fn into_parts(self) -> (InboxCheckpoint, OutcomeHistory, LocalKeyLedger) {
+        (self.inbox, self.history, self.local_keys)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ControllerCheckpointError> {
@@ -83,35 +105,61 @@ impl ControllerCheckpoint {
             }
             return Self::new(inbox, OutcomeHistory::new(OutcomeHistoryLimits::default()));
         }
-        if bytes.len() < HEADER_BYTES || !bytes.starts_with(MAGIC) {
+        if bytes.len() < LEGACY_HEADER_BYTES || !bytes.starts_with(MAGIC) {
             return Err(ControllerCheckpointError::InvalidEncoding);
         }
         let version = u16::from_be_bytes([bytes[8], bytes[9]]);
-        if version != VERSION {
+        if ![LEGACY_COMPOSITE_VERSION, VERSION].contains(&version) {
             return Err(ControllerCheckpointError::UnsupportedVersion);
         }
         let inbox_len = length(&bytes[10..14])?;
         let history_len = length(&bytes[14..18])?;
+        let (header_bytes, key_len) = if version == VERSION {
+            if bytes.len() < HEADER_BYTES {
+                return Err(ControllerCheckpointError::InvalidEncoding);
+            }
+            let key_len = length(&bytes[18..22])?;
+            if key_len == 0 {
+                return Err(ControllerCheckpointError::InvalidEncoding);
+            }
+            (HEADER_BYTES, key_len)
+        } else {
+            // This only supplies absent metadata. The native owner MUST check
+            // real namespace absence under the store lock before migration.
+            (LEGACY_HEADER_BYTES, 0)
+        };
         if inbox_len == 0 || history_len == 0 {
             return Err(ControllerCheckpointError::InvalidEncoding);
         }
-        if inbox_len > MAX_SNAPSHOT_BYTES || history_len > MAX_OUTCOME_HISTORY_BYTES {
+        if inbox_len > MAX_SNAPSHOT_BYTES
+            || history_len > MAX_OUTCOME_HISTORY_BYTES
+            || key_len > MAX_LOCAL_KEY_LEDGER_BYTES
+        {
             return Err(ControllerCheckpointError::TooLarge);
         }
-        let inbox_end = HEADER_BYTES
+        let inbox_end = header_bytes
             .checked_add(inbox_len)
             .ok_or(ControllerCheckpointError::TooLarge)?;
-        let total = inbox_end
+        let history_end = inbox_end
             .checked_add(history_len)
+            .ok_or(ControllerCheckpointError::TooLarge)?;
+        let total = history_end
+            .checked_add(key_len)
             .ok_or(ControllerCheckpointError::TooLarge)?;
         if total != bytes.len() {
             return Err(ControllerCheckpointError::InvalidEncoding);
         }
-        let inbox = InboxCheckpoint::from_bytes(&bytes[HEADER_BYTES..inbox_end])
+        let inbox = InboxCheckpoint::from_bytes(&bytes[header_bytes..inbox_end])
             .map_err(ControllerCheckpointError::Inbox)?;
-        let history = OutcomeHistory::from_bytes(&bytes[inbox_end..])
+        let history = OutcomeHistory::from_bytes(&bytes[inbox_end..history_end])
             .map_err(ControllerCheckpointError::History)?;
-        Self::new(inbox, history)
+        let local_keys = if key_len == 0 {
+            LocalKeyLedger::default()
+        } else {
+            LocalKeyLedger::from_bytes(&bytes[history_end..])
+                .map_err(ControllerCheckpointError::LocalKeys)?
+        };
+        Self::with_local_keys(inbox, history, local_keys)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, ControllerCheckpointError> {
@@ -124,9 +172,14 @@ impl ControllerCheckpoint {
             .history
             .to_bytes()
             .map_err(ControllerCheckpointError::History)?;
+        let local_keys = self
+            .local_keys
+            .to_bytes()
+            .map_err(ControllerCheckpointError::LocalKeys)?;
         let total = HEADER_BYTES
             .checked_add(inbox.len())
             .and_then(|v| v.checked_add(history.len()))
+            .and_then(|v| v.checked_add(local_keys.len()))
             .filter(|v| *v <= MAX_SNAPSHOT_BYTES)
             .ok_or(ControllerCheckpointError::TooLarge)?;
         let mut bytes = Vec::with_capacity(total);
@@ -142,8 +195,14 @@ impl ControllerCheckpoint {
                 .map_err(|_| ControllerCheckpointError::TooLarge)?
                 .to_be_bytes(),
         );
+        bytes.extend_from_slice(
+            &u32::try_from(local_keys.len())
+                .map_err(|_| ControllerCheckpointError::TooLarge)?
+                .to_be_bytes(),
+        );
         bytes.extend_from_slice(&inbox);
         bytes.extend_from_slice(&history);
+        bytes.extend_from_slice(&local_keys);
         Ok(bytes)
     }
 

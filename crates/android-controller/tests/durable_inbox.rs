@@ -309,12 +309,12 @@ fn composite_checkpoint_rejects_truncation_unknown_version_nested_limits_and_tra
         assert!(ControllerCheckpoint::from_bytes(&bytes[..end]).is_err());
     }
     let mut unknown = bytes.clone();
-    unknown[8..10].copy_from_slice(&2_u16.to_be_bytes());
+    unknown[8..10].copy_from_slice(&3_u16.to_be_bytes());
     assert_eq!(
         ControllerCheckpoint::from_bytes(&unknown).unwrap_err(),
         ControllerCheckpointError::UnsupportedVersion
     );
-    for offset in [10, 14] {
+    for offset in [10, 14, 18] {
         let mut excessive = bytes.clone();
         excessive[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(

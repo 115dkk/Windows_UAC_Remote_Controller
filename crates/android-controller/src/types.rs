@@ -17,6 +17,12 @@ pub enum DurableFault {
     Composite(crate::ControllerCheckpointError),
     #[error("the bounded outcome history rejected this transition")]
     History(activity_journal::OutcomeHistoryError),
+    #[error("local key metadata requires explicit reconciliation")]
+    LocalKeyReconciliationRequired,
+    #[error("the native local key owner is unavailable")]
+    NativeLocalKeysUnavailable,
+    #[error("local key metadata is invalid")]
+    LocalKeys(crate::LocalKeyError),
     #[error("the native owner requires directory-synchronized storage")]
     DirectorySynchronizationRequired,
     #[error("the phone owner transition did not complete")]
@@ -127,6 +133,16 @@ pub struct CommittedOutcomeAcknowledgment {
 pub struct CommittedHistoryMutation {
     pub(crate) receipt: CommitReceipt,
     pub(crate) affected: usize,
+}
+
+/// Rejected metadata input does not mutate the store. Persistence failures retain
+/// the ordinary fail-closed owner/cleanup requirement and imply no key rollback.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum LocalKeyMutationError {
+    #[error("local key metadata input was rejected")]
+    Rejected(crate::LocalKeyError),
+    #[error("the local metadata storage owner stopped")]
+    Owner(DurableFailure),
 }
 impl CommittedHistoryMutation {
     pub const fn receipt(self) -> CommitReceipt {

@@ -62,6 +62,17 @@ internal enum class PolicyOwnerPhase { NEW, STARTING, READY, FAILED, STOPPING, C
 
 internal enum class ControllerCleanupAction { NONE, SHUTDOWN_THEN_DESTROY, DESTROY }
 
+/** Memory-key cleanup also exists when a Rust constructor returned no handle. */
+internal class KeyReferenceCleanupState {
+    private var done = false
+    private var retryRequired = false
+    fun complete(): Boolean = done
+    fun shouldAttempt(explicitRetry: Boolean): Boolean = !done && (!retryRequired || explicitRetry)
+    fun succeeded() { done = true; retryRequired = false }
+    fun failed() { if (!done) retryRequired = true }
+    override fun toString(): String = "KeyReferenceCleanupState(owner_scoped)"
+}
+
 /** Worker-owned cleanup obligation. A failed shutdown never authorizes destroy. */
 internal class ControllerCleanupState {
     private var shutdownAcknowledged = false
@@ -125,7 +136,7 @@ internal class PolicyOwnerLifecycle {
 /** Only property names are inspected; values are never logged or used as paths. */
 internal object ControllerLibraryPolicy {
     const val LIBRARY = "uac_android_controller"
-    const val ABI_VERSION = 3u
+    const val ABI_VERSION = 4u
 
     fun permitsInitialProperties(names: Iterable<String>): Boolean {
         var count = 0

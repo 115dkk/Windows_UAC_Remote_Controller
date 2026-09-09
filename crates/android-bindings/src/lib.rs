@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 mod bootstrap;
+mod local_keys;
+pub use local_keys::NativeLocalKeySet;
 
 use android_controller::{DurableFault, DurableInbox};
 use notification_policy::{CapacityLimits, LocalTime, MonotonicTime, Weekday};
@@ -14,7 +16,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -40,6 +42,10 @@ pub enum BridgeError {
     Closed,
     #[error("native history timestamp is unavailable")]
     HistoryTimeUnavailable,
+    #[error("local key state requires explicit reconciliation")]
+    LocalKeysReconciliationRequired,
+    #[error("native local key references could not be reopened")]
+    LocalKeysUnavailable,
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
@@ -72,6 +78,15 @@ pub trait NativePlatform: Send + Sync {
     fn legacy_policy_document(&self) -> Result<Option<String>, BridgeError>;
     /// Existing controller aliases prevent fresh state; unavailable is an error.
     fn has_device_keys(&self) -> Result<bool, BridgeError>;
+    /// Reopen exact recorded aliases only; verify the complete owned namespace,
+    /// KeyInfo policy and all three SPKIs. No generation, signing or auth prompt.
+    /// Each NativePlatform instance owns its references; it must keep a cleanup
+    /// obligation before partial publication and through any callback failure.
+    fn reopen_local_key_sets(&self, keys: Vec<NativeLocalKeySet>) -> Result<(), BridgeError>;
+    /// Memory-only, owner-scoped and idempotent. Never delete persisted aliases,
+    /// change metadata, clear another instance or retry generation. The native
+    /// Application retains this adapter to retry cleanup after constructor error.
+    fn release_local_key_references(&self) -> Result<(), BridgeError>;
     /// Must clear only this app's request notifications and caller-held views.
     /// No Activity, permission prompt or authentication may be opened here.
     fn clear_request_notifications(&self) -> Result<(), BridgeError>;
@@ -109,6 +124,8 @@ pub struct MobileController {
     state: Mutex<Option<DurableInbox>>,
     active: AtomicBool,
     cleanup_pending: AtomicBool,
+    key_cleanup_pending: AtomicBool,
+    native_floor_nanos: AtomicU64,
     // Hold through close/cleanup and until the generated object is destroyed.
     _owner_lease: OwnerLease,
 }
@@ -120,7 +137,7 @@ impl fmt::Debug for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    3
+    4
 }
 
 #[uniffi::export]
@@ -264,6 +281,7 @@ impl MobileController {
     }
     fn open(platform: Arc<dyn NativePlatform>, mode: OpenMode) -> Result<Arc<Self>, BridgeError> {
         let owner_lease = OwnerLease::acquire()?;
+        let mut key_cleanup_needed = false;
         let result = (|| {
             let path = platform.state_directory()?;
             if path.is_empty() || path.len() > 4096 {
@@ -279,7 +297,9 @@ impl MobileController {
                 OpenMode::Existing => bootstrap::InitialState::Existing,
             };
             // This is a native constructor, never Windows's weaker host model.
-            let (owner, update) = if let bootstrap::InitialState::Fresh(policy) = initial {
+            let mut preflight_error = None;
+            let fresh = matches!(&initial, bootstrap::InitialState::Fresh(_));
+            let created = if let bootstrap::InitialState::Fresh(policy) = initial {
                 DurableInbox::create_fresh(
                     directory,
                     policy,
@@ -288,15 +308,44 @@ impl MobileController {
                     clock,
                 )
             } else {
-                DurableInbox::open_existing_policy_only(directory, boot, clock)
-            }
-            .map_err(|error| {
+                DurableInbox::open_existing_policy_only_with_key_preflight(
+                    directory,
+                    boot,
+                    clock,
+                    |checkpoint| {
+                        local_keys::preflight(
+                            checkpoint.local_keys(),
+                            &*platform,
+                            &mut key_cleanup_needed,
+                        )
+                        .map_err(|error| {
+                            preflight_error = Some(error);
+                            DurableFault::NativeLocalKeysUnavailable
+                        })
+                    },
+                )
+            };
+            let (owner, update) = created.map_err(|error| {
+                if let Some(cause) = preflight_error {
+                    return cause;
+                }
                 if error.cause() == DurableFault::LifecycleIntegrationRequired {
                     BridgeError::LifecycleIntegrationRequired
                 } else {
                     BridgeError::StorageUnavailable
                 }
             })?;
+            if fresh {
+                // Recheck namespace absence under the new owner as well. A
+                // concurrent unexpected alias never turns empty metadata ready.
+                local_keys::preflight(
+                    owner
+                        .local_keys()
+                        .map_err(|_| BridgeError::StorageUnavailable)?,
+                    &*platform,
+                    &mut key_cleanup_needed,
+                )?;
+            }
             if owner
                 .inbox_fault()
                 .map_err(|_| BridgeError::StorageUnavailable)?
@@ -319,20 +368,35 @@ impl MobileController {
                 // existing owner's notifications.
                 platform.clear_request_notifications()?;
             }
-            Ok((boot, owner))
+            let (finished_boot, finished_clock) = map_clock(platform.clock()?)?;
+            if finished_boot != boot
+                || finished_clock.phone_monotonic_nanos() < clock.phone_monotonic_nanos()
+            {
+                return Err(BridgeError::InvalidObservation);
+            }
+            Ok((boot, finished_clock.phone_monotonic_nanos(), owner))
         })();
         match result {
-            Ok((boot, owner)) => Ok(Arc::new(Self {
+            Ok((boot, native_floor, owner)) => Ok(Arc::new(Self {
                 platform,
                 boot,
                 state: Mutex::new(Some(owner)),
                 active: AtomicBool::new(false),
                 cleanup_pending: AtomicBool::new(false),
+                key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
+                native_floor_nanos: AtomicU64::new(native_floor),
                 _owner_lease: owner_lease,
             })),
             // A rejected constructor is not the notification owner. In
             // particular Busy/preflight failures must not clear another owner.
-            Err(error) => Err(error),
+            Err(error) => {
+                if key_cleanup_needed {
+                    // Preserve primary failure. The Application still retains
+                    // this exact adapter and retries a failed memory cleanup.
+                    let _ = platform.release_local_key_references();
+                }
+                Err(error)
+            }
         }
     }
     fn enter(&self) -> Result<Admission<'_>, BridgeError> {
@@ -360,7 +424,14 @@ impl MobileController {
     fn read_clock(&self) -> Result<InboxClock, BridgeError> {
         // Foreign callbacks occur outside the state mutex; re-entry is Busy.
         match self.platform.clock().and_then(map_clock) {
-            Ok((boot, clock)) if boot == self.boot => Ok(clock),
+            Ok((boot, clock)) if boot == self.boot => {
+                let observed = clock.phone_monotonic_nanos();
+                if observed < self.native_floor_nanos.load(Ordering::Acquire) {
+                    return self.fail_closed(BridgeError::InvalidObservation);
+                }
+                self.native_floor_nanos.store(observed, Ordering::Release);
+                Ok(clock)
+            }
             Ok(_) => self.fail_closed(BridgeError::InvalidObservation),
             Err(error) => self.fail_closed(error),
         }
@@ -378,13 +449,25 @@ impl MobileController {
         had_owner
     }
     fn finish_cleanup(&self) -> Result<(), BridgeError> {
-        if self.cleanup_pending.load(Ordering::Acquire) {
+        let notifications = if self.cleanup_pending.load(Ordering::Acquire) {
             self.platform
                 .clear_request_notifications()
-                .map_err(|_| BridgeError::NativeUnavailable)?;
-            self.cleanup_pending.store(false, Ordering::Release);
-        }
-        Ok(())
+                .map(|()| self.cleanup_pending.store(false, Ordering::Release))
+        } else {
+            Ok(())
+        };
+        let keys = if self.key_cleanup_pending.load(Ordering::Acquire) {
+            self.platform
+                .release_local_key_references()
+                .map(|()| self.key_cleanup_pending.store(false, Ordering::Release))
+        } else {
+            Ok(())
+        };
+        // Attempt both independent downward cleanups; one failure must not skip
+        // the other. Failed obligations remain for explicit shutdown retry.
+        notifications
+            .and(keys)
+            .map_err(|_| BridgeError::NativeUnavailable)
     }
     fn fail_closed<T>(&self, error: BridgeError) -> Result<T, BridgeError> {
         self.drop_owner();
@@ -428,7 +511,10 @@ fn map_clock(observed: NativeClock) -> Result<(PhoneBootId, InboxClock), BridgeE
 mod tests {
     use super::*;
     use notification_policy::NotificationPolicy;
-    use std::sync::{Weak, atomic::AtomicUsize};
+    use std::{
+        collections::VecDeque,
+        sync::{Weak, atomic::AtomicUsize},
+    };
     static SERIAL: Mutex<()> = Mutex::new(());
     struct TestPlatform {
         path: String,
@@ -438,8 +524,50 @@ mod tests {
         clear_fails: AtomicBool,
         reenter: Mutex<Option<Weak<MobileController>>>,
         saw_busy: AtomicBool,
+        clock_samples: Mutex<VecDeque<NativeClock>>,
+        keys_present: AtomicBool,
+        key_callbacks: Mutex<KeyCallbacks>,
+    }
+    #[derive(Default)]
+    struct KeyCallbacks {
+        reopens: usize,
+        releases: usize,
+        reopen_fails: bool,
+        release_fails: bool,
+    }
+    fn test_platform(path: String, clock: NativeClock) -> Arc<TestPlatform> {
+        Arc::new(TestPlatform {
+            path,
+            clock: Mutex::new(clock),
+            history_time: Mutex::new(Ok(1_234_567)),
+            cleared: AtomicUsize::new(0),
+            clear_fails: AtomicBool::new(false),
+            reenter: Mutex::new(None),
+            saw_busy: AtomicBool::new(false),
+            clock_samples: Mutex::new(VecDeque::new()),
+            keys_present: AtomicBool::new(false),
+            key_callbacks: Mutex::new(KeyCallbacks::default()),
+        })
     }
     impl NativePlatform for TestPlatform {
+        fn reopen_local_key_sets(&self, _: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
+            let mut state = self.key_callbacks.lock().unwrap();
+            state.reopens += 1;
+            if state.reopen_fails {
+                Err(BridgeError::LocalKeysUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+        fn release_local_key_references(&self) -> Result<(), BridgeError> {
+            let mut state = self.key_callbacks.lock().unwrap();
+            state.releases += 1;
+            if state.release_fails {
+                Err(BridgeError::LocalKeysUnavailable)
+            } else {
+                Ok(())
+            }
+        }
         fn unix_millis(&self) -> Result<u64, BridgeError> {
             *self.history_time.lock().unwrap()
         }
@@ -447,7 +575,7 @@ mod tests {
             Ok(None)
         }
         fn has_device_keys(&self) -> Result<bool, BridgeError> {
-            Ok(false)
+            Ok(self.keys_present.load(Ordering::Acquire))
         }
         fn state_directory(&self) -> Result<String, BridgeError> {
             Ok(self.path.clone())
@@ -460,7 +588,12 @@ mod tests {
                     Ordering::Release,
                 );
             }
-            Ok(*self.clock.lock().unwrap())
+            Ok(self
+                .clock_samples
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(*self.clock.lock().unwrap()))
         }
         fn clear_request_notifications(&self) -> Result<(), BridgeError> {
             self.cleared.fetch_add(1, Ordering::Relaxed);
@@ -480,15 +613,7 @@ mod tests {
             weekday: 0,
             minute: 600,
         };
-        let platform = Arc::new(TestPlatform {
-            path: directory.path().to_str().unwrap().into(),
-            clock: Mutex::new(clock),
-            history_time: Mutex::new(Ok(1_234_567)),
-            cleared: AtomicUsize::new(0),
-            clear_fails: AtomicBool::new(false),
-            reenter: Mutex::new(None),
-            saw_busy: AtomicBool::new(false),
-        });
+        let platform = test_platform(directory.path().to_str().unwrap().into(), clock);
         let (boot, clock) = map_clock(clock).unwrap();
         let (owner, _) = DurableInbox::create_fresh_host_model(
             NativePrivateDirectory::from_native_app_data(directory.path()).unwrap(),
@@ -504,9 +629,219 @@ mod tests {
             state: Mutex::new(Some(owner)),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
+            key_cleanup_pending: AtomicBool::new(false),
+            native_floor_nanos: AtomicU64::new(clock.phone_monotonic_nanos()),
             _owner_lease: OwnerLease::acquire().unwrap(),
         });
         test(&controller, &platform);
+    }
+
+    #[test]
+    fn both_downward_cleanup_obligations_are_attempted_and_retained_on_failure() {
+        with_model(|controller, platform| {
+            controller
+                .key_cleanup_pending
+                .store(true, Ordering::Release);
+            platform.clear_fails.store(true, Ordering::Release);
+            platform.key_callbacks.lock().unwrap().release_fails = true;
+            assert_eq!(
+                controller.shutdown_native_owner(),
+                Err(BridgeError::NativeUnavailable)
+            );
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 1);
+            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 1);
+            assert!(controller.cleanup_pending.load(Ordering::Acquire));
+            assert!(controller.key_cleanup_pending.load(Ordering::Acquire));
+            platform.clear_fails.store(false, Ordering::Release);
+            platform.key_callbacks.lock().unwrap().release_fails = false;
+            controller.shutdown_native_owner().unwrap();
+            controller.shutdown_native_owner().unwrap();
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 2);
+            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 2);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn constructor_final_clock_is_retained_as_the_next_operation_floor() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let at = |nanos| NativeClock {
+            boot_count: 1,
+            monotonic_nanos: nanos,
+            weekday: 0,
+            minute: 600,
+        };
+        let platform = test_platform(temp.path().to_str().unwrap().into(), at(1_500_000_000));
+        platform
+            .clock_samples
+            .lock()
+            .unwrap()
+            .extend([at(1_000_000_000), at(2_000_000_000)]);
+        let controller = MobileController::open_or_initialize(platform.clone()).unwrap();
+        assert_eq!(
+            controller.native_floor_nanos.load(Ordering::Acquire),
+            2_000_000_000
+        );
+        let policy = serde_json::to_string(&NotificationPolicy::default()).unwrap();
+        assert_eq!(
+            controller.save_notification_policy(policy),
+            Err(BridgeError::InvalidObservation)
+        );
+        assert_eq!(
+            controller.notification_policy_json(),
+            Err(BridgeError::Closed)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn seed_local_keys(path: &std::path::Path, clock: NativeClock, pending: bool) {
+        use android_controller::{
+            LocalAttestationChallenge, LocalKeyHandle, LocalKeySetDescriptor,
+        };
+        use p256::{ecdsa::SigningKey, pkcs8::EncodePublicKey};
+        use secure_channel::TlsPublicKey;
+        let key = |seed| {
+            let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
+            let public = p256::PublicKey::from_sec1_bytes(
+                signing.verifying_key().to_encoded_point(false).as_bytes(),
+            )
+            .unwrap();
+            TlsPublicKey::from_spki_der(public.to_public_key_der().unwrap().as_bytes()).unwrap()
+        };
+        let (boot, clock) = map_clock(clock).unwrap();
+        let (mut owner, _) = DurableInbox::create_fresh_host_model(
+            NativePrivateDirectory::from_native_app_data(path).unwrap(),
+            NotificationPolicy::default(),
+            CapacityLimits::default(),
+            boot,
+            clock,
+        )
+        .unwrap();
+        let handle = LocalKeyHandle::from_bytes([1; 32]).unwrap();
+        let challenge = LocalAttestationChallenge::from_bytes([2; 32]).unwrap();
+        owner.begin_local_key_creation(handle, challenge).unwrap();
+        if !pending {
+            owner
+                .record_local_key_creation(
+                    LocalKeySetDescriptor::new(handle, challenge, key(3), key(4), key(5)).unwrap(),
+                )
+                .unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_native_reopen_failure_releases_own_refs_before_return_without_store_change() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let clock = NativeClock {
+            boot_count: 1,
+            monotonic_nanos: 1_000_000_000,
+            weekday: 0,
+            minute: 600,
+        };
+        seed_local_keys(temp.path(), clock, false);
+        let before =
+            std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap();
+        let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+        platform.keys_present.store(true, Ordering::Release);
+        platform.key_callbacks.lock().unwrap().reopen_fails = true;
+        assert_eq!(
+            MobileController::open_existing(platform.clone()).unwrap_err(),
+            BridgeError::LocalKeysUnavailable
+        );
+        let calls = platform.key_callbacks.lock().unwrap();
+        assert_eq!(calls.reopens, 1);
+        assert_eq!(calls.releases, 1);
+        assert_eq!(platform.cleared.load(Ordering::Acquire), 0);
+        assert_eq!(
+            std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap(),
+            before
+        );
+        assert!(
+            !temp
+                .path()
+                .join(phone_state_store::INTENT_FILE_NAME)
+                .exists()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn late_constructor_failure_keeps_primary_error_and_releases_reopened_refs() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        for fail_cleanup in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let at = |nanos| NativeClock {
+                boot_count: 1,
+                monotonic_nanos: nanos,
+                weekday: 0,
+                minute: 600,
+            };
+            seed_local_keys(temp.path(), at(1_000_000_000), false);
+            let platform = test_platform(temp.path().to_str().unwrap().into(), at(900_000_000));
+            platform
+                .clock_samples
+                .lock()
+                .unwrap()
+                .push_back(at(1_000_000_000));
+            platform.key_callbacks.lock().unwrap().release_fails = fail_cleanup;
+            assert_eq!(
+                MobileController::open_existing(platform.clone()).unwrap_err(),
+                BridgeError::InvalidObservation
+            );
+            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 1);
+            // Native Application retains this same adapter even with no Rust
+            // handle returned. It can retry only its own pending memory cleanup.
+            platform.key_callbacks.lock().unwrap().release_fails = false;
+            platform.release_local_key_references().unwrap();
+            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 2);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preparing_or_untracked_aliases_are_rejected_before_any_reopen_or_migration() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        for pending in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let clock = NativeClock {
+                boot_count: 1,
+                monotonic_nanos: 1_000_000_000,
+                weekday: 0,
+                minute: 600,
+            };
+            if pending {
+                seed_local_keys(temp.path(), clock, true);
+            } else {
+                let (boot, observed) = map_clock(clock).unwrap();
+                drop(
+                    DurableInbox::create_fresh_host_model(
+                        NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
+                        NotificationPolicy::default(),
+                        CapacityLimits::default(),
+                        boot,
+                        observed,
+                    )
+                    .unwrap(),
+                );
+            }
+            let before =
+                std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap();
+            let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+            platform.keys_present.store(!pending, Ordering::Release);
+            assert_eq!(
+                MobileController::open_existing(platform.clone()).unwrap_err(),
+                BridgeError::LocalKeysReconciliationRequired
+            );
+            assert_eq!(platform.key_callbacks.lock().unwrap().reopens, 0);
+            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 0);
+            assert_eq!(
+                std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap(),
+                before
+            );
+        }
     }
 
     #[test]
