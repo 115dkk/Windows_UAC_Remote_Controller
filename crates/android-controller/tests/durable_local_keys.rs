@@ -117,19 +117,23 @@ fn preparing_survives_restart_and_cannot_be_retried_as_a_new_creation() {
 fn created_public_metadata_reopens_and_survives_policy_and_history_changes() {
     let temp = tempfile::tempdir().unwrap();
     let mut owner = fresh(&temp);
-    owner
+    let prepared = owner
         .begin_local_key_creation(handle(), challenge())
         .unwrap();
+    assert!(prepared.changed());
     let (_, result) = owner.record_local_key_creation(descriptor()).unwrap();
     assert_eq!(result, LocalKeyObservation::RecordedUnverified);
     let expected = owner.local_keys().unwrap().clone();
-    owner
+    let updated = owner
         .update_policy(
             NotificationPolicy::new(Some(Schedule::Never), AlertMode::Silent),
             clock(1),
         )
         .unwrap();
-    owner.clear_history().unwrap();
+    assert!(updated.receipt().changed());
+    assert!(updated.update().effects().is_empty());
+    let cleared = owner.clear_history().unwrap();
+    assert_eq!(cleared.affected(), 0);
     drop(owner);
     let observed = Cell::new(false);
     let (mut owner, _) = DurableInbox::open_existing_host_model_with_key_preflight(
@@ -165,9 +169,10 @@ fn created_public_metadata_reopens_and_survives_policy_and_history_changes() {
 fn failed_created_metadata_write_does_not_expose_created_or_erase_pending() {
     let temp = tempfile::tempdir().unwrap();
     let mut owner = fresh(&temp);
-    owner
+    let prepared = owner
         .begin_local_key_creation(handle(), challenge())
         .unwrap();
+    assert!(prepared.changed());
     let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
     fs::write(
         temp.path().join(STAGING_FILE_NAME),

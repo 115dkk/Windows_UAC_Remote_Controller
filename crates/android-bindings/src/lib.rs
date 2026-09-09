@@ -720,13 +720,19 @@ mod tests {
         .unwrap();
         let handle = LocalKeyHandle::from_bytes([1; 32]).unwrap();
         let challenge = LocalAttestationChallenge::from_bytes([2; 32]).unwrap();
-        owner.begin_local_key_creation(handle, challenge).unwrap();
+        let prepared = owner.begin_local_key_creation(handle, challenge).unwrap();
+        assert!(prepared.changed());
         if !pending {
-            owner
+            let (recorded, observation) = owner
                 .record_local_key_creation(
                     LocalKeySetDescriptor::new(handle, challenge, key(3), key(4), key(5)).unwrap(),
                 )
                 .unwrap();
+            assert!(recorded.changed());
+            assert_eq!(
+                observation,
+                android_controller::LocalKeyObservation::RecordedUnverified
+            );
         }
     }
 
