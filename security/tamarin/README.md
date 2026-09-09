@@ -34,7 +34,9 @@ This is **not exact TLS 1.3 wire modeling**: transcript encoding, HKDF/key sched
 
 Fifteen rules separate `CreatePc` from repeated trusted device enrollment, allowing multiple approvers under the **same PC**. Each device has linear `CurrentRegistry`/`RetiredRegistry` state. A request's `Building(pc, binding)` phase captures immutable per-device `Snapshot` facts containing the exact current revision and purpose keys. Publish consumes Building and creates exactly one **global `Pending(pc, binding)`**. Every eligible device and both decision purposes must consume that same Pending; there is no per-device replay guard.
 
-The short build/publish phase holds the PC's linear owner token, representing the existing engine's exclusive mutation scope: registry mutation/acceptance cannot interleave with snapshot collection. Snapshot capture is impossible after publication because Building no longer exists. Any nonempty subset of current devices can be captured, including the full registry; this includes actual full-registry enumerations but does not prove completeness of recipient enumeration or notification delivery. These are operational state rules, not restrictions assuming the security conclusions.
+There is deliberately **no global `PcAvailable` owner token**. Enrollment requires the already-existing persistent HostContext instead. Registry changes and other requests may interleave between snapshot captures, so this model overapproximates the Rust owner's atomic collection/serialization and admits more adversarial schedules. Each capture still requires that device's linear current registration; capture remains impossible after publication because the per-request Building no longer exists. The existing serial full-registry enumerations remain possible, alongside nonempty subsets and additional interleavings. Neither atomic collection nor completeness of notification delivery is proved by this abstraction.
+
+Removing the global token retains former traces while adding behavior. A completed proof of the same six all-traces request-safety lemmas would therefore not weaken their conclusions. The three exists-trace lemmas demonstrate non-vacuity of the enlarged model, not automatically the realizability of every witness in the real serialized owner. ROOT must inspect actual prover witnesses; no new restriction, derived fact, assumed lemma, session bound or signature/authentication change accompanies this optimization.
 
 Accepting, cancelling or expiring consumes the global Pending. Revoking removes the current per-device registration; re-enrollment/replacement uses a fresh revision token, including when keys are unchanged. A new member or new revision cannot adopt a published request's older frozen eligibility. The at-most-once lemma quantifies **different devices, revisions and purposes**; a separate honest trace has two distinct eligible devices sign the same published request before one acceptance.
 
@@ -53,12 +55,26 @@ Revision freshness abstracts the real allocator's no-reuse behavior, not u64 ari
 | Bounded/cancellable native socket ownership | `crates/framed-transport/src/socket.rs`: `SocketDriver`; deadlines, guard polling, partial IO and resource bounds are **not** established by the symbolic model |
 | Native transport key callbacks | `crates/android-bindings/src/transport.rs`: opaque transport binding/CertificateVerify; `crates/windows-identity/src/lib.rs`: protected PC identity signing; native ownership is outside this proof |
 | Full canonical statement and separate signature domains | `crates/approval-protocol/src/lib.rs`: `RequestBinding`, `UnsignedDecision::signing_bytes`, `SignedDecision::from_wire`/`verify` |
-| Per-device registry revisions, frozen multi-device eligibility and global Pending | `crates/approval-core/src/lib.rs`: privileged enroll/replace/revoke; `open_from_privileged_host` clones the eligible registry inside one exclusive mutation; `submit_decision` consumes the single request regardless of winning device; cancel/expire |
+| Per-device registry revisions, frozen multi-device eligibility and global Pending | `crates/approval-core/src/lib.rs`: privileged enroll/replace/revoke; `open_from_privileged_host` atomically clones eligibility (the model additionally allows interleaved collection); `submit_decision` consumes the single request regardless of winning device; cancel/expire |
 | Persisted allocator history | `crates/approval-core/src/registry_checkpoint.rs` and `crates/windows-service-host/src/trust_registry.rs`; symbolic fresh revisions do not prove these codecs/filesystem commits |
 | PC-origin original binding, content digest, issuance and expiry | `crates/service-protocol/src/message.rs`; this request model does not prove PC-event encoding/signature checking or clock correlation |
 | Exact-binding per-use phone approval plan | `crates/android-controller/src/approval.rs` and native auth owner; `ApprovalTicket` abstracts this trusted boundary, not Android execution |
 
 Tuple constructors and cryptography are symbolic; byte-width bounds, Unicode, strict DER/P-256 parsing, signature malleability, constant-time behavior, memory/resource safety, pairing UX, availability/DoS, notification/history effects and actual Windows application of a decision are not proved. The two models do not automatically constitute a composed end-to-end implementation proof.
+
+### Ordinary serial witness candidates for ROOT review
+
+These are candidate rule sequences, **not executed/proved traces**. They require no interleaving that the actual exclusive PC owner forbids. `Capture(d)` means `CaptureEligibleDevice` for that current device; `Auth(d)`/`Sign(d)` mean the exact-binding authentication/signing rules. The binding and signatures are public after their Out rules, so the attacker can relay or replay them.
+
+| Witness | Serial rule sequence |
+| --- | --- |
+| `honest_approve_trace` | CreatePc; TrustedEnrollment(d1); OpenActualRequest; Capture(d1); PublishRequest; Auth(d1); Sign(d1); AcceptApproval(d1) |
+| `honest_deny_without_approval_auth_trace` | Same prefix through PublishRequest; SignDenialWithoutApprovalAuthentication(d1); AcceptDenial(d1), without an Auth event |
+| `honest_two_approvers_single_winner_trace` | CreatePc; TrustedEnrollment(d1); TrustedEnrollment(d2), d1 != d2; OpenActualRequest; Capture(d1); Capture(d2); PublishRequest; Auth/Sign(d1); Auth/Sign(d2); AcceptApproval(d1). The ordinary global Pending is consumed; the second device cannot also accept. |
+| Missing-signature canary | First sequence through PublishRequest; attacker injects the public binding plus an arbitrary forged approval signature; mutated AcceptApproval, with no Auth/Sign rule. |
+| Retained-Pending canary | Honest approval sequence through its first AcceptApproval; attacker replays that already-public same decision; mutated AcceptApproval executes again because it restored the same global Pending. |
+
+The unchanged PC-pin canary likewise needs only a serial phone session: CreatePc; TrustedEnrollment; PhoneStarts; attacker forges its own server-key/DH/confirmation flight; mutated PhoneChecksPinSignatureAndConfirmation; attacker supplies the matching ready confirmation; PhoneReleasesEncryptedApplicationSecret; attacker decrypts with the known forged-session key. Actual positive/counterexample verdicts and witness correspondence remain ROOT-owned gates.
 
 ## Lemmas and required ROOT verdicts
 
