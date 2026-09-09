@@ -113,6 +113,7 @@ test('unknown row/lemma/input/origin and altered normal invocation reject', (t) 
     (row) => { row.model = '../outside.spthy'; }, (row) => { row.origin.source = 'security/tamarin/Other.spthy'; },
     (row) => { row.arguments[0] = join(f.root, 'outside.spthy'); },
     (row) => { row.arguments.push('--bound=8'); },
+    (row) => { row.arguments.push('--bound=16'); },
     (row) => { row.origin.mutation = { from: 'a', to: 'b' }; },
   ];
   for (const change of changes) {
@@ -164,10 +165,10 @@ test('read-only normal summary and snapshot symlinks are rejected', { skip: proc
   });
 });
 
-test('diagnostic arguments are one depth8/i/NONE run with no output/extraction flags', (t) => {
+test('diagnostic arguments are one depth16/i/NONE run with no output/extraction flags', (t) => {
   const f = fixture(t), path = join(f.root, 'artifacts/protocol-diagnostic/DIAGNOSTIC_ONLY-fixture/request.input.spthy');
   assert.deepEqual(diagnosticArguments(path, 'honest_approve_trace'), [path, '--quit-on-warning', '--prove=honest_approve_trace',
-    '--heuristic=i', '--bound=8', '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS']);
+    '--heuristic=i', '--bound=16', '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS']);
   assert.throws(() => diagnosticArguments(join(f.root, normalDirectory, 'request-authorization.spthy'), 'honest_approve_trace'));
   assert.throws(() => diagnosticArguments(path, 'lemma --prove=other'));
   assert.equal(DIAGNOSTIC_TIMEOUT_MS, 60_000);

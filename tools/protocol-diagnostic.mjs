@@ -15,6 +15,9 @@ const REQUEST_MODEL = 'request-authorization';
 const ROWS = 16;
 export const DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
 export const DIAGNOSTIC_TIMEOUT_MS = 60_000;
+// The ce69210 depth8 skeleton stops after key-source premises. This single
+// deeper observation changes no normal proof bound, model or accepted verdict.
+export const DIAGNOSTIC_DEPTH = 16;
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const reject = () => { throw new Error('Diagnostic admission rejected inconsistent or unavailable evidence.'); };
 const hash = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -171,7 +174,7 @@ export function diagnosticArguments(inputPath, selectedLemma) {
   if (!isAbsolute(inputPath) || resolve(inputPath) !== inputPath || !lemma(selectedLemma) || basename(inputPath) !== 'request.input.spthy' ||
       !/^DIAGNOSTIC_ONLY-[A-Za-z0-9_-]+$/.test(basename(directory)) || basename(dirname(directory)) !== 'protocol-diagnostic' ||
       basename(dirname(dirname(directory))) !== 'artifacts') reject();
-  return [inputPath, '--quit-on-warning', `--prove=${selectedLemma}`, '--heuristic=i', '--bound=8', '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS'];
+  return [inputPath, '--quit-on-warning', `--prove=${selectedLemma}`, '--heuristic=i', `--bound=${DIAGNOSTIC_DEPTH}`, '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS'];
 }
 
 export function diagnosticResult(result, log) {
@@ -216,7 +219,7 @@ export async function runProtocolDiagnostic(root = repository) {
     abort.signal.throwIfAborted();
     const directory = freshDirectory(input.root);
     const base = { classification: 'DIAGNOSTIC_ONLY', eligibleAsProof: false, toolVersion: '1.12.0', normal: input.identity,
-      bounds: { depth: 8, timeoutMs: DIAGNOSTIC_TIMEOUT_MS, combinedOutputBytes: DIAGNOSTIC_OUTPUT_BYTES, maxInvocations: 1 } };
+      bounds: { depth: DIAGNOSTIC_DEPTH, timeoutMs: DIAGNOSTIC_TIMEOUT_MS, combinedOutputBytes: DIAGNOSTIC_OUTPUT_BYTES, maxInvocations: 1 } };
     let report;
     if (!input.selected) report = { ...base, status: 'not_applicable', reason: 'no_failed_request_baseline', attempted: false };
     else {
