@@ -14,7 +14,9 @@
     "lint": "eslint ui --max-warnings 0",
     "typecheck": "tsc -b --pretty false",
     "test:ui": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "package:windows": "node tools/windows-packaging.mjs build",
+    "inspect:windows-package": "node tools/windows-packaging.mjs inspect"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

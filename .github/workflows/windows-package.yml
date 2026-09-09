@@ -1,0 +1,67 @@
+name: Windows package
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/native-runtime']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64 installer and payload inspection
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/windows-package-build
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Check available runner space before building
+        shell: pwsh
+        run: |
+          $packageVolume = [IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR)
+          $packageDrive = [IO.DriveInfo]::new($packageVolume)
+          Write-Output "Build volume free bytes: $($packageDrive.AvailableFreeSpace)"
+          if ($packageDrive.AvailableFreeSpace -lt 8GB) {
+            throw 'At least 8 GiB of free runner space is required; no caches or user files will be deleted.'
+          }
+      - name: Install locked frontend inputs
+        run: npm ci
+      - name: Install repository-pinned Rust and Windows target
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-pc-windows-msvc
+      - name: Build the service, prompt helper and Tauri installer
+        id: package
+        # Builds only. This workflow never installs, starts a service or opens UAC.
+        run: npm run package:windows
+      - name: Inspect actual installer payload without executing it
+        run: npm run inspect:windows-package
+      - name: Retain the installer and exact payload inspection
+        if: ${{ !cancelled() && steps.package.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: windows-x64-package-${{ github.sha }}
+          path: target/windows-package/
+          if-no-files-found: error
+          retention-days: 14
+
+# Publication is deliberately separate: a compiled installer is not evidence of
+# working UAC, trusted pairing, signing or a passed protocol-security gate.

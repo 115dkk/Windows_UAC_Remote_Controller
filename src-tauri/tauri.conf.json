@@ -33,7 +33,16 @@
     "targets": ["nsis"],
     "shortDescription": "휴대폰에서 PC의 권한 요청을 확인합니다.",
     "category": "Utility",
-    "windows": { "nsis": { "installMode": "perMachine", "languages": ["Korean", "English"], "displayLanguageSelector": false } },
+    "windows": {
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["Korean", "English"],
+        "displayLanguageSelector": false,
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/packaging-hooks.nsh"
+      }
+    },
     "android": { "minSdkVersion": 30 },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
   }
