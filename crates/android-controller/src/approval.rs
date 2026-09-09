@@ -543,6 +543,20 @@ impl ApprovalPlanOwner {
         Ok(())
     }
 
+    /// Whether the one native slot still belongs to this exact PC/epoch/request.
+    /// Includes planned, claimed, cancelled and terminal-but-unretired slots.
+    /// Closing the owner is cancellation, not retirement, so it also preserves
+    /// this observation until explicit native cleanup retires the slot.
+    ///
+    /// False says nothing about OS/provider quiescence, live retired submissions
+    /// or queued socket guards. The native actor must observe actual cleanup AND
+    /// this slot independently; neither observation grants signing authority.
+    pub fn has_native_slot_for(&self, key: RequestKey) -> bool {
+        self.slot
+            .as_ref()
+            .is_some_and(|slot| slot.shared.bound.key() == key)
+    }
+
     /// Cancel ALL currently live contexts for this exact PC/epoch/request key,
     /// including retired submissions or a context held only by a socket guard.
     /// No inbox, clock, native callback or I/O is involved. The native slot is

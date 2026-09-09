@@ -1109,3 +1109,69 @@ fn failed_begin_does_not_register_or_publish_a_historical_context() {
     );
     approvals.retire_after_native_cleanup(&plan).unwrap();
 }
+
+#[test]
+fn native_slot_observation_matches_the_full_key_until_successful_retirement() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let key = request_key(f.binding);
+    let different_keys = [
+        notification_policy::RequestKey::new([81; 32], key.epoch(), key.request()),
+        notification_policy::RequestKey::new(key.pc(), [82; 32], key.request()),
+        notification_policy::RequestKey::new(key.pc(), key.epoch(), [83; 32]),
+    ];
+    assert!(!approvals.has_native_slot_for(key));
+    let plan = result(approvals.begin(&mut f.owner, key, &mut ScriptClock::at(&[3, 4])));
+    assert!(approvals.has_native_slot_for(key));
+    assert!(
+        different_keys
+            .iter()
+            .all(|key| !approvals.has_native_slot_for(*key))
+    );
+    let attempt = result(approvals.claim(&mut f.owner, &plan, &mut ScriptClock::at(&[5, 6])));
+    assert!(approvals.has_native_slot_for(key));
+    let submission = result(approvals.finish(
+        &mut f.owner,
+        &attempt,
+        &der(&attempt, 3),
+        &mut ScriptClock::at(&[7, 8, 9]),
+    ));
+    assert!(approvals.has_native_slot_for(key));
+    assert!(
+        different_keys
+            .iter()
+            .all(|key| !approvals.has_native_slot_for(*key))
+    );
+    // Fixture has no native operation. The accessor cannot prove OS cleanup.
+    approvals.retire_after_native_cleanup(&plan).unwrap();
+    assert!(!approvals.has_native_slot_for(key));
+    assert!(!submission.is_cancelled());
+    // Retired signature data still requires request-scoped cancellation.
+    assert_eq!(approvals.cancel_request(key).matched_contexts(), 1);
+    assert!(submission.is_cancelled());
+    assert!(!approvals.has_native_slot_for(key));
+}
+
+#[test]
+fn failed_finish_and_owner_close_do_not_hide_unretired_native_slots() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let key = request_key(f.binding);
+    let plan = result(approvals.begin(&mut f.owner, key, &mut ScriptClock::at(&[3, 4])));
+    let attempt = result(approvals.claim(&mut f.owner, &plan, &mut ScriptClock::at(&[5, 6])));
+    let failure = approvals.finish(&mut f.owner, &attempt, &[], &mut ScriptClock::at(&[7, 8]));
+    assert_eq!(
+        failure.outcome().unwrap_err(),
+        &ApprovalError::InvalidSignature
+    );
+    assert!(plan.is_cancelled());
+    assert!(approvals.has_native_slot_for(key));
+    approvals.close();
+    assert!(approvals.has_native_slot_for(key));
+    assert_eq!(approvals.cancel_request(key).matched_contexts(), 1);
+    assert!(approvals.has_native_slot_for(key));
+    approvals.retire_after_native_cleanup(&plan).unwrap();
+    assert!(!approvals.has_native_slot_for(key));
+    approvals.retire_after_native_cleanup(&plan).unwrap();
+    assert!(!approvals.has_native_slot_for(key));
+}
