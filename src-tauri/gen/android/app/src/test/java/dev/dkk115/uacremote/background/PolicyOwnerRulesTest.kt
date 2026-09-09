@@ -9,6 +9,20 @@ import org.junit.Test
 
 /** Pure synthetic state only; no Application, threads, JNA, files, keys or Android calls. */
 class PolicyOwnerRulesTest {
+    @Test fun actualProgressMayContinueRustCleanupButNeverRetryFailedGeneratedDestroy() {
+        val state = ControllerCleanupState()
+        assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, state.next(false))
+        state.failed()
+        assertEquals(ControllerCleanupAction.NONE, state.next(false))
+        assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, state.next(false, resumed = true))
+        state.shutdownSucceeded()
+        assertEquals(ControllerCleanupAction.DESTROY, state.next(false))
+        state.failed()
+        assertEquals(ControllerCleanupAction.NONE, state.next(false, resumed = true))
+        assertEquals(ControllerCleanupAction.DESTROY, state.next(true))
+        state.destroyed()
+        assertEquals(ControllerCleanupAction.NONE, state.next(true, resumed = true))
+    }
     @Test fun failedShutdownKeepsTheHandleForExplicitCleanupRetryBeforeDestroy() {
         val cleanup = ControllerCleanupState()
         assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, cleanup.next(false))
@@ -138,7 +152,7 @@ class PolicyOwnerRulesTest {
             assertFalse(ControllerLibraryPolicy.permitsInitialProperties(listOf(name)))
         }
         assertEquals("uac_android_controller", ControllerLibraryPolicy.LIBRARY)
-        assertEquals(6u, ControllerLibraryPolicy.ABI_VERSION)
+        assertEquals(7u, ControllerLibraryPolicy.ABI_VERSION)
     }
 
     @Test fun loaderPropertyInspectionIsBounded() {

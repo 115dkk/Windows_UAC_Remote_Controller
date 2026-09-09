@@ -9,7 +9,7 @@ Application plugin. Windows retains its existing runtime. Native arm64 Rust,
 generated Kotlin/Application code, Gradle/APK and device evidence are separate
 gates; compilation is not a native key or authentication result.
 
-ABI version 6 retains openOrInitialize and recovery-only openExisting, not an
+ABI version 7 retains openOrInitialize and recovery-only openExisting, not an
 unguarded fresh constructor. Application startup adopts existing state; fresh
 initialization requires an empty private directory, no controller key aliases,
 strictly readable old preferences and an exclusive first-attempt marker. A marker
@@ -40,11 +40,26 @@ bounded partial cleanup. [ADR0012](../../docs/adr/0012-bound-native-transport-an
 describes this factory and the real guarded approval-write path. Application
 connection provisioning, foreground intake and PC service action wiring remain.
 
+ABI7 adds opaque request-scoped denial scopes and one-shot attempts. Rust retains
+the approval fence and private prepared denial; Kotlin uses only the exact existing
+DENIAL key without approval authentication. Native approval-session cleanup and
+the matching Rust native slot are checked independently before signing. Cancellation
+continues to reach the original attempt after native retirement. There is no
+exported denial submission or signed-wire getter, and no connected transport is
+invented for this prepared-unsent boundary. See [ADR0014](../../docs/adr/0014-native-denial-fence-and-cleanup.md).
+
+Stop retains logically closed core owners until native retirement and reference
+cleanup complete. Ordinary `continueNativeCleanup()` preserves failed cleanup
+steps; explicit `shutdownNativeOwner()` or scoped `retryDenialCleanup()` may retry
+the original failed step once. Neither can rearm a cancelled scope or sign again.
+
 The handwritten Rust boundary forbids unsafe code and uses pinned UniFFI0.32
 generation. Generated/dependency ABI machinery is not claimed unsafe-free.
-NativePlatform provides Application-owned directory/clock observations and
-downward-only request-notification/key-reference cleanup. There is no generic wire ingress,
-key alias, signature, approval boolean, execution or renderer path parameter.
+NativePlatform provides Application-owned directory/clock observations, exact
+native cleanup observations and downward request-notification/key-reference cleanup.
+Bounded signature bytes are input only to finishing the original opaque attempt;
+there is no generic wire ingress, caller-selected key alias, authentication boolean,
+execution or renderer path parameter.
 
 MobileController's process-local ownership lease is acquired before callbacks
 and held until the generated object is destroyed. Its separate operation lease
@@ -84,7 +99,7 @@ Source declarations/isolated compiles do not prove packaged loading or OS cleanu
 Build/generate: `node tools/build-android-bindings.mjs --abi arm64-v8a --variant debug`.
 The script uses the installed pinned NDK and host-only generator. Gradle source
 generation and JNA5.19.1 AAR dependency are declared. Earlier ABI3 full APK builds
-passed in hosted CI, as did ABI4 source5747d58 and ABI5 sourceaba127f. ABI6 requires its own exact-source
-run. Release shrinking,
+passed in hosted CI, as did ABI4 source5747d58, ABI5 sourceaba127f and ABI6 sourceb5b3b19.
+ABI7 requires its own exact-source generated Kotlin/Gradle run. Release shrinking,
 Android16KiB-page/device behavior and Kotlin/JNA runtime calls remain separate
 unverified gates. No library-copy/symlink permission workaround is used.

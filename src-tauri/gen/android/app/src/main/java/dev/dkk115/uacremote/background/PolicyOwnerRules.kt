@@ -78,8 +78,9 @@ internal class ControllerCleanupState {
     private var shutdownAcknowledged = false
     private var blocked = false
     private var destroyed = false
-    fun next(explicitRetry: Boolean): ControllerCleanupAction = when {
-        destroyed || (blocked && !explicitRetry) -> ControllerCleanupAction.NONE
+    fun next(explicitRetry: Boolean, resumed: Boolean = false): ControllerCleanupAction = when {
+        destroyed -> ControllerCleanupAction.NONE
+        blocked && !explicitRetry && (shutdownAcknowledged || !resumed) -> ControllerCleanupAction.NONE
         shutdownAcknowledged -> ControllerCleanupAction.DESTROY
         else -> ControllerCleanupAction.SHUTDOWN_THEN_DESTROY
     }
@@ -136,7 +137,7 @@ internal class PolicyOwnerLifecycle {
 /** Only property names are inspected; values are never logged or used as paths. */
 internal object ControllerLibraryPolicy {
     const val LIBRARY = "uac_android_controller"
-    const val ABI_VERSION = 6u
+    const val ABI_VERSION = 7u
 
     fun permitsInitialProperties(names: Iterable<String>): Boolean {
         var count = 0

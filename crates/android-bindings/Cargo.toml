@@ -20,6 +20,7 @@ phone-state-store = { path = "../phone-state-store" }
 notification-policy = { path = "../notification-policy" }
 controller-runtime = { path = "../controller-runtime" }
 secure-channel = { path = "../secure-channel" }
+service-protocol = { path = "../service-protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
 uniffi = { version = "=0.32.0", default-features = false }
@@ -30,7 +31,9 @@ libc = "0.2.177"
 
 [dev-dependencies]
 approval-protocol = { path = "../approval-protocol" }
+framed-transport = { path = "../framed-transport" }
 tempfile = "3.23.0"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time"] }
 p256.workspace = true
 secure-channel = { path = "../secure-channel" }
 

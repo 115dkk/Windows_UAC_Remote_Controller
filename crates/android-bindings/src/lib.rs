@@ -6,10 +6,19 @@
 
 mod approval;
 mod bootstrap;
+mod denial;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod denial_fixture;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod denial_tests;
 mod local_keys;
 mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
+};
+pub use denial::{
+    NativeApprovalDrainState, NativeDenialAdvance, NativeDenialAttempt, NativeDenialOperationState,
+    NativeDenialScope, NativeDenialWait,
 };
 pub use local_keys::NativeLocalKeySet;
 pub use transport::{
@@ -56,6 +65,8 @@ pub enum BridgeError {
     LocalKeysUnavailable,
     #[error("the approval attempt is no longer eligible")]
     ApprovalRejected,
+    #[error("the denial attempt is no longer eligible")]
+    DenialRejected,
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
@@ -79,6 +90,19 @@ impl fmt::Debug for NativeClock {
 
 #[uniffi::export(foreign)]
 pub trait NativePlatform: Send + Sync {
+    /// Scope-bound actual session cancellation/progress. Never wait for or
+    /// synchronously reenter the actor/controller; queue native cleanup instead.
+    fn advance_approval_drain_for_denial(
+        &self,
+        scope: Arc<NativeDenialScope>,
+    ) -> Result<NativeApprovalDrainState, BridgeError>;
+    /// Observe the exact registered operation; no caller-supplied quiescent flag.
+    fn observe_denial_operation(
+        &self,
+        attempt: Arc<NativeDenialAttempt>,
+    ) -> Result<NativeDenialOperationState, BridgeError>;
+    /// Scope-owned memory/generated-reference cleanup, never persistent keys.
+    fn release_denial_scope(&self, scope: Arc<NativeDenialScope>) -> Result<(), BridgeError>;
     /// Same native key owner, original exact TRANSPORT reference. No key creation.
     fn prepare_transport_signer(
         &self,
@@ -121,10 +145,15 @@ pub trait NativePlatform: Send + Sync {
     fn withdraw_requests(&self, requests: Vec<NativeRequestSelection>) -> Result<(), BridgeError>;
 }
 
-struct Admission<'a>(&'a AtomicBool);
+struct Admission<'a>(&'a MobileController);
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        // No foreign callbacks while unwinding. Retain closed retirement owners
+        // and native cleanup obligations rather than reopening admission live.
+        if std::thread::panicking() {
+            self.0.drop_owner();
+        }
+        self.0.active.store(false, Ordering::Release);
     }
 }
 
@@ -152,10 +181,14 @@ pub struct MobileController {
     boot: PhoneBootId,
     state: Mutex<Option<DurableInbox>>,
     approval_owner: Mutex<Option<android_controller::ApprovalPlanOwner>>,
+    approval_native_plan: Mutex<Option<Arc<NativeApprovalPlan>>>,
+    denial_state: Mutex<denial::DenialState>,
     approval_alive: Arc<AtomicBool>,
     active: AtomicBool,
     cleanup_pending: AtomicBool,
+    notification_cleanup_failed: AtomicBool,
     key_cleanup_pending: AtomicBool,
+    key_cleanup_failed: AtomicBool,
     native_floor_nanos: AtomicU64,
     // Hold through close/cleanup and until the generated object is destroyed.
     _owner_lease: OwnerLease,
@@ -165,10 +198,18 @@ impl fmt::Debug for MobileController {
         f.write_str("MobileController([redacted])")
     }
 }
+impl Drop for MobileController {
+    fn drop(&mut self) {
+        // Last-resort downward invalidation only. Native actor must retain this
+        // object until explicit cleanup succeeds; Drop claims no quiescence.
+        self.approval_alive.store(false, Ordering::Release);
+        self.close_denial_state();
+    }
+}
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    6
+    7
 }
 
 #[uniffi::export]
@@ -252,6 +293,18 @@ impl MobileController {
 
     /// Downward-only close; no key deletion, file recovery or service activation.
     pub fn shutdown_native_owner(&self) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        self.drop_owner();
+        self.grant_denial_shutdown_retry();
+        self.notification_cleanup_failed
+            .store(false, Ordering::Release);
+        self.key_cleanup_failed.store(false, Ordering::Release);
+        self.finish_cleanup()
+    }
+
+    /// Ordinary native progress/automatic shutdown continuation, NOT a retry
+    /// grant. Previously failed callbacks remain latched until explicit stop.
+    pub fn continue_native_cleanup(&self) -> Result<(), BridgeError> {
         let _admission = self.enter()?;
         self.drop_owner();
         self.finish_cleanup()
@@ -407,23 +460,29 @@ impl MobileController {
             }
             let approval_owner = android_controller::ApprovalPlanOwner::new(&owner, boot)
                 .map_err(|_| BridgeError::OwnerFaulted)?;
+            let denial_state = denial::DenialState::new(&owner, boot)?;
             Ok((
                 boot,
                 finished_clock.phone_monotonic_nanos(),
                 owner,
                 approval_owner,
+                denial_state,
             ))
         })();
         match result {
-            Ok((boot, native_floor, owner, approval_owner)) => Ok(Arc::new(Self {
+            Ok((boot, native_floor, owner, approval_owner, denial_state)) => Ok(Arc::new(Self {
                 platform,
                 boot,
                 state: Mutex::new(Some(owner)),
                 approval_owner: Mutex::new(Some(approval_owner)),
+                approval_native_plan: Mutex::new(None),
+                denial_state: Mutex::new(denial_state),
                 approval_alive: Arc::new(AtomicBool::new(true)),
                 active: AtomicBool::new(false),
                 cleanup_pending: AtomicBool::new(false),
+                notification_cleanup_failed: AtomicBool::new(false),
                 key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
+                key_cleanup_failed: AtomicBool::new(false),
                 native_floor_nanos: AtomicU64::new(native_floor),
                 _owner_lease: owner_lease,
             })),
@@ -442,7 +501,7 @@ impl MobileController {
     fn enter(&self) -> Result<Admission<'_>, BridgeError> {
         self.active
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| Admission(&self.active))
+            .map(|_| Admission(self))
             .map_err(|_| BridgeError::Busy)
     }
     fn read_policy_while_admitted(&self) -> Result<String, BridgeError> {
@@ -478,12 +537,17 @@ impl MobileController {
     }
     fn drop_owner(&self) -> bool {
         self.approval_alive.store(false, Ordering::Release);
-        let plans = self
+        // Logical close, not loss of the native retirement owner. Native cleanup
+        // may still need retire_approval after provider return.
+        if let Some(plans) = self
             .approval_owner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .take();
-        drop(plans);
+            .as_mut()
+        {
+            plans.close();
+        }
+        self.close_denial_state();
         let owner = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.take()
@@ -496,25 +560,56 @@ impl MobileController {
         had_owner
     }
     fn finish_cleanup(&self) -> Result<(), BridgeError> {
-        let notifications = if self.cleanup_pending.load(Ordering::Acquire) {
-            self.platform
-                .clear_request_notifications()
-                .map(|()| self.cleanup_pending.store(false, Ordering::Release))
-        } else {
+        let actions = self.finish_denial_cleanup();
+        let approval_clean = self
+            .approval_native_plan
+            .lock()
+            .map(|slot| slot.is_none())
+            .unwrap_or(false);
+        let notifications = if !self.cleanup_pending.load(Ordering::Acquire) {
             Ok(())
+        } else if self.notification_cleanup_failed.load(Ordering::Acquire) {
+            Err(BridgeError::NativeUnavailable)
+        } else {
+            // Set before foreign work so an unwinding callback also leaves a
+            // failure latch. Only its completed success clears the obligation.
+            self.notification_cleanup_failed
+                .store(true, Ordering::Release);
+            self.platform.clear_request_notifications().map(|()| {
+                self.cleanup_pending.store(false, Ordering::Release);
+                self.notification_cleanup_failed
+                    .store(false, Ordering::Release);
+            })
         };
-        let keys = if self.key_cleanup_pending.load(Ordering::Acquire) {
-            self.platform
-                .release_local_key_references()
-                .map(|()| self.key_cleanup_pending.store(false, Ordering::Release))
-        } else {
+        let keys = if actions.is_err() || !approval_clean {
+            // Pending action cleanup is NOT a failed key-reference callback.
+            // A later continuation may make its FIRST attempt without a retry.
+            Err(BridgeError::NativeUnavailable)
+        } else if !self.key_cleanup_pending.load(Ordering::Acquire) {
             Ok(())
+        } else if self.key_cleanup_failed.load(Ordering::Acquire) {
+            Err(BridgeError::NativeUnavailable)
+        } else {
+            self.key_cleanup_failed.store(true, Ordering::Release);
+            self.platform.release_local_key_references().map(|()| {
+                self.key_cleanup_pending.store(false, Ordering::Release);
+                self.key_cleanup_failed.store(false, Ordering::Release);
+            })
         };
         // Attempt both independent downward cleanups; one failure must not skip
         // the other. Failed obligations remain for explicit shutdown retry.
-        notifications
+        let result = notifications
+            .and(actions)
             .and(keys)
-            .map_err(|_| BridgeError::NativeUnavailable)
+            .map_err(|_| BridgeError::NativeUnavailable);
+        if result.is_ok() && !self.approval_alive.load(Ordering::Acquire) {
+            self.approval_owner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            self.destroy_clean_denial_owner();
+        }
+        result
     }
     fn fail_closed<T>(&self, error: BridgeError) -> Result<T, BridgeError> {
         self.drop_owner();
@@ -562,7 +657,7 @@ mod tests {
         collections::VecDeque,
         sync::{Weak, atomic::AtomicUsize},
     };
-    static SERIAL: Mutex<()> = Mutex::new(());
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
     struct TestPlatform {
         path: String,
         clock: Mutex<NativeClock>,
@@ -597,6 +692,21 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn advance_approval_drain_for_denial(
+            &self,
+            _: Arc<NativeDenialScope>,
+        ) -> Result<NativeApprovalDrainState, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn observe_denial_operation(
+            &self,
+            _: Arc<NativeDenialAttempt>,
+        ) -> Result<NativeDenialOperationState, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn release_denial_scope(&self, _: Arc<NativeDenialScope>) -> Result<(), BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
         fn prepare_transport_signer(
             &self,
             _: Arc<NativeTransportBinding>,
@@ -705,10 +815,14 @@ mod tests {
                 android_controller::ApprovalPlanOwner::new(&owner, boot).unwrap(),
             )),
             approval_alive: Arc::new(AtomicBool::new(true)),
+            approval_native_plan: Mutex::new(None),
+            denial_state: Mutex::new(denial::DenialState::new(&owner, boot).unwrap()),
             state: Mutex::new(Some(owner)),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
+            notification_cleanup_failed: AtomicBool::new(false),
             key_cleanup_pending: AtomicBool::new(false),
+            key_cleanup_failed: AtomicBool::new(false),
             native_floor_nanos: AtomicU64::new(clock.phone_monotonic_nanos()),
             _owner_lease: OwnerLease::acquire().unwrap(),
         });

@@ -15,6 +15,7 @@ import dev.dkk115.uacremote.nativecore.NativeApprovalAttempt
 import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
 import dev.dkk115.uacremote.nativecore.NativeApprovalSubmission
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
+import dev.dkk115.uacremote.nativecore.NativeApprovalDrainState
 import dev.dkk115.uacremote.security.ApprovalOperationOutcome
 import dev.dkk115.uacremote.security.NativeApprovalOperation
 import dev.dkk115.uacremote.security.DeviceKeyError
@@ -45,6 +46,8 @@ internal class ApplicationApprovalCoordinator(
     private val owner: () -> MobileController?,
     private val enqueue: (() -> Unit) -> Boolean,
     private val ownerFailed: () -> Unit,
+    private val denialBlocked: (NativeRequestSelection) -> Boolean,
+    private val nativeProgress: () -> Unit,
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private val current = AtomicReference<Session?>(null)
@@ -65,9 +68,11 @@ internal class ApplicationApprovalCoordinator(
         }
         val copied = NativeRequestIdentity.copy(selection)
         if (copied == null) { callback(NativeApprovalReply.Unavailable); return }
+        if (denialBlocked(copied)) { callback(NativeApprovalReply.Busy); return }
         val session = Session(copied, host, callback)
         if (!current.compareAndSet(null, session)) { callback(NativeApprovalReply.Busy); return }
         work(session) {
+            if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return@work }
             val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
             val plan = controller.beginApproval(session.selection)
             session.plan = plan
@@ -93,6 +98,26 @@ internal class ApplicationApprovalCoordinator(
     }
     fun invalidateRequests() { current.get()?.let { cancel(it, NativeApprovalReply.Cancelled) } }
 
+    /** One actual session captured under the native same-request denial blocker. */
+    internal fun captureDenialDrain(selection: NativeRequestSelection): DenialApprovalDrain {
+        if (!denialBlocked(selection)) throw BridgeException.NativeUnavailable()
+        val session = current.get()?.takeIf { NativeRequestIdentity.same(it.selection, selection) }
+        if (session == null) return object : DenialApprovalDrain {
+            override fun state() = NativeApprovalDrainState.NO_MATCHING_SESSION
+        }
+        cancel(session, NativeApprovalReply.Cancelled)
+        return object : DenialApprovalDrain {
+            override fun state(): NativeApprovalDrainState {
+                if (session.cleanupFailed.get() || session.cancellationUncertain.get()) return NativeApprovalDrainState.FAILED
+                val handlesClosed = synchronized(session.handleLock) { session.handleCleanup.planClosed() }
+                return if (DenialDrainCompletion.retired(session.phase() == Phase.TERMINAL, session.jobs.get(),
+                    session.operation?.isQuiescent() != false, handlesClosed, current.get() !== session, session.submission.get() == null)) {
+                    NativeApprovalDrainState.RETIRED
+                } else NativeApprovalDrainState.PENDING
+            }
+        }
+    }
+
     /** Explicit request-view departure, not pause/stop/focus loss. */
     fun leaveRequest(host: Activity) {
         val session = current.get() ?: return
@@ -109,12 +134,17 @@ internal class ApplicationApprovalCoordinator(
     fun cleanupOnWorker() { current.get()?.let { cleanup(it) } }
     fun hasPendingCleanup(): Boolean = current.get() != null
     /** Explicit owner shutdown retry or actual owner destruction, not a timer. */
-    fun retryCleanup() { current.get()?.let { it.cleanupFailed.set(false); cleanup(it) } }
+    fun retryCleanup() { current.get()?.let {
+        it.cleanupFailed.set(false)
+        cancel(it, NativeApprovalReply.Cancelled, explicitRetry = true)
+        cleanup(it)
+    } }
 
     private fun advance(session: Session) {
         if (session.phase() == Phase.TERMINAL) { cleanup(session); return }
         if (session.phase() == Phase.PREPARING) return
         if (current.get() !== session || session.cancelled.get()) { cleanup(session); return }
+        if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return }
         if (session.host.isDestroyed || session.host.isFinishing || !session.lease.isCurrent(session.host)) {
             cancel(session, NativeApprovalReply.Cancelled); return
         }
@@ -163,6 +193,7 @@ internal class ApplicationApprovalCoordinator(
     }
 
     private fun sign(session: Session) {
+        if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return }
         if (!session.lease.mayComplete(session.host)) {
             session.move(Phase.SIGNING, if (session.attempt == null) Phase.AUTHENTICATED else Phase.CLAIMED)
             post(session) { advance(session) }; return
@@ -189,6 +220,7 @@ internal class ApplicationApprovalCoordinator(
     }
 
     private fun finish(session: Session) {
+        if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return }
         if (!session.lease.mayComplete(session.host)) {
             session.move(Phase.FINISHING, Phase.SIGNED); post(session) { advance(session) }; return
         }
@@ -227,19 +259,22 @@ internal class ApplicationApprovalCoordinator(
         }
     }
 
-    private fun cancel(session: Session, reply: NativeApprovalReply) {
-        session.cancelled.set(true)
+    private fun cancel(session: Session, reply: NativeApprovalReply, explicitRetry: Boolean = false) {
+        val changed = !session.cancelled.getAndSet(true)
         session.lease.invalidate()
         // Both are downward-only. Rust invalidation precedes OS cancellation.
         synchronized(session.handleLock) {
-            if (!session.handleCleanup.planClosed()) try { session.plan?.cancel() } catch (failure: Throwable) { rethrowFatal(failure) }
+            if (!session.handleCleanup.planClosed() && (!session.cancellationUncertain.get() || explicitRetry)) try { session.plan?.cancel(); session.cancellationUncertain.set(false) }
+            catch (failure: Throwable) { rethrowFatal(failure); session.cancellationUncertain.set(true) }
         }
-        session.operation?.cancel()
+        if (!session.cancellationUncertain.get() || explicitRetry || changed) session.operation?.cancel()
         session.der.getAndSet(null)?.fill(0)
-        session.submission.getAndSet(null)?.close()
+        // A retained prepared wrapper is closed by the worker cursor; a failed
+        // close must not disappear because getAndSet(null) ran first.
         session.terminate()
         deliver(session, reply)
         cleanup(session)
+        if (changed) nativeProgress()
     }
 
     private fun cleanup(session: Session) {
@@ -252,6 +287,7 @@ internal class ApplicationApprovalCoordinator(
                 // Native holder is quiescent; no Signature or live prompt may
                 // use these generated handles after terminal cleanup.
                 synchronized(session.handleLock) {
+                    session.submission.get()?.let { held -> held.close(); session.submission.compareAndSet(held, null) }
                     // At most three exact successful operations. Failed action
                     // remains selected; a retry never repeats a successful close.
                     while (session.handleCleanup.next() != ApprovalHandleCleanupAction.COMPLETE) {
@@ -275,7 +311,7 @@ internal class ApplicationApprovalCoordinator(
                 session.cleanupFailed.set(true)
                 session.cleanupQueued.set(false)
                 if (fatalOwnerFailure(failure)) ownerFailed()
-            }
+            } finally { nativeProgress() }
         }) session.cleanupQueued.set(false)
     }
 
@@ -337,6 +373,7 @@ internal class ApplicationApprovalCoordinator(
         val delivered = AtomicBoolean(false)
         val cleanupQueued = AtomicBoolean(false)
         val cleanupFailed = AtomicBoolean(false)
+        val cancellationUncertain = AtomicBoolean(false)
         val prepared = AtomicBoolean(false)
         val jobs = AtomicInteger(0)
         val der = AtomicReference<ByteArray?>(null)

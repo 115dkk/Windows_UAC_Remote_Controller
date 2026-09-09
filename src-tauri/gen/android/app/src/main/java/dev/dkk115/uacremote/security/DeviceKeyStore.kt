@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
 import dev.dkk115.uacremote.nativecore.NativeCertificateVerify
 import dev.dkk115.uacremote.nativecore.NativeTransportBinding
+import dev.dkk115.uacremote.nativecore.NativeDenialAttempt
 
 /** Closed, purpose-separated identity roles. These names are not user input. */
 internal enum class DeviceKeyRole { APPROVAL, DENIAL, TRANSPORT }
@@ -196,6 +197,79 @@ internal class DeviceKeyStore(context: Context) {
     private val transportLock = Any()
     private val transportSigners = LinkedHashSet<NativeTransportSigner>()
     private var transportClosing = false
+    private val denialLock = Any()
+    private val denialOperations = LinkedHashSet<NativeDenialOperation>()
+
+    /** Register BEFORE any metadata/provider work or byte claim. Existing owner only. */
+    fun registerDenialOperation(attempt: NativeDenialAttempt, progress: () -> Unit): NativeDenialOperation {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw DenialSigningException(DenialSigningError.WRONG_THREAD)
+        return synchronized(denialLock) {
+            if (owner.closed || denialOperations.size >= DenialSigningPolicy.MAX_OPERATIONS || denialOperations.any { it.owns(attempt) }) {
+                throw DenialSigningException(DenialSigningError.KEY_UNAVAILABLE)
+            }
+            NativeDenialOperation(attempt, ::performDenialSignature, progress).also { denialOperations.add(it) }
+        }
+    }
+
+    fun signDenial(attempt: NativeDenialAttempt): ByteArray {
+        val operation = synchronized(denialLock) { denialOperations.singleOrNull { it.owns(attempt) } }
+            ?: throw DenialSigningException(DenialSigningError.KEY_UNAVAILABLE)
+        return operation.sign()
+    }
+
+    fun releaseDenialOperation(operation: NativeDenialOperation): Boolean = synchronized(denialLock) {
+        if (operation !in denialOperations || operation.observation() != DenialOperationObservation.QUIESCENT) return@synchronized false
+        denialOperations.remove(operation)
+        true
+    }
+
+    private fun performDenialSignature(attempt: NativeDenialAttempt): ByteArray {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw DenialSigningException(DenialSigningError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            var statement: ByteArray? = null
+            val buffer = ByteArray(DenialSigningPolicy.MAX_DER_BYTES)
+            try {
+                registryValue(REFERENCES.requireOpen(owner))
+                val deadline = attempt.deadlineNanos()
+                val started = SystemClock.elapsedRealtimeNanos()
+                if (deadline > Long.MAX_VALUE.toULong() || started < 0) throw DenialSigningException(DenialSigningError.INVALID_INPUT)
+                val time = DenialTimeWindow(deadline.toLong(), started)
+                fun fresh() {
+                    time.observe(SystemClock.elapsedRealtimeNanos())?.let { throw DenialSigningException(it) }
+                    if (attempt.isCancelled()) throw DenialSigningException(DenialSigningError.CANCELLED)
+                }
+                fresh()
+                val keys = attempt.localKeys()
+                val descriptor = registryValue(ReopenKeySetDescriptor.fromTrustedStorage(keys.handle, keys.approvalSpki, keys.denialSpki, keys.transportSpki))
+                val registration = registryValue(REFERENCES.findExact(owner, descriptor)) ?: fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                val reference = registration.reference(DeviceKeyRole.DENIAL)
+                fun exactReference() {
+                    if (reference.role != DeviceKeyRole.DENIAL || registryValue(REFERENCES.resolve(owner, reference)) !== registration) {
+                        fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                    }
+                }
+                exactReference(); requireDeviceSecure()
+                val store = openStore()
+                val record = existingRecord(descriptor, DeviceKeyRole.DENIAL)
+                val inspected = inspectNativeKey(store, record)
+                fresh()
+                val message = attempt.takeSigningBytes()
+                statement = message
+                if (!DenialSigningPolicy.validStatement(message)) throw DenialSigningException(DenialSigningError.INVALID_INPUT)
+                val signature = Signature.getInstance("SHA256withECDSA")
+                signature.initSign(inspected.privateKey)
+                exactReference(); requireDeviceSecure(); fresh()
+                signature.update(message)
+                val length = signature.sign(buffer, 0, buffer.size)
+                if (!DenialSigningPolicy.validDerLength(length)) throw DenialSigningException(DenialSigningError.SIGNING_FAILED)
+                exactReference(); inspectNativeKey(store, record); requireDeviceSecure(); fresh()
+                buffer.copyOf(length)
+            } catch (failure: DenialSigningException) { throw failure }
+            catch (failure: OwnerFailure) { throw DenialSigningException(DenialSigningError.KEY_UNAVAILABLE, failure.error) }
+            catch (failure: Exception) { throw DenialSigningException(DenialSigningError.SIGNING_FAILED, nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE)) }
+            finally { statement?.fill(0); buffer.fill(0) }
+        }
+    }
 
     /** Capture one existing TRANSPORT reference; no native key creation/reopen. */
     fun prepareTransportSigner(binding: NativeTransportBinding): TransportSignerOutcome<NativeTransportSigner> {
@@ -524,9 +598,15 @@ internal class DeviceKeyStore(context: Context) {
         // Close admission before waiting for native work. No in-flight transport
         // can publish DER after this volatile owner/binding invalidation.
         owner.close()
+        val denials = synchronized(denialLock) { denialOperations.toList() }
+        for (operation in denials) operation.cancel()
         val signers = synchronized(transportLock) { transportClosing = true; transportSigners.toList() }
         approvalOperation?.cancel()
         var pending = false
+        for (operation in denials) {
+            if (!operation.discardAndCloseInput()) pending = true
+            else releaseDenialOperation(operation)
+        }
         for (signer in signers) {
             if (signer.close() is TransportSignerOutcome.Failure || !signer.isQuiescent()) pending = true
         }

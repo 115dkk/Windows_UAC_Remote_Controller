@@ -26,7 +26,7 @@ pub struct NativeRequestSelection {
     pub request: Vec<u8>,
 }
 impl NativeRequestSelection {
-    fn key(&self) -> Result<RequestKey, BridgeError> {
+    pub(crate) fn key(&self) -> Result<RequestKey, BridgeError> {
         fn part(bytes: &[u8]) -> Result<[u8; 32], BridgeError> {
             let value: [u8; 32] = bytes
                 .try_into()
@@ -42,7 +42,7 @@ impl NativeRequestSelection {
             part(&self.request)?,
         ))
     }
-    fn from_key(key: RequestKey) -> Self {
+    pub(crate) fn from_key(key: RequestKey) -> Self {
         Self {
             pc: key.pc().to_vec(),
             epoch: key.epoch().to_vec(),
@@ -150,12 +150,41 @@ impl MobileController {
     ) -> Result<Arc<NativeApprovalPlan>, BridgeError> {
         let key = request.key()?;
         let _admission = self.enter()?;
+        self.require_positive_approval(key)?;
         let plan = self.run_approval(|plans, inbox, clock| plans.begin(inbox, key, clock))?;
-        Ok(Arc::new(NativeApprovalPlan {
+        if let Err(error) =
+            self.seal_approval_publication(key, plan.deadline_nanos(), || plan.is_cancelled())
+        {
+            plan.cancel();
+            // No native handle escaped. A failed clock may already have closed
+            // and destroyed the owner after confirming no native obligations.
+            if let Some(plans) = self
+                .approval_owner
+                .lock()
+                .map_err(|_| BridgeError::Closed)?
+                .as_mut()
+            {
+                plans
+                    .retire_after_native_cleanup(&plan)
+                    .map_err(|_| BridgeError::Closed)?;
+            }
+            return Err(error);
+        }
+        let native = Arc::new(NativeApprovalPlan {
             core: plan,
             controller_alive: Arc::clone(&self.approval_alive),
             native_closed: AtomicBool::new(false),
-        }))
+        });
+        let mut slot = self
+            .approval_native_plan
+            .lock()
+            .map_err(|_| BridgeError::Closed)?;
+        if slot.is_some() {
+            native.cancel();
+            return Err(BridgeError::Closed);
+        }
+        *slot = Some(Arc::clone(&native));
+        Ok(native)
     }
 
     pub fn claim_approval(
@@ -164,8 +193,16 @@ impl MobileController {
     ) -> Result<Arc<NativeApprovalAttempt>, BridgeError> {
         let _admission = self.enter()?;
         self.require_own_plan(&plan)?;
+        let key = phone_request_core::request_key(plan.core.binding());
+        self.require_positive_approval(key)?;
         let attempt =
             self.run_approval(|plans, inbox, clock| plans.claim(inbox, &plan.core, clock))?;
+        if let Err(error) = self
+            .seal_approval_publication(key, plan.core.deadline_nanos(), || attempt.is_cancelled())
+        {
+            plan.cancel();
+            return Err(error);
+        }
         Ok(Arc::new(NativeApprovalAttempt {
             core: attempt,
             plan,
@@ -179,16 +216,28 @@ impl MobileController {
     ) -> Result<Arc<NativeApprovalSubmission>, BridgeError> {
         let _admission = self.enter()?;
         self.require_own_plan(&attempt.plan)?;
+        let key = phone_request_core::request_key(attempt.plan.core.binding());
+        self.require_positive_approval(key)?;
         // The domain consumes its claim even on malformed/invalid DER. A caller
         // cannot retry finish with another signature or duplicate a copied Arc.
         let result = self
             .run_approval(|plans, inbox, clock| plans.finish(inbox, &attempt.core, &der, clock));
         attempt.plan.native_closed.store(true, Ordering::Release);
         match result {
-            Ok(core) => Ok(Arc::new(NativeApprovalSubmission {
-                core,
-                controller_alive: Arc::clone(&self.approval_alive),
-            })),
+            Ok(core) => {
+                if let Err(error) =
+                    self.seal_approval_publication(key, core.deadline_nanos(), || {
+                        core.is_cancelled()
+                    })
+                {
+                    attempt.plan.cancel();
+                    return Err(error);
+                }
+                Ok(Arc::new(NativeApprovalSubmission {
+                    core,
+                    controller_alive: Arc::clone(&self.approval_alive),
+                }))
+            }
             Err(error) => {
                 attempt.plan.cancel();
                 Err(error)
@@ -208,11 +257,24 @@ impl MobileController {
                 .approval_owner
                 .lock()
                 .map_err(|_| BridgeError::Closed)?;
-            plans
+            let result = plans
                 .as_mut()
                 .ok_or(BridgeError::Closed)?
                 .retire_after_native_cleanup(&plan.core)
-                .map_err(|_| BridgeError::ApprovalRejected)
+                .map_err(|_| BridgeError::ApprovalRejected);
+            if result.is_ok() {
+                let mut shadow = self
+                    .approval_native_plan
+                    .lock()
+                    .map_err(|_| BridgeError::Closed)?;
+                if shadow
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &plan))
+                {
+                    shadow.take();
+                }
+            }
+            result
         })();
         if result == Err(BridgeError::Closed) {
             return self.fail_closed(BridgeError::Closed);
@@ -222,6 +284,57 @@ impl MobileController {
 }
 
 impl MobileController {
+    /// A native withdrawal/clock callback may have taken time or atomically
+    /// cancelled a handle after the domain's seal. The same admission prevents
+    /// replacing the inbox or changing association/key metadata during dispatch.
+    /// Observe time again outside locks, with no positive retry/commit loop.
+    fn seal_approval_publication(
+        &self,
+        key: RequestKey,
+        deadline_nanos: u64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), BridgeError> {
+        self.require_positive_approval(key)?;
+        let clock = self.read_clock()?;
+        self.require_positive_approval(key)?;
+        if cancelled() {
+            return Err(BridgeError::ApprovalRejected);
+        }
+        let late = {
+            let state = self.state.lock().map_err(|_| BridgeError::Closed)?;
+            let owner = state.as_ref().ok_or(BridgeError::Closed)?;
+            clock.phone_monotonic_nanos() >= deadline_nanos
+                || !owner
+                    .policy()
+                    .map_err(|_| BridgeError::StorageUnavailable)?
+                    .allows(clock.reading().local)
+        };
+        if late {
+            let checked = self
+                .state
+                .lock()
+                .map_err(|_| BridgeError::Closed)?
+                .as_mut()
+                .ok_or(BridgeError::Closed)?
+                .check_associated_pending(key, clock);
+            match checked {
+                Ok(check) => self.dispatch_approval_checks(vec![check])?,
+                Err(_) => return self.fail_closed(BridgeError::StorageUnavailable),
+            }
+            return Err(BridgeError::ApprovalRejected);
+        }
+        if cancelled() {
+            return Err(BridgeError::ApprovalRejected);
+        }
+        self.require_positive_approval(key)
+    }
+
+    fn require_positive_approval(&self, key: RequestKey) -> Result<(), BridgeError> {
+        if !self.approval_alive.load(Ordering::Acquire) {
+            return Err(BridgeError::Closed);
+        }
+        self.denial_fence(key)
+    }
     fn require_own_plan(&self, plan: &NativeApprovalPlan) -> Result<(), BridgeError> {
         if !Arc::ptr_eq(&self.approval_alive, &plan.controller_alive) || plan.is_cancelled() {
             return Err(BridgeError::ApprovalRejected);
@@ -335,7 +448,7 @@ impl MobileController {
         }
     }
 
-    fn dispatch_approval_checks(
+    pub(crate) fn dispatch_approval_checks(
         &self,
         checks: Vec<CommittedAssociatedCheck>,
     ) -> Result<(), BridgeError> {
@@ -346,6 +459,7 @@ impl MobileController {
             for effect in checked.update().effects() {
                 match *effect {
                     Effect::Withdraw { key, .. } => {
+                        self.cancel_denial_request(key);
                         withdrawn.insert(key);
                     }
                     // Outcome delivery remains in the durable body-free outbox.
@@ -394,15 +508,42 @@ impl Drop for DetachedApprovalState<'_> {
             self.controller
                 .cleanup_pending
                 .store(true, Ordering::Release);
+            // Keep exact closed native retirement ownership on unwind. The
+            // uncertain inbox drops; native handles must still retire later.
+            if let Some(plans) = &mut self.plans {
+                plans.close();
+            }
+            let mut stored = self
+                .controller
+                .approval_owner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if stored.is_none() {
+                *stored = self.plans.take();
+            }
+            self.controller.close_denial_state();
         }
     }
 }
 
-struct NativeApprovalClock<'a> {
+pub(crate) struct NativeApprovalClock<'a> {
     platform: &'a dyn NativePlatform,
     boot: phone_request_core::PhoneBootId,
     floor: &'a std::sync::atomic::AtomicU64,
     error: Option<BridgeError>,
+}
+impl<'a> NativeApprovalClock<'a> {
+    pub(crate) fn new(controller: &'a MobileController) -> Self {
+        Self {
+            platform: &*controller.platform,
+            boot: controller.boot,
+            floor: &controller.native_floor_nanos,
+            error: None,
+        }
+    }
+    pub(crate) fn error(&self) -> Option<BridgeError> {
+        self.error
+    }
 }
 impl ApprovalClock for NativeApprovalClock<'_> {
     fn read(&mut self) -> Result<ApprovalTime, ApprovalClockError> {

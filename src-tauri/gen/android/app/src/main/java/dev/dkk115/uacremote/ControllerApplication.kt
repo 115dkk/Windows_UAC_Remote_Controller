@@ -384,7 +384,7 @@ class ControllerApplication : Application() {
         if (actor.lifecyclePhase() == PolicyOwnerPhase.CLOSED ||
             (shutdownRequestedFor === actor && !explicitRetry)) return
         shutdownRequestedFor = actor
-        try { actor.shutdown() }
+        try { actor.shutdown(explicitRetry) }
         catch (_: Exception) {
             mayReplaceClosed = false
             publish(ControllerServiceState.UNAVAILABLE)

@@ -157,6 +157,24 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn advance_approval_drain_for_denial(
+            &self,
+            _: std::sync::Arc<crate::NativeDenialScope>,
+        ) -> Result<crate::NativeApprovalDrainState, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn observe_denial_operation(
+            &self,
+            _: std::sync::Arc<crate::NativeDenialAttempt>,
+        ) -> Result<crate::NativeDenialOperationState, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn release_denial_scope(
+            &self,
+            _: std::sync::Arc<crate::NativeDenialScope>,
+        ) -> Result<(), BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
         fn prepare_transport_signer(
             &self,
             _: std::sync::Arc<crate::NativeTransportBinding>,

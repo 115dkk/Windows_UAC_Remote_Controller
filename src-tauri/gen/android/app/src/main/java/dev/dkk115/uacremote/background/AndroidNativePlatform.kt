@@ -13,12 +13,17 @@ import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
 import dev.dkk115.uacremote.nativecore.NativeCertificateVerify
 import dev.dkk115.uacremote.nativecore.NativeTransportBinding
+import dev.dkk115.uacremote.nativecore.NativeDenialScope
+import dev.dkk115.uacremote.nativecore.NativeDenialAttempt
+import dev.dkk115.uacremote.nativecore.NativeApprovalDrainState
+import dev.dkk115.uacremote.nativecore.NativeDenialOperationState
 import dev.dkk115.uacremote.security.DeviceKeyStore
 import dev.dkk115.uacremote.security.KeyStoreOutcome
 import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
 import dev.dkk115.uacremote.security.ClientCertificateVerifyPolicy
 import dev.dkk115.uacremote.security.NativeTransportSigner
 import dev.dkk115.uacremote.security.TransportSignerOutcome
+import dev.dkk115.uacremote.security.NativeDenialOperation
 
 /**
  * Generated-trait adapter only. The Application owner calls it from a bounded
@@ -37,6 +42,29 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val failedTransportArguments = ArrayList<AutoCloseable>()
     @Volatile private var transportStopping = false
     private var transportCleanupUncertain = false
+    private var denials: DenialJobs? = null
+    private val unboundDenialArguments = DenialCloseCursor()
+
+    internal fun bindDenials(owner: DenialJobs) { check(denials == null); denials = owner }
+    internal fun registerDenialOperation(attempt: NativeDenialAttempt, progress: () -> Unit): NativeDenialOperation =
+        keyStore.registerDenialOperation(attempt, progress)
+    internal fun signDenial(attempt: NativeDenialAttempt): ByteArray = keyStore.signDenial(attempt)
+    internal fun releaseDenialOperation(operation: NativeDenialOperation): Boolean = keyStore.releaseDenialOperation(operation)
+    internal fun retryUnboundDenialCleanup(): Boolean = unboundDenialArguments.retryOnce()
+    internal fun denialReferencesClear(): Boolean = unboundDenialArguments.complete() && denials?.permitsKeyReferenceCleanup() != false
+
+    override fun advanceApprovalDrainForDenial(scope: NativeDenialScope): NativeApprovalDrainState =
+        denialRegistry(scope).advance(scope)
+    override fun observeDenialOperation(attempt: NativeDenialAttempt): NativeDenialOperationState =
+        denialRegistry(attempt).observe(attempt)
+    override fun releaseDenialScope(scope: NativeDenialScope) = denialRegistry(scope).release(scope)
+
+    private fun denialRegistry(argument: AutoCloseable): DenialDrainRegistry {
+        val owner = denials
+        if (Looper.myLooper() != Looper.getMainLooper() && owner != null) return owner.registry
+        try { unboundDenialArguments.closeOrRetain(argument) } catch (_: Exception) { }
+        throw BridgeException.NativeUnavailable()
+    }
 
     // Only native opaque identities index this map. IDs select a candidate;
     // sameBinding/belongsTo must ALSO succeed before any native key operation.
@@ -286,6 +314,9 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     }
 
     override fun releaseLocalKeyReferences() {
+        if (denials?.permitsKeyReferenceCleanup() == false || !unboundDenialArguments.complete()) {
+            throw BridgeException.NativeUnavailable()
+        }
         closeAllTransportSigners()
         keyValue(keyStore.closeReferences())
     }

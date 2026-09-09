@@ -38,12 +38,14 @@ internal class ApplicationPolicyActor(private val application: Application) {
     // Retain even if the Rust constructor fails after partially reopening keys.
     // This adapter owns only its own in-process references, never aliases.
     private val platform = AndroidNativePlatform(application)
-    private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval) {
-        failOwner(PolicyStatus.STORAGE_UNAVAILABLE)
-    }
+    private val denials = DenialJobs(platform, { controller }, ::enqueueDenial,
+        { lifecycle.phase() == PolicyOwnerPhase.READY }, { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, ::nativeCleanupProgress)
+    private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval,
+        { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, denials::blocksApproval, denials::nativeProgress)
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
+    private val cleanupWake = AtomicBoolean(false)
     private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
     @Volatile private var lifecycleObserver: ((PolicyOwnerPhase) -> Unit)? = null
 
@@ -64,17 +66,34 @@ internal class ApplicationPolicyActor(private val application: Application) {
         if (Looper.myLooper() == Looper.getMainLooper()) action.run() else main.post(action)
     }
 
-    init { platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests) }
+    init {
+        platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests)
+        platform.bindDenials(denials)
+        denials.bindCapture { job -> approvals.captureDenialDrain(job.selection) }
+    }
 
     /** Native selection only; no Tauri/intent ingress is exposed in this slice. */
     internal fun requestApproval(selection: NativeRequestSelection, host: Activity, callback: (NativeApprovalReply) -> Unit) =
         approvals.request(selection, host, callback)
     internal fun leaveApprovalRequest(host: Activity) = approvals.leaveRequest(host)
+    /** Trusted native selection only; intentionally not a Tauri/receiver command. */
+    internal fun requestDenial(selection: NativeRequestSelection, callback: (NativeDenialReply) -> Unit) = denials.request(selection, callback)
 
     private fun enqueueApproval(action: () -> Unit): Boolean = try {
         worker.execute { try { action() } finally { cleanupIfStopped() } }
         true
     } catch (_: RejectedExecutionException) { false }
+
+    private fun enqueueDenial(action: () -> Unit): Boolean = try {
+        worker.execute { try { action() } finally { cleanupIfStopped() } }
+        true
+    } catch (_: RejectedExecutionException) { false }
+
+    /** Actual native cleanup progress may resume owner shutdown, not failed scope steps. */
+    private fun nativeCleanupProgress() {
+        cleanupWake.set(true)
+        requestWorkerCleanup()
+    }
 
     fun start() {
         if (!lifecycle.start()) return
@@ -104,12 +123,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
     }
 
     /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
-    fun shutdown() {
+    fun shutdown(explicitRetry: Boolean = false) {
+        denials.stop()
         approvals.stop()
-        approvals.retryCleanup()
+        if (explicitRetry) approvals.retryCleanup()
         lifecycle.stop()
         publishLifecycle()
-        explicitCleanupRetry.set(true)
+        if (explicitRetry) explicitCleanupRetry.set(true)
         main.removeCallbacks(initializationTimeout)
         finishAll(PolicyStatus.UNAVAILABLE)
         requestWorkerCleanup()
@@ -194,11 +214,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
             if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY && status != PolicyStatus.HISTORY_UNAVAILABLE) failOwner(status)
             deliver(call, PolicyReply.Failed(status))
         } finally {
+            denials.externalProgress()
             cleanupIfStopped()
         }
     }
 
     private fun failOwner(status: PolicyStatus) {
+        denials.stop()
         approvals.stop()
         lifecycle.fail(status)
         publishLifecycle()
@@ -256,13 +278,16 @@ internal class ApplicationPolicyActor(private val application: Application) {
         approvals.cleanupOnWorker()
         if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
         val explicitRetry = explicitCleanupRetry.getAndSet(false)
+        val resumed = cleanupWake.getAndSet(false)
+        denials.prepareShutdownCleanup(explicitRetry)
+        if (explicitRetry) platform.retryUnboundDenialCleanup()
         val owner = controller
         if (owner != null) {
-            val action = cleanup.next(explicitRetry)
+            val action = cleanup.next(explicitRetry, resumed)
             if (action == ControllerCleanupAction.NONE) return
             if (action == ControllerCleanupAction.SHUTDOWN_THEN_DESTROY) {
                 try {
-                    owner.shutdownNativeOwner()
+                    if (explicitRetry) owner.shutdownNativeOwner() else owner.continueNativeCleanup()
                     cleanup.shutdownSucceeded()
                 } catch (failure: Throwable) {
                     rethrowFatal(failure)
@@ -272,6 +297,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
                     return
                 }
             }
+            // Logical Rust close keeps exact core owners available for native
+            // retirement. Never destroy the ABI handle while its native session
+            // or scope wrappers still need cleanup-only calls through it.
+            if (approvals.hasPendingCleanup() || !denials.ownerShutdownSucceeded() || !platform.denialReferencesClear()) return
             try {
                 owner.close()
                 cleanup.destroyed()
@@ -299,7 +328,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         // An OS cancellation request is not a terminal callback. Keep the
         // already bounded worker available to release the last opaque handles
         // once native signing/prompt cleanup actually becomes quiescent.
-        if (approvals.hasPendingCleanup()) return
+        if (approvals.hasPendingCleanup() || denials.hasPendingCleanup()) return
         lifecycle.closed()
         worker.shutdown()
         publishLifecycle()
@@ -323,6 +352,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         is BridgeException.InvalidPolicy -> if (initializing) PolicyStatus.STORAGE_UNAVAILABLE else PolicyStatus.INVALID_POLICY
         is BridgeException.Busy -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.BUSY
         is BridgeException.HistoryTimeUnavailable -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.HISTORY_UNAVAILABLE
+        is BridgeException.DenialRejected -> PolicyStatus.UNAVAILABLE
         is BridgeException.StorageUnavailable, is BridgeException.LifecycleIntegrationRequired,
         is BridgeException.OwnerFaulted, is BridgeException.LocalKeysReconciliationRequired,
         is BridgeException.LocalKeysUnavailable -> PolicyStatus.STORAGE_UNAVAILABLE

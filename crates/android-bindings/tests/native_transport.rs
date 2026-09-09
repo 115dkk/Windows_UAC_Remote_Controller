@@ -153,6 +153,24 @@ impl SyntheticNativePlatform {
     }
 }
 impl NativePlatform for SyntheticNativePlatform {
+    fn advance_approval_drain_for_denial(
+        &self,
+        _: Arc<uac_android_controller::NativeDenialScope>,
+    ) -> Result<uac_android_controller::NativeApprovalDrainState, BridgeError> {
+        self.unused()
+    }
+    fn observe_denial_operation(
+        &self,
+        _: Arc<uac_android_controller::NativeDenialAttempt>,
+    ) -> Result<uac_android_controller::NativeDenialOperationState, BridgeError> {
+        self.unused()
+    }
+    fn release_denial_scope(
+        &self,
+        _: Arc<uac_android_controller::NativeDenialScope>,
+    ) -> Result<(), BridgeError> {
+        self.unused()
+    }
     fn prepare_transport_signer(
         &self,
         binding: Arc<NativeTransportBinding>,

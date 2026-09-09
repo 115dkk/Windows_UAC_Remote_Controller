@@ -16,6 +16,10 @@ not a general remote desktop or arbitrary remote execution tool.
 - **Authorization**: the Rust core has accepted a decision once. This is not
   proof that Windows accepted or applied it. The prompt adapter still has to
   bind the action to the same live prompt and confirm the result.
+- **Denial scope**: a process-local, original-request operation that also fences
+  further approval while denial and native cleanup are outstanding. Cancellation,
+  native retirement, a local socket write and Windows denial are distinct events.
+  See [ADR0014](docs/adr/0014-native-denial-fence-and-cleanup.md).
 - **Credential entry**: the user supplies what Windows itself requests from the
   phone. It does not turn phone biometrics into Windows credentials. The user
   permits ignoring credential prompt types that cannot be handled appropriately.
