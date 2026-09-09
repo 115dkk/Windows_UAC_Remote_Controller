@@ -31,6 +31,7 @@ rule TrustedEnrollment:
   --[ Enrolled(pc, ~device, ~revision, pk(~approval_sk), pk(~denial_sk)) ]->
   [ !PhoneKeys(~device, ~approval_sk, ~denial_sk),
     !EnrollmentKeys(pc, ~device, pk(~approval_sk), pk(~denial_sk)),
+    !RevisionOrigin(~revision, pc, ~device),
     RegistrySlot(~revision, pc, ~device, 'active'),
     Out(<pc, ~device, ~revision,
       pk(~approval_sk), pk(~denial_sk)>) ]
@@ -40,24 +41,27 @@ rule OpenActualRequest:
         ~content_digest, ~expiry>
   in
   [ !HostContext(pc, epoch, session_id, logon_luid),
+    !RevisionOrigin(revision, pc, device)[+],
     RegistrySlot(revision, pc, device, 'active'),
     Fr(~request_id), Fr(~nonce), Fr(~content_digest), Fr(~expiry) ]
   -->
   [ RegistrySlot(revision, pc, device, 'active'),
-    RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(pc, binding) ]
+    RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]
 
 // Immutable keys originate ONLY in TrustedEnrollment. The previous theory also
 // kept these keys unchanged across every revision; current membership remains
-// linear and revocable. RequestOrigin is created ONLY by the actual open rule,
-// not by network input. These facts expose existing provenance to the search;
-// neither fact replaces the request slot, frozen Snapshot or active revision.
+// linear and revocable. RequestOrigin links the existing slot ID to its binding
+// ONLY at actual open. RevisionOrigin records each existing fresh revision's
+// creation, not current membership. Their input [+] changes search priority only;
+// neither origin replaces the request slot, frozen Snapshot or exact registry phase.
 
 // Each capture checks current registration, but registry changes and other
 // requests MAY interleave between captures. This overapproximates atomic Rust
 // snapshot collection. Repeated captures are harmless persistent duplicates;
 // any nonempty subset, including a full serial registry snapshot, is possible.
 rule CaptureEligibleDevice:
-  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(pc, binding),
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    !RevisionOrigin(revision, pc, device)[+],
     RegistrySlot(revision, pc, device, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key) ]
   --[ SnapshotCaptured(pc, device, revision, binding) ]->
@@ -69,7 +73,7 @@ rule CaptureEligibleDevice:
 // makes later capture impossible. The pending slot is GLOBAL to the request,
 // never one replay guard per eligible device or key revision.
 rule PublishRequest:
-  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(pc, binding),
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
     !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
   --[ RequestOpened(pc, binding) ]->
   [ RequestSlot(request_id, pc, binding, 'pending'), Out(<'opened', pc, binding>) ]
@@ -104,9 +108,10 @@ rule AcceptApproval:
   let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
         'v1', device, 'approve', binding>
   in
-  [ RegistrySlot(revision, pc, device, 'active'),
+  [ !RevisionOrigin(revision, pc, device)[+],
+    RegistrySlot(revision, pc, device, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
-    !RequestOrigin(pc, binding),
+    !RequestOrigin(request_id, pc, binding)[+],
     !Snapshot(pc, device, revision, approval_key, denial_key, binding),
     RequestSlot(request_id, pc, binding, 'pending'),
     In(<'decision', device, 'approve', binding, signature>) ]
@@ -120,9 +125,10 @@ rule AcceptDenial:
   let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
         'v1', device, 'deny', binding>
   in
-  [ RegistrySlot(revision, pc, device, 'active'),
+  [ !RevisionOrigin(revision, pc, device)[+],
+    RegistrySlot(revision, pc, device, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
-    !RequestOrigin(pc, binding),
+    !RequestOrigin(request_id, pc, binding)[+],
     !Snapshot(pc, device, revision, approval_key, denial_key, binding),
     RequestSlot(request_id, pc, binding, 'pending'),
     In(<'decision', device, 'deny', binding, signature>) ]
@@ -133,38 +139,43 @@ rule AcceptDenial:
 // Real retirement of the linear active registration. The retired phase permits
 // explicit re-enrollment but never restores the old revision.
 rule RevokeCurrentDevice:
-  [ RegistrySlot(revision, pc, device, 'active') ]
+  [ !RevisionOrigin(revision, pc, device)[+],
+    RegistrySlot(revision, pc, device, 'active') ]
   --[ RegistryRevoked(pc, device, revision) ]->
   [ RegistrySlot(revision, pc, device, 'retired') ]
 
 rule TrustedReenrollmentWithSameKeys:
-  [ RegistrySlot(old_revision, pc, device, 'retired'),
+  [ !RevisionOrigin(old_revision, pc, device)[+],
+    RegistrySlot(old_revision, pc, device, 'retired'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     Fr(~new_revision) ]
   --[ Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
-  [ RegistrySlot(~new_revision, pc, device, 'active'),
+  [ !RevisionOrigin(~new_revision, pc, device),
+    RegistrySlot(~new_revision, pc, device, 'active'),
     Out(~new_revision) ]
 
 // Core replacement likewise invalidates the former revision even with the same
 // keys; no pending snapshot is silently upgraded to the new membership.
 rule TrustedReplacementWithSameKeys:
-  [ RegistrySlot(old_revision, pc, device, 'active'),
+  [ !RevisionOrigin(old_revision, pc, device)[+],
+    RegistrySlot(old_revision, pc, device, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     Fr(~new_revision) ]
   --[ RegistryRevoked(pc, device, old_revision),
       Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
-  [ RegistrySlot(~new_revision, pc, device, 'active'),
+  [ !RevisionOrigin(~new_revision, pc, device),
+    RegistrySlot(~new_revision, pc, device, 'active'),
     Out(~new_revision) ]
 
 rule CancelExactRequest:
-  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(pc, binding) ]
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
   --[ RequestCancelled(binding) ]->
   [ ]
 
 // Explicit native expiry transition, not a modeled numerical clock. There is
 // intentionally no claim that this rule executes within a wall-clock duration.
 rule ExpireExactRequest:
-  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(pc, binding) ]
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
   --[ RequestExpired(binding) ]->
   [ ]
 
