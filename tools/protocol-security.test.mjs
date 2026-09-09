@@ -5,11 +5,27 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { mutateExactlyOnce, parseProofSummary, runProtocolSecurity } from './protocol-security.mjs';
+import { mutateExactlyOnce, parseProofSummary, proofArguments, runProtocolSecurity } from './protocol-security.mjs';
 const expected = { auth: { trace: 'all-traces', verdict: 'verified' }, executable: { trace: 'exists-trace', verdict: 'verified' } };
 const text = 'summary of summaries:\n analyzed: Model.spthy\n auth (all-traces): verified (5 steps)\n executable (exists-trace): verified (3 steps)\n';
 const result = (stdout) => ({ stdout, stderr: '', status: 0, signal: null });
 const parse = (input, expected, known) => parseProofSummary(input, expected, known, 'Model.spthy');
+
+test('breadth-first witness search changes no proof requirements or model bounds', () => {
+  for (const wanted of [
+    { honest: { trace: 'exists-trace', verdict: 'verified' } },
+    { auth: { trace: 'all-traces', verdict: 'falsified' } },
+  ]) {
+    const args = proofArguments('Model.spthy', wanted);
+    assert.ok(args.includes('--stop-on-trace=BFS'));
+    assert.ok(args.includes('--quit-on-warning'));
+    assert.equal(args.filter((arg) => arg.startsWith('--prove=')).length, 1);
+    assert.ok(args.every((arg) => !arg.startsWith('--bound') && !arg.includes('sorry')));
+    assert.equal(args[0], 'Model.spthy');
+  }
+  assert.ok(proofArguments('Model.spthy', expected).includes('--stop-on-trace=DFS'));
+  assert.ok(proofArguments('Model.spthy', { auth: expected.auth }).includes('--stop-on-trace=DFS'));
+});
 test('actual summary needs every property and honest executable trace', () => {
   assert.equal(parse(result(text), expected).ok, true);
   assert.equal(parse(result(text.replace('executable (exists-trace): verified (3 steps)', '')), expected).ok, false);

@@ -8,6 +8,15 @@ import { runProver } from './prover-process.mjs';
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+export function proofArguments(path, expected) {
+  // A single long branch must not starve a short honest/attack witness. BFS
+  // changes search order only, never the trace set, lemmas or acceptance rule.
+  const witness = Object.values(expected).every((result) =>
+    result.trace === 'exists-trace' || result.verdict === 'falsified');
+  return [path, '--quit-on-warning', ...Object.keys(expected).map((name) => `--prove=${name}`),
+    `--stop-on-trace=${witness ? 'BFS' : 'DFS'}`, '+RTS', '-N2', '-M2G', '-RTS'];
+}
+
 export function parseProofSummary(result, expected, knownNames = Object.keys(expected), expectedModel) {
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
   const reasons = [];
@@ -137,14 +146,14 @@ async function runProtocolSecurityImpl(root, cancellation) {
     const before = readFileSync(path);
     const inputHash = sha256(before);
     if (inputHash !== expectedInputHash) throw new Error('Immutable prover snapshot changed before invocation.');
-    const args = [path, '--quit-on-warning', ...Object.keys(expected).map((name) => `--prove=${name}`), '+RTS', '-N2', '-M2G', '-RTS'];
+    const args = proofArguments(path, expected);
     process.stdout.write(`Protocol security: ${id}\n`);
     const result = await runProver(binary, args, { cwd: root, logPath: joinEvidence(id, 'log'), signal: cancellation });
     const proof = parseProofSummary(result, expected, knownNames, path);
     try {
       if (sha256(readFileSync(path)) !== inputHash) { proof.ok = false; proof.reasons.push('prover input changed during execution'); }
     } catch { proof.ok = false; proof.reasons.push('prover input could not be re-read after execution'); }
-    const row = { id, model: basename(path), modelSha256: inputHash, origin, selectedLemmas: Object.keys(expected), status: result.status, signal: result.signal,
+    const row = { id, model: basename(path), modelSha256: inputHash, origin, selectedLemmas: Object.keys(expected), arguments: args, status: result.status, signal: result.signal,
       processError: result.error?.message, cleanupIncomplete: result.cleanupIncomplete, cancelled: result.cancelled, ...proof };
     runs.push(row);
     process.stdout.write(`${JSON.stringify(row)}\n`);
