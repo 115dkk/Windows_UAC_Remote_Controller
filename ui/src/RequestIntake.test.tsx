@@ -39,7 +39,10 @@ describe('native request presentation integration', () => {
       const initial = pending();
       const snapshot = { ...initial, requests: initial.requests.map((request) => ({ ...request, state, canApprove: false, canDeny: false })) };
       const rendered = view(snapshot);
-      expect(await screen.findByText(copy)).toBeInTheDocument();
+      const phase = await screen.findByText(copy);
+      expect(phase).toBeInTheDocument();
+      expect(phase.compareDocumentPosition(rendered.container.querySelector('.path-output')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(screen.queryByText(ko.requestIntro)).not.toBeInTheDocument();
       expect(screen.queryByText(ko.expired)).not.toBeInTheDocument();
       expect(screen.queryByText('요청 승인됨')).not.toBeInTheDocument();
       rendered.unmount();

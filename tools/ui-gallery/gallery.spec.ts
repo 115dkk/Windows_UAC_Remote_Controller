@@ -34,6 +34,7 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     };
     if (intakeCopy[fixture]) {
       await expect(page.getByText(intakeCopy[fixture], { exact: true })).toBeVisible();
+      await expect(page.getByText(intakeCopy[fixture], { exact: true })).toBeInViewport({ ratio: 1 });
       await expect(page.getByText('요청 승인됨', { exact: true })).toHaveCount(0);
       await expect(page.getByText('요청 시간이 지났어요.', { exact: true })).toHaveCount(0);
       if (fixture === 'phone-authenticating') {

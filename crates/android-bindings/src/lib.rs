@@ -754,6 +754,8 @@ mod tests {
         reenter: Mutex<Option<Weak<MobileController>>>,
         saw_busy: AtomicBool,
         clock_samples: Mutex<VecDeque<NativeClock>>,
+        clock_samples_thread: std::thread::ThreadId,
+        intake_notices: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
         keys_present: AtomicBool,
         key_callbacks: Mutex<KeyCallbacks>,
     }
@@ -774,12 +776,17 @@ mod tests {
             reenter: Mutex::new(None),
             saw_busy: AtomicBool::new(false),
             clock_samples: Mutex::new(VecDeque::new()),
+            clock_samples_thread: std::thread::current().id(),
+            intake_notices: Mutex::new(None),
             keys_present: AtomicBool::new(false),
             key_callbacks: Mutex::new(KeyCallbacks::default()),
         })
     }
     impl NativePlatform for TestPlatform {
         fn intake_progress(&self) -> Result<(), BridgeError> {
+            if let Some(sender) = self.intake_notices.lock().unwrap().as_ref() {
+                sender.try_send(()).expect("bounded fixture intake notices");
+            }
             Ok(())
         }
         fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError> {
@@ -885,12 +892,15 @@ mod tests {
                     Ordering::Release,
                 );
             }
-            Ok(self
-                .clock_samples
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(*self.clock.lock().unwrap()))
+            // Scripted failures target the test's command thread. Independent
+            // reactor observations use the stable native-time fallback instead
+            // of nondeterministically consuming a next-command fault fixture.
+            let scripted = if std::thread::current().id() == self.clock_samples_thread {
+                self.clock_samples.lock().unwrap().pop_front()
+            } else {
+                None
+            };
+            Ok(scripted.unwrap_or(*self.clock.lock().unwrap()))
         }
         fn clear_request_notifications(&self) -> Result<(), BridgeError> {
             self.cleared.fetch_add(1, Ordering::Relaxed);
@@ -1077,7 +1087,12 @@ mod tests {
             weekday: 0,
             minute: 600,
         };
-        let platform = test_platform(temp.path().to_str().unwrap().into(), at(1_500_000_000));
+        // Full startup performs further effect/temporal observations after its
+        // post-store sample. Keep those healthy; inject regression only after
+        // the real native constructor has returned its retained clock floor.
+        let platform = test_platform(temp.path().to_str().unwrap().into(), at(2_000_000_000));
+        let (progress, notices) = std::sync::mpsc::sync_channel(8);
+        *platform.intake_notices.lock().unwrap() = Some(progress);
         platform
             .clock_samples
             .lock()
@@ -1088,6 +1103,11 @@ mod tests {
             controller.native_floor_nanos.load(Ordering::Acquire),
             2_000_000_000
         );
+        platform
+            .clock_samples
+            .lock()
+            .unwrap()
+            .push_back(at(1_500_000_000));
         let policy = serde_json::to_string(&NotificationPolicy::default()).unwrap();
         assert_eq!(
             controller.save_notification_policy(policy),
@@ -1096,6 +1116,25 @@ mod tests {
         assert_eq!(
             controller.notification_policy_json(),
             Err(BridgeError::Closed)
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut cleaned = false;
+        for _ in 0..8 {
+            match controller.continue_native_cleanup() {
+                Ok(()) => {
+                    controller.intake.join_completed_for_tests();
+                    cleaned = true;
+                    break;
+                }
+                Err(BridgeError::Busy | BridgeError::NativeUnavailable) => notices
+                    .recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                    .expect("bounded actual reactor cleanup progress"),
+                Err(error) => panic!("unexpected clock-fault cleanup {error:?}"),
+            }
+        }
+        assert!(
+            cleaned,
+            "release the real I/O lifetime before the next owner"
         );
     }
 
@@ -1143,7 +1182,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn partial_native_reopen_failure_releases_own_refs_before_return_without_store_change() {
+    fn partial_native_reopen_failure_releases_own_refs_and_keeps_snapshot_with_intent() {
         let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let clock = NativeClock {
@@ -1171,11 +1210,19 @@ mod tests {
             before
         );
         assert!(
-            !temp
-                .path()
+            temp.path()
                 .join(phone_state_store::INTENT_FILE_NAME)
                 .exists()
         );
+        // Full request-bearing restoration reserves durable intent BEFORE the
+        // key preflight. Rejection releases native references, not the intent;
+        // the unchanged committed snapshot must not be reopened/reset as fresh.
+        assert!(matches!(
+            phone_state_store::SnapshotStore::open_existing(
+                NativePrivateDirectory::from_native_app_data(temp.path()).unwrap()
+            ),
+            Err(phone_state_store::StoreError::RecoveryRequired)
+        ));
     }
 
     #[cfg(target_os = "linux")]

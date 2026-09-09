@@ -24,9 +24,10 @@ function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen
     <div className="request-context"><Icon name="pc" /><bdi>{request.computerName}</bdi></div>
     <p className="eyebrow request-eyebrow">{ko.needsDecision}</p>
     <h2 id={headingId} ref={heading} tabIndex={-1} className="program-name"><bdi>{request.programName}</bdi></h2>
+    {!pending && <div className="request-result" aria-live="polite"><p className="pending-copy">{requestStateText[request.state]}</p></div>}
     <dl className="request-facts"><div><dt>{ko.executable}</dt><dd className="path-output" dir="auto">{request.executablePath}</dd></div></dl>
     {request.hasDetails && <RequestDetailsDisclosure request={request} disabled={disabled} read={readDetails} initiallyOpen={initiallyOpen} />}
-    <div className="request-result" aria-live="polite">{pending ? <p className="time-remaining"><Icon name="clock" />{remainingLabel(request.remainingSeconds)}</p> : <p className="pending-copy">{requestStateText[request.state]}</p>}</div>
+    {pending && <div className="request-result" aria-live="polite"><p className="time-remaining"><Icon name="clock" />{remainingLabel(request.remainingSeconds)}</p></div>}
     <div className="request-actions"><button type="button" className="button secondary" disabled={disabled || !request.canDeny} onClick={() => onDecision(request.id, 'deny')}>{ko.deny}</button><button type="button" className="button primary" disabled={disabled || !pending || !request.canApprove} onClick={() => onDecision(request.id, 'approve')}><Icon name="check" />{ko.approve}</button></div>
   </article>;
 }

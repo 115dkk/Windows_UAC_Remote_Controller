@@ -44,11 +44,11 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     @Volatile private var requestChanged: (() -> Unit)? = null
     @Volatile private var timeChanged: (() -> Unit)? = null
     @Volatile private var requestCleanup: (() -> Unit)? = null
-    private val presentation = NativePresentationClockSource {
+    private val presentation: NativePresentationClockSource = NativePresentationClockSource {
         requests.invalidateTime()
         timeChanged?.invoke()
     }
-    internal val requests = NativeRequestRegistry(application, presentation,
+    internal val requests: NativeRequestRegistry = NativeRequestRegistry(application, presentation,
         { requestChanged?.invoke() }, { requestCleanup?.invoke() })
 
     internal fun bindRequests(progress: () -> Unit, changed: () -> Unit, temporal: () -> Unit, cleanup: () -> Unit) {

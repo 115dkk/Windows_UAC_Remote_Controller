@@ -13,7 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(target_os = "android"))]
 thread_local! { static CALLBACK_DEPTH: Cell<u32> = const { Cell::new(0) }; }
+// Android uses lazy OS TLS. Rust1.97's OS macro wraps even a const block in a
+// non-const initializer, triggering Clippy on that generated function. Default
+// is genuinely runtime initialization with the same zero u32, not a lint bypass
+// or an alternate reentry policy. No allow/expect or hand-written TLS/unsafe.
+#[cfg(target_os = "android")]
+thread_local! { static CALLBACK_DEPTH: Cell<u32> = Cell::default(); }
 pub(crate) fn callback_active() -> bool {
     CALLBACK_DEPTH.with(|depth| depth.get() != 0)
 }

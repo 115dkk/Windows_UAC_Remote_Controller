@@ -22,6 +22,8 @@ export function onlyIsolatedEmulator(list) {
 
 export function checkNotificationUi(xml, selected) {
   if (xml.length > 1024 * 1024 || !xml.includes('<hierarchy')) throw new Error('Missing bounded actual UI dump.');
+  const rootNode = xml.match(/<node\b[^>]*>/u)?.[0];
+  if (!rootNode?.includes('package="com.android.systemui"')) throw new Error('The notification shade is not the observed UI.');
   const present = xml.includes('UAC 인증 요청');
   if (selected === 'withdrawn') {
     if (present) throw new Error('Withdrawn test notification is still visible.');
@@ -72,26 +74,36 @@ async function main() {
       }
       if (!matchesNativeReceipt(native, selected, nonce)) throw new Error('Native renderer checks did not finish for this exact launch.');
       run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
-      // Wait only for the OS shade animation. Presence below is actually checked.
-      await pause();
-      run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
-      let xml = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
-      if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`))) {
-        // Expand only an observed system control; never guess a blind position.
-        const controls = [...xml.matchAll(/<node\b[^>]*content-desc="Expand"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*>/gu)];
-        if (controls.length === 1) {
-          const [, left, top, right, bottom] = controls[0];
-          run(['shell', 'input', 'tap', String(Math.floor((Number(left) + Number(right)) / 2)), String(Math.floor((Number(top) + Number(bottom)) / 2))]);
-          await pause();
-          run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
-          xml = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
+      // App.onCreate/notify returning does not mean SystemUI finished its first
+      // post-boot render. Await the actual shade/title/actions, not a fixed delay.
+      const uiDeadline = Date.now() + 30_000;
+      const observations = [];
+      let xml = '';
+      for (let attempt = 0; attempt < 12 && Date.now() < uiDeadline; attempt += 1) {
+        await pause();
+        run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
+        xml = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
+        let shown = false;
+        try { checkNotificationUi(xml, selected); shown = true; } catch { /* Retain actual failed observation. */ }
+        const actionsShown = selected === 'withdrawn' || ['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`));
+        observations.push({ attempt, shade: xml.includes('package="com.android.systemui"'), shown, actionsShown, xmlSha256: hash(xml) });
+        if (shown && actionsShown) break;
+        if (!xml.includes('package="com.android.systemui"')) {
+          run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
+        } else if (shown && !actionsShown) {
+          // Expand only an observed system control; never guess a blind position.
+          const controls = [...xml.matchAll(/<node\b[^>]*content-desc="Expand"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*>/gu)];
+          if (controls.length === 1) {
+            const [, left, top, right, bottom] = controls[0];
+            run(['shell', 'input', 'tap', String(Math.floor((Number(left) + Number(right)) / 2)), String(Math.floor((Number(top) + Number(bottom)) / 2))]);
+          }
         }
       }
       const png = run(['exec-out', 'screencap', '-p'], true);
       if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Actual screenshot is not PNG.');
       writeFileSync(resolve(output, `${selected}.png`), png);
       writeFileSync(resolve(output, `${selected}.xml`), xml);
-      receipt.captures.push({ case: selected, native, pngSha256: hash(png), actualUiChecked: false });
+      receipt.captures.push({ case: selected, native, observations, pngSha256: hash(png), actualUiChecked: false });
       checkNotificationUi(xml, selected);
       if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`))) {
         throw new Error('All three native notification actions were not visible in the actual UI.');

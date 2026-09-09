@@ -74,7 +74,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
 
   const main = <main id="main-content" className="main-scroll" tabIndex={-1}>
     <div className="page-content">
-      <header className="page-header"><div><h1 tabIndex={-1}>{title}</h1>{page === 'requests' && snapshot.requests.length > 0 && snapshot.dataAvailability.requests === 'available' && <p>{ko.requestIntro}</p>}{page === 'schedule' && <p>{ko.scheduleIntro}</p>}</div>{refreshButton}</header>
+      <header className="page-header"><div><h1 tabIndex={-1}>{title}</h1>{page === 'requests' && snapshot.requests.some((request) => request.state === 'pending') && snapshot.dataAvailability.requests === 'available' && <p>{ko.requestIntro}</p>}{page === 'schedule' && <p>{ko.scheduleIntro}</p>}</div>{refreshButton}</header>
       {stale && <p className="stale-label"><Icon name="alert" />{ko.stale}</p>}
       {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{error}</p></section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{snapshot.issue.message}</p>{snapshot.issue.nextAction && <p className="supporting-text">{snapshot.issue.nextAction}</p>}</div></section>}

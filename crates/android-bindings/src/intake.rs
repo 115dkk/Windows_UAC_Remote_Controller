@@ -96,7 +96,7 @@ impl Default for IntakeOwner {
     }
 }
 impl IntakeOwner {
-    #[cfg(test)]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(crate) fn accepted_correlation_for_tests(
         &self,
         reference: PeerAssociationRef,
@@ -111,7 +111,7 @@ impl IntakeOwner {
             .then(|| peer.last_correlation.load(Ordering::Acquire))
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(crate) fn join_completed_for_tests(&self) {
         let runtime = self.inner.lock().unwrap().runtime.take();
         if let Some(runtime) = runtime {
@@ -560,7 +560,8 @@ impl MobileController {
 fn fail_reactor(controller: &Weak<MobileController>, intake: &IntakeOwner) {
     intake.failed.store(true, Ordering::Release);
     intake.stop();
-    if let Some(owner) = controller.upgrade() {
+    if let Some(owner) = Weak::<MobileController>::upgrade(controller) {
+        let owner: &MobileController = Arc::as_ref(&owner);
         owner.stop_intake();
         owner.cleanup_pending.store(true, Ordering::Release);
     }
@@ -606,10 +607,10 @@ async fn reactor(
     mut attach: mpsc::Receiver<AttachInput>,
 ) {
     let budget = Arc::new(ConnectionBudget::new(MAX_PEERS).expect("fixed nonzero peer capacity"));
-    let mut jobs = JoinSet::new();
-    let mut parked = VecDeque::new();
+    let mut jobs: JoinSet<ParkedPeer> = JoinSet::new();
+    let mut parked: VecDeque<Parked> = VecDeque::new();
     let mut blocked = false;
-    let mut last_local = None;
+    let mut last_local: Option<(notification_policy::LocalTime, u64)> = None;
     let mut observation = tokio::time::interval(OBSERVE_INTERVAL);
     observation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -623,8 +624,9 @@ async fn reactor(
             && (!parked.is_empty()
                 || (intake.maintenance.load(Ordering::Acquire)
                     && !intake.awaiting_temporal_refresh()))
-            && let Some(owner) = controller.upgrade()
+            && let Some(owner) = Weak::<MobileController>::upgrade(&controller)
         {
+            let owner: &MobileController = Arc::as_ref(&owner);
             match owner.enter() {
                 Ok(admission) => {
                     if intake.failed.load(Ordering::Acquire)
@@ -652,7 +654,7 @@ async fn reactor(
                             .native_progress_pending
                             .store(true, Ordering::Release);
                     } else if let Some(work) = parked.pop_front() {
-                        match process_parked(&owner, work, Arc::clone(&budget)) {
+                        match process_parked(owner, work, Arc::clone(&budget)) {
                             Ok(Some(peer)) => {
                                 jobs.spawn(wait_peer(peer));
                             }
@@ -728,8 +730,9 @@ async fn reactor(
     jobs.abort_all();
     while jobs.join_next().await.is_some() {}
     if intake.failed.load(Ordering::Acquire)
-        && let Some(owner) = controller.upgrade()
+        && let Some(owner) = Weak::<MobileController>::upgrade(&controller)
     {
+        let owner: &MobileController = Arc::as_ref(&owner);
         owner.approval_alive.store(false, Ordering::Release);
         owner.cleanup_pending.store(true, Ordering::Release);
     }
@@ -987,7 +990,7 @@ fn queue_probe(owner: &MobileController, peer: &mut PeerOwned) -> Result<(), Bri
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(windows, target_os = "linux")))]
 pub(crate) fn process_parked_message_for_test(
     owner: &MobileController,
     socket: AssociatedPcSocket,
