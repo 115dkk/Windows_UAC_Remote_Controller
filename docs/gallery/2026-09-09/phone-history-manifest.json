@@ -1,0 +1,22 @@
+{
+  "sourceCommit": "dac04a99e0b60022068eb6b0f06336941a12a3ef",
+  "run": "https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34298827980",
+  "scope": "Actual Chromium renders of synthetic React history state, not Android storage, received requests or UAC approvals",
+  "renderer": "Playwright 1.63.0 / Chromium 153.0.8010.12",
+  "images": [
+    {
+      "file": "phone-history.png",
+      "case": "phone-history-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "8BC0E2E01E377951C53ED4F3B2739D756CECD63AD3675C88C347F81EDFEF2C51"
+    },
+    {
+      "file": "phone-history-empty.png",
+      "case": "phone-history-empty-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "695FE86B041467FE9F783E956C420254CB533199980FCF85020D585806D462EA"
+    }
+  ]
+}
