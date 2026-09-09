@@ -18,11 +18,13 @@ use windows::{
     },
     core::{HRESULT, PCWSTR},
 };
+use windows_prompt_probe::supervision::MAX_REPORT_BYTES;
 
-const BUFFER_BYTES: usize = 513;
 struct Storage {
     overlapped: OVERLAPPED,
-    buffer: [u8; BUFFER_BYTES],
+    // Allocate the contents on the heap before boxing Storage. A MAX_REPORT_BYTES
+    // array temporary here would consume most of the Windows thread stack.
+    buffer: Box<[u8]>,
 }
 pub(super) enum Completed {
     Bytes(Vec<u8>),
@@ -37,6 +39,9 @@ pub(super) enum Kind<'a> {
 }
 pub(super) struct PendingIo {
     storage: Option<Box<UnsafeCell<Storage>>>,
+    // Acquired once before issuing I/O. Never reborrow/reallocate the buffer
+    // through its owning Box while the kernel can still access these bytes.
+    buffer: *mut u8,
     event: Option<Handle>,
     pending: bool,
     read: bool,
@@ -56,31 +61,18 @@ impl PendingIo {
                 .map_err(|error| native(stage, error))?,
             stage,
         )?;
-        let mut storage = Storage {
+        let (read, buffer) = prepare_buffer(kind)?;
+        let maximum = buffer.len();
+        let storage = Storage {
             overlapped: OVERLAPPED {
                 hEvent: event.raw(),
                 ..Default::default()
             },
-            buffer: [0; BUFFER_BYTES],
-        };
-        let (read, maximum) = match kind {
-            Kind::Connect => (false, 0),
-            Kind::Write(bytes) => {
-                if bytes.len() > BUFFER_BYTES {
-                    return Err(Error::InvalidReport);
-                }
-                storage.buffer[..bytes.len()].copy_from_slice(bytes);
-                (false, bytes.len())
-            }
-            Kind::Read(count) => {
-                if count == 0 || count > BUFFER_BYTES {
-                    return Err(Error::InvalidReport);
-                }
-                (true, count)
-            }
+            buffer,
         };
         let mut operation = Self {
             storage: Some(Box::new(UnsafeCell::new(storage))),
+            buffer: std::ptr::null_mut(),
             event: Some(event),
             pending: false,
             read,
@@ -88,6 +80,11 @@ impl PendingIo {
             stage,
         };
         let pointer = operation.pointer();
+        // SAFETY: boxed initialized storage; no native operation has started.
+        // This is the only mutable borrow through the owned buffer descriptor.
+        // Neither allocation is subsequently moved, resized or replaced.
+        operation.buffer = unsafe { (*pointer).buffer.as_mut_ptr() };
+        let buffer = operation.buffer;
         // SAFETY: boxed UnsafeCell storage stays at a stable address through
         // completion/cancel acknowledgement. No Rust reference accesses these
         // bytes while the kernel may mutate OVERLAPPED/read data. Pipe/event
@@ -101,19 +98,13 @@ impl PendingIo {
                 Kind::Connect => ConnectNamedPipe(pipe, Some(overlapped)),
                 Kind::Write(_) => WriteFile(
                     pipe,
-                    Some(std::slice::from_raw_parts(
-                        std::ptr::addr_of!((*pointer).buffer).cast(),
-                        maximum,
-                    )),
+                    Some(std::slice::from_raw_parts(buffer, maximum)),
                     None,
                     Some(overlapped),
                 ),
                 Kind::Read(_) => ReadFile(
                     pipe,
-                    Some(std::slice::from_raw_parts_mut(
-                        std::ptr::addr_of_mut!((*pointer).buffer).cast(),
-                        maximum,
-                    )),
+                    Some(std::slice::from_raw_parts_mut(buffer, maximum)),
                     None,
                     Some(overlapped),
                 ),
@@ -175,13 +166,8 @@ impl PendingIo {
                 if self.read {
                     // SAFETY: successful completion proves native writes ended;
                     // count is bounded before copying the initialized byte region.
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            std::ptr::addr_of!((*self.pointer()).buffer).cast(),
-                            count as usize,
-                        )
-                    }
-                    .to_vec();
+                    let bytes =
+                        unsafe { std::slice::from_raw_parts(self.buffer, count as usize) }.to_vec();
                     Ok(Some(Completed::Bytes(bytes)))
                 } else {
                     Ok(Some(Completed::Count(count as usize)))
@@ -217,6 +203,7 @@ impl PendingIo {
         }
     }
 }
+
 impl Drop for PendingIo {
     fn drop(&mut self) {
         if self.pending {
@@ -230,5 +217,73 @@ impl Drop for PendingIo {
                 mem::forget(event);
             }
         }
+    }
+}
+
+// Only the requested bounded length is allocated: connect and EOF probes do not
+// each reserve a maximum report. Validation happens before allocating/copying.
+fn prepare_buffer(kind: Kind<'_>) -> Result<(bool, Box<[u8]>), Error> {
+    let (read, length) = match kind {
+        Kind::Connect => (false, 0),
+        Kind::Write(bytes) if bytes.len() <= MAX_REPORT_BYTES => (false, bytes.len()),
+        Kind::Read(count) if (1..=MAX_REPORT_BYTES + 1).contains(&count) => (true, count),
+        Kind::Write(_) | Kind::Read(_) => return Err(Error::InvalidReport),
+    };
+    let mut buffer = vec![0; length].into_boxed_slice();
+    if let Kind::Write(bytes) = kind {
+        buffer.copy_from_slice(bytes);
+    }
+    Ok((read, buffer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_buffer_is_heap_owned_and_storage_stays_small() {
+        let (read, buffer) = prepare_buffer(Kind::Read(MAX_REPORT_BYTES + 1)).unwrap();
+        let storage = Storage {
+            overlapped: OVERLAPPED::default(),
+            buffer,
+        };
+        assert!(mem::size_of_val(&storage) < 256);
+        assert!(read);
+        assert_eq!(storage.buffer.len(), MAX_REPORT_BYTES + 1);
+        assert!(storage.buffer.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn connect_and_eof_only_allocate_their_requested_length() {
+        let (read, bytes) = prepare_buffer(Kind::Connect).unwrap();
+        assert!(!read);
+        assert!(bytes.is_empty());
+        let (read, bytes) = prepare_buffer(Kind::Read(1)).unwrap();
+        assert!(read);
+        assert_eq!(&*bytes, &[0]);
+    }
+
+    #[test]
+    fn oversized_or_empty_reads_are_rejected_before_allocation() {
+        for length in [0, MAX_REPORT_BYTES + 2, usize::MAX] {
+            assert!(matches!(
+                prepare_buffer(Kind::Read(length)),
+                Err(Error::InvalidReport)
+            ));
+        }
+        let bytes = vec![0; MAX_REPORT_BYTES + 1];
+        assert!(matches!(
+            prepare_buffer(Kind::Write(&bytes)),
+            Err(Error::InvalidReport)
+        ));
+    }
+
+    #[test]
+    fn writes_own_an_exact_independent_copy() {
+        let mut source = vec![1, 2, 3];
+        let (read, bytes) = prepare_buffer(Kind::Write(&source)).unwrap();
+        source.fill(9);
+        assert!(!read);
+        assert_eq!(&*bytes, &[1, 2, 3]);
     }
 }

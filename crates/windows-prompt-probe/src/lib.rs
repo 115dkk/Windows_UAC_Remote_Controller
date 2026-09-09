@@ -11,6 +11,12 @@
 
 use std::fmt;
 
+mod content;
+pub use content::{
+    LabelKind, MAX_PROMPT_CONTENT_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS,
+    MAX_RUNTIME_ID_VALUES, PromptContentError, PromptContentObservation, PromptLabel,
+    prompt_text_from_utf16,
+};
 pub mod supervision;
 
 #[cfg(all(windows, target_pointer_width = "64"))]
@@ -58,6 +64,10 @@ pub enum NativeOperation {
     ElementProperty,
     PatternAvailability,
     ClearProperty,
+    RuntimeId,
+    ClearRuntimeId,
+    Caption,
+    Label,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +90,8 @@ pub enum ProbeFailure {
     ProviderOwnerMismatch,
     WorkerUnavailable,
     WorkerPanicked,
+    ContentLimit,
+    UnsupportedContent,
     CleanupFailed,
     MalformedNativeData(NativeOperation),
     NativeCall {
@@ -139,13 +151,35 @@ pub struct ProbeCounts {
     pub maximum_depth: u8,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Bounded read-only observation, not recognized operation or live target proof.
+/// Success always contains content; counts alone cannot construct this report.
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProbeReport {
     counts: ProbeCounts,
+    content: PromptContentObservation,
 }
 impl ProbeReport {
-    pub const fn counts(self) -> ProbeCounts {
+    pub fn from_observation(
+        counts: ProbeCounts,
+        content: PromptContentObservation,
+    ) -> Result<Self, PromptContentError> {
+        content.validate_counts(counts)?;
+        Ok(Self { counts, content })
+    }
+    pub const fn counts(&self) -> ProbeCounts {
         self.counts
+    }
+    pub const fn content(&self) -> &PromptContentObservation {
+        &self.content
+    }
+}
+impl fmt::Debug for ProbeReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProbeReport")
+            .field("counts", &self.counts)
+            .field("content", &self.content)
+            .finish()
     }
 }
 

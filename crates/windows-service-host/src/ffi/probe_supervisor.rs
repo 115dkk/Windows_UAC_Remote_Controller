@@ -25,7 +25,7 @@ use windows::{
     core::Error as WinError,
 };
 use windows_prompt_probe::supervision::{
-    CHALLENGE_BYTES, Challenge, REPORT_BYTES, ReportOutcome, decode_report,
+    CHALLENGE_BYTES, Challenge, MAX_REPORT_BYTES, ReportOutcome, decode_report,
 };
 
 mod io;
@@ -301,7 +301,9 @@ impl ActiveRun {
         }
         self.operation = Some(PendingIo::start(
             self.pipe()?,
-            Kind::Read(REPORT_BYTES + 1),
+            // One complete message and one extra byte to reject an oversized
+            // frame. PendingIo heap-allocates it and retains it through cancel.
+            Kind::Read(MAX_REPORT_BYTES + 1),
             Stage::ReportRead,
             self.began,
         )?);
@@ -328,7 +330,7 @@ impl ActiveRun {
             }
         }
         let code = exit_code(process)?;
-        let expected = match report {
+        let expected = match &report {
             ReportOutcome::Observed(_) => 0,
             ReportOutcome::Unavailable(_) => 1,
         };

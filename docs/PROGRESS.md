@@ -2,7 +2,33 @@
 
 2026-09-09 · **개발 진행 중. 원격 UAC 승인기 전체가 완성된 상태는 아니다.**
 
-## 현재 기준: `dac04a9`
+## 최근 검증 기준: `65c2a5e`
+
+- [전체 품질 CI](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34309072248)의
+  Windows·Linux·Android 코어 작업과 [APK 빌드](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34309072267)가
+  통과했다. ROOT가 각 실행의 최종 종료 코드 0을 확인했다. Rustfmt, 전체
+  Clippy 경고 0, Cargo 테스트, 실제 Rust Analyzer와 실패 판정 예제를 포함한다.
+- 서비스 전용 Windows 등록부 저장과 휴대폰의 로컬 키 생성 의도·공개키
+  기록·재열기 수명주기를 추가했다. 휴대폰 기록은 PC 등록 승인이 아니며,
+  Application은 여전히 설정 전용이다. 불완전한 생성 기록이나 남은 키를
+  새 설치로 덮어쓰지 않는다. 관련 결정은 [Windows 등록부](adr/0007-service-device-registry.md)와
+  [휴대폰 키 수명주기](adr/0008-phone-local-key-lifecycle.md)에 있다.
+- 실제 UAC·휴대폰 인증 수동 검증, 신뢰할 수 있는 QR 등록, 실제 요청·알림·
+  승인 연결, PR/main 릴리스와 최종 보안 감사·리팩터링은 여전히 남았다.
+
+### 현재 작성 중: Windows 창의 제한된 표시 내용
+
+읽기 전용 보조 프로세스에서 같은 UIA 루트의 제목·보이는 정적 문구를
+두 번 읽고 비교하도록 확장한다. 편집·값·비밀번호 하위 트리는 읽지 않는다.
+런타임 식별자와 문구 일치는 원자적인 UAC 요청 식별이나 승인 권한이 아니다.
+문구를 오류·Debug 기록에 넣지 않고, 입력 길이와 수신 버퍼·보조 프로세스
+메모리를 제한한다. 이 새 변경의 검증은 위 `65c2a5e` 결과에 포함되지 않는다.
+
+C·E 드라이브 청소는 사용자 요청대로 모든 구현·최종 리팩터링·검증 후에
+수행한다. 이 작업을 위해 아직 파일을 삭제하지 않았으며 실제 삭제 목록과
+전후 여유 공간을 따로 기록할 예정이다.
+
+## 이전 화면·기록 검증 기준: `dac04a9`
 
 - [전체 품질 CI](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34298828002)는
   Windows·Linux의 fmt, Clippy 경고 0, Cargo 테스트, 실제 Rust Analyzer와
@@ -25,7 +51,7 @@
   화면을 양쪽에서 확인했다. [대표 화면 12장](gallery/2026-09-09/README.md)은
   합성 데이터를 실제 Chromium으로 렌더링한 것이며 Android 캡처가 아니다.
 
-남은 핵심은 소유자가 선택한 휴대폰만 등록하는 QR 절차, 영속 등록부,
+이 단계에 남았던 핵심은 소유자가 선택한 휴대폰만 등록하는 QR 절차, 영속 등록부,
 실제 요청 수신·알림·요청별 인증, Windows 프롬프트에 대한 동작 적용이다.
 일반 화면에서 복사한 QR이나 하드웨어 키 증명만으로 등록을 허용하지 않는다.
 등록할 기기를 확인하는 보호된 화면·입력 절차는 아직 결정·실증이 필요하다.

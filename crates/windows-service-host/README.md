@@ -177,7 +177,9 @@ no arguments, inherited handles or inherited user environment. Its working
 directory is the protected installation and desktop is fixed to
 `winsta0\winlogon`; access failure is not repaired by changing desktop security.
 Creation is suspended. A fresh unnamed job has KILL_ON_JOB_CLOSE and an active
-process limit of1, with no breakaway option. Assignment precedes resume. The
+process limit of1, with no breakaway option. Both process and job committed-memory
+limits are 256MiB, set before assignment/resume. This is not a working-set or
+system UIA-provider limit; failed allocation does not prove child exit. The
 empty job's Session0 creator is not falsely treated as a ban on its first
 assignment to a target-session child; the actual assignment API decides.
 
@@ -188,16 +190,28 @@ child process, creation time, protected image path and token. The helper matches
 the pipe's server PID/session to a retained actual running fixed SCM process,
 SYSTEM/system-IL/service-SID token and fixed protected sibling path. Pipe names
 and random challenges alone never authenticate either side. The leaf probe
-crate owns the strict versioned40-byte challenge/80-byte report codec; no
+crate owns the strict v2 40-byte challenge, 80-byte report header and bounded
+content codec; one complete report is at most 512KiB. No
 dependency cycle or generic RPC surface exists.
 
 One fresh CSPRNG32-byte challenge is sent only after peer checks. The report
-contains only fixed counts/statuses and numeric fixed-operation failures. Excess
-bytes, duplicate/trailing messages, wrong challenge/version, invalid counts,
-malformed tags, EOF without report and inconsistent exit codes are rejected.
+contains bounded visible static labels, a caption, comparison-only RuntimeId and
+diagnostic counts on success; failures contain only fixed categories/numbers.
+The probe excludes edit/value/password subtrees and makes no program/path/command
+interpretation. Two matching capture projections do not establish atomic prompt
+identity. Content is never included in Debug/error logging. Excess bytes,
+duplicate/trailing messages, wrong challenge/version, malformed or oversized
+content/counts/tags, EOF without report and inconsistent exit codes are rejected.
 The owner returns no report until authenticated report + EOF + actual process
 exit + empty job + fresh context checks. Helper exit3 (cleanup uncertainty)
 cannot be accepted even if earlier report bytes arrived.
+
+The service reads one message into a 512KiB+1 heap buffer, never a similarly sized
+stack temporary. Connect, challenge and EOF operations allocate only their own
+length. OVERLAPPED, buffer and event ownership remain stable until completion or
+acknowledged cancellation; uncertain cleanup retains all of them. The 64KiB pipe
+buffer setting is advisory, not a kernel memory cap. A successful zero-byte read
+is not EOF and does not satisfy the required pipe-close observation.
 
 The execution deadline is5seconds, with bounded overlapped waits; failure asks
 only the owned child/job to terminate, then allows a separate1second cleanup
@@ -218,7 +232,7 @@ deadline boundaries, unambiguous synthetic session selection and strict report
 framing. They never call the Windows supervisor/helper/probe. Native launch,
 actual privileges/desktop access, job restrictions, pipe authentication,
 cancellation and cleanup still require ROOT's review and separately authorized
-Windows QA. Counts remain diagnostic; no Windows request identity, remote
+Windows QA. Content/counts remain observations; no Windows request identity, remote
 approval, credential input or authorization action is implemented.
 
 Primary API basis: [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
@@ -227,3 +241,5 @@ Primary API basis: [CreateProcessAsUserW](https://learn.microsoft.com/en-us/wind
 [CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex),
 [QueryServiceStatusEx](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex),
 [QueryServiceConfig2W](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfig2w).
+See also the exact [job committed-memory limit semantics](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)
+and [pipe buffer advisory behavior](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew).

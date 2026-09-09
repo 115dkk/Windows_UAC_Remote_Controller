@@ -169,8 +169,11 @@ fn scoped(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
         return Ok(HelperExit::CleanupUnconfirmed);
     }
     let mut written = 0;
-    // SAFETY: one immutable bounded80-byte metadata message on the authenticated
-    // owned pipe; no stdout, text, pointer, image, credential or command contents.
+    // SAFETY: one immutable bounded v2 observation on the authenticated owned
+    // pipe. The encoder rejects malformed/oversized content; do not split it
+    // into multiple pipe messages or expose the visible labels through stdout.
+    // Native capture excludes edit/value/password subtrees, not all possible
+    // sensitive text an application may have placed in a visible static label.
     unsafe { WriteFile(pipe.raw, Some(&report), Some(&mut written), None) }.map_err(|_| ())?;
     if written as usize != report.len() {
         return Err(());

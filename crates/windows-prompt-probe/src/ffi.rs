@@ -129,20 +129,37 @@ fn worker_probe(
     policy::unique_candidate(qualified)?;
     let candidate =
         candidate.ok_or_else(|| ProbeError::new(ProbeFailure::NoQualifiedConsentWindow))?;
-    let mut counts = ProbeCounts {
+    let counts = ProbeCounts {
         top_level_windows: u16::try_from(windows.len())
             .map_err(|_| malformed(NativeOperation::EnumerateWindows))?,
         qualified_candidates: 1,
         ..ProbeCounts::default()
     };
     candidate.recheck(session, &image, cleanup)?;
-    uia::inspect(candidate.hwnd, candidate.pid, began, &mut counts, cleanup)?;
+    let report = uia::inspect(
+        candidate.hwnd,
+        candidate.pid,
+        began,
+        counts,
+        cleanup,
+        || {
+            // Read-only context checks around EACH complete capture while the same
+            // UIA root remains held. Original desktop-census seed counts are not a
+            // second census or atomic target proof; traversal content/counts are new.
+            candidate.recheck(session, &image, cleanup)?;
+            verify_input_desktop(desktop)?;
+            verify_window_station()?;
+            security::reject_impersonation(cleanup)?;
+            security::process_identity(own_process, own_pid, Some(session), cleanup)?;
+            policy::budget(began.elapsed())
+        },
+    )?;
     candidate.recheck(session, &image, cleanup)?;
     verify_input_desktop(desktop)?;
     security::reject_impersonation(cleanup)?;
     security::process_identity(own_process, own_pid, Some(session), cleanup)?;
     policy::budget(began.elapsed())?;
-    Ok(ProbeReport { counts })
+    Ok(report)
 }
 
 fn verify_window_station() -> Result<(), ProbeError> {

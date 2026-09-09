@@ -41,7 +41,7 @@ candidate must have an OS-reported image path matching the OS-resolved system
 directory plus `consent.exe`, native64 architecture, SYSTEM/system-IL token,
 matching session, retained query/synchronize process handle, creation time and
 unsignaled process state. HWND thread/PID, process facts/image/liveness and desktop
-input state are rechecked around the UIA traversal. Unknown/inaccessible/racing
+input state are rechecked around both UIA captures. Unknown/inaccessible/racing
 observations and multiple candidates fail rather than guessing.
 
 **This path comparison assumes the intact OS/system directory. It is not a full
@@ -56,16 +56,35 @@ The client is scoped to `ElementFromHandle(candidate)`, never the whole desktop
 tree. It requires UIA2 connection and transaction timeout support, configuring
 each to 1,000ms. Traversal allows at most 128 inspected elements and depth 16
 (root depth one). Password flags are read first; password nodes and descendants
-are skipped. Other reads are fixed control type, owner PID, native HWND,
+are skipped. Edit controls and controls offering ValuePattern also exclude their
+entire subtree from content capture. Other reads are fixed control type, owner PID, native HWND,
 enabled/offscreen flags and three pattern-availability booleans (Invoke, Value,
 legacy accessibility). No actual action-pattern interface is obtained.
 
-There is **no UIA Name/Text/Value or credential-value read**, AutomationId dump,
-window caption, command line, screenshot, clipboard, ValuePattern write, window
+The retained root must be an onscreen nonpassword window element belonging to
+the candidate HWND. Its UIA Name supplies the caption (including an actual empty
+caption); only visible, nonempty Text/Button/Hyperlink Names become labels.
+Labels retain traversal ordinal, depth, enabled state and kind without trimming,
+reordering or interpreting names as a program, publisher, path or command. The
+root's RuntimeId is an opaque comparison value, not a durable request identifier.
+Two complete captures through that same root must agree exactly on content and
+counts. Traversal counters are fresh each time; top-level/qualified-candidate
+counts are seeded from the original enumeration, not a second independent census.
+Matching samples are **not an atomic snapshot, ABA defense or later action proof**.
+
+Names are strict UTF-16 converted to UTF-8: embedded NUL, malformed surrogates,
+fields beyond 32,768 UTF-16 units, more than 128 labels, RuntimeIds outside 1–32
+integers, or total content beyond 384KiB fail without truncation. Successful
+`ProbeReport` always includes at least one visible nonempty label. These types'
+Debug implementations redact text and identifiers; no Display/serialization
+logging surface is provided. Static text can still contain information supplied
+by an application. Do not log, publish or treat it as inherently non-sensitive.
+
+There is **no TextPattern/Value or credential-value read**, AutomationId dump,
+process command-line query, screenshot, clipboard, ValuePattern write, window
 activation, Invoke, BM_CLICK, WM_COMMAND, SendInput or arbitrary-message API.
-Desktop/window-station object names are private diagnostic prerequisites only.
-Output exposes only fixed statuses/counts and fixed error categories/numeric
-HRESULTs; no PID, handle, path, raw name or provider content escapes.
+Desktop/window-station object names are private prerequisites. Only fixed
+failure categories/numeric HRESULTs appear in errors, never provider strings.
 
 Raw tree-walker vtable calls deliberately preserve the native distinction between
 S_OK with a null element (normal end-of-tree) and an actual HRESULT failure such
@@ -82,7 +101,7 @@ supervisor must bound/terminate the complete helper, not `consent.exe`.
 
 ## Cleanup and output
 
-Every owned token/process/desktop and property VARIANT logs observed release
+Every owned token/process/desktop, property VARIANT and RuntimeId SAFEARRAY records observed release
 failures into a bounded shared summary. The original failure remains primary;
 first cleanup operation/HRESULT and cleanup-failure count remain attached. A clean
 operation with failed cleanup becomes an error, never a capability report. COM
@@ -106,9 +125,11 @@ fixed sibling image path are rechecked. No foreign token is duplicated and no
 pipe impersonation API exists. The service independently authenticates its
 retained created child. The namespace or challenge alone is not authentication.
 
-The safe `supervision` module owns a strict versioned40-byte challenge and
-80-byte reply with reserved-zero fields, fixed status tags, bounded UIA counts
-and no arbitrary strings. It is a leaf dependency of the service host. A fresh
+The safe `supervision` module owns a strict v2 40-byte challenge and an 80-byte
+reply header plus a length-prefixed bounded content payload. One complete reply
+is at most 512KiB. Legacy v1, reserved-field changes, malformed strings/counts,
+noncanonical ordering, truncation and extra bytes fail closed. Failure reports
+contain no content. It is a leaf dependency of the service host. A fresh
 32-byte random challenge is generated only by the service; the codec's shape
 constructor cannot prove entropy or provenance. An echoed challenge binds only
 this already-authenticated local report exchange, not a UAC request or approval.
@@ -123,8 +144,8 @@ First-party unsafe is isolated under the Windows-only `ffi` module tree; shared
 policy and binary code forbid unsafe. Non-Windows returns UnsupportedPlatform;
 32-bit Windows returns Native64Unsupported without native observation.
 
-Authored tests exercise API shape, pure bounds/SID/name parsing, error precedence
-and non-Windows unsupported behavior only. **No Windows test calls probe_once or
+Authored tests exercise API shape, pure bounds/SID/name/content parsing, the v2
+codec, error precedence and non-Windows unsupported behavior only. **No Windows test calls probe_once or
 the helper**, including assumptions that a developer token is not SYSTEM. No
 native capability or privileged launch has been exercised by the child.
 
@@ -136,3 +157,8 @@ Source basis: the existing
 `.superloopy/evidence/secure-desktop-next-probe.md` design and installed
 windows-rs 0.62.2 signatures/ownership implementations. Original project code is
 GPL-2.0-or-later; dependency notices remain their own.
+
+The [RuntimeId API](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationelement-getruntimeid)
+explicitly permits identifier reuse and comparison-only use. The supervisor's
+256MiB committed-memory limit bounds this helper, not all OS/provider allocations;
+it supplements the existing process deadline and acknowledged cleanup.

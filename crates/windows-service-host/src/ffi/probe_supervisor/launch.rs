@@ -14,8 +14,10 @@ use windows::{
         System::{
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_BASIC_LIMIT_INFORMATION,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
             },
             Pipes::{
                 CreateNamedPipeW, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS,
@@ -33,6 +35,24 @@ use windows::{
 };
 use windows_prompt_probe::supervision::{PIPE_BUFFER_BYTES, PIPE_PREFIX};
 
+const HELPER_COMMIT_LIMIT: usize = 256 * 1024 * 1024;
+
+fn job_limits() -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+            LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | JOB_OBJECT_LIMIT_JOB_MEMORY,
+            ActiveProcessLimit: 1,
+            ..Default::default()
+        },
+        ProcessMemoryLimit: HELPER_COMMIT_LIMIT,
+        JobMemoryLimit: HELPER_COMMIT_LIMIT,
+        ..Default::default()
+    }
+}
+
 pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
     let descriptor = preflight
         .sid
@@ -44,10 +64,11 @@ pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
     let raw = unsafe { CreateJobObjectW(Some(&attributes), PCWSTR::null()) }
         .map_err(|error| native(Stage::CreateJob, error))?;
     let job = Handle::new(raw, Stage::CreateJob)?;
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    // A COM provider can allocate a BSTR before the helper can inspect its
+    // length. Bound this owned helper's committed memory before it runs. These
+    // limits do not cover the OS UIA server, kernel buffers or working-set size;
+    // allocation failure is not exit proof, so the deadline/reap still apply.
+    let limits = job_limits();
     // SAFETY: owned empty job, exact initialized fixed structure; no breakaway,
     // security-token/desktop manipulation or external process assignment.
     unsafe {
@@ -276,4 +297,24 @@ fn environment() -> Result<Vec<u16>, Error> {
             .encode_utf16()
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_job_caps_one_process_and_committed_memory_without_breakaway() {
+        let limits = job_limits();
+        assert_eq!(
+            limits.BasicLimitInformation.LimitFlags,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | JOB_OBJECT_LIMIT_JOB_MEMORY
+        );
+        assert_eq!(limits.BasicLimitInformation.ActiveProcessLimit, 1);
+        assert_eq!(limits.ProcessMemoryLimit, 256 * 1024 * 1024);
+        assert_eq!(limits.JobMemoryLimit, limits.ProcessMemoryLimit);
+    }
 }
