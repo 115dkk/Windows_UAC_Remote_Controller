@@ -23,7 +23,7 @@
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -41,6 +41,24 @@ use crate::{
 };
 
 const NANOS_PER_MILLI: u64 = 1_000_000;
+
+/// Active and retired-but-live contexts share this bound. Cancelled contexts
+/// still occupy capacity until their LAST plan/attempt/submission/guard drops.
+pub const MAX_LIVE_APPROVAL_CONTEXTS: usize = 64;
+
+/// Matching existing contexts had their downward cancellation flags recorded.
+/// This is NOT OS/provider quiescence, a future-action fence, or a PC outcome.
+/// Repeating cancellation counts still-live matches even if already cancelled.
+#[must_use = "cancellation flags do not replace native cleanup or an action fence"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApprovalRequestCancellation {
+    matched_contexts: usize,
+}
+impl ApprovalRequestCancellation {
+    pub const fn matched_contexts(self) -> usize {
+        self.matched_contexts
+    }
+}
 
 /// Trusted native observations, not UI clock or authentication input.
 #[derive(Clone, Copy)]
@@ -337,6 +355,9 @@ pub struct ApprovalPlanOwner {
     boot: PhoneBootId,
     last_clock_nanos: Option<u64>,
     slot: Option<Slot>,
+    // Weak ownership only: retirement must not hide live prepared/queued data,
+    // and this registry must not itself keep any completed context alive.
+    contexts: Vec<Weak<SharedPlan>>,
 }
 impl fmt::Debug for ApprovalPlanOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -359,6 +380,7 @@ impl ApprovalPlanOwner {
             boot,
             last_clock_nanos: None,
             slot: None,
+            contexts: Vec::new(),
         })
     }
 
@@ -374,6 +396,9 @@ impl ApprovalPlanOwner {
             if self.slot.is_some() {
                 return Err(ApprovalError::Busy);
             }
+            // Reserve before blocking checks/commits or publishing a handle.
+            // An occupied native slot retains its existing Busy precedence.
+            self.reserve_context()?;
             let bound = self.refresh(owner, key, None, clock, &mut checks)?;
             let shared = Arc::new(SharedPlan {
                 life: Arc::clone(&self.life),
@@ -383,6 +408,9 @@ impl ApprovalPlanOwner {
                 attempt_active: AtomicBool::new(false),
                 retired: AtomicBool::new(false),
             });
+            // One entry for this Arc identity, before either public handle or
+            // active slot is published. Reservation above makes push bounded.
+            self.contexts.push(Arc::downgrade(&shared));
             self.slot = Some(Slot {
                 shared: Arc::clone(&shared),
                 phase: Phase::Plan,
@@ -515,6 +543,27 @@ impl ApprovalPlanOwner {
         Ok(())
     }
 
+    /// Cancel ALL currently live contexts for this exact PC/epoch/request key,
+    /// including retired submissions or a context held only by a socket guard.
+    /// No inbox, clock, native callback or I/O is involved. The native slot is
+    /// NOT retired: actual provider/UI cleanup still has to finish separately.
+    ///
+    /// This cancels existing contexts only. Before invoking it for user denial,
+    /// the containing native actor must reserve a same-request action fence and
+    /// prevent subsequent begin/claim/send admission until that action finishes.
+    /// It cannot recall bytes already written or assert a Windows/PC outcome.
+    pub fn cancel_request(&mut self, key: RequestKey) -> ApprovalRequestCancellation {
+        self.prune_dead_contexts();
+        let mut matched_contexts = 0;
+        for shared in self.contexts.iter().filter_map(Weak::upgrade) {
+            if shared.bound.key() == key {
+                shared.cancel();
+                matched_contexts += 1;
+            }
+        }
+        ApprovalRequestCancellation { matched_contexts }
+    }
+
     /// Downward invalidation only; native cancellation/reference cleanup remains
     /// the containing actor's responsibility. No key or inbox state is changed.
     pub fn close(&mut self) {
@@ -522,6 +571,27 @@ impl ApprovalPlanOwner {
         if let Some(slot) = &self.slot {
             slot.shared.cancel();
         }
+    }
+
+    fn prune_dead_contexts(&mut self) {
+        let mut index = 0;
+        while index < self.contexts.len() {
+            if Weak::<SharedPlan>::upgrade(&self.contexts[index]).is_none() {
+                self.contexts.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn reserve_context(&mut self) -> Result<(), ApprovalError> {
+        self.prune_dead_contexts();
+        if self.contexts.len() >= MAX_LIVE_APPROVAL_CONTEXTS {
+            return Err(ApprovalError::ContextCapacity);
+        }
+        self.contexts
+            .try_reserve_exact(1)
+            .map_err(|_| ApprovalError::ContextAllocationFailed)
     }
 
     fn consume(
@@ -708,6 +778,10 @@ fn approval_public_key(local: &LocalKeySetDescriptor) -> Result<DecisionPublicKe
 pub enum ApprovalError {
     #[error("approval slot is already occupied")]
     Busy,
+    #[error("live approval context capacity is exhausted")]
+    ContextCapacity,
+    #[error("bounded approval context reservation failed")]
+    ContextAllocationFailed,
     #[error("approval plan owner is closed")]
     Closed,
     #[error("approval belongs to another durable owner instance")]

@@ -104,6 +104,30 @@ never a Windows-success history row or delivery receipt. The containing native
 actor still owns actual hardware-key/per-use authentication and current transport
 handoff checks. See [ADR0011](../../docs/adr/0011-native-approval-operation.md).
 
+`ApprovalPlanOwner::cancel_request(RequestKey)` also reaches retired-but-live
+plans/submissions and contexts retained only by a queued socket guard. It matches
+the complete PC/epoch/request key, changes only existing downward flags and never
+touches inbox/replay/history state, clocks, native APIs or other requests. Its
+count-only `ApprovalRequestCancellation::matched_contexts` includes already
+cancelled live matches; it is not provider/UI quiescence, a PC result or proof
+that bytes were unsent. Cancellation does not retire an occupied native slot.
+
+The owner tracks at most `MAX_LIVE_APPROVAL_CONTEXTS = 64` private weak contexts.
+Retirement and cancellation do not remove live entries; only dropping the LAST
+plan/attempt/submission/delivery-guard reference releases capacity. Each successful
+begin registers once before publishing its slot/handle. A free-slot begin reserves
+capacity before its blocking check; `ContextCapacity`/`ContextAllocationFailed`
+reject without discarding another context or starting that check. An occupied
+native slot still reports Busy first. Close/Drop's original shared lifetime
+invalidates all contexts, not just the current slot; a new owner cannot rearm them.
+
+This is cancellation of existing contexts, **not** a future-plan/action fence.
+Before a future native Deny calls it, that actor must reserve its same-request
+action fence, prevent new approval admission, cancel/quiesce the actual native
+UI/provider, and retain that fence through denial. A later same-request begin is
+still possible through this pure API after cleanup if the caller installs no
+fence. No native/ABI/UI fence or preemption is activated by this method.
+
 `AssociatedPcSocket::queue_approval` now performs fresh committed original-request
 checks and admits only the typed prepared signature. Its queue retains original
 cancellation and a process-local request lease through actual partial TCP writes;

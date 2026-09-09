@@ -8,6 +8,8 @@
 mod approval_send;
 #[path = "peer_socket/denial_send.rs"]
 mod denial_send;
+#[path = "peer_socket/request_cancellation.rs"]
+mod request_cancellation;
 #[path = "peer_socket/request_sources.rs"]
 mod request_sources;
 

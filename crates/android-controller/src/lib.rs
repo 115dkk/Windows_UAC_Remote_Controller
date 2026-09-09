@@ -32,7 +32,8 @@ mod types;
 
 pub use approval::{
     ApprovalAttempt, ApprovalClock, ApprovalClockError, ApprovalError, ApprovalPlan,
-    ApprovalPlanOwner, ApprovalSubmission, ApprovalTime, ApprovalTransition,
+    ApprovalPlanOwner, ApprovalRequestCancellation, ApprovalSubmission, ApprovalTime,
+    ApprovalTransition, MAX_LIVE_APPROVAL_CONTEXTS,
 };
 pub use associated_request::{
     AssociatedPendingRequest, AssociatedRequestIssue, CommittedAssociatedCheck,

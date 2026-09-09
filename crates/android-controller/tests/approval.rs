@@ -13,8 +13,8 @@ use android_controller::{
     ApprovalAttempt, ApprovalClock, ApprovalClockError, ApprovalError, ApprovalPlan,
     ApprovalPlanOwner, ApprovalTime, ApprovalTransition, AssociatedPcSocket,
     AssociatedRequestIssue, DurableInbox, LocalAttestationChallenge, LocalKeyHandle,
-    LocalKeySetDescriptor, PcSocketEvent, PcSocketInputs, PeerAssociationDescriptor,
-    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
+    LocalKeySetDescriptor, MAX_LIVE_APPROVAL_CONTEXTS, PcSocketEvent, PcSocketInputs,
+    PeerAssociationDescriptor, PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
 };
 use approval_protocol::{
     BootEpoch, ChallengeNonce, DecisionPublicKey, DecisionPurpose, DeviceId, ExpiryTick, OsSession,
@@ -806,4 +806,306 @@ fn retirement_preserves_submission_but_explicit_cancel_and_owner_drop_invalidate
             ApprovalError::Cancelled
         );
     }
+}
+
+#[test]
+fn request_cancellation_reaches_retired_submission_without_a_retained_plan_handle() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let plan = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[3, 4]),
+    ));
+    let attempt = result(approvals.claim(&mut f.owner, &plan, &mut ScriptClock::at(&[5, 6])));
+    let signature = der(&attempt, 3);
+    let submission = result(approvals.finish(
+        &mut f.owner,
+        &attempt,
+        &signature,
+        &mut ScriptClock::at(&[7, 8, 9]),
+    ));
+    approvals.retire_after_native_cleanup(&plan).unwrap();
+    drop(attempt);
+    drop(plan);
+    assert!(!submission.is_cancelled());
+    let before = f.owner.counts().unwrap();
+    let receipt = approvals.cancel_request(request_key(f.binding));
+    assert_eq!(receipt.matched_contexts(), 1);
+    assert!(submission.is_cancelled());
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    assert_eq!(f.owner.counts().unwrap(), before);
+    assert!(f.owner.pending_outcomes().unwrap().is_empty());
+    assert!(f.owner.history().unwrap().is_empty());
+    assert_eq!(
+        submission.into_signed_decision().unwrap_err(),
+        ApprovalError::Cancelled
+    );
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        0
+    );
+}
+
+#[test]
+fn request_cancellation_matches_full_key_does_not_retire_native_slot_or_fence_future_plans() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let plan = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[3, 4]),
+    ));
+    for index in 0..3 {
+        let b = f.binding;
+        let foreign = RequestBinding::new(
+            if index == 0 {
+                PcIdentity::from_bytes([8; 32]).unwrap()
+            } else {
+                b.pc()
+            },
+            if index == 1 {
+                BootEpoch::from_bytes([8; 32]).unwrap()
+            } else {
+                b.epoch()
+            },
+            b.session(),
+            if index == 2 {
+                RequestId::from_bytes([8; 32]).unwrap()
+            } else {
+                b.request_id()
+            },
+            b.nonce(),
+            b.content_digest(),
+            b.expiry(),
+        );
+        assert_eq!(
+            approvals
+                .cancel_request(request_key(foreign))
+                .matched_contexts(),
+            0
+        );
+        assert!(!plan.is_cancelled());
+    }
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    assert!(plan.is_cancelled());
+    let busy = approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[]),
+    );
+    assert_eq!(busy.outcome().unwrap_err(), &ApprovalError::Busy);
+    assert!(busy.checks().is_empty());
+    approvals.retire_after_native_cleanup(&plan).unwrap(); // Synthetic fixture has no native operation.
+    // This capability does NOT install the caller's missing same-request fence.
+    // A future native denial actor must prevent this begin while its action runs.
+    let fresh = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[5, 6]),
+    ));
+    assert!(!fresh.is_cancelled());
+    assert!(plan.is_cancelled());
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        2
+    );
+    assert!(fresh.is_cancelled());
+    approvals.retire_after_native_cleanup(&fresh).unwrap();
+}
+
+#[test]
+fn live_cancelled_contexts_fill_capacity_and_only_last_reference_drop_recovers_it() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let mut retained = Vec::new();
+    for index in 0..MAX_LIVE_APPROVAL_CONTEXTS {
+        let start = 3 + u64::try_from(index).unwrap() * 10;
+        let plan = result(approvals.begin(
+            &mut f.owner,
+            request_key(f.binding),
+            &mut ScriptClock::at(&[start, start + 1]),
+        ));
+        if index + 1 == MAX_LIVE_APPROVAL_CONTEXTS {
+            let busy = approvals.begin(
+                &mut f.owner,
+                request_key(f.binding),
+                &mut ScriptClock::at(&[]),
+            );
+            assert_eq!(busy.outcome().unwrap_err(), &ApprovalError::Busy);
+            assert!(busy.checks().is_empty());
+        }
+        plan.cancel();
+        approvals.retire_after_native_cleanup(&plan).unwrap();
+        retained.push(plan);
+    }
+    let before = f.owner.counts().unwrap();
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        MAX_LIVE_APPROVAL_CONTEXTS
+    );
+    let full = approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[]),
+    );
+    assert_eq!(full.outcome().unwrap_err(), &ApprovalError::ContextCapacity);
+    assert!(full.checks().is_empty());
+    assert_eq!(f.owner.counts().unwrap(), before);
+    assert!(retained.iter().all(ApprovalPlan::is_cancelled));
+    // Already cancelled and retired is insufficient: release the last handle.
+    drop(retained.pop().unwrap());
+    let replacement = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[700, 701]),
+    ));
+    assert!(!replacement.is_cancelled());
+    assert!(retained.iter().all(ApprovalPlan::is_cancelled));
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        MAX_LIVE_APPROVAL_CONTEXTS
+    );
+    approvals.retire_after_native_cleanup(&replacement).unwrap();
+    assert_eq!(
+        approvals
+            .begin(
+                &mut f.owner,
+                request_key(f.binding),
+                &mut ScriptClock::at(&[])
+            )
+            .outcome()
+            .unwrap_err(),
+        &ApprovalError::ContextCapacity
+    );
+    assert!(f.owner.pending_outcomes().unwrap().is_empty());
+    assert!(f.owner.history().unwrap().is_empty());
+}
+
+#[test]
+fn closed_owner_cancellation_is_idempotent_and_new_owner_cannot_rearm_old_context() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let plan = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[3, 4]),
+    ));
+    plan.cancel();
+    approvals.retire_after_native_cleanup(&plan).unwrap();
+    approvals.close();
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    assert_eq!(
+        approvals
+            .begin(
+                &mut f.owner,
+                request_key(f.binding),
+                &mut ScriptClock::at(&[])
+            )
+            .outcome()
+            .unwrap_err(),
+        &ApprovalError::Closed
+    );
+    drop(approvals);
+    let mut replacement = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    assert_eq!(
+        replacement
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        0
+    );
+    let fresh = result(replacement.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[5, 6]),
+    ));
+    assert!(plan.is_cancelled());
+    assert!(!fresh.is_cancelled());
+    fresh.cancel();
+    replacement.retire_after_native_cleanup(&fresh).unwrap();
+}
+
+#[test]
+fn failed_begin_does_not_register_or_publish_a_historical_context() {
+    let mut f = fixture();
+    let mut approvals = ApprovalPlanOwner::new(&f.owner, boot()).unwrap();
+    let b = f.binding;
+    let unavailable = RequestBinding::new(
+        b.pc(),
+        b.epoch(),
+        b.session(),
+        RequestId::from_bytes([8; 32]).unwrap(),
+        b.nonce(),
+        b.content_digest(),
+        b.expiry(),
+    );
+    let rejected = approvals.begin(
+        &mut f.owner,
+        request_key(unavailable),
+        &mut ScriptClock::at(&[3]),
+    );
+    assert_eq!(
+        rejected.outcome().unwrap_err(),
+        &ApprovalError::RequestUnavailable
+    );
+    assert_eq!(rejected.checks().len(), 1);
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(unavailable))
+            .matched_contexts(),
+        0
+    );
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        0
+    );
+    let plan = result(approvals.begin(
+        &mut f.owner,
+        request_key(f.binding),
+        &mut ScriptClock::at(&[4, 5]),
+    ));
+    assert_eq!(
+        approvals
+            .cancel_request(request_key(f.binding))
+            .matched_contexts(),
+        1
+    );
+    approvals.retire_after_native_cleanup(&plan).unwrap();
 }

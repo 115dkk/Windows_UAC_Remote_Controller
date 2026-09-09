@@ -316,7 +316,10 @@ impl MobileController {
         }
         match outcome {
             Ok(value) => Ok(value),
-            Err(ApprovalError::Busy) => Err(BridgeError::Busy),
+            Err(ApprovalError::Busy | ApprovalError::ContextCapacity) => Err(BridgeError::Busy),
+            // Capacity/allocation reject before a new native plan is published.
+            // Neither means that the request signature or its source is invalid.
+            Err(ApprovalError::ContextAllocationFailed) => Err(BridgeError::NativeUnavailable),
             Err(
                 ApprovalError::Owner(_)
                 | ApprovalError::Persistence(_)
