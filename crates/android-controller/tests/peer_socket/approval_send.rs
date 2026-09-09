@@ -158,9 +158,12 @@ async fn peer_revocation_after_queue_closes_before_any_complete_peer_frame() {
         let mut f = setup().await;
         let (plan, submission) = f.signed();
         let ticket = f.queue(submission);
-        f.owner
+        let (receipt, removal) = f
+            .owner
             .revoke_peer_association_from_trusted_host(f.reference)
             .unwrap();
+        assert!(receipt.changed());
+        assert_eq!(removal, PeerAssociationRemoval::Removed);
         assert!(
             !plan.is_cancelled(),
             "the domain lease, not a manual plan cancel, must stop this write"
