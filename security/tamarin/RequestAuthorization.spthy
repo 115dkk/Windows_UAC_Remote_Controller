@@ -4,6 +4,10 @@
 theory RequestAuthorization
 begin
 
+// Ranking only: prioritize existing constraints over unbounded previous-state
+// chains. This does not restrict traces or assume any security conclusion.
+heuristic: i
+
 builtins: signing
 
 restriction Equality:

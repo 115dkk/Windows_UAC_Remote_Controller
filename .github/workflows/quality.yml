@@ -36,7 +36,7 @@ jobs:
         id: tamarin
         run: node tools/install-tamarin.mjs
       - name: Check proof verdict and negative-control gates
-        run: node --test tools/protocol-security.test.mjs
+        run: node --test tools/protocol-security.test.mjs tools/prover-process.test.mjs
       - name: Prove protocol properties and expose broken-model attacks
         env:
           TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}

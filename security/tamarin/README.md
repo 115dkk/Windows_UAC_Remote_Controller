@@ -1,9 +1,18 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 # Tamarin connection and request-authorization contracts
 
-Status: **authored_unverified**. Neither model has been parsed or proved by its author. ROOT owns Tamarin 1.12 execution, CI integration, counterexample inspection and the final evidence. Expected verdicts below are acceptance criteria, not recorded results.
+Status: **verification_in_progress**. ROOT's first supported-tool CI (`187bdc0`) proved the four channel lemmas and exposed both required PC-pin-omission counterexamples. The request model timed out; a later runner shutdown prevented full artifact upload. This is not a passing full protocol gate. Model authors do not run verification; ROOT owns execution, counterexample inspection and final evidence. Expected verdicts below remain acceptance criteria.
 
 Tamarin was selected for this slice's mutable registration and one-shot state. This is not a universal ranking over Verifpal/ProVerif or a claim that a symbolic proof verifies the product. The intended tool version is the official [Tamarin 1.12 release](https://github.com/tamarin-prover/tamarin-prover/releases/tag/1.12.0); binary provenance/checksums are ROOT-owned.
+
+CI pins both Tamarin1.12.0 and its supported Maude3.5.1 distribution by SHA-256,
+including Maude's sibling prelude/modules. Every positive lemma now runs in its
+own bounded process (120 seconds, 2GiB GHC heap, bounded streamed transcript).
+All13 positive lemmas and all3 broken-model controls remain mandatory. A timeout,
+heap/output limit, missing tool or incomplete result fails; limits never become
+proof bounds. Partial summaries start/retain passed:false and logs are written
+during execution. The request model's `heuristic: i` changes search ranking only,
+as documented for stateful protocols; its effectiveness is not assumed.
 
 ## What the models mean
 

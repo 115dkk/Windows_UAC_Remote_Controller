@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { mutateExactlyOnce, parseProofSummary, runProtocolSecurity } from './protocol-security.mjs';
@@ -20,6 +21,8 @@ test('exit zero does not turn falsified/incomplete/unknown into proof', () => {
   assert.equal(parse({ ...result(text), status: 1 }, expected).ok, false);
   assert.equal(parse({ ...result(text), signal: 'SIGTERM' }, expected).ok, false);
   assert.equal(parse({ ...result(text), error: new Error('missing tool') }, expected).ok, false);
+  assert.equal(parse({ ...result(text), cancelled: true }, expected).ok, false);
+  assert.equal(parse({ ...result(text), cleanupIncomplete: true }, expected).ok, false);
   assert.equal(parse({ ...result(text), stderr: 'checking version: WARNING: returned unsupported version' }, expected).ok, false);
 });
 test('negative control requires a real counterexample to a named production lemma', () => {
@@ -46,14 +49,14 @@ test('canary mutation must change exactly one current source marker', () => {
   assert.throws(() => mutateExactlyOnce('GUARD', { from: '', to: 'x' }));
   assert.throws(() => mutateExactlyOnce('GUARD', { from: 'GUARD', to: 'GUARD' }));
 });
-test('early missing-manifest failure cannot leave a prior passing summary', () => {
+test('early missing-manifest failure cannot leave a prior passing summary', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'uac-protocol-gate-test-'));
   try {
     const directory = join(temp, 'artifacts/protocol-security');
     mkdirSync(directory, { recursive: true });
     const path = join(directory, 'summary.json');
     writeFileSync(path, JSON.stringify({ passed: true, runs: [{ id: 'old-proof' }] }));
-    assert.throws(() => runProtocolSecurity(temp));
+    await assert.rejects(() => runProtocolSecurity(temp));
     const current = JSON.parse(readFileSync(path, 'utf8'));
     assert.equal(current.passed, false);
     assert.equal(current.status, 'failed');
@@ -64,3 +67,120 @@ test('early missing-manifest failure cannot leave a prior passing summary', () =
     rmSync(temp, { recursive: true });
   }
 });
+
+// Synthetic runner fixture, NOT Tamarin or evidence of a security proof. The
+// fake process reports controlled verdict text solely to test orchestration.
+function runnerFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'uac-protocol-runner-test-'));
+  const directory = join(root, 'artifacts/protocol-security');
+  const manifestPath = join(root, 'security/tamarin/manifest.json');
+  mkdirSync(directory, { recursive: true });
+  mkdirSync(join(root, 'security/tamarin'), { recursive: true });
+  writeFileSync(join(root, 'source.rs'), 'synthetic reviewed source\n');
+  const model = (id) => ({ id, path: `security/tamarin/${id}.spthy`, expected,
+    canaries: [{ id: `${id}-mutant`, expected: { auth: { trace: 'all-traces', verdict: 'falsified' } },
+      mutation: { from: 'GUARD', to: 'MUTANT' } }] });
+  const config = { version: 1, toolVersion: '1.12.0',
+    sourceBindings: [{ path: 'source.rs', sha256: createHash('sha256').update('synthetic reviewed source\n').digest('hex') }],
+    models: [model('alpha'), model('beta')] };
+  for (const value of config.models) writeFileSync(join(root, value.path), 'synthetic GUARD input\n');
+  const save = () => writeFileSync(manifestPath, JSON.stringify(config));
+  save();
+  const fake = join(root, 'fake-prover');
+  writeFileSync(fake, `#!${process.execPath}
+    const fs = require('node:fs');
+    fs.appendFileSync('invocations.log', JSON.stringify(process.argv.slice(2)) + '\\n');
+    if (process.argv.includes('--version')) { console.log('tamarin-prover 1.12.0'); process.exit(0); }
+    const file = process.argv[2];
+    const mutant = fs.readFileSync(file, 'utf8').includes('MUTANT');
+    console.log('summary of summaries:\\n analyzed: ' + file);
+    for (const arg of process.argv.filter(x => x.startsWith('--prove='))) {
+      const name = arg.slice(8);
+      const kind = name === 'executable' ? 'exists-trace' : 'all-traces';
+      console.log(' ' + name + ' (' + kind + '): ' + (mutant ? 'falsified - found trace' : 'verified') + ' (1 steps)');
+    }
+  `);
+  if (process.platform === 'linux') chmodSync(fake, 0o700);
+  const previous = process.env.TAMARIN_BIN;
+  process.env.TAMARIN_BIN = fake;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TAMARIN_BIN;
+    else process.env.TAMARIN_BIN = previous;
+    assert.equal(resolve(root).startsWith(resolve(tmpdir()) + sep + 'uac-protocol-runner-test-'), true);
+    rmSync(root, { recursive: true });
+  });
+  return { root, directory, config, save };
+}
+
+test('input identities are reserved before any baseline/canary can overwrite evidence', async (t) => {
+  for (const collision of ['own-baseline', 'later-baseline', 'run-id']) {
+    await t.test(collision, async (t) => {
+      const f = runnerFixture(t);
+      if (collision === 'own-baseline') f.config.models[0].canaries[0].id = 'alpha';
+      if (collision === 'later-baseline') f.config.models[0].canaries[0].id = 'beta';
+      if (collision === 'run-id') f.config.models[0].canaries[0].id = 'alpha-1';
+      f.save();
+      const retained = join(f.directory, 'alpha.spthy');
+      writeFileSync(retained, 'existing evidence sentinel');
+      await assert.rejects(() => runProtocolSecurity(f.root), /duplicate protocol evidence id/);
+      assert.equal(readFileSync(retained, 'utf8'), 'existing evidence sentinel');
+      assert.equal(existsSync(join(f.root, 'invocations.log')), false);
+    });
+  }
+});
+
+test('an input changed BETWEEN per-lemma runs cannot receive another attributed proof',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t);
+    const originalWrite = process.stdout.write;
+    let changed = false;
+    process.stdout.write = function(chunk, ...rest) {
+      if (!changed && String(chunk).startsWith('{"id":"alpha-1",')) {
+        changed = true;
+        writeFileSync(join(f.directory, 'alpha.spthy'), 'different model between runs');
+      }
+      return originalWrite.call(this, chunk, ...rest);
+    };
+    try {
+      await assert.rejects(() => runProtocolSecurity(f.root), /snapshot changed before invocation/);
+    } finally { process.stdout.write = originalWrite; }
+    assert.equal(changed, true);
+    assert.equal(existsSync(join(f.directory, 'alpha-2.log')), false);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.status, 'failed');
+    assert.equal(summary.runs.length, 1);
+  });
+
+test('a handled parent signal records cancellation and never starts remaining proofs',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t);
+    const originalWrite = process.stdout.write;
+    const previousHandlers = process.listeners('SIGTERM');
+    let cancelled = false;
+    process.stdout.write = function(chunk, ...rest) {
+      if (!cancelled && String(chunk) === 'Protocol security: alpha-1\n') {
+        cancelled = true;
+        // Invoke only this wrapper's real registered handler; do not signal
+        // the test runner PID or unrelated test-harness signal listeners.
+        const ownedHandlers = process.listeners('SIGTERM').filter(handler => !previousHandlers.includes(handler));
+        assert.equal(ownedHandlers.length, 1);
+        ownedHandlers[0]();
+      }
+      return originalWrite.call(this, chunk, ...rest);
+    };
+    try {
+      await assert.rejects(() => runProtocolSecurity(f.root), /interrupted by SIGTERM/);
+    } finally { process.stdout.write = originalWrite; }
+    assert.equal(cancelled, true);
+    assert.equal(process.listenerCount('SIGTERM'), previousHandlers.length);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.status, 'failed');
+    assert.equal(summary.runs.length, 1);
+    assert.equal(summary.runs[0].cancelled, true);
+    assert.equal(summary.runs[0].ok, false);
+    assert.equal(existsSync(join(f.directory, 'alpha-2.log')), false);
+    const calls = readFileSync(join(f.root, 'invocations.log'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(calls, [['--version']]);
+  });
