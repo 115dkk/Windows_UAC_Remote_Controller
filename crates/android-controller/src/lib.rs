@@ -22,6 +22,7 @@
 mod approval;
 mod associated_request;
 mod checkpoint;
+mod liveness;
 mod local_keys;
 mod owner;
 mod peer_associations;
@@ -37,6 +38,7 @@ pub use associated_request::{
     RequestSourceFailure,
 };
 pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
+pub use liveness::{NativePeerLease, PeerLeaseError};
 pub use local_keys::{
     LocalAttestationChallenge, LocalKeyError, LocalKeyHandle, LocalKeyLedger, LocalKeyObservation,
     LocalKeySetDescriptor, LocalKeySetPhase, MAX_LOCAL_KEY_LEDGER_BYTES, MAX_LOCAL_KEY_SETS,
@@ -48,8 +50,9 @@ pub use peer_associations::{
     PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
 };
 pub use peer_socket::{
-    AssociatedPcSocket, AssociatedUpdate, PcSocketEvent, PcSocketInputs, PeerSocketError,
-    ReceivedPcEvent,
+    ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, AssociatedPcSocket,
+    AssociatedUpdate, PcSocketEvent, PcSocketInputs, PeerSocketError, QueuedApproval,
+    ReceivedPcEvent, SendIssue, SendRetry,
 };
 pub use types::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,

@@ -3,6 +3,12 @@
 //! bare-frame promotion, generic outbound payload, native UI or approval API.
 #![forbid(unsafe_code)]
 
+mod delivery;
+pub use delivery::{
+    ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, QueuedApproval, SendIssue,
+    SendRetry,
+};
+
 use std::{
     fmt,
     sync::{
@@ -182,9 +188,11 @@ impl fmt::Debug for AssociatedUpdate {
 /// The Application policy-only gate is unchanged; no startup connection is added.
 pub struct AssociatedPcSocket {
     driver: SocketDriver,
+    socket_clock: Arc<dyn SocketClock>,
     context: Arc<PeerContext>,
     probe: Option<ClockProbe>,
     correlation: Option<ClockCorrelation>,
+    outbound_approval: Option<delivery::WriteState>,
 }
 
 impl fmt::Debug for AssociatedPcSocket {
@@ -222,13 +230,16 @@ impl AssociatedPcSocket {
             now,
         )
         .map_err(|error| PeerSocketError::Socket(SocketError::Transport(error)))?;
+        let socket_clock = Arc::clone(&inputs.clock);
         let driver = SocketDriver::new(inputs.socket, transport, inputs.clock, inputs.limits, stop)
             .map_err(PeerSocketError::Socket)?;
         Ok(Self {
             driver,
+            socket_clock,
             context,
             probe: None,
             correlation: None,
+            outbound_approval: None,
         })
     }
 
@@ -268,7 +279,12 @@ impl AssociatedPcSocket {
                     verified,
                 })))
             }
-            SocketEvent::OutboundDrained => Ok(PcSocketEvent::OutboundDrained),
+            SocketEvent::OutboundDrained => {
+                if let Some(write) = self.outbound_approval.take() {
+                    write.written();
+                }
+                Ok(PcSocketEvent::OutboundDrained)
+            }
             SocketEvent::PeerClosed => {
                 self.abort();
                 Ok(PcSocketEvent::PeerClosed)
@@ -339,10 +355,21 @@ impl AssociatedPcSocket {
                     let correlation = probe
                         .complete(&message.verified, clock.phone_monotonic_nanos())
                         .map_err(PeerSocketError::Clock)?;
+                    let changed_queued_epoch = self.outbound_approval.is_some()
+                        && self
+                            .correlation
+                            .as_ref()
+                            .is_some_and(|previous| previous.epoch() != correlation.epoch());
                     let update = owner
                         .observe_service_clock(&correlation, clock)
                         .map_err(PeerSocketError::Persistence)?;
-                    self.correlation = Some(correlation);
+                    if changed_queued_epoch {
+                        // Preserve the committed clock update, but never write
+                        // an old-service-epoch approval suffix after this change.
+                        self.abort();
+                    } else {
+                        self.correlation = Some(correlation);
+                    }
                     Ok(update)
                 }
                 PcEvent::Opened { .. } => owner
@@ -399,6 +426,9 @@ impl AssociatedPcSocket {
 
     /// Downward only; never clears replay guards, history, keys or association.
     pub fn abort(&mut self) {
+        if let Some(write) = self.outbound_approval.take() {
+            write.stopped();
+        }
         self.context.active.store(false, Ordering::Release);
         self.context.stop.cancel();
         self.probe.take();

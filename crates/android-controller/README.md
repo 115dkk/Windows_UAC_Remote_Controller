@@ -104,6 +104,15 @@ never a Windows-success history row or delivery receipt. The containing native
 actor still owns actual hardware-key/per-use authentication and current transport
 handoff checks. See [ADR0011](../../docs/adr/0011-native-approval-operation.md).
 
+`AssociatedPcSocket::queue_approval` now performs fresh committed original-request
+checks and admits only the typed prepared signature. Its queue retains original
+cancellation and a process-local request lease through actual partial TCP writes;
+registration/request withdrawal or owner failure invalidates retained output.
+Queued and WrittenToSocket are not PC acceptance/Windows results. A bounded retry
+returns the same signature/deadline. The native foreground owner must still drive
+socket/policy/time-change wakes; the API does not start that owner automatically.
+See [ADR0012](../../docs/adr/0012-bound-native-transport-and-send.md).
+
 ## Public interface
 
 Native factories require actual `DirectorySynced` receipts:

@@ -54,6 +54,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "activity-journal",
  "android-controller",
+ "approval-protocol",
  "controller-runtime",
  "libc",
  "notification-policy",

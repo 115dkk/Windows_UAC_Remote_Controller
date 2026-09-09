@@ -157,6 +157,24 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn prepare_transport_signer(
+            &self,
+            _: std::sync::Arc<crate::NativeTransportBinding>,
+        ) -> Result<(), BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+        fn sign_client_certificate_verify(
+            &self,
+            _: std::sync::Arc<crate::NativeCertificateVerify>,
+        ) -> Result<Vec<u8>, BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+        fn release_transport_signer(
+            &self,
+            _: std::sync::Arc<crate::NativeTransportBinding>,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
         fn withdraw_requests(
             &self,
             requests: Vec<crate::NativeRequestSelection>,

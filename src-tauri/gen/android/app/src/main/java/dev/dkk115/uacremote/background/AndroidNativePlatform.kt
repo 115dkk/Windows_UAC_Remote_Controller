@@ -11,9 +11,14 @@ import dev.dkk115.uacremote.nativecore.NativePlatform
 import dev.dkk115.uacremote.nativecore.NativeLocalKeySet
 import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
+import dev.dkk115.uacremote.nativecore.NativeCertificateVerify
+import dev.dkk115.uacremote.nativecore.NativeTransportBinding
 import dev.dkk115.uacremote.security.DeviceKeyStore
 import dev.dkk115.uacremote.security.KeyStoreOutcome
 import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
+import dev.dkk115.uacremote.security.ClientCertificateVerifyPolicy
+import dev.dkk115.uacremote.security.NativeTransportSigner
+import dev.dkk115.uacremote.security.TransportSignerOutcome
 
 /**
  * Generated-trait adapter only. The Application owner calls it from a bounded
@@ -27,6 +32,211 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val keyStore = DeviceKeyStore(application)
     private var withdrawal: ((NativeRequestSelection) -> Unit)? = null
     private var clearHeldApprovals: (() -> Unit)? = null
+    private val transportLock = Any()
+    private val transports = LinkedHashMap<ULong, TransportEntry>()
+    private val failedTransportArguments = ArrayList<AutoCloseable>()
+    @Volatile private var transportStopping = false
+    private var transportCleanupUncertain = false
+
+    // Only native opaque identities index this map. IDs select a candidate;
+    // sameBinding/belongsTo must ALSO succeed before any native key operation.
+    private class TransportEntry(val binding: NativeTransportBinding) {
+        var signer: NativeTransportSigner? = null
+        var input: NativeCertificateVerify? = null
+        var releaseArgument: NativeTransportBinding? = null
+        var closing = false
+        var bindingClosed = false
+        override fun toString(): String = "TransportEntry([redacted])"
+    }
+
+    override fun prepareTransportSigner(binding: NativeTransportBinding) {
+        requireTransportWorker()
+        synchronized(transportLock) {
+            var retained = false
+            try {
+                val id = binding.referenceId()
+                if (id == 0uL || transportStopping) throw BridgeException.NativeUnavailable()
+                val existing = transports[id]
+                if (existing != null) {
+                    retained = binding === existing.binding
+                    // Repeated prepare is idempotent only for the exact healthy
+                    // binding. It never constructs another signer or reopens keys.
+                    if (!binding.sameBinding(existing.binding) || existing.closing || existing.signer == null || binding.isClosed()) {
+                        throw BridgeException.NativeUnavailable()
+                    }
+                    return@synchronized
+                }
+                if (transports.size >= ClientCertificateVerifyPolicy.MAX_SIGNERS) throw BridgeException.NativeUnavailable()
+                val entry = TransportEntry(binding)
+                transports[id] = entry // Cleanup obligation precedes native preparation.
+                retained = true
+                if (binding.isClosed()) { entry.closing = true; throw BridgeException.NativeUnavailable() }
+                when (val prepared = keyStore.prepareTransportSigner(binding)) {
+                    is TransportSignerOutcome.Value -> entry.signer = prepared.value
+                    is TransportSignerOutcome.Failure -> { entry.closing = true; throw BridgeException.LocalKeysUnavailable() }
+                }
+                if (binding.isClosed()) { entry.closing = true; throw BridgeException.NativeUnavailable() }
+            } catch (_: Exception) {
+                // Rust closes its binding before its one release callback. A
+                // partially prepared entry remains here even when this throws.
+                throw BridgeException.NativeUnavailable()
+            } finally {
+                if (!retained) closeTemporaryTransportArgument(binding)
+            }
+        }
+    }
+
+    override fun signClientCertificateVerify(input: NativeCertificateVerify): ByteArray {
+        requireTransportWorker()
+        synchronized(transportLock) {
+            var entry: TransportEntry? = null
+            var der: ByteArray? = null
+            var accepted = false
+            try {
+                if (transportStopping) throw BridgeException.NativeUnavailable()
+                val selected = transports[input.bindingId()] ?: throw BridgeException.NativeUnavailable()
+                if (!input.belongsTo(selected.binding) || selected.closing || selected.input != null || selected.bindingClosed) {
+                    throw BridgeException.NativeUnavailable()
+                }
+                entry = selected
+                selected.input = input
+                val signer = selected.signer ?: throw BridgeException.NativeUnavailable()
+                when (val signed = signer.sign(input)) {
+                    is TransportSignerOutcome.Failure -> { selected.closing = true; throw BridgeException.NativeUnavailable() }
+                    is TransportSignerOutcome.Value -> der = signed.value
+                }
+                if (transportStopping || selected.binding.isClosed() || input.isCancelled()) throw BridgeException.NativeUnavailable()
+                accepted = true
+            } catch (_: Exception) {
+                entry?.closing = true
+            } finally {
+                // The provider has returned before any generated input closes.
+                // On close failure the EXACT wrapper stays for explicit cleanup.
+                val selected = entry
+                if (selected != null) {
+                    try { input.close(); selected.input = null }
+                    catch (_: Exception) { selected.closing = true; accepted = false }
+                    if (selected.closing) {
+                        try { selected.binding.closeBinding() } catch (_: Exception) { /* retained cleanup obligation */ }
+                        selected.signer?.close()
+                    }
+                } else {
+                    try { closeTemporaryTransportArgument(input) }
+                    catch (_: Exception) { accepted = false }
+                }
+            }
+            val result = der
+            // Temporary-handle cleanup can itself cross native code. Recheck the
+            // retained binding/admission afterwards, not the now-closed input.
+            if (accepted) {
+                accepted = try { !transportStopping && entry?.binding?.isClosed() == false }
+                catch (_: Exception) { false }
+            }
+            if (!accepted || result == null) {
+                result?.fill(0)
+                throw BridgeException.NativeUnavailable()
+            }
+            return result
+        }
+    }
+
+    override fun releaseTransportSigner(binding: NativeTransportBinding) {
+        requireTransportWorker()
+        synchronized(transportLock) {
+            var retainedArgument = false
+            try {
+                val id = binding.referenceId()
+                val entry = transports[id]
+                if (entry == null) {
+                    if (!binding.isClosed()) throw BridgeException.NativeUnavailable()
+                    return@synchronized // No owned signer; still close this argument below.
+                }
+                retainedArgument = binding === entry.binding
+                if (!binding.sameBinding(entry.binding) || !binding.isClosed()) throw BridgeException.NativeUnavailable()
+                retainedArgument = true
+                if (binding !== entry.binding) {
+                    // Rust invokes release at most ONCE per binding. Retries are
+                    // local cleanup of this retained argument, not fresh wrappers.
+                    if (entry.releaseArgument != null && entry.releaseArgument !== binding) {
+                        retainedArgument = false
+                        throw BridgeException.NativeUnavailable()
+                    }
+                    entry.releaseArgument = binding
+                }
+                entry.closing = true
+                if (!cleanupTransportEntry(entry) || failedTransportArguments.isNotEmpty() || transportCleanupUncertain) {
+                    throw BridgeException.NativeUnavailable()
+                }
+                transports.remove(id)
+            } catch (_: Exception) {
+                throw BridgeException.NativeUnavailable()
+            } finally {
+                if (!retainedArgument) closeTemporaryTransportArgument(binding)
+            }
+        }
+    }
+
+    /** Called with transportLock. No actor dispatch or Rust store mutex is held. */
+    private fun cleanupTransportEntry(entry: TransportEntry): Boolean {
+        entry.closing = true
+        try {
+            if (!entry.bindingClosed) entry.binding.closeBinding()
+            val signer = entry.signer
+            if (signer != null && (signer.close() is TransportSignerOutcome.Failure || !signer.isQuiescent())) return false
+            entry.input?.let { it.close(); entry.input = null }
+            entry.releaseArgument?.let { it.close(); entry.releaseArgument = null }
+            if (!entry.bindingClosed) {
+                entry.binding.close()
+                entry.bindingClosed = true // Only after close returned successfully.
+            }
+            return true
+        } catch (_: Exception) { return false }
+    }
+
+    private fun closeTemporaryTransportArgument(argument: AutoCloseable) {
+        // A caller can pass the same Java wrapper rather than a fresh callback
+        // wrapper. Only its existing cleanup record may close that object.
+        if (transports.values.any { it.binding === argument || it.input === argument || it.releaseArgument === argument } ||
+            failedTransportArguments.any { it === argument }) return
+        try { argument.close() }
+        catch (_: Exception) {
+            transportStopping = true
+            // Root bounds live bindings to32, one sign and one release argument
+            // each; no retry mints more wrappers after error. Malformed callback
+            // routing can therefore retain at most64 temporary cleanup handles.
+            if (failedTransportArguments.none { it === argument }) {
+                if (failedTransportArguments.size >= ClientCertificateVerifyPolicy.MAX_SIGNERS * 2) transportCleanupUncertain = true
+                else failedTransportArguments.add(argument)
+            }
+            throw BridgeException.NativeUnavailable()
+        }
+    }
+
+    private fun closeAllTransportSigners() {
+        requireTransportWorker()
+        // Close native admission before waiting for an in-flight direct callback.
+        // Its final gate observes this volatile flag and discards any late DER.
+        transportStopping = true
+        synchronized(transportLock) {
+            val iterator = transports.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next().value
+                if (cleanupTransportEntry(entry)) iterator.remove()
+            }
+            val arguments = failedTransportArguments.iterator()
+            while (arguments.hasNext()) {
+                try { arguments.next().close(); arguments.remove() }
+                catch (_: Exception) { /* retain exactly the failed handle for retry */ }
+            }
+            if (transports.isNotEmpty() || failedTransportArguments.isNotEmpty() || transportCleanupUncertain) {
+                throw BridgeException.NativeUnavailable()
+            }
+        }
+    }
+
+    private fun requireTransportWorker() {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw BridgeException.NativeUnavailable()
+    }
 
     internal fun bindWithdrawal(receiver: (NativeRequestSelection) -> Unit, clear: () -> Unit) {
         check(withdrawal == null)
@@ -76,6 +286,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     }
 
     override fun releaseLocalKeyReferences() {
+        closeAllTransportSigners()
         keyValue(keyStore.closeReferences())
     }
 

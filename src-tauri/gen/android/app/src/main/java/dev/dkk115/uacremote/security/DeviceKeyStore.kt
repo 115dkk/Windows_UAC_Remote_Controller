@@ -26,6 +26,8 @@ import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.atomic.AtomicBoolean
 import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
+import dev.dkk115.uacremote.nativecore.NativeCertificateVerify
+import dev.dkk115.uacremote.nativecore.NativeTransportBinding
 
 /** Closed, purpose-separated identity roles. These names are not user input. */
 internal enum class DeviceKeyRole { APPROVAL, DENIAL, TRANSPORT }
@@ -190,7 +192,113 @@ internal class DeviceKeyStore(context: Context) {
     private val owner = KeyReferenceOwner()
     // One process-local operation for THIS owner. No Activity owns a key store.
     // Even a produced DER keeps this slot until Rust finish and native cleanup.
-    private var approvalOperation: NativeApprovalOperation? = null
+    @Volatile private var approvalOperation: NativeApprovalOperation? = null
+    private val transportLock = Any()
+    private val transportSigners = LinkedHashSet<NativeTransportSigner>()
+    private var transportClosing = false
+
+    /** Capture one existing TRANSPORT reference; no native key creation/reopen. */
+    fun prepareTransportSigner(binding: NativeTransportBinding): TransportSignerOutcome<NativeTransportSigner> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return TransportSignerOutcome.Failure(TransportSignerError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) transportPrepare@ {
+            try {
+                registryValue(REFERENCES.requireOpen(owner))
+                synchronized(transportLock) {
+                    if (transportSigners.size >= ClientCertificateVerifyPolicy.MAX_SIGNERS) fail(DeviceKeyError.REFERENCE_CAPACITY_REACHED)
+                }
+                if (synchronized(transportLock) { transportClosing } || binding.isClosed()) {
+                    return@transportPrepare TransportSignerOutcome.Failure(TransportSignerError.CLOSED)
+                }
+                val id = binding.referenceId()
+                if (id == 0uL) return@transportPrepare TransportSignerOutcome.Failure(TransportSignerError.IDENTITY_MISMATCH)
+                val keys = binding.localKeys()
+                val descriptor = registryValue(ReopenKeySetDescriptor.fromTrustedStorage(
+                    keys.handle, keys.approvalSpki, keys.denialSpki, keys.transportSpki,
+                ))
+                val registration = registryValue(REFERENCES.findExact(owner, descriptor))
+                    ?: fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                val reference = registration.reference(DeviceKeyRole.TRANSPORT)
+                val identity = TransportReferenceIdentity(registration, reference)
+                requireTransportReference(registration, reference, identity)
+                inspectNativeKey(openStore(), existingRecord(descriptor, DeviceKeyRole.TRANSPORT))
+                requireDeviceSecure()
+                if (binding.isClosed()) return@transportPrepare TransportSignerOutcome.Failure(TransportSignerError.CLOSED)
+                val signer = NativeTransportSigner(binding, id,
+                    signFrame = { input -> signTransportFrame(binding, registration, reference, identity, input) },
+                    released = { closed -> synchronized(transportLock) { transportSigners.remove(closed); Unit } },
+                )
+                synchronized(transportLock) {
+                    if (transportClosing || owner.closed) fail(DeviceKeyError.OWNER_CLOSED)
+                    transportSigners.add(signer)
+                }
+                TransportSignerOutcome.Value(signer)
+            } catch (failure: OwnerFailure) {
+                TransportSignerOutcome.Failure(TransportSignerError.KEY_UNAVAILABLE, failure.error)
+            } catch (failure: Exception) {
+                TransportSignerOutcome.Failure(TransportSignerError.KEY_UNAVAILABLE, nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
+            }
+        }
+    }
+
+    private fun requireTransportReference(
+        registration: KeySetRegistration,
+        reference: DeviceKeyReference,
+        identity: TransportReferenceIdentity,
+    ) {
+        if (reference.role != DeviceKeyRole.TRANSPORT) fail(DeviceKeyError.UNKNOWN_REFERENCE)
+        val current = registryValue(REFERENCES.resolve(owner, reference))
+        if (current !== registration || !identity.matches(current, current.reference(DeviceKeyRole.TRANSPORT))) {
+            fail(DeviceKeyError.UNKNOWN_REFERENCE)
+        }
+    }
+
+    /** Only the opaque one-shot native TLS input reaches this private key code. */
+    private fun signTransportFrame(
+        binding: NativeTransportBinding,
+        registration: KeySetRegistration,
+        reference: DeviceKeyReference,
+        identity: TransportReferenceIdentity,
+        input: NativeCertificateVerify,
+    ): TransportSignerOutcome<ByteArray> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return TransportSignerOutcome.Failure(TransportSignerError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            var message: ByteArray? = null
+            val der = ByteArray(ClientCertificateVerifyPolicy.MAX_DER_BYTES)
+            try {
+                if (!input.belongsTo(binding) || binding.isClosed() || input.isCancelled()) {
+                    return@synchronized TransportSignerOutcome.Failure(TransportSignerError.CLOSED)
+                }
+                requireTransportReference(registration, reference, identity)
+                requireDeviceSecure()
+                val store = openStore()
+                val record = existingRecord(registration.descriptor, DeviceKeyRole.TRANSPORT)
+                val inspected = inspectNativeKey(store, record)
+                message = input.takeBytes()
+                if (!ClientCertificateVerifyPolicy.valid(message)) return@synchronized TransportSignerOutcome.Failure(TransportSignerError.INVALID_FRAME)
+                val signature = Signature.getInstance("SHA256withECDSA")
+                signature.initSign(inspected.privateKey)
+                requireDeviceSecure()
+                if (binding.isClosed() || input.isCancelled()) return@synchronized TransportSignerOutcome.Failure(TransportSignerError.CLOSED)
+                signature.update(message)
+                val length = signature.sign(der, 0, der.size)
+                if (!ClientCertificateVerifyPolicy.validDerLength(length)) return@synchronized TransportSignerOutcome.Failure(TransportSignerError.SIGNING_FAILED)
+                // Re-read actual KeyInfo/SPKI/hardware/CE/secure-lock facts AFTER
+                // signing, not just cached public material. Never rebind a ref.
+                requireTransportReference(registration, reference, identity)
+                inspectNativeKey(store, record)
+                requireDeviceSecure()
+                if (binding.isClosed() || input.isCancelled()) return@synchronized TransportSignerOutcome.Failure(TransportSignerError.CLOSED)
+                TransportSignerOutcome.Value(der.copyOf(length))
+            } catch (failure: OwnerFailure) {
+                TransportSignerOutcome.Failure(TransportSignerError.KEY_UNAVAILABLE, failure.error)
+            } catch (failure: Exception) {
+                TransportSignerOutcome.Failure(TransportSignerError.SIGNING_FAILED, nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
+            } finally {
+                message?.fill(0)
+                der.fill(0)
+            }
+        }
+    }
 
     /**
      * Worker-only. No input key, role, bytes, provider or alias is accepted.
@@ -413,9 +521,17 @@ internal class DeviceKeyStore(context: Context) {
 
     /** Closes only this instance's references permanently; never deletes native keys. */
     fun closeReferences(): KeyStoreOutcome<Unit> {
-        val closed = synchronized(OWNER_LOCK) { REFERENCES.close(owner) to approvalOperation }
-        closed.second?.cancel()
-        return closed.first
+        // Close admission before waiting for native work. No in-flight transport
+        // can publish DER after this volatile owner/binding invalidation.
+        owner.close()
+        val signers = synchronized(transportLock) { transportClosing = true; transportSigners.toList() }
+        approvalOperation?.cancel()
+        var pending = false
+        for (signer in signers) {
+            if (signer.close() is TransportSignerOutcome.Failure || !signer.isQuiescent()) pending = true
+        }
+        if (pending) return KeyStoreOutcome.Failure(DeviceKeyError.KEYSTORE_UNAVAILABLE)
+        return synchronized(OWNER_LOCK) { REFERENCES.close(owner) }
     }
 
     private fun existingRecord(descriptor: ReopenKeySetDescriptor, role: DeviceKeyRole): OwnedKey {

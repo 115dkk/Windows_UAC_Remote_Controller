@@ -26,8 +26,9 @@ mod transport;
 
 pub use budget::{ConnectionBudget, ConnectionBudgetError};
 pub use socket::{
-    MAX_SOCKET_IDLE_TIMEOUT, MAX_SOCKET_LIFETIME, SocketClock, SocketClockUnavailable,
-    SocketDriver, SocketError, SocketEvent, SocketLimits, SocketLimitsError, SocketPending,
+    MAX_SOCKET_IDLE_TIMEOUT, MAX_SOCKET_LIFETIME, OutboundFrameGuard, SocketClock,
+    SocketClockUnavailable, SocketDriver, SocketError, SocketEvent, SocketLimits,
+    SocketLimitsError, SocketPending,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use transport::{PeerTransport, PendingCounts, ReceivedFrame, TransportError, TransportStatus};

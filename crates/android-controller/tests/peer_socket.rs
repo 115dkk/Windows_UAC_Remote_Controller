@@ -4,6 +4,8 @@
 //! No Android authentication/notification, native key, UAC or deployed relay proof.
 #![cfg(any(windows, target_os = "linux"))]
 
+#[path = "peer_socket/approval_send.rs"]
+mod approval_send;
 #[path = "peer_socket/request_sources.rs"]
 mod request_sources;
 

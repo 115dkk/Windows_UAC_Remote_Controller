@@ -7,10 +7,14 @@
 mod approval;
 mod bootstrap;
 mod local_keys;
+mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
 };
 pub use local_keys::NativeLocalKeySet;
+pub use transport::{
+    NativeCertificateVerify, NativeTransportBinding, native_client_transport_identity,
+};
 
 use android_controller::{DurableFault, DurableInbox};
 use notification_policy::{CapacityLimits, LocalTime, MonotonicTime, Weekday};
@@ -75,6 +79,23 @@ impl fmt::Debug for NativeClock {
 
 #[uniffi::export(foreign)]
 pub trait NativePlatform: Send + Sync {
+    /// Same native key owner, original exact TRANSPORT reference. No key creation.
+    fn prepare_transport_signer(
+        &self,
+        binding: Arc<NativeTransportBinding>,
+    ) -> Result<(), BridgeError>;
+    /// Actual Client TLS input only. Never bounce synchronously to the calling
+    /// actor/worker or wait for a human. Return bounded canonical DER.
+    fn sign_client_certificate_verify(
+        &self,
+        input: Arc<NativeCertificateVerify>,
+    ) -> Result<Vec<u8>, BridgeError>;
+    /// One callback after Rust closes binding; failed cleanup remains owned by
+    /// this same native platform until its explicit/global reference cleanup.
+    fn release_transport_signer(
+        &self,
+        binding: Arc<NativeTransportBinding>,
+    ) -> Result<(), BridgeError>;
     /// Fixed canonical getNoBackupFilesDir()/controller-state, never caller data.
     fn state_directory(&self) -> Result<String, BridgeError>;
     fn clock(&self) -> Result<NativeClock, BridgeError>;
@@ -147,7 +168,7 @@ impl fmt::Debug for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    5
+    6
 }
 
 #[uniffi::export]
@@ -576,6 +597,24 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn prepare_transport_signer(
+            &self,
+            _: Arc<NativeTransportBinding>,
+        ) -> Result<(), BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+        fn sign_client_certificate_verify(
+            &self,
+            _: Arc<NativeCertificateVerify>,
+        ) -> Result<Vec<u8>, BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+        fn release_transport_signer(
+            &self,
+            _: Arc<NativeTransportBinding>,
+        ) -> Result<(), BridgeError> {
+            Ok(())
+        }
         fn withdraw_requests(
             &self,
             requests: Vec<NativeRequestSelection>,

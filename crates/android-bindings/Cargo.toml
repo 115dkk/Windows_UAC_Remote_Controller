@@ -19,6 +19,7 @@ phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }
 notification-policy = { path = "../notification-policy" }
 controller-runtime = { path = "../controller-runtime" }
+secure-channel = { path = "../secure-channel" }
 serde_json.workspace = true
 thiserror.workspace = true
 uniffi = { version = "=0.32.0", default-features = false }
@@ -28,6 +29,7 @@ uniffi = { version = "=0.32.0", default-features = false }
 libc = "0.2.177"
 
 [dev-dependencies]
+approval-protocol = { path = "../approval-protocol" }
 tempfile = "3.23.0"
 p256.workspace = true
 secure-channel = { path = "../secure-channel" }

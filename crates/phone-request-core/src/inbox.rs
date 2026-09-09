@@ -224,6 +224,51 @@ impl PhoneInbox {
         self.active_count()
     }
 
+    /// Downward-only comparison with this owner's LAST reconciled state. It
+    /// never polls, restores a body, changes clocks or grants fresh permission.
+    /// Native owners must still perform check_pending with fresh policy/time
+    /// before use and independently enforce the original deadline thereafter.
+    pub fn retains_exact_pending_snapshot(
+        &self,
+        window: MappedRequestWindow,
+        source: ReceivingGeneration,
+    ) -> bool {
+        if self.fault.is_some()
+            || self.outcome_retention_failed
+            || self
+                .engine
+                .as_ref()
+                .is_none_or(|engine| engine.fault().is_some())
+            || self.source_expired(window.binding())
+            || self
+                .last_local
+                .is_none_or(|local| !self.policy.allows(local))
+        {
+            return false;
+        }
+        self.retained
+            .get(&request_key(window.binding()))
+            .is_some_and(|entry| {
+                entry.binding == window.binding()
+                    && entry.issued_at == window.service_issued_at()
+                    && entry.window == Some(window)
+                    && entry.receiving_generation == Some(source)
+                    && entry.content.is_some()
+                    && !entry.recovering
+                    && entry.metadata.is_some_and(|metadata| {
+                        metadata.key() == request_key(window.binding())
+                            && metadata.issued_at().as_millis()
+                                == window.phone_issued_nanos() / NANOS_PER_MILLI
+                            && metadata.expires_at().as_millis()
+                                == window.phone_expiry_nanos() / NANOS_PER_MILLI
+                            && self.last_phone_nanos.is_some_and(|now| {
+                                now < window.phone_expiry_nanos()
+                                    && now / NANOS_PER_MILLI < metadata.expires_at().as_millis()
+                            })
+                    })
+            })
+    }
+
     /// Metadata-only active requests waiting for reverified bodies; not views.
     pub fn recovering_count(&self) -> usize {
         self.retained

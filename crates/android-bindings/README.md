@@ -9,7 +9,7 @@ Application plugin. Windows retains its existing runtime. Native arm64 Rust,
 generated Kotlin/Application code, Gradle/APK and device evidence are separate
 gates; compilation is not a native key or authentication result.
 
-ABI version 5 retains openOrInitialize and recovery-only openExisting, not an
+ABI version 6 retains openOrInitialize and recovery-only openExisting, not an
 unguarded fresh constructor. Application startup adopts existing state; fresh
 initialization requires an empty private directory, no controller key aliases,
 strictly readable old preferences and an exclusive first-attempt marker. A marker
@@ -31,6 +31,14 @@ Windows-approved. The policy-only startup gate remains until real enrolled
 intake, full notification/effect delivery and outgoing transport are connected.
 See [ADR0011](../../docs/adr/0011-native-approval-operation.md) for lifetime,
 cancellation, cleanup and explicitly deferred native acceptance.
+
+ABI6 adds opaque Client CertificateVerify inputs and original-association native
+transport bindings. A native Rust composition factory uses the existing Android
+TRANSPORT reference; it is not an exported dialer, enrollment command or arbitrary
+signer. Key/association withdrawal closes the binding, and native teardown retains
+bounded partial cleanup. [ADR0012](../../docs/adr/0012-bound-native-transport-and-send.md)
+describes this factory and the real guarded approval-write path. Application
+connection provisioning, foreground intake and PC service action wiring remain.
 
 The handwritten Rust boundary forbids unsafe code and uses pinned UniFFI0.32
 generation. Generated/dependency ABI machinery is not claimed unsafe-free.
@@ -76,7 +84,7 @@ Source declarations/isolated compiles do not prove packaged loading or OS cleanu
 Build/generate: `node tools/build-android-bindings.mjs --abi arm64-v8a --variant debug`.
 The script uses the installed pinned NDK and host-only generator. Gradle source
 generation and JNA5.19.1 AAR dependency are declared. Earlier ABI3 full APK builds
-passed in hosted CI, as did ABI4 source5747d58. ABI5 requires its own exact-source
+passed in hosted CI, as did ABI4 source5747d58 and ABI5 sourceaba127f. ABI6 requires its own exact-source
 run. Release shrinking,
 Android16KiB-page/device behavior and Kotlin/JNA runtime calls remain separate
 unverified gates. No library-copy/symlink permission workaround is used.

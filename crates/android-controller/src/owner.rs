@@ -13,13 +13,15 @@ use phone_state_store::{
 };
 use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
+use crate::liveness::LeaseRegistry;
 use crate::types::PeerAssociationMutationError;
 use crate::{
-    CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
-    ControllerCheckpoint, DurableFailure, DurableFault, InboxCounts, LocalAttestationChallenge,
-    LocalKeyHandle, LocalKeyLedger, LocalKeyMutationError, LocalKeyObservation,
-    LocalKeySetDescriptor, PeerAssociationDescriptor, PeerAssociationLedger,
-    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
+    AssociatedPendingRequest, CommittedCheck, CommittedHistoryMutation,
+    CommittedOutcomeAcknowledgment, CommittedUpdate, ControllerCheckpoint, DurableFailure,
+    DurableFault, InboxCounts, LocalAttestationChallenge, LocalKeyHandle, LocalKeyLedger,
+    LocalKeyMutationError, LocalKeyObservation, LocalKeySetDescriptor, NativePeerLease,
+    PeerAssociationDescriptor, PeerAssociationLedger, PeerAssociationMutation, PeerAssociationRef,
+    PeerAssociationRemoval, PeerLeaseError,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +69,7 @@ pub struct DurableInbox {
     // Per-lifetime identity only. Never encoded or restored from checkpoint
     // bytes, and retaining this Arc does not keep this owner alive/healthy.
     owner_epoch: Arc<()>,
+    liveness: LeaseRegistry,
     required_durability: RequiredDurability,
     fault: Option<DurableFault>,
 }
@@ -271,6 +274,81 @@ impl DurableInbox {
         Arc::clone(&self.owner_epoch)
     }
 
+    /// Downward-only native connection restriction, not enrollment or signing
+    /// permission. Current keys/association come only from this committed owner.
+    pub fn lease_peer_association(
+        &mut self,
+        reference: PeerAssociationRef,
+    ) -> Result<NativePeerLease, PeerLeaseError> {
+        self.ensure_lease_healthy()?;
+        let association = self
+            .peer_associations
+            .resolve(reference)
+            .ok_or(PeerLeaseError::AssociationNotCurrent)?
+            .clone();
+        let local = self
+            .local_keys
+            .get(association.descriptor().local_key_handle())
+            .and_then(|phase| phase.descriptor())
+            .ok_or(PeerLeaseError::LocalKeysUnavailable)?
+            .clone();
+        self.liveness
+            .register(self.owner_epoch(), association, local, None)
+    }
+
+    /// Called only by the current native request owner after its fresh check;
+    /// retained metadata cannot itself turn a stale snapshot into permission.
+    pub(crate) fn lease_pending_request(
+        &mut self,
+        request: &AssociatedPendingRequest,
+    ) -> Result<NativePeerLease, PeerLeaseError> {
+        self.ensure_lease_healthy()?;
+        if !request.belongs_to_owner(self) {
+            return Err(PeerLeaseError::DifferentOwner);
+        }
+        if self
+            .peer_associations
+            .resolve(request.association().reference())
+            != Some(request.association())
+        {
+            return Err(PeerLeaseError::AssociationNotCurrent);
+        }
+        if self
+            .local_keys
+            .get(request.local_keys().handle())
+            .and_then(|phase| phase.descriptor())
+            != Some(request.local_keys())
+        {
+            return Err(PeerLeaseError::LocalKeysUnavailable);
+        }
+        let source = request
+            .request()
+            .receiving_generation()
+            .ok_or(PeerLeaseError::RequestNotPending)?;
+        let window = request.request().original_window();
+        if source.get() != request.association().generation()
+            || window.binding().pc() != request.association().descriptor().pc()
+            || !self.inbox.retains_exact_pending_snapshot(window, source)
+        {
+            return Err(PeerLeaseError::RequestNotPending);
+        }
+        self.liveness.register(
+            self.owner_epoch(),
+            request.association().clone(),
+            request.local_keys().clone(),
+            Some((window, source)),
+        )
+    }
+
+    fn ensure_lease_healthy(&self) -> Result<(), PeerLeaseError> {
+        self.ensure_healthy().map_err(PeerLeaseError::Owner)?;
+        if let Some(fault) = self.inbox.fault() {
+            self.liveness.invalidate_all();
+            return Err(PeerLeaseError::DomainFault(fault));
+        }
+        Ok(())
+    }
+
     /// Only a separately trusted native enrollment owner may choose this input.
     /// No QR, signature, UI flag or CreatedUnverified-to-paired promotion occurs.
     /// The full candidate is validated before intent and published after commit.
@@ -280,10 +358,15 @@ impl DurableInbox {
     ) -> Result<(CommitReceipt, PeerAssociationMutation), PeerAssociationMutationError> {
         self.ensure_healthy()
             .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
-        let mut candidate = self.peer_associations.clone();
-        let mutation = candidate
-            .record_from_trusted_host(descriptor, &self.local_keys)
-            .map_err(PeerAssociationMutationError::Rejected)?;
+        let (candidate, mutation) =
+            self.liveness
+                .preserve_on_return(|| -> Result<_, PeerAssociationMutationError> {
+                    let mut candidate = self.peer_associations.clone();
+                    let mutation = candidate
+                        .record_from_trusted_host(descriptor, &self.local_keys)
+                        .map_err(PeerAssociationMutationError::Rejected)?;
+                    Ok((candidate, mutation))
+                })?;
         let bytes = self.prevalidate_peer_candidate(&candidate)?;
         let receipt = self
             .commit_peer_candidate(candidate, &bytes)
@@ -299,8 +382,11 @@ impl DurableInbox {
     ) -> Result<(CommitReceipt, PeerAssociationRemoval), PeerAssociationMutationError> {
         self.ensure_healthy()
             .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
-        let mut candidate = self.peer_associations.clone();
-        let removal = candidate.remove_from_trusted_host(reference);
+        let (candidate, removal) = self.liveness.preserve_on_return(|| {
+            let mut candidate = self.peer_associations.clone();
+            let removal = candidate.remove_from_trusted_host(reference);
+            (candidate, removal)
+        });
         let bytes = self.prevalidate_peer_candidate(&candidate)?;
         let receipt = self
             .commit_peer_candidate(candidate, &bytes)
@@ -312,12 +398,18 @@ impl DurableInbox {
         &mut self,
         candidate: &PeerAssociationLedger,
     ) -> Result<Vec<u8>, PeerAssociationMutationError> {
-        candidate
-            .validate_relationships(&self.local_keys)
-            .map_err(PeerAssociationMutationError::Rejected)?;
+        let mut leases = self.liveness.begin_transition();
+        if let Err(error) = candidate.validate_relationships(&self.local_keys) {
+            leases.preserve();
+            return Err(PeerAssociationMutationError::Rejected(error));
+        }
         match encode(&self.inbox, &self.history, &self.local_keys, candidate) {
-            Ok(bytes) => Ok(bytes),
+            Ok(bytes) => {
+                leases.preserve();
+                Ok(bytes)
+            }
             Err(DurableFault::Composite(crate::ControllerCheckpointError::TooLarge)) => {
+                leases.preserve();
                 Err(PeerAssociationMutationError::RejectedCheckpoint(
                     crate::ControllerCheckpointError::TooLarge,
                 ))
@@ -325,6 +417,7 @@ impl DurableInbox {
             Err(DurableFault::Composite(crate::ControllerCheckpointError::PeerAssociations(
                 error,
             ))) if error != crate::PeerAssociationError::AllocationFailed => {
+                leases.preserve();
                 Err(PeerAssociationMutationError::Rejected(error))
             }
             Err(cause) => {
@@ -345,6 +438,7 @@ impl DurableInbox {
         bytes: &[u8],
     ) -> Result<CommitReceipt, DurableFailure> {
         self.ensure_healthy().map_err(DurableFailure::new)?;
+        let mut leases = self.liveness.begin_transition();
         self.fault = Some(DurableFault::TransitionIncomplete);
         let required = self.required_durability;
         // Metadata commits still need the existing unwind/failed-transition
@@ -366,6 +460,7 @@ impl DurableInbox {
         match result {
             Ok(receipt) => {
                 self.peer_associations = candidate;
+                leases.reconcile(&self.inbox, &self.peer_associations, &self.local_keys);
                 self.fault = None;
                 Ok(receipt)
             }
@@ -389,13 +484,18 @@ impl DurableInbox {
     ) -> Result<CommitReceipt, LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let mut candidate = self.local_keys.clone();
-        candidate
-            .begin_creation(handle, challenge)
-            .map_err(LocalKeyMutationError::Rejected)?;
-        self.peer_associations
-            .validate_relationships(&candidate)
-            .map_err(LocalKeyMutationError::RejectedAssociation)?;
+        let candidate =
+            self.liveness
+                .preserve_on_return(|| -> Result<_, LocalKeyMutationError> {
+                    let mut candidate = self.local_keys.clone();
+                    candidate
+                        .begin_creation(handle, challenge)
+                        .map_err(LocalKeyMutationError::Rejected)?;
+                    self.peer_associations
+                        .validate_relationships(&candidate)
+                        .map_err(LocalKeyMutationError::RejectedAssociation)?;
+                    Ok(candidate)
+                })?;
         self.transition_all(|_, _, keys| {
             *keys = candidate;
             Ok(())
@@ -413,13 +513,18 @@ impl DurableInbox {
     ) -> Result<(CommitReceipt, LocalKeyObservation), LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let mut candidate = self.local_keys.clone();
-        let observation = candidate
-            .record_created(descriptor)
-            .map_err(LocalKeyMutationError::Rejected)?;
-        self.peer_associations
-            .validate_relationships(&candidate)
-            .map_err(LocalKeyMutationError::RejectedAssociation)?;
+        let (candidate, observation) =
+            self.liveness
+                .preserve_on_return(|| -> Result<_, LocalKeyMutationError> {
+                    let mut candidate = self.local_keys.clone();
+                    let observation = candidate
+                        .record_created(descriptor)
+                        .map_err(LocalKeyMutationError::Rejected)?;
+                    self.peer_associations
+                        .validate_relationships(&candidate)
+                        .map_err(LocalKeyMutationError::RejectedAssociation)?;
+                    Ok((candidate, observation))
+                })?;
         self.transition_all(|_, _, keys| {
             *keys = candidate;
             Ok(observation)
@@ -634,6 +739,7 @@ impl DurableInbox {
             local_keys,
             peer_associations,
             owner_epoch: Arc::new(()),
+            liveness: LeaseRegistry::default(),
             required_durability,
             fault: None,
         };
@@ -706,6 +812,7 @@ impl DurableInbox {
                 local_keys,
                 peer_associations,
                 owner_epoch: Arc::new(()),
+                liveness: LeaseRegistry::default(),
                 required_durability,
                 fault: None,
             },
@@ -714,6 +821,9 @@ impl DurableInbox {
     }
 
     fn ensure_healthy(&self) -> Result<(), DurableFault> {
+        if self.fault.is_some() {
+            self.liveness.invalidate_all();
+        }
         self.fault.map_or(Ok(()), Err)
     }
 
@@ -740,6 +850,7 @@ impl DurableInbox {
         ) -> Result<T, DurableFault>,
     ) -> Result<(CommitReceipt, T), DurableFailure> {
         self.ensure_healthy().map_err(DurableFailure::new)?;
+        let mut leases = self.liveness.begin_transition();
         // Read-only APIs must not expose a candidate if an unexpected unwind is
         // caught by a native caller. Only complete durable success clears this.
         self.fault = Some(DurableFault::TransitionIncomplete);
@@ -754,6 +865,7 @@ impl DurableInbox {
         );
         match result {
             Ok(committed) => {
+                leases.reconcile(&self.inbox, &self.peer_associations, &self.local_keys);
                 self.fault = None;
                 Ok(committed)
             }
@@ -762,6 +874,13 @@ impl DurableInbox {
                 Err(stop_unowned(&mut self.inbox, cause))
             }
         }
+    }
+}
+
+impl Drop for DurableInbox {
+    fn drop(&mut self) {
+        // Revoke before the locked store/native-owner fields begin dropping.
+        self.liveness.invalidate_all();
     }
 }
 
@@ -844,4 +963,83 @@ fn run_transition<T>(
     )?;
     candidate_owner.completed = true;
     Ok((receipt, candidate))
+}
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod liveness_unwind_tests {
+    use super::*;
+    use approval_protocol::{DeviceId, PcIdentity};
+    use notification_policy::{ClockReading, LocalTime, MonotonicTime, Weekday};
+    use p256::{ecdsa::SigningKey, pkcs8::EncodePublicKey};
+    use secure_channel::TlsPublicKey;
+
+    #[test]
+    fn caught_transition_unwind_revokes_existing_lease_before_owner_is_dropped() {
+        // The public owner exposes no callback for injecting a transition
+        // panic. This one unit test exercises the actual private commit scope,
+        // not a substitute filesystem/engine implementation.
+        let temp = tempfile::tempdir().unwrap();
+        let clock = InboxClock::new(
+            ClockReading::new(
+                MonotonicTime::from_millis(0),
+                LocalTime::new(Weekday::Monday, 600).unwrap(),
+            ),
+            0,
+        )
+        .unwrap();
+        let (mut owner, _) = DurableInbox::create_fresh_host_model(
+            NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
+            NotificationPolicy::default(),
+            CapacityLimits::default(),
+            PhoneBootId::from_native_boot_count(5).unwrap(),
+            clock,
+        )
+        .unwrap();
+        let public = |seed: u8| {
+            let key = SigningKey::from_slice(&[seed; 32]).unwrap();
+            let point = p256::PublicKey::from_sec1_bytes(
+                key.verifying_key().to_encoded_point(false).as_bytes(),
+            )
+            .unwrap();
+            TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes()).unwrap()
+        };
+        let handle = LocalKeyHandle::from_bytes([1; 32]).unwrap();
+        let challenge = LocalAttestationChallenge::from_bytes([2; 32]).unwrap();
+        let _ = owner.begin_local_key_creation(handle, challenge).unwrap();
+        let _ = owner
+            .record_local_key_creation(
+                LocalKeySetDescriptor::new(handle, challenge, public(3), public(4), public(5))
+                    .unwrap(),
+            )
+            .unwrap();
+        let (_, mutation) = owner
+            .record_peer_association_from_trusted_host(
+                PeerAssociationDescriptor::new(
+                    PcIdentity::from_bytes([6; 32]).unwrap(),
+                    DeviceId::from_bytes([7; 16]).unwrap(),
+                    1,
+                    handle,
+                    public(8),
+                    public(9),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let reference = match mutation {
+            PeerAssociationMutation::Recorded(reference)
+            | PeerAssociationMutation::AlreadyRecorded(reference) => reference,
+        };
+        let lease = owner.lease_peer_association(reference).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = owner.transition::<()>(|_| panic!("synthetic transition unwind"));
+        }));
+        assert!(result.is_err());
+        assert_eq!(owner.fault(), Some(DurableFault::TransitionIncomplete));
+        assert!(lease.is_revoked());
+        assert!(lease.belongs_to_owner(&owner));
+        assert!(matches!(
+            owner.lease_peer_association(reference),
+            Err(PeerLeaseError::Owner(_))
+        ));
+    }
 }

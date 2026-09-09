@@ -34,6 +34,15 @@ pub trait SocketClock: Send + Sync {
 #[error("trusted native socket clock is unavailable")]
 pub struct SocketClockUnavailable;
 
+/// Downward-only restriction on an already-authorized outbound frame. This is
+/// not peer enrollment, approval authority, or evidence of remote acceptance.
+/// Implementations must use bounded, nonblocking state observations (normally
+/// atomics): no IO, driver mutation, reentry, signing or application/store locks.
+/// Once revoked, an implementation must never become unrevoked.
+pub trait OutboundFrameGuard: Send + Sync {
+    fn is_revoked(&self) -> bool;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SocketLimits {
     idle_timeout: Duration,
@@ -137,6 +146,7 @@ pub struct SocketDriver {
     output_end: usize,
     output_deadline: Option<Instant>,
     frame_deadline: Option<Instant>,
+    frame_guard: Option<Arc<dyn OutboundFrameGuard>>,
     close_deadline: Option<Instant>,
     ready_reported: bool,
     eof: bool,
@@ -227,6 +237,7 @@ impl SocketDriver {
             output_end: 0,
             output_deadline: None,
             frame_deadline: None,
+            frame_guard: None,
             close_deadline: None,
             ready_reported: false,
             eof: false,
@@ -257,6 +268,35 @@ impl SocketDriver {
     /// supplied Vec without replacing the pending frame. The original ten-second
     /// deadline extends through actual partial socket writes, never restarts.
     pub fn queue_frame(&mut self, frame: Vec<u8>) -> Result<(), SocketError> {
+        self.queue_frame_with_guard(frame, None)
+    }
+
+    /// Restrict one already-authorized, already-framed message until its actual
+    /// OutboundDrained event. The supplied deadline uses the SAME trusted native
+    /// Instant domain as this driver and can only shorten the usual ten seconds.
+    /// A rejected new restriction is not admitted; Busy/NotReady never replace
+    /// the existing frame or its guard. Revocation/expiry AFTER admission closes
+    /// the connection and discards retained output, including encrypted bytes.
+    ///
+    /// The owner must continuously drive next_event; the existing at-most-25-ms
+    /// idle polling observes revocation without a task or an application lock.
+    /// Checks surround TLS work and each partial write, but cannot recall bytes
+    /// already handed to TCP or interrupt synchronous native signing. Neither
+    /// this guard nor OutboundDrained proves remote receipt or acceptance.
+    pub fn queue_guarded_frame(
+        &mut self,
+        frame: Vec<u8>,
+        absolute_deadline: Instant,
+        guard: Arc<dyn OutboundFrameGuard>,
+    ) -> Result<(), SocketError> {
+        self.queue_frame_with_guard(frame, Some((absolute_deadline, guard)))
+    }
+
+    fn queue_frame_with_guard(
+        &mut self,
+        frame: Vec<u8>,
+        restriction: Option<(Instant, Arc<dyn OutboundFrameGuard>)>,
+    ) -> Result<(), SocketError> {
         let now = self.observe()?;
         if self.closing {
             return Err(SocketError::Closing);
@@ -264,11 +304,26 @@ impl SocketDriver {
         if self.frame_deadline.is_some() {
             return Err(SocketError::Transport(TransportError::Busy));
         }
-        let deadline = now
+        let mut deadline = now
             .checked_add(FRAME_TIMEOUT)
             .ok_or_else(|| self.fail(SocketError::ClockRange))?;
+        let guard = if let Some((restricted_deadline, guard)) = restriction {
+            if guard.is_revoked() {
+                return Err(SocketError::OutboundRevoked);
+            }
+            if now >= restricted_deadline {
+                return Err(SocketError::SendDeadline);
+            }
+            deadline = deadline.min(restricted_deadline);
+            Some(guard)
+        } else {
+            None
+        };
         match self.transport.queue_frame(frame, now) {
-            Ok(()) => self.frame_deadline = Some(deadline),
+            Ok(()) => {
+                self.frame_deadline = Some(deadline);
+                self.frame_guard = guard;
+            }
             Err(error @ (TransportError::Busy | TransportError::NotReady)) => {
                 return Err(SocketError::Transport(error));
             }
@@ -362,11 +417,12 @@ impl SocketDriver {
                 .as_ref()
                 .ok_or(SocketError::Closed)?
                 .try_write(&self.output[self.output_start..end]);
+            let after_write = self.observe()?;
             match result {
                 Ok(0) => return Err(self.fail(SocketError::WriteZero)),
                 Ok(count) => {
                     self.output_start += count;
-                    self.last_activity = self.observe()?;
+                    self.last_activity = after_write;
                     progress = true;
                     if self.output_start == self.output_end {
                         self.output_start = 0;
@@ -389,6 +445,7 @@ impl SocketDriver {
             if self.frame_deadline.is_some() && !pending.outbound_frame {
                 self.observe()?;
                 self.frame_deadline = None;
+                self.frame_guard = None;
                 return Ok(Step::Event(SocketEvent::OutboundDrained));
             }
         }
@@ -547,6 +604,13 @@ impl SocketDriver {
             return Err(self.fail(SocketError::ClockRegressed));
         }
         self.last_clock = now;
+        if self
+            .frame_guard
+            .as_ref()
+            .is_some_and(|guard| guard.is_revoked())
+        {
+            return Err(self.fail(SocketError::OutboundRevoked));
+        }
         if now >= self.absolute_deadline {
             return Err(self.fail(SocketError::AbsoluteDeadline));
         }
@@ -587,6 +651,7 @@ impl SocketDriver {
         self.input_deadline = None;
         self.output_deadline = None;
         self.frame_deadline = None;
+        self.frame_guard = None;
         self.close_deadline = None;
         self.terminal = true;
     }
@@ -626,6 +691,8 @@ pub enum SocketError {
     AbsoluteDeadline,
     #[error("original frame socket-send deadline expired")]
     SendDeadline,
+    #[error("outbound frame was revoked before socket completion")]
+    OutboundRevoked,
     #[error("retained socket input deadline expired")]
     InputDeadline,
     #[error("pending socket write or close deadline expired")]

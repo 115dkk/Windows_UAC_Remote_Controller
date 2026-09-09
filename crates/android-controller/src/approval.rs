@@ -261,6 +261,19 @@ pub struct ApprovalSubmission {
     signed: SignedDecision,
 }
 impl ApprovalSubmission {
+    /// Crate-owned delivery only. The caller consumes the original submission
+    /// on successful admission; temporary busy retries retain that same value.
+    pub(crate) fn delivery_parts(
+        &self,
+    ) -> Result<(Vec<u8>, Arc<dyn framed_transport::OutboundFrameGuard>), ApprovalError> {
+        if self.is_cancelled() {
+            return Err(ApprovalError::Cancelled);
+        }
+        Ok((
+            self.signed.to_wire(),
+            Arc::new(ApprovalDeliveryGuard(Arc::clone(&self.shared))),
+        ))
+    }
     pub fn binding(&self) -> RequestBinding {
         self.shared.bound.window.binding()
     }
@@ -291,6 +304,12 @@ impl ApprovalSubmission {
             return Err(ApprovalError::Cancelled);
         }
         Ok(self.signed)
+    }
+}
+struct ApprovalDeliveryGuard(Arc<SharedPlan>);
+impl framed_transport::OutboundFrameGuard for ApprovalDeliveryGuard {
+    fn is_revoked(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 impl fmt::Debug for ApprovalSubmission {
