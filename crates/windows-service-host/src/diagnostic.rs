@@ -629,5 +629,5 @@ mod owned {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) use owned::*;

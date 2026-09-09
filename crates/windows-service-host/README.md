@@ -98,6 +98,39 @@ lead to permissive creation, silent recovery or fake readiness. Journal events
 are fixed typed diagnostics only; no raw paths, OS errors, keys, credentials or
 command-line text is stored. Activity data is not authorization state.
 
+### Narrow anchored ProgramData ancestor
+
+The special private `pin_program_data_root` helper supports the observed
+ProgramData Users mask `0x116` without changing the Windows DACL or weakening
+ordinary ancestor/installation/private-data checks. All ancestors above the native
+ProgramData root remain strict. The helper opens a provisional root handle,
+verifies **NTFS and volume serial on that exact handle**, then pins the existing
+fixed `ProgramData\Microsoft` directory with data/list-read access, no delete
+sharing, OPEN_REPARSE_POINT and normalized expected-path validation. It never
+creates, repairs or reads the anchor's contents.
+
+Before returning any usable parent pins or performing a privileged descendant
+write, it rechecks the original ProgramData handle's non-reparse/path/security
+facts and NTFS identity. Holding the child entry keeps ProgramData nonempty;
+the documented NTFS reparse operation refuses nonempty directories.
+[Reparse restrictions](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points),
+[FSCTL_SET_REPARSE_POINT](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/fsctl-set-reparse-point).
+The root's own no-delete pin and strict higher ancestors protect its name.
+
+Only this helper uses `AnchoredAncestor`: untrusted EA/attribute writes and child
+creation are permitted, but untrusted owners, delete/delete-child, WRITE_DAC,
+WRITE_OWNER, generic ALL/WRITE and unsupported access/ACE flags remain rejected.
+The anchor may have metadata rights because only its retained entry presence is
+used. Missing, inaccessible, linked, unsupported-volume or ambiguous anchors fail
+closed; there is no alternate anchor or filesystem fallback. All four activity/
+trust provision/open paths retain the complete ancestor/root/anchor pin set through
+their existing IO lifetimes. Product, activity, trust, binary and data-file policies
+are unchanged.
+
+This fix is source-authored/unverified by its worker. Three new pure ACL tests
+separate the exception from strict policies and reject replacement/security/unknown
+rights; ROOT owns actual install, filesystem-sharing and reparse-race validation.
+
 ## Runtime/FFI ownership
 
 Safe orchestration is in `native.rs`, pure policy in `policy.rs`, and the worker

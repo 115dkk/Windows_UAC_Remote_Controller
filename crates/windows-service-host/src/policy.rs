@@ -8,6 +8,9 @@ use crate::ServiceError;
 pub(crate) enum ObjectPolicy {
     /// Create-child alone cannot replace an already existing protected child.
     Ancestor,
+    /// PRIVATE ProgramData root/entry-presence anchor only. The native helper
+    /// must establish retained nonempty NTFS ancestry before any path write.
+    AnchoredAncestor,
     Installation,
     PrivateData,
     Service,
@@ -92,6 +95,10 @@ fn forbidden_mask(policy: ObjectPolicy) -> u32 {
         // FILE_DELETE_CHILD, WRITE_EA, WRITE_ATTRIBUTES. ADD_FILE (2) and
         // ADD_SUBDIRECTORY (4) are intentionally NOT replacement rights here.
         ObjectPolicy::Ancestor => GENERIC_ALL | GENERIC_WRITE | OWNER_OR_DACL_OR_DELETE | 0x150,
+        // Only read/execute/synchronize, child creation and EA/attribute writes.
+        // Unknown rights, delete-child, DELETE, WRITE_DAC/OWNER and generic
+        // ALL/WRITE remain forbidden to untrusted principals.
+        ObjectPolicy::AnchoredAncestor => !0xA012_01BF_u32,
         ObjectPolicy::Installation => GENERIC_ALL | GENERIC_WRITE | OWNER_OR_DACL_OR_DELETE | 0x156,
         ObjectPolicy::PrivateData => u32::MAX,
         // Only QUERY_CONFIG, QUERY_STATUS, ENUMERATE_DEPENDENTS, INTERROGATE,
@@ -132,6 +139,14 @@ pub(crate) fn check_acl(
         }
         let ace = acl.get(offset..offset + ace_size).ok_or_else(reject)?;
         let mask = u32::from_le_bytes([ace[4], ace[5], ace[6], ace[7]]);
+        if policy == ObjectPolicy::AnchoredAncestor
+            && (header[1] & !0x1f != 0 || mask & !0xF01F_01FF_u32 != 0)
+        {
+            // The special policy understands only ordinary inheritance flags,
+            // standard file rights and known generic access bits. No audit/
+            // unknown flag or access mapping broadens this anchored exception.
+            return Err(reject());
+        }
         let principal = &ace[8..];
         if !valid_sid(principal) {
             return Err(reject());
@@ -240,6 +255,149 @@ mod tests {
                 &acl(&users, 4, 0, 0),
                 &trusted,
                 ObjectPolicy::Installation
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn anchored_program_data_metadata_exception_does_not_relax_other_paths() {
+        let trusted = trusted_system_sids();
+        let users = sid(&[32, 545]);
+        // ROOT observed this ordinary ProgramData Users mask: add file/subdir,
+        // write EA and write attributes. Native anchoring is a separate gate.
+        let metadata_acl = acl(&users, 0x116, 0, 0);
+        assert!(
+            check_acl(
+                &trusted[0],
+                &metadata_acl,
+                &trusted,
+                ObjectPolicy::AnchoredAncestor
+            )
+            .is_ok()
+        );
+        for policy in [
+            ObjectPolicy::Ancestor,
+            ObjectPolicy::Installation,
+            ObjectPolicy::PrivateData,
+        ] {
+            assert!(check_acl(&trusted[0], &metadata_acl, &trusted, policy).is_err());
+        }
+        for rights in [
+            0x1,
+            0x2,
+            0x4,
+            0x8,
+            0x10,
+            0x20,
+            0x80,
+            0x100,
+            0x0002_0000,
+            0x0010_0000,
+            0x8000_0000,
+            0x2000_0000,
+        ] {
+            assert!(
+                check_acl(
+                    &trusted[0],
+                    &acl(&users, rights, 0, 0),
+                    &trusted,
+                    ObjectPolicy::AnchoredAncestor
+                )
+                .is_ok()
+            );
+        }
+        // Trusted SYSTEM full control is still an ordinary supported descriptor.
+        assert!(
+            check_acl(
+                &trusted[0],
+                &acl(&trusted[0], 0x001F_01FF, 0, 0),
+                &trusted,
+                ObjectPolicy::AnchoredAncestor
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn anchored_ancestor_still_rejects_untrusted_replacement_and_security_rights() {
+        let trusted = trusted_system_sids();
+        let users = sid(&[32, 545]);
+        for rights in [
+            0x40,
+            0x0001_0000,
+            0x0004_0000,
+            0x0008_0000,
+            0x1000_0000,
+            0x4000_0000,
+            0x0100_0000,
+            0x0200_0000,
+            0x200,
+        ] {
+            assert!(
+                check_acl(
+                    &trusted[0],
+                    &acl(&users, rights, 0, 0),
+                    &trusted,
+                    ObjectPolicy::AnchoredAncestor
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            check_acl(
+                &users,
+                &acl(&users, 0x116, 0, 0),
+                &trusted,
+                ObjectPolicy::AnchoredAncestor
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn anchored_ancestor_rejects_unknown_ace_flags_and_access_bits() {
+        let trusted = trusted_system_sids();
+        let users = sid(&[32, 545]);
+        for flags in [0x20, 0x40, 0x80] {
+            for kind in [0, 1] {
+                assert!(
+                    check_acl(
+                        &trusted[0],
+                        &acl(&users, 0x116, kind, flags),
+                        &trusted,
+                        ObjectPolicy::AnchoredAncestor
+                    )
+                    .is_err()
+                );
+            }
+        }
+        for flags in [0x0, 0x1, 0x2, 0x4, 0x8, 0x10, 0x13] {
+            assert!(
+                check_acl(
+                    &trusted[0],
+                    &acl(&users, 0x116, 0, flags),
+                    &trusted,
+                    ObjectPolicy::AnchoredAncestor
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            check_acl(
+                &trusted[0],
+                &acl(&trusted[0], 0x200, 0, 0),
+                &trusted,
+                ObjectPolicy::AnchoredAncestor
+            )
+            .is_err()
+        );
+        assert!(
+            check_acl(
+                &trusted[0],
+                &acl(&users, 0x200, 0, 0x8),
+                &trusted,
+                ObjectPolicy::AnchoredAncestor
             )
             .is_err()
         );

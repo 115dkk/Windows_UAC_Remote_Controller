@@ -16,7 +16,8 @@ use windows::{
             FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
             FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
             GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
-            GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, VOLUME_NAME_DOS,
+            GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, READ_CONTROL,
+            VOLUME_NAME_DOS,
         },
         System::Com::CoTaskMemFree,
         UI::Shell::{
@@ -200,6 +201,78 @@ pub(super) fn pin_ancestors(
     Ok(pins)
 }
 
+/// Only this helper may use the metadata-tolerant ancestor policy. It performs
+/// no create/write/repair. All callers must retain the entire returned pin set.
+pub(super) fn pin_program_data_root(
+    trusted: &[Vec<u8>],
+) -> Result<(PathBuf, Vec<OwnedHandle>), ServiceError> {
+    let program_data = known_folder(&FOLDERID_ProgramData)?;
+    let parent = program_data.parent().ok_or(ServiceError::UnsafePath)?;
+    // Keep every higher ancestor strict. In the normal layout this is C:\.
+    let mut pins = pin_ancestors(parent, trusted)?;
+    // Provisional only: accepting metadata rights does not yet authorize a path
+    // write. Keep this exact non-reparse/no-delete handle through both gates.
+    let root = open_checked(&program_data, true, ObjectPolicy::AnchoredAncestor, trusted)?;
+    let initial = inspect_open_handle(
+        &root,
+        &program_data,
+        true,
+        ObjectPolicy::AnchoredAncestor,
+        trusted,
+    )?;
+    require_ntfs(&root, initial.dwVolumeSerialNumber)?;
+    // Existing fixed child only. Its contents are neither read nor trusted. Its
+    // retained data/list-read handle denies delete sharing, keeping ProgramData
+    // nonempty. NTFS refuses SET_REPARSE_POINT on a nonempty directory. The
+    // anchor itself may have metadata rights; its entry presence is sufficient.
+    let anchor_path = program_data.join("Microsoft");
+    let anchor = open_checked(&anchor_path, true, ObjectPolicy::AnchoredAncestor, trusted)?;
+    // Close the provisional window: reject any root reparse/path/ACL change
+    // before the anchor was acquired. No privileged descendant write preceded it.
+    let anchored = inspect_open_handle(
+        &root,
+        &program_data,
+        true,
+        ObjectPolicy::AnchoredAncestor,
+        trusted,
+    )?;
+    require_ntfs(&root, anchored.dwVolumeSerialNumber)?;
+    pins.push(root);
+    pins.push(anchor);
+    Ok((program_data, pins))
+}
+
+/// Shared exact-handle filesystem gate. DRIVE_FIXED alone is not enough for
+/// the NTFS nonempty-reparse property or the existing trust-journal contract.
+pub(super) fn require_ntfs(handle: &OwnedHandle, expected_serial: u32) -> Result<(), ServiceError> {
+    let unavailable = || ServiceError::RegistryUnavailable;
+    let mut filesystem = [0u16; 16];
+    let mut serial = 0;
+    // SAFETY: SAME retained handle already checked for disk/normalized path/ACL;
+    // initialized bounded outputs, no root-path guess or filesystem fallback.
+    unsafe {
+        GetVolumeInformationByHandleW(
+            handle.0,
+            None,
+            Some(&mut serial),
+            None,
+            None,
+            Some(&mut filesystem),
+        )
+    }
+    .map_err(|_| unavailable())?;
+    let end = filesystem
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(unavailable)?;
+    if filesystem[..end] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16]
+        || serial != expected_serial
+    {
+        return Err(unavailable());
+    }
+    Ok(())
+}
+
 fn pin_open_options(directory: bool) -> (u32, FILE_SHARE_MODE) {
     // Attribute/security-only opens do not establish the read/write/delete
     // sharing contract needed for a pin. Request an actual data-read category:
@@ -332,12 +405,11 @@ fn file_identity(handle: &OwnedHandle) -> Result<(u32, u32, u32), ServiceError> 
 /// never after an insecure create. Failure deliberately leaves data untouched.
 pub(crate) fn provision_activity_directory() -> Result<(), ServiceError> {
     super::security::require_elevated()?;
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
     let sid = OwnServiceSid::lookup()?;
     let mut trusted = policy::trusted_system_sids();
     trusted.push(sid.bytes());
     let descriptor = sid.private_descriptor()?;
-    let mut pins = pin_ancestors(&program_data, &trusted)?;
+    let (program_data, mut pins) = pin_program_data_root(&trusted)?;
     let product = program_data.join(INSTALLATION_FOLDER);
     create_private_directory(&product, &descriptor)?;
     pins.push(open_checked(
@@ -383,11 +455,10 @@ pub(super) fn create_private_directory(
 }
 
 pub(crate) fn open_activity_directory() -> Result<ActivityDirectory, ServiceError> {
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
     let sid = OwnServiceSid::lookup()?;
     let mut trusted = policy::trusted_system_sids();
     trusted.push(sid.bytes());
-    let mut pins = pin_ancestors(&program_data, &trusted)?;
+    let (program_data, mut pins) = pin_program_data_root(&trusted)?;
     let product = program_data.join(INSTALLATION_FOLDER);
     pins.push(
         open_checked(&product, true, ObjectPolicy::PrivateData, &trusted)

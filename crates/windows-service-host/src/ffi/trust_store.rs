@@ -8,7 +8,8 @@
 use super::{
     OwnedHandle, Wide,
     filesystem::{
-        create_private_directory, inspect_open_handle, known_folder, open_checked, pin_ancestors,
+        create_private_directory, inspect_open_handle, open_checked, pin_program_data_root,
+        require_ntfs,
     },
     security::{OwnServiceSid, require_elevated},
 };
@@ -33,10 +34,9 @@ use windows::{
             FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_BEGIN, FILE_END, FILE_FLAG_OPEN_REPARSE_POINT,
             FILE_FLAG_WRITE_THROUGH, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ,
             FILE_GENERIC_WRITE, FILE_SHARE_MODE, FindClose, FindFirstFileW, FindNextFileW,
-            FlushFileBuffers, GetFileSizeEx, GetVolumeInformationByHandleW, OPEN_EXISTING,
-            ReadFile, SetFilePointerEx, WIN32_FIND_DATAW, WriteFile,
+            FlushFileBuffers, GetFileSizeEx, OPEN_EXISTING, ReadFile, SetFilePointerEx,
+            WIN32_FIND_DATAW, WriteFile,
         },
-        UI::Shell::FOLDERID_ProgramData,
     },
     core::HRESULT,
 };
@@ -60,12 +60,11 @@ fn service_context() -> Result<(), ServiceError> {
 /// created or repaired from the service-open path.
 pub(crate) fn provision_trust_directory() -> Result<(), ServiceError> {
     require_elevated()?;
-    let program_data = known_folder(&FOLDERID_ProgramData)?;
     let sid = OwnServiceSid::lookup()?;
     let mut trusted = policy::trusted_system_sids();
     trusted.push(sid.bytes());
     let descriptor = sid.private_descriptor()?;
-    let mut pins = pin_ancestors(&program_data, &trusted)?;
+    let (program_data, mut pins) = pin_program_data_root(&trusted)?;
     let result = (|| {
         let product = program_data.join(INSTALLATION_FOLDER);
         pins.push(open_checked(
@@ -111,11 +110,10 @@ impl fmt::Debug for TrustDirectory {
 impl TrustDirectory {
     pub(crate) fn open_for_service() -> Result<Self, ServiceError> {
         service_context()?;
-        let program_data = known_folder(&FOLDERID_ProgramData).map_err(|_| unavailable())?;
         let sid = OwnServiceSid::lookup().map_err(|_| unavailable())?;
         let mut trusted = policy::trusted_system_sids();
         trusted.push(sid.bytes());
-        let pins = pin_ancestors(&program_data, &trusted).map_err(|_| unavailable())?;
+        let (program_data, pins) = pin_program_data_root(&trusted).map_err(|_| unavailable())?;
         let product = program_data.join(INSTALLATION_FOLDER);
         let mut owner = Self {
             path: product.join(DIRECTORY_NAME),
@@ -514,34 +512,6 @@ fn file_size(handle: &OwnedHandle) -> Result<u64, ServiceError> {
     // SAFETY: live same file handle and initialized exclusive signed64 output.
     unsafe { GetFileSizeEx(handle.0, &mut size) }.map_err(|_| unavailable())?;
     u64::try_from(size).map_err(|_| unavailable())
-}
-fn require_ntfs(handle: &OwnedHandle, expected_serial: u32) -> Result<(), ServiceError> {
-    let mut filesystem = [0u16; 16];
-    let mut serial = 0;
-    // SAFETY: SAME retained file/directory handle already inspected for disk,
-    // normalized fixed path and ACL; initialized bounded name/scalar outputs.
-    // No root-path filesystem guess or filesystem-type fallback is used.
-    unsafe {
-        GetVolumeInformationByHandleW(
-            handle.0,
-            None,
-            Some(&mut serial),
-            None,
-            None,
-            Some(&mut filesystem),
-        )
-    }
-    .map_err(|_| unavailable())?;
-    let end = filesystem
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or_else(unavailable)?;
-    if filesystem[..end] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16]
-        || serial != expected_serial
-    {
-        return Err(unavailable());
-    }
-    Ok(())
 }
 fn seek(
     handle: &OwnedHandle,
