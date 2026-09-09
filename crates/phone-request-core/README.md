@@ -9,9 +9,12 @@ notification delivery, OS authentication or Windows applying a decision.
 
 Status: ROOT host contracts checked; native Android integration remains pending.
 Only ROOT runs formatting, builds, tests, Clippy, Rust Analyzer and device checks.
-ROOT's affected host tests (including all54 prior core cases and10 new outbox
+ROOT's previous affected host tests (including all54 prior core cases and10 new outbox
 cases) and all-target/all-feature Clippy passed. Native integration and broader
 workspace/device gates remain separate.
+
+Original receiving-generation retention is a new source change; its own current
+CI evidence is separate from those historical test counts.
 
 ## Inputs and public API
 
@@ -20,6 +23,8 @@ InboxClock::new(ClockReading, native_phone_nanos) -> Result<InboxClock, InboxIss
 PhoneInbox::new(NotificationPolicy, CapacityLimits) -> PhoneInbox
 
 receive_opened(&mut self, &VerifiedPcEvent, &mut ClockCorrelation, InboxClock)
+  -> InboxUpdate
+receive_opened_from(&mut self, &VerifiedPcEvent, ReceivingGeneration, &mut ClockCorrelation, InboxClock)
   -> InboxUpdate
 resolve_pc(&mut self, &VerifiedPcEvent, &mut ClockCorrelation, InboxClock)
   -> InboxUpdate
@@ -74,6 +79,24 @@ Each key uses all 256 bits of PC identity, service epoch and request ID. While
 retained, the **entire** RequestBinding and original ServiceTick issuance must
 match a duplicate or resolution, including changes smaller than a millisecond.
 Different session/nonce/content/expiry values cannot replace an existing body.
+
+Each original guard also retains `Option<ReceivingGeneration>`. The associated
+receiving methods supply the current trusted native association generation;
+legacy methods supply None. Exact binding, issuance and original Option are
+checked before local/source clocks or lifecycle state advance. Some(A) cannot
+be replaced by Some(B) or None, and legacy None cannot acquire today's key
+relationship on a duplicate or recovery. `check_receiving_source` is the read-only
+pre-intent gate used by the durable receiving wrapper. The integer itself is
+metadata, not pairing, authentication or permission to sign.
+
+Inbox checkpointv3 appends one canonical option tag, plus a nonzero u64 when
+present, to each retained row. Explicitv2 decoding retains its outcomes and
+assigns None; v1 keeps its existing policy-only reconciliation rule. The maximum
+512-row extension over v2 is4,608bytes. The384-KiB bound, original lifetimes,
+retirement rules, source watermarks and outcome format do not change. Receiving
+metadata survives same-/different-boot restore; no stored body/auth result does.
+Once a guard legitimately retires, a still-pending terminal outcome has no source
+generation but remains a suppression record, never a newly active request.
 
 A successfully mapped first event retains that original `MappedRequestWindow`.
 Later Opened/Resolved inputs use it without a fresh mapping—even when the

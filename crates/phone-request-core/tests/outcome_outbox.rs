@@ -137,8 +137,19 @@ fn one_pending() -> (PhoneInbox, VerifiedPcEvent) {
     (state, event)
 }
 fn legacy_without_outbox(state: &PhoneInbox) -> Vec<u8> {
-    let mut bytes = state.checkpoint().unwrap().to_bytes().unwrap();
+    let checkpoint = state.checkpoint().unwrap();
+    assert_eq!(checkpoint.receiving_sources().count(), 0);
+    let mut bytes = checkpoint.to_bytes().unwrap();
     let tail = 2 + state.pending_outcomes().len() * OUTCOME_ROW_BYTES;
+    // These legacy fixtures have zero or one unassociated retained row. Remove
+    // the new schema3 None tag before making a genuine schema1 layout; merely
+    // changing the version would leave a malformed historical fixture.
+    assert!(state.retained_count() <= 1);
+    if state.retained_count() == 1 {
+        let generation_tag = bytes.len() - tail - 1;
+        assert_eq!(bytes[generation_tag], 0);
+        bytes.remove(generation_tag);
+    }
     bytes.truncate(bytes.len() - tail);
     bytes[8..10].copy_from_slice(&1_u16.to_be_bytes());
     bytes
@@ -399,7 +410,7 @@ fn schema1_migration_is_only_for_fully_valid_policy_only_state() {
     let legacy = legacy_without_outbox(&policy_only);
     let migrated = InboxCheckpoint::from_bytes(&legacy).unwrap();
     assert!(migrated.is_policy_only());
-    assert_eq!(&migrated.to_bytes().unwrap()[8..10], &2_u16.to_be_bytes());
+    assert_eq!(&migrated.to_bytes().unwrap()[8..10], &3_u16.to_be_bytes());
     let mut corrupt = legacy.clone();
     corrupt.push(0);
     assert!(InboxCheckpoint::from_bytes(&corrupt).is_err());

@@ -15,4 +15,7 @@ pub use notification_policy::{
     RequestKey,
 };
 pub use outbox::{OutcomeAcknowledgment, OutcomeDeliveryId, PendingOutcome};
-pub use types::{InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, PendingRequest};
+pub use types::{
+    InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, InvalidReceivingGeneration,
+    PendingRequest, ReceivingGeneration,
+};

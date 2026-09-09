@@ -375,7 +375,7 @@ fn checkpoint_codec_is_bounded_body_free_and_rejects_every_partial_record() {
     extra.push(0);
     assert!(InboxCheckpoint::from_bytes(&extra).is_err());
     let mut bad_version = bytes.clone();
-    bad_version[9] = 3;
+    bad_version[9] = 9;
     assert_eq!(
         InboxCheckpoint::from_bytes(&bad_version).unwrap_err(),
         InboxCheckpointError::UnsupportedVersion

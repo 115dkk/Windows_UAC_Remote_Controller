@@ -15,7 +15,8 @@ use service_protocol::{
 
 use crate::{
     InboxCheck, InboxClock, InboxFault, InboxIssue, InboxUpdate, OutcomeAcknowledgment,
-    OutcomeDeliveryId, PendingOutcome, PendingRequest, PhoneBootId, types::NANOS_PER_MILLI,
+    OutcomeDeliveryId, PendingOutcome, PendingRequest, PhoneBootId, ReceivingGeneration,
+    types::NANOS_PER_MILLI,
 };
 
 const MAX_GUARD_HORIZON_NANOS: u64 = MAX_REQUEST_LIFETIME_NANOS + MAX_CLOCK_PROBE_RTT_NANOS;
@@ -46,6 +47,9 @@ pub(crate) struct SourceState {
 pub(crate) struct RetainedRequest {
     pub(crate) binding: RequestBinding,
     pub(crate) issued_at: ServiceTick,
+    // Captured only on first guard insertion, including discarded/body-free
+    // requests. Never inferred, upgraded or replaced on retry/recovery.
+    pub(crate) receiving_generation: Option<ReceivingGeneration>,
     pub(crate) window: Option<MappedRequestWindow>,
     pub(crate) metadata: Option<AuthenticatedRequestMetadata>,
     // Original RECEIVE-anchor upper expiry, never recalculated by a new probe.
@@ -318,7 +322,22 @@ impl PhoneInbox {
         if !matches!(event.event(), PcEvent::Opened { .. }) {
             return self.rejected(InboxIssue::WrongEventKind);
         }
-        self.process(event, correlation, clock)
+        self.process(event, None, correlation, clock)
+    }
+
+    /// Receive from a trusted native association context. The number itself is
+    /// not authentication; callers must verify current peer/key ownership first.
+    pub fn receive_opened_from(
+        &mut self,
+        event: &VerifiedPcEvent,
+        generation: ReceivingGeneration,
+        correlation: &mut ClockCorrelation,
+        clock: InboxClock,
+    ) -> InboxUpdate {
+        if !matches!(event.event(), PcEvent::Opened { .. }) {
+            return self.rejected(InboxIssue::WrongEventKind);
+        }
+        self.process(event, Some(generation), correlation, clock)
     }
 
     pub fn resolve_pc(
@@ -330,7 +349,63 @@ impl PhoneInbox {
         if !matches!(event.event(), PcEvent::Resolved { .. }) {
             return self.rejected(InboxIssue::WrongEventKind);
         }
-        self.process(event, correlation, clock)
+        self.process(event, None, correlation, clock)
+    }
+
+    pub fn resolve_pc_from(
+        &mut self,
+        event: &VerifiedPcEvent,
+        generation: ReceivingGeneration,
+        correlation: &mut ClockCorrelation,
+        clock: InboxClock,
+    ) -> InboxUpdate {
+        if !matches!(event.event(), PcEvent::Resolved { .. }) {
+            return self.rejected(InboxIssue::WrongEventKind);
+        }
+        self.process(event, Some(generation), correlation, clock)
+    }
+
+    /// Read-only pre-intent relational gate for the durable owner. Binding and
+    /// original issuance take precedence, then the exact original Option source
+    /// must match: None is never upgraded to Some, nor Some downgraded/reassigned.
+    /// This is not a policy/freshness/authentication permit. Terminal outbox-only
+    /// rows retain no source field; their binding/issuance are checked here and
+    /// the ordinary process path still drops them without making them active.
+    pub fn check_receiving_source(
+        &self,
+        event: &VerifiedPcEvent,
+        receiving_generation: Option<ReceivingGeneration>,
+    ) -> Result<(), InboxIssue> {
+        let (binding, issued_at) = match event.event() {
+            PcEvent::Opened {
+                binding, issued_at, ..
+            }
+            | PcEvent::Resolved {
+                binding, issued_at, ..
+            } => (*binding, *issued_at),
+            PcEvent::Clock { .. } => return Err(InboxIssue::WrongEventKind),
+        };
+        let key = request_key(binding);
+        if let Some(original) = self.retained.get(&key) {
+            if original.binding != binding {
+                return Err(InboxIssue::ConflictingBinding);
+            }
+            if original.issued_at != issued_at {
+                return Err(InboxIssue::ConflictingIssuedAt);
+            }
+            if original.receiving_generation != receiving_generation {
+                return Err(InboxIssue::ConflictingReceivingSource);
+            }
+        }
+        if let Some(pending) = self.pending_outcomes.iter().find(|row| row.key() == key) {
+            if pending.binding() != binding {
+                return Err(InboxIssue::ConflictingBinding);
+            }
+            if pending.issued_at() != issued_at {
+                return Err(InboxIssue::ConflictingIssuedAt);
+            }
+        }
+        Ok(())
     }
 
     pub fn poll(&mut self, clock: InboxClock) -> InboxUpdate {
@@ -392,11 +467,13 @@ impl PhoneInbox {
                 Some(RetainedRequest {
                     window: Some(window),
                     content: Some(content),
+                    receiving_generation,
                     ..
                 }) => Some(PendingRequest {
                     window: *window,
                     notification,
                     content: Arc::clone(content),
+                    receiving_generation: *receiving_generation,
                 }),
                 Some(record) if record.recovering => None,
                 _ => {
@@ -420,6 +497,7 @@ impl PhoneInbox {
     fn process(
         &mut self,
         event: &VerifiedPcEvent,
+        receiving_generation: Option<ReceivingGeneration>,
         correlation: &mut ClockCorrelation,
         clock: InboxClock,
     ) -> InboxUpdate {
@@ -436,6 +514,11 @@ impl PhoneInbox {
             } => (*binding, *issued_at, EventKind::Resolved(*outcome)),
             PcEvent::Clock { .. } => return self.rejected(InboxIssue::WrongEventKind),
         };
+        // Before begin/poll/observe_source: even a newer valid PC clock must not
+        // let an event from another generation age or rebind this original guard.
+        if let Err(issue) = self.check_receiving_source(event, receiving_generation) {
+            return self.rejected(issue);
+        }
         if binding.pc() != correlation.pc() {
             return self.rejected(InboxIssue::WrongPc);
         }
@@ -524,6 +607,8 @@ impl PhoneInbox {
                 self.apply_effects(checked.effects, &mut update);
                 if let Some(pending) = checked.pending {
                     if let Some(record) = self.retained.get_mut(&key) {
+                        // Preflight matched the immutable original source. Only
+                        // the body/recovery state changes; its source stays put.
                         record.recovering = false;
                         record.content = Some(Arc::clone(content));
                     }
@@ -586,6 +671,7 @@ impl PhoneInbox {
                     RetainedRequest {
                         binding,
                         issued_at,
+                        receiving_generation,
                         window: None,
                         metadata: None,
                         guard_until_nanos,
@@ -672,6 +758,7 @@ impl PhoneInbox {
             RetainedRequest {
                 binding,
                 issued_at,
+                receiving_generation,
                 window: Some(window),
                 metadata,
                 guard_until_nanos,

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Body-free native lifecycle checkpoints, never an authentication assertion.
 use crate::{
-    InboxClock, InboxFault, InboxUpdate, PendingOutcome, PhoneInbox,
+    InboxClock, InboxFault, InboxUpdate, PendingOutcome, PhoneInbox, ReceivingGeneration,
     inbox::{RetainedRequest, SourceKey, SourceState},
     request_key,
 };
-use approval_protocol::RequestBinding;
+use approval_protocol::{PcIdentity, RequestBinding};
 use notification_policy::{
     AuthenticatedRequestMetadata, CapacityLimits, LifecycleCheckpoint, LocalTime,
     NotificationEngine, NotificationPolicy,
@@ -59,6 +59,7 @@ pub enum InboxCheckpointError {
 #[derive(Clone)]
 pub(crate) struct RetainedCheckpoint {
     pub(crate) binding: RequestBinding,
+    pub(crate) receiving_generation: Option<ReceivingGeneration>,
     pub(crate) issued_at: ServiceTick,
     pub(crate) window: Option<MappedRequestWindow>,
     pub(crate) metadata: Option<AuthenticatedRequestMetadata>,
@@ -118,6 +119,18 @@ impl InboxCheckpoint {
     pub const fn phone_boot(&self) -> PhoneBootId {
         self.phone_boot
     }
+    /// Original receiving-generation references, including inactive guards.
+    /// These may be revoked/noncurrent; a caller must resolve current eligibility
+    /// separately. None/legacy rows are never assigned a present-day association.
+    pub fn receiving_sources(
+        &self,
+    ) -> impl Iterator<Item = (PcIdentity, ReceivingGeneration)> + '_ {
+        self.retained.iter().filter_map(|entry| {
+            entry
+                .receiving_generation
+                .map(|generation| (entry.binding.pc(), generation))
+        })
+    }
 }
 
 impl PhoneInbox {
@@ -135,6 +148,7 @@ impl PhoneInbox {
                 .values()
                 .map(|entry| RetainedCheckpoint {
                     binding: entry.binding,
+                    receiving_generation: entry.receiving_generation,
                     issued_at: entry.issued_at,
                     window: entry.window,
                     metadata: entry.metadata,
@@ -191,6 +205,9 @@ impl PhoneInbox {
                         request_key(entry.binding),
                         RetainedRequest {
                             binding: entry.binding,
+                            // Association identity is independent of phone boot
+                            // and local timer comparability. Preserve even None.
+                            receiving_generation: entry.receiving_generation,
                             issued_at: entry.issued_at,
                             window: same_boot.then_some(entry.window).flatten(),
                             metadata: same_boot.then_some(entry.metadata).flatten(),

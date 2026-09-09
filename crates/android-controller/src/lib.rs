@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+mod associated_request;
 mod checkpoint;
 mod local_keys;
 mod owner;
@@ -26,6 +27,10 @@ mod peer_associations;
 mod peer_socket;
 mod types;
 
+pub use associated_request::{
+    AssociatedPendingRequest, AssociatedRequestIssue, CommittedAssociatedCheck,
+    RequestSourceFailure,
+};
 pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
 pub use local_keys::{
     LocalAttestationChallenge, LocalKeyError, LocalKeyHandle, LocalKeyLedger, LocalKeyObservation,

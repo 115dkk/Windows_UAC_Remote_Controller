@@ -15,7 +15,7 @@ use framed_transport::{
     ConnectionBudget, PeerTransport, SocketClock, SocketDriver, SocketError, SocketEvent,
     SocketLimits, SocketPending, TransportError,
 };
-use phone_request_core::InboxClock;
+use phone_request_core::{InboxClock, InboxIssue, ReceivingGeneration};
 use secure_channel::{EndpointRole, TlsIdentity};
 use service_protocol::{
     ClockCorrelation, ClockError, ClockProbe, PcEvent, PcEventError, PcPublicKey, VerifiedPcEvent,
@@ -329,36 +329,43 @@ impl AssociatedPcSocket {
             self.abort();
             return Err(PeerSocketError::VerificationKeyMismatch);
         }
-        let result = (|| match message.verified.event() {
-            PcEvent::Clock { .. } => {
-                let probe = self.probe.take().ok_or(PeerSocketError::UnexpectedClock)?;
-                let correlation = probe
-                    .complete(&message.verified, clock.phone_monotonic_nanos())
-                    .map_err(PeerSocketError::Clock)?;
-                let update = owner
-                    .observe_service_clock(&correlation, clock)
-                    .map_err(PeerSocketError::Persistence)?;
-                self.correlation = Some(correlation);
-                Ok(update)
+        let result = (|| {
+            let generation =
+                ReceivingGeneration::from_trusted_owner(self.context.association.generation())
+                    .map_err(|_| PeerSocketError::AssociationChanged)?;
+            match message.verified.event() {
+                PcEvent::Clock { .. } => {
+                    let probe = self.probe.take().ok_or(PeerSocketError::UnexpectedClock)?;
+                    let correlation = probe
+                        .complete(&message.verified, clock.phone_monotonic_nanos())
+                        .map_err(PeerSocketError::Clock)?;
+                    let update = owner
+                        .observe_service_clock(&correlation, clock)
+                        .map_err(PeerSocketError::Persistence)?;
+                    self.correlation = Some(correlation);
+                    Ok(update)
+                }
+                PcEvent::Opened { .. } => owner
+                    .receive_opened_from(
+                        &message.verified,
+                        generation,
+                        self.correlation
+                            .as_mut()
+                            .ok_or(PeerSocketError::ClockRequired)?,
+                        clock,
+                    )
+                    .map_err(receiving_error),
+                PcEvent::Resolved { .. } => owner
+                    .resolve_pc_from(
+                        &message.verified,
+                        generation,
+                        self.correlation
+                            .as_mut()
+                            .ok_or(PeerSocketError::ClockRequired)?,
+                        clock,
+                    )
+                    .map_err(receiving_error),
             }
-            PcEvent::Opened { .. } => owner
-                .receive_opened(
-                    &message.verified,
-                    self.correlation
-                        .as_mut()
-                        .ok_or(PeerSocketError::ClockRequired)?,
-                    clock,
-                )
-                .map_err(PeerSocketError::Persistence),
-            PcEvent::Resolved { .. } => owner
-                .resolve_pc(
-                    &message.verified,
-                    self.correlation
-                        .as_mut()
-                        .ok_or(PeerSocketError::ClockRequired)?,
-                    clock,
-                )
-                .map_err(PeerSocketError::Persistence),
         })();
         match result {
             Ok(committed) => {
@@ -370,6 +377,10 @@ impl AssociatedPcSocket {
                     committed,
                 })
             }
+            // A well-authenticated but mismatched old request is a pre-intent
+            // rejection, not permission to destroy this peer's current clock
+            // or other valid work. No body/effect escapes this rejected event.
+            Err(error @ PeerSocketError::ReceivingSource(_)) => Err(error),
             Err(error) => {
                 self.abort();
                 Err(error)
@@ -413,8 +424,17 @@ impl Drop for AssociatedPcSocket {
     }
 }
 
+fn receiving_error(error: crate::RequestSourceFailure) -> PeerSocketError {
+    match error {
+        crate::RequestSourceFailure::Rejected(issue) => PeerSocketError::ReceivingSource(issue),
+        crate::RequestSourceFailure::Owner(failure) => PeerSocketError::Persistence(failure),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PeerSocketError {
+    #[error("the message does not match the request's original receiving source")]
+    ReceivingSource(InboxIssue),
     #[error("the originating connection was cancelled, closed or failed")]
     ConnectionClosed,
     #[error("peer context belongs to another owner instance")]

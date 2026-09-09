@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One byte-store payload for replay state, history, local keys and peer associations.
 //! A checksum/file location is not authentication; callers own native provenance.
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use activity_journal::{
     MAX_OUTCOME_HISTORY_BYTES, OutcomeHistory, OutcomeHistoryError, OutcomeHistoryLimits,
@@ -46,6 +49,8 @@ pub enum ControllerCheckpointError {
     LocalKeys(LocalKeyError),
     #[error("the nested peer association metadata or local-key relationship is invalid")]
     PeerAssociations(PeerAssociationError),
+    #[error("original request source generations conflict with the peer ledger")]
+    ReceivingSourceMismatch,
 }
 
 /// Strict metadata-only representation; not a runtime, permission or action token.
@@ -276,6 +281,19 @@ impl ControllerCheckpoint {
         self.peer_associations
             .validate_relationships(&self.local_keys)
             .map_err(ControllerCheckpointError::PeerAssociations)?;
+        let mut generations = BTreeMap::new();
+        for current in self.peer_associations.entries() {
+            generations.insert(current.generation(), current.descriptor().pc());
+        }
+        for (pc, generation) in self.inbox.receiving_sources() {
+            if generation.get() >= self.peer_associations.next_generation()
+                || generations
+                    .insert(generation.get(), pc)
+                    .is_some_and(|known_pc| known_pc != pc)
+            {
+                return Err(ControllerCheckpointError::ReceivingSourceMismatch);
+            }
+        }
         if self.history.limits() != OutcomeHistoryLimits::default() {
             return Err(ControllerCheckpointError::HistoryProfileMismatch);
         }

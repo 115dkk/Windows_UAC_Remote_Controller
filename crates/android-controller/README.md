@@ -73,8 +73,22 @@ is claimed for cancellation arriving during a disk commit.
 
 `AssociatedUpdate` identifies the triggering message's source, not an approval
 plan or the original source of every preexisting request affected by maintenance.
-Full per-request source retention, authenticated intake/effect dispatch, native
-key operations and phone authentication remain required. Removing an association
+The receiving wrapper now additionally records that association's generation in
+the original request guard via private source-aware durable methods. A conflicting
+old/unknown source is rejected before intent without destroying the current
+connection's otherwise valid clock/work. Composite validation checks all retained
+source generations against the peer highwater and generation-to-PC relationship,
+including inactive guards. Removed associations may remain historical metadata.
+
+`check_associated_pending` first performs the normal committed pending check,
+then returns a body only if its ORIGINAL generation resolves to the current
+immutable PC/device/local-key relationship. None, removed or replaced sources
+are not filled from a latest-PC lookup. The result keeps committed downward
+effects even when it withholds the body. Returned AssociatedPendingRequest is a
+non-Clone snapshot with owner identity, not a signing/action token or live native
+freshness proof. See [ADR0010](../../docs/adr/0010-original-request-source.md).
+Authenticated native intake/effect dispatch, key operations and phone
+authentication remain required. Removing an association
 does not itself withdraw existing Android notifications or erase replay guards.
 
 ## Public interface

@@ -3,6 +3,7 @@
 //! neither parsing nor a checksum authenticates storage/native observations.
 use crate::{
     InboxCheckpoint, InboxCheckpointError as Error, InboxFault, PendingOutcome, PhoneBootId,
+    ReceivingGeneration,
     checkpoint::RetainedCheckpoint,
     inbox::{SourceKey, SourceState},
     outbox::{outcome_from_tag, outcome_tag},
@@ -21,7 +22,8 @@ use service_protocol::{MAX_REQUEST_LIFETIME_NANOS, MappedRequestWindow, ServiceT
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAGIC: &[u8; 8] = b"UACINBX\0";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
+const OUTCOMES_LEGACY_VERSION: u16 = 2;
 const POLICY_ONLY_LEGACY_VERSION: u16 = 1;
 const MAX_BYTES: usize = 384 * 1024;
 const MAX_POLICY: usize = 16 * 1024;
@@ -105,6 +107,9 @@ impl InboxCheckpoint {
             out.u8(u8::from(entry.was_active));
             out.optional(entry.recovery_until_nanos);
             out.u8(*engine_states.get(&request_key(entry.binding)).unwrap_or(&0));
+            // Appended only in schema3. The optional nonzero scalar freezes the
+            // original receiver; never encode a current registry lookup here.
+            out.optional(entry.receiving_generation.map(ReceivingGeneration::get));
         }
         out.u16(self.pending_outcomes.len() as u16);
         for pending in &self.pending_outcomes {
@@ -131,7 +136,7 @@ impl InboxCheckpoint {
             return Err(Error::InvalidState);
         }
         let version = input.u16()?;
-        if version != VERSION && version != POLICY_ONLY_LEGACY_VERSION {
+        if ![POLICY_ONLY_LEGACY_VERSION, OUTCOMES_LEGACY_VERSION, VERSION].contains(&version) {
             return Err(Error::UnsupportedVersion);
         }
         let phone_boot = PhoneBootId::from_native_boot_count(input.u32()?)?;
@@ -226,6 +231,17 @@ impl InboxCheckpoint {
             let was_active = input.boolean()?;
             let recovery_until_nanos = input.optional()?;
             let engine_state = input.u8()?;
+            let receiving_generation = if version == VERSION {
+                input
+                    .optional()?
+                    .map(ReceivingGeneration::from_trusted_owner)
+                    .transpose()
+                    .map_err(|_| Error::InvalidState)?
+            } else {
+                // Older schemas had no association field. Lack of provenance is
+                // retained, not inferred from the current PC or key registry.
+                None
+            };
             if engine_state > 2
                 || (engine_state != 0 && !has_engine)
                 || was_active != (engine_state == 2)
@@ -240,6 +256,7 @@ impl InboxCheckpoint {
             }
             retained.push(RetainedCheckpoint {
                 binding,
+                receiving_generation,
                 issued_at,
                 window,
                 metadata,
@@ -249,7 +266,7 @@ impl InboxCheckpoint {
             });
         }
         let mut pending_outcomes = Vec::new();
-        if version == VERSION {
+        if version == OUTCOMES_LEGACY_VERSION || version == VERSION {
             let count = usize::from(input.u16()?);
             if count > limits.max_retained() {
                 return Err(Error::InvalidState);

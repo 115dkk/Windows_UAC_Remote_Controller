@@ -6,6 +6,7 @@ use activity_journal::{OutcomeHistory, OutcomeHistoryLimits, OutcomeHistoryRecor
 use notification_policy::{CapacityLimits, NotificationPolicy, RequestKey};
 use phone_request_core::{
     InboxClock, InboxFault, OutcomeDeliveryId, PendingOutcome, PhoneBootId, PhoneInbox,
+    ReceivingGeneration,
 };
 use phone_state_store::{
     CommitReceipt, Durability, NativePrivateDirectory, SnapshotStore, Transition,
@@ -80,6 +81,44 @@ impl fmt::Debug for DurableInbox {
 }
 
 impl DurableInbox {
+    /// Actual association/socket wrapper only. Check original source before
+    /// reserving an intent, then commit its exact tag with the receiving update.
+    pub(crate) fn receive_opened_from(
+        &mut self,
+        event: &VerifiedPcEvent,
+        generation: ReceivingGeneration,
+        correlation: &mut ClockCorrelation,
+        clock: InboxClock,
+    ) -> Result<CommittedUpdate, crate::RequestSourceFailure> {
+        self.ensure_healthy()
+            .map_err(|fault| crate::RequestSourceFailure::Owner(DurableFailure::new(fault)))?;
+        self.inbox
+            .check_receiving_source(event, Some(generation))
+            .map_err(crate::RequestSourceFailure::Rejected)?;
+        let (receipt, update) = self
+            .transition(|inbox| inbox.receive_opened_from(event, generation, correlation, clock))
+            .map_err(crate::RequestSourceFailure::Owner)?;
+        Ok(CommittedUpdate { receipt, update })
+    }
+
+    pub(crate) fn resolve_pc_from(
+        &mut self,
+        event: &VerifiedPcEvent,
+        generation: ReceivingGeneration,
+        correlation: &mut ClockCorrelation,
+        clock: InboxClock,
+    ) -> Result<CommittedUpdate, crate::RequestSourceFailure> {
+        self.ensure_healthy()
+            .map_err(|fault| crate::RequestSourceFailure::Owner(DurableFailure::new(fault)))?;
+        self.inbox
+            .check_receiving_source(event, Some(generation))
+            .map_err(crate::RequestSourceFailure::Rejected)?;
+        let (receipt, update) = self
+            .transition(|inbox| inbox.resolve_pc_from(event, generation, correlation, clock))
+            .map_err(crate::RequestSourceFailure::Owner)?;
+        Ok(CommittedUpdate { receipt, update })
+    }
+
     /// Explicit native fresh-state creation; never a fallback from an open error.
     ///
     /// Requires actual DirectorySynced receipts for both the initial empty state

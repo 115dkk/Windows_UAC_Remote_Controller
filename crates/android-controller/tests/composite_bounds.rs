@@ -23,7 +23,7 @@ use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use p256::pkcs8::EncodePublicKey;
 use phone_request_core::{
     CapacityLimits, ClockReading, Effect, InboxClock, LocalTime, MonotonicTime, NotificationPolicy,
-    PhoneBootId, PhoneInbox,
+    PhoneBootId, PhoneInbox, ReceivingGeneration,
 };
 use phone_state_store::MAX_SNAPSHOT_BYTES;
 use secure_channel::TlsPublicKey;
@@ -118,6 +118,10 @@ fn opened(peer: u16) -> VerifiedPcEvent {
 }
 
 fn full_inbox() -> PhoneInbox {
+    full_inbox_with_sources(false)
+}
+
+fn full_inbox_with_sources(with_sources: bool) -> PhoneInbox {
     let mut inbox = PhoneInbox::with_phone_boot(
         NotificationPolicy::default(),
         CapacityLimits::new(32, RECORD_CAP).unwrap(),
@@ -126,7 +130,12 @@ fn full_inbox() -> PhoneInbox {
     for peer in 1..=RECORD_CAP as u16 {
         let event = opened(peer);
         let mut correlation = source(peer);
-        let opened = inbox.receive_opened(&event, &mut correlation, clock(0));
+        let generation = ReceivingGeneration::from_trusted_owner(u64::from(peer)).unwrap();
+        let opened = if with_sources {
+            inbox.receive_opened_from(&event, generation, &mut correlation, clock(0))
+        } else {
+            inbox.receive_opened(&event, &mut correlation, clock(0))
+        };
         assert!(
             opened
                 .effects()
@@ -144,7 +153,12 @@ fn full_inbox() -> PhoneInbox {
             issued_at: *issued_at,
             outcome: RequestResolution::Cancelled,
         });
-        inbox.resolve_pc(&resolution, &mut correlation, clock(0));
+        let resolved = if with_sources {
+            inbox.resolve_pc_from(&resolution, generation, &mut correlation, clock(0))
+        } else {
+            inbox.resolve_pc(&resolution, &mut correlation, clock(0))
+        };
+        assert!(resolved.issue().is_none());
     }
     assert_eq!(inbox.pending_outcomes().len(), RECORD_CAP);
     assert_eq!(inbox.retained_count(), RECORD_CAP);
@@ -247,6 +261,126 @@ fn envelope(inbox: &[u8], history: &[u8], keys: &[u8], peers: &[u8]) -> Vec<u8> 
     bytes.extend_from_slice(keys);
     bytes.extend_from_slice(peers);
     bytes
+}
+
+#[test]
+fn all_512_original_sources_and_four_maximum_components_fit_without_new_cap() {
+    let inbox = full_inbox_with_sources(true);
+    let checkpoint = inbox.checkpoint().unwrap();
+    assert_eq!(checkpoint.receiving_sources().count(), RECORD_CAP);
+    let inbox_bytes = checkpoint.to_bytes().unwrap();
+    let pending_ids = inbox
+        .pending_outcomes()
+        .iter()
+        .map(|row| *row.delivery_id().as_bytes())
+        .collect();
+    let history_bytes = full_disjoint_history(&pending_ids).to_bytes().unwrap();
+    let keys = full_local_keys();
+    let templates = full_peer_associations(&keys);
+    let template = templates.entries().next().unwrap().descriptor().clone();
+    let mut peers = PeerAssociationLedger::new();
+    // Explicit synthetic native-host history: each old association really used
+    // its retained generation, then was removed before the current 32 records.
+    for index in 1..=RECORD_CAP as u16 {
+        let descriptor = PeerAssociationDescriptor::new(
+            pc(index),
+            template.recipient_device_id(),
+            template.pc_registry_revision(),
+            template.local_key_handle(),
+            template.pc_signing_key().clone(),
+            template.pc_transport_key().clone(),
+        )
+        .unwrap();
+        let created = peers.record_from_trusted_host(descriptor, &keys).unwrap();
+        let reference = match created {
+            android_controller::PeerAssociationMutation::Recorded(reference) => reference,
+            other => panic!("unexpected synthetic generation result: {other:?}"),
+        };
+        assert_eq!(reference.generation(), u64::from(index));
+        assert_eq!(
+            peers.remove_from_trusted_host(reference),
+            android_controller::PeerAssociationRemoval::Removed
+        );
+    }
+    for current in templates.entries() {
+        assert!(matches!(
+            peers
+                .record_from_trusted_host(current.descriptor().clone(), &keys)
+                .unwrap(),
+            android_controller::PeerAssociationMutation::Recorded(_)
+        ));
+    }
+    let key_bytes = keys.to_bytes().unwrap();
+    let peer_bytes = peers.to_bytes().unwrap();
+    assert_eq!(peer_bytes.len(), MAX_PEER_ASSOCIATION_LEDGER_BYTES);
+    let bytes = envelope(&inbox_bytes, &history_bytes, &key_bytes, &peer_bytes);
+    assert!(bytes.len() <= MAX_SNAPSHOT_BYTES);
+    let restored = ControllerCheckpoint::from_bytes(&bytes).unwrap();
+    assert_eq!(restored.inbox().receiving_sources().count(), RECORD_CAP);
+    assert_eq!(restored.to_bytes().unwrap(), bytes);
+
+    // Keep a sufficiently high allocator ceiling, but assign an active peer a
+    // generation already retained by a different historical PC. The independent
+    // peer codec is valid; only the cross-component relationship is invalid.
+    let mut active_alias = peer_bytes.clone();
+    const PEER_HEADER_BYTES: usize = 24;
+    const PEER_ROW_BYTES: usize = 278;
+    active_alias[PEER_HEADER_BYTES + PEER_ROW_BYTES - 8..PEER_HEADER_BYTES + PEER_ROW_BYTES]
+        .copy_from_slice(&1_u64.to_be_bytes());
+    assert!(PeerAssociationLedger::from_bytes(&active_alias).is_ok());
+    assert!(matches!(
+        ControllerCheckpoint::from_bytes(&envelope(
+            &inbox_bytes,
+            &history_bytes,
+            &key_bytes,
+            &active_alias
+        )),
+        Err(ControllerCheckpointError::ReceivingSourceMismatch)
+    ));
+
+    // Two historical PCs cannot claim the same generation even if neither
+    // remains active in the peer ledger and the highwater itself is sufficient.
+    let mut conflicting = PhoneInbox::with_phone_boot(
+        NotificationPolicy::default(),
+        CapacityLimits::default(),
+        boot(),
+    );
+    for peer in [701, 702] {
+        let mut correlation = source(peer);
+        let accepted = conflicting.receive_opened_from(
+            &opened(peer),
+            ReceivingGeneration::from_trusted_owner(1).unwrap(),
+            &mut correlation,
+            clock(0),
+        );
+        assert!(accepted.issue().is_none());
+    }
+    let conflicting_bytes = conflicting.checkpoint().unwrap().to_bytes().unwrap();
+    let empty_history = OutcomeHistory::new(OutcomeHistoryLimits::default())
+        .to_bytes()
+        .unwrap();
+    assert!(matches!(
+        ControllerCheckpoint::from_bytes(&envelope(
+            &conflicting_bytes,
+            &empty_history,
+            &key_bytes,
+            &peer_bytes
+        )),
+        Err(ControllerCheckpointError::ReceivingSourceMismatch)
+    ));
+
+    // A valid independent peer ledger cannot erase issued generations merely by
+    // resetting its highwater or assign a retained generation to a different PC.
+    let reset = full_peer_associations(&keys).to_bytes().unwrap();
+    assert!(matches!(
+        ControllerCheckpoint::from_bytes(&envelope(
+            &inbox_bytes,
+            &history_bytes,
+            &key_bytes,
+            &reset
+        )),
+        Err(ControllerCheckpointError::ReceivingSourceMismatch)
+    ));
 }
 
 #[test]
