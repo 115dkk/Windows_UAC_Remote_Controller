@@ -11,8 +11,12 @@
 
 mod contract;
 mod probe_supervisor;
+mod trust_registry;
 pub use probe_supervisor::{
     LaunchPrivilege, ProbeSupervisorError, ReportOutcome, ServiceProbeSupervisor, SupervisorStage,
+};
+pub use trust_registry::{
+    CommittedRegistryChange, RegisteredDeviceKeys, RegistryError, ServiceRegistry,
 };
 #[cfg(any(windows, test))]
 mod policy;

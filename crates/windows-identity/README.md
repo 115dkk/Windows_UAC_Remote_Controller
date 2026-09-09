@@ -14,6 +14,10 @@ Root owns all validation. This is not evidence of working remote UAC or pairing.
 `sign_digest_for_service(&[u8; 32])` produces verified low-S DER ECDSA from an
 exact prehash. `close()` releases handles, not the persistent key.
 
+`verify_service_context()` reuses the same native identity check without opening
+or creating a key. It is a point-in-time observation, not a transferable grant;
+the fixed trust-file adapter rechecks it for each operation.
+
 Every open/create/export/sign entry checks the actual process token: LocalSystem
 as its user and the enabled, non-deny-only SID obtained by native lookup of
 `NT SERVICE\UacRemoteController`. Any thread impersonation is rejected. An
@@ -22,7 +26,8 @@ No alternate token, `RevertToSelf`, privilege adjustment or elevation is used.
 
 Call only from the installed service's trusted Rust worker, outside the service
 start callback. `windows-service-host::runtime` now opens the existing key and
-creates only on `KeyNotFound`, validates public export before worker Ready, and
+creates only on `KeyNotFound` with an otherwise empty validated trust directory,
+loads/initializes the matching registry before worker Ready, and
 closes it on normal shutdown. This is authored integration, not a performed
 service installation, key creation or successful native-OS test. No UI, IPC,
 network listener, automatic pairing bootstrap, probe CLI or installer key API

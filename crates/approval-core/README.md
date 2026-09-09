@@ -48,6 +48,53 @@ old challenges or explicit `RequestContent` clones are not bounded by the engine
 the host must release them when requests finish and cap its own queues/caches.
 Sharing is not zeroization or permission to persist/log the body.
 
+## Typed privileged-registry checkpoints
+
+`PrivilegedDeviceRegistry::checkpoint_for_privileged_host()` exports immutable
+`RegistryCheckpoint` metadata: capacity, exact `next_revision`, and active
+`RegistryCheckpointEntry` rows containing DeviceId, assigned revision and the
+existing two purpose-specific public keys. The read-only
+`ApprovalEngine::registry_checkpoint_for_privileged_host()` exports the registry
+actually owned by a running engine; it grants no mutable registry access.
+
+A trusted host constructs typed entries with `RegistryCheckpointEntry::new` and
+a complete candidate with `RegistryCheckpoint::new(capacity, next_revision,
+entries)`, then consumes it using
+`PrivilegedDeviceRegistry::restore_for_privileged_host`. There is no serde,
+wire/JSON parser, filesystem I/O, generic enrollment RPC or TLS-pin parser here.
+The host's bounded protected composite/storage implementation is still required.
+Its transport pin mapping must correspond to this same committed membership and
+revision state, not an independently published registry.
+
+Validation rejects capacity outside 1–32, count beyond that capacity, zero next
+revision, zero/reused active revisions or revisions not strictly below the next
+value, duplicate DeviceIds, and any active cross-device/cross-purpose key reuse.
+Existing DeviceId/DeviceKeys types enforce identifier/key validity; canonical
+public-key equality makes alternate SEC1 encodings unable to disguise reuse.
+The typed constructor consumes at most capacity+1 input entries and never
+silently truncates or overwrites duplicates. Accepted rows have canonical
+DeviceId order. Checkpoints/entries are bounded Clone metadata with private
+fields/read-only accessors; the registry, engine and authorization tokens remain
+non-Clone. Debug does not print identifiers or key bytes.
+
+Restore preserves allocator gaps even when all devices have been revoked. It
+does not replay enrollment calls or infer `next_revision` from remaining active
+rows. `u64::MAX` is a valid exhausted next value: later enrollment/replacement
+fails without wrap or reset, while revocation remains possible. Revocation still
+removes current membership, and an explicit later privileged enrollment may
+reuse the ID/keys with a fresh revision when allocation remains possible. No
+permanent revoked-ID/key blacklist or hidden tombstone policy has been added.
+
+Move the restored registry into a newly initialized ApprovalEngine. Its fresh
+epoch and empty pending map are deliberate; requests, content and issued adapter
+permissions are never restored. The live engine still cannot have its whole
+registry swapped or reset. The service must serialize registry mutation, durable
+commit, peer changes and adapter dispatch, stopping authority on uncertain
+persistence. A checkpoint/export is not a commit receipt, attestation result,
+Windows privilege check or rollback-proof version. A well-formed older snapshot
+cannot be identified by this typed model alone; current protected-state provenance
+and explicit create-vs-open/error recovery remain host responsibilities.
+
 ## Required host security boundaries, not implemented claims
 
 - Keep the engine and registry inside a protected Windows service. Its internal

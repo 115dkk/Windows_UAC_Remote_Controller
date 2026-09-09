@@ -16,8 +16,9 @@ fn trusted_host_api_has_no_key_name_or_provider_parameters() {
     let sign: fn(&PcIdentityKey, &[u8; 32]) -> Result<IdentitySignature, IdentityError> =
         PcIdentityKey::sign_digest_for_service;
     let close: fn(PcIdentityKey) -> Result<(), IdentityError> = PcIdentityKey::close;
+    let context: fn() -> Result<(), IdentityError> = windows_identity::verify_service_context;
     // Referencing function pointers does not call native code.
-    let _ = (open, create, public, sign, close);
+    let _ = (open, create, public, sign, close, context);
     assert_eq!(SERVICE_NAME, "UacRemoteController");
     assert_eq!(
         PERSISTENT_KEY_NAME,
@@ -50,6 +51,10 @@ fn diagnostic_errors_contain_fixed_metadata_only() {
 #[cfg(not(windows))]
 #[test]
 fn unsupported_platform_has_no_success_stub_or_fallback() {
+    assert!(matches!(
+        windows_identity::verify_service_context(),
+        Err(IdentityError::UnsupportedPlatform)
+    ));
     assert!(matches!(
         PcIdentityKey::open_existing_for_service(),
         Err(IdentityError::UnsupportedPlatform)

@@ -9,8 +9,12 @@ mod filesystem;
 #[cfg(target_pointer_width = "64")]
 pub(crate) mod probe_supervisor;
 mod security;
+mod trust_store;
 
 pub(crate) use elevation::request_elevated_control;
+pub(crate) use trust_store::{
+    MAX_TRUST_FILE_BYTES, ServiceTrustFile, TrustDirectory, provision_trust_directory,
+};
 
 pub(crate) use filesystem::{
     expected_executable, open_activity_directory, provision_activity_directory,

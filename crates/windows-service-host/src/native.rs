@@ -282,6 +282,7 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
             .set_config_service_sid_info(ServiceSidType::Restricted)
             .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
         ffi::provision_activity_directory()?;
+        ffi::provision_trust_directory()?;
         Ok(())
     };
     prepare().map_err(incomplete)?;

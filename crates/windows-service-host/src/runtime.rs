@@ -3,7 +3,7 @@
 //! It contains no listener, pairing endpoint, prompt adapter or fake UAC.
 #![forbid(unsafe_code)]
 
-use crate::{ServiceError, ffi};
+use crate::{ServiceError, ServiceRegistry, ffi};
 use activity_journal::{ActivityEvent, FailureKind, Journal, Limits, ServiceOutcome, UnixMillis};
 use std::{
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -128,17 +128,47 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     }
     // Key work stays on the service worker, never the SCM entry callback or
     // a WebView/IPC thread. Only genuine absence permits initial creation.
-    let identity = match PcIdentityKey::open_existing_for_service() {
-        Ok(identity) => identity,
+    let mut trust_directory = ffi::TrustDirectory::open_for_service()?;
+    let registry_absent = trust_directory.is_empty_registry_absent()?;
+    // This private disposition is produced only here by the actual key API,
+    // never supplied by a renderer, file, phone or caller freshness boolean.
+    enum IdentityOrigin {
+        Existing,
+        CreatedNow,
+    }
+    let (identity, origin) = match PcIdentityKey::open_existing_for_service() {
+        Ok(identity) => {
+            if registry_absent {
+                return Err(ServiceError::RegistryUnavailable);
+            }
+            (identity, IdentityOrigin::Existing)
+        }
         Err(IdentityError::KeyNotFound) => {
-            PcIdentityKey::create_for_service().map_err(|_| ServiceError::IdentityUnavailable)?
+            // Do not create a replacement key beside older trust data. Missing
+            // either half of a previously initialized identity requires recovery.
+            if !registry_absent {
+                return Err(ServiceError::RegistryUnavailable);
+            }
+            (
+                PcIdentityKey::create_for_service()
+                    .map_err(|_| ServiceError::IdentityUnavailable)?,
+                IdentityOrigin::CreatedNow,
+            )
         }
         Err(_) => return Err(ServiceError::IdentityUnavailable),
     };
-    let _public_identity = identity
-        .public_sec1()
-        .map_err(|_| ServiceError::IdentityUnavailable)?;
+    let mut registry = match origin {
+        IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
+        IdentityOrigin::CreatedNow => {
+            ServiceRegistry::initialize_empty_after_key_creation(&identity, trust_directory)
+        }
+    }
+    .map_err(registry_error)?;
+    // Read from the actual committed owner before service readiness. No engine,
+    // phone handshake or enrollment endpoint is started by this lifecycle host.
+    let _registry_checkpoint = registry.checkpoint_for_engine().map_err(registry_error)?;
     if cancellation_requested(stop) {
+        registry.close().map_err(registry_error)?;
         return identity
             .close()
             .map_err(|_| ServiceError::IdentityUnavailable);
@@ -180,6 +210,7 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
         &mut journal,
         ActivityEvent::Service(ServiceOutcome::Stopping),
     )?;
+    registry.close().map_err(registry_error)?;
     identity
         .close()
         .map_err(|_| ServiceError::IdentityUnavailable)?;
@@ -187,6 +218,14 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     drop(journal);
     drop(directory);
     Ok(())
+}
+
+fn registry_error(error: crate::RegistryError) -> ServiceError {
+    if error == crate::RegistryError::MaintenanceRequired {
+        ServiceError::RegistryMaintenanceRequired
+    } else {
+        ServiceError::RegistryUnavailable
+    }
 }
 
 #[cfg(test)]

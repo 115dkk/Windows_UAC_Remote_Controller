@@ -28,6 +28,21 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 /// Versioned persistent machine-key name, not a path or caller-supplied label.
 pub const PERSISTENT_KEY_NAME: &str = "UacRemoteController.PcIdentity.P256.v1";
 
+/// Observe the current thread/process's fixed service identity without opening
+/// or creating a key. This is a point-in-time check, not a transferable grant:
+/// callers must recheck at each protected operation and must never impersonate
+/// between the observation and use. No token or privilege is changed.
+pub fn verify_service_context() -> Result<(), IdentityError> {
+    #[cfg(windows)]
+    {
+        ffi::verify_service_context()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(IdentityError::UnsupportedPlatform)
+    }
+}
+
 /// An owned, deliberately non-Clone, thread-affine TPM key capability.
 ///
 /// Opening, creating, public-key export and signing each check the real process

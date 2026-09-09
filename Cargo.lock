@@ -5047,9 +5047,14 @@ name = "windows-service-host"
 version = "0.1.0-alpha.1"
 dependencies = [
  "activity-journal",
+ "approval-core",
+ "approval-protocol",
  "getrandom 0.3.4",
+ "p256",
+ "secure-channel",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "windows 0.62.2",
  "windows-identity",

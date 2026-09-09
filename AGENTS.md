@@ -56,6 +56,21 @@
   fabricated with skipped work, mocks presented as real devices or ignored exits.
 - License original project code as GPL-2.0-or-later; retain third-party notices.
 
+## After all programming is complete
+
+- The user requested a substantial C: and E: drive cleanup after implementation,
+  final refactoring and validation finish. This is not authorization to begin
+  deleting files during the ongoing programming work to relieve disk pressure.
+- First inventory exact absolute candidates, sizes, ownership and active use.
+  Remove only confirmed reproducible build outputs/caches or clearly disposable
+  task artifacts; preserve source, git history, keys/certificates, user data,
+  required release files and sufficient validation evidence.
+- Never recursively delete a drive, home, repository/workspace root, an unverified
+  computed target, or a reparse-point destination. Root reviews the exact targets
+  and owns deletion verification. Unclear data requires a user decision.
+- Report what was removed, recoverability, and measured free-space changes on
+  each drive. No claimed recovered space from estimates alone.
+
 ## RunPod child task relay
 
 Before spawning any `runpod_*` agent, stage its exact plaintext task under the

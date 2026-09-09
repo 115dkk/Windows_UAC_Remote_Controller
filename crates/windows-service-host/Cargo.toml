@@ -15,6 +15,13 @@ serde_json.workspace = true
 activity-journal = { path = "../activity-journal" }
 windows-prompt-probe = { path = "../windows-prompt-probe" }
 getrandom.workspace = true
+approval-core = { path = "../approval-core" }
+approval-protocol = { path = "../approval-protocol" }
+secure-channel = { path = "../secure-channel" }
+sha2.workspace = true
+
+[dev-dependencies]
+p256.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }

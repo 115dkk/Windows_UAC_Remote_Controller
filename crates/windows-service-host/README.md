@@ -5,6 +5,13 @@ This crate owns the single `UacRemoteController` SCM service (display name
 phone connectivity, Windows prompt detection/approval, pairing, credential entry,
 or encrypted transport. The serialized capability flags remain `false`.
 
+The SCM worker now restores a PC-key-bound device registry before Ready. Its
+fixed private NTFS append journal preserves all three device key roles and core
+revision highwater. Newly created PC identity permits empty initialization only;
+an existing key with missing/corrupt state does not. No enrollment/QR caller or
+live engine/peer update path is activated. See [ADR0007](../../docs/adr/0007-service-device-registry.md)
+for transaction, maintenance and native-proof limitations.
+
 ## Public interface
 
 - `query_status() -> Result<ServiceSnapshot, ServiceError>` is read-only.

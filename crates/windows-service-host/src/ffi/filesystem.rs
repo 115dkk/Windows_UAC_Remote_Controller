@@ -74,7 +74,7 @@ impl ActivityDirectory {
     }
 }
 
-fn known_folder(id: &GUID) -> Result<PathBuf, ServiceError> {
+pub(super) fn known_folder(id: &GUID) -> Result<PathBuf, ServiceError> {
     // No environment variable, caller path or WOW64 redirection is authority.
     // The supported package is native 64-bit Windows; 32-bit callers fail closed.
     if !cfg!(target_pointer_width = "64") {
@@ -187,7 +187,10 @@ fn same_path(a: &Path, b: &Path) -> Result<bool, ServiceError> {
     Ok(a.eq_ignore_ascii_case(b))
 }
 
-fn pin_ancestors(target: &Path, trusted: &[Vec<u8>]) -> Result<Vec<OwnedHandle>, ServiceError> {
+pub(super) fn pin_ancestors(
+    target: &Path,
+    trusted: &[Vec<u8>],
+) -> Result<Vec<OwnedHandle>, ServiceError> {
     let mut paths: Vec<_> = target.ancestors().collect();
     paths.reverse();
     let mut pins = Vec::with_capacity(paths.len());
@@ -218,7 +221,7 @@ fn pin_open_options(directory: bool) -> (u32, FILE_SHARE_MODE) {
     )
 }
 
-fn open_checked(
+pub(super) fn open_checked(
     path: &Path,
     directory: bool,
     policy: ObjectPolicy,
@@ -251,7 +254,29 @@ fn open_checked(
     }
     .map_err(|e| win_error(ServiceOperation::OpenProtectedPath, e))?;
     let handle = OwnedHandle(raw);
-    let info = file_info(&handle)?;
+    inspect_open_handle(&handle, path, directory, policy, trusted)?;
+    Ok(handle)
+}
+
+/// Validate the caller's already-owned exact file/directory handle. This does
+/// not open a second read-only file pin or alter its sharing/write permissions.
+/// The caller retains ownership; no handle/path is exported outside private FFI.
+pub(super) fn inspect_open_handle(
+    handle: &OwnedHandle,
+    path: &Path,
+    directory: bool,
+    policy: ObjectPolicy,
+    trusted: &[Vec<u8>],
+) -> Result<BY_HANDLE_FILE_INFORMATION, ServiceError> {
+    let text = path.to_str().ok_or(ServiceError::UnsafePath)?;
+    policy::checked_dos_path(text)?;
+    let drive = Wide::new(&text[..3])?;
+    // SAFETY: validated DOS root for this fixed expected path; no caller-derived
+    // fallback or drive mutation. The handle's normalized path is checked below.
+    if unsafe { GetDriveTypeW(drive.ptr()) } != 3 {
+        return Err(ServiceError::UnsafePath);
+    }
+    let info = file_info(handle)?;
     // SAFETY: a live owned file handle; this call has no pointer outputs.
     if unsafe { GetFileType(handle.0) } != FILE_TYPE_DISK
         || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
@@ -281,8 +306,8 @@ fn open_checked(
     if !same_path(Path::new(normalized), path)? {
         return Err(ServiceError::UnsafePath);
     }
-    inspect_file_security(&handle, trusted, policy)?;
-    Ok(handle)
+    inspect_file_security(handle, trusted, policy)?;
+    Ok(info)
 }
 
 fn file_info(handle: &OwnedHandle) -> Result<BY_HANDLE_FILE_INFORMATION, ServiceError> {
@@ -333,7 +358,7 @@ pub(crate) fn provision_activity_directory() -> Result<(), ServiceError> {
     Ok(())
 }
 
-fn create_private_directory(
+pub(super) fn create_private_directory(
     path: &Path,
     descriptor: &SecurityDescriptor,
 ) -> Result<(), ServiceError> {

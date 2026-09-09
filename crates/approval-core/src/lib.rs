@@ -33,6 +33,12 @@
 
 #![forbid(unsafe_code)]
 
+mod registry_checkpoint;
+
+pub use registry_checkpoint::{
+    RegistryCheckpoint, RegistryCheckpointEntry, RegistryCheckpointError,
+};
+
 use std::{
     collections::BTreeMap,
     fmt,

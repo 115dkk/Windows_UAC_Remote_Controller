@@ -231,6 +231,12 @@ pub enum ServiceError {
     JournalProvisioningRequired,
     #[error("activity journal operation failed; administrator recovery may be required")]
     JournalUnavailable,
+    #[error("a pre-provisioned private device-registry directory is required")]
+    RegistryProvisioningRequired,
+    #[error("the device registry is unavailable; trusted recovery is required")]
+    RegistryUnavailable,
+    #[error("the device registry reached its bounded maintenance limit")]
+    RegistryMaintenanceRequired,
     #[error("the service could not initialize its protected PC identity")]
     IdentityUnavailable,
     #[error("the service clock is outside the supported range")]
@@ -256,6 +262,9 @@ impl ServiceError {
             | Self::ConfigurationConflict => 5,
             Self::Timeout => 6,
             Self::JournalProvisioningRequired | Self::JournalUnavailable => 7,
+            Self::RegistryProvisioningRequired
+            | Self::RegistryUnavailable
+            | Self::RegistryMaintenanceRequired => 8,
             _ => 1,
         }
     }
@@ -267,9 +276,10 @@ pub(crate) fn incomplete(error: ServiceError) -> ServiceError {
         ServiceError::WindowsCall { operation, code } => SetupFailure::Windows { operation, code },
         ServiceError::UnsafePath => SetupFailure::UnsafePath,
         ServiceError::UnsafePermissions => SetupFailure::UnsafePermissions,
-        ServiceError::JournalProvisioningRequired | ServiceError::JournalUnavailable => {
-            SetupFailure::Provisioning
-        }
+        ServiceError::JournalProvisioningRequired
+        | ServiceError::JournalUnavailable
+        | ServiceError::RegistryProvisioningRequired
+        | ServiceError::RegistryUnavailable => SetupFailure::Provisioning,
         _ => SetupFailure::Other,
     };
     ServiceError::InstallationIncomplete { reason }

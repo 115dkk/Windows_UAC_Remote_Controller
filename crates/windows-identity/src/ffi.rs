@@ -666,6 +666,10 @@ impl Drop for OwnedDescriptor {
     }
 }
 
+pub(super) fn verify_service_context() -> Result<(), IdentityError> {
+    authorize_service().map(|_| ())
+}
+
 fn authorize_service() -> Result<[u8; 32], IdentityError> {
     reject_thread_impersonation()?;
     let token = OwnedToken::process()?;
