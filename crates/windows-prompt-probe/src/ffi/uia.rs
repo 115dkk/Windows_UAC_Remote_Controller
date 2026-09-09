@@ -28,11 +28,12 @@ use windows::{
         },
         UI::Accessibility::{
             CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
-            IUIAutomationTreeWalker, UIA_ButtonControlTypeId, UIA_EditControlTypeId,
-            UIA_HyperlinkControlTypeId, UIA_IsInvokePatternAvailablePropertyId,
+            IUIAutomationTreeWalker, UIA_ButtonControlTypeId as UIA_BUTTON_CONTROL_TYPE_ID,
+            UIA_EditControlTypeId, UIA_HyperlinkControlTypeId as UIA_HYPERLINK_CONTROL_TYPE_ID,
+            UIA_IsInvokePatternAvailablePropertyId,
             UIA_IsLegacyIAccessiblePatternAvailablePropertyId,
             UIA_IsValuePatternAvailablePropertyId, UIA_NamePropertyId, UIA_PROPERTY_ID,
-            UIA_TextControlTypeId, UIA_WindowControlTypeId,
+            UIA_TextControlTypeId as UIA_TEXT_CONTROL_TYPE_ID, UIA_WindowControlTypeId,
         },
     },
     core::Interface,
@@ -234,7 +235,7 @@ fn visit(
     }
     observed.counts.enabled_elements += u16::from(enabled.as_bool());
     observed.counts.offscreen_elements += u16::from(offscreen.as_bool());
-    observed.counts.button_elements += u16::from(control_type == UIA_ButtonControlTypeId);
+    observed.counts.button_elements += u16::from(control_type == UIA_BUTTON_CONTROL_TYPE_ID);
     observed.counts.invoke_pattern_available += u16::from(pattern_available(
         element,
         UIA_IsInvokePatternAvailablePropertyId,
@@ -270,9 +271,9 @@ fn visit(
         observed.caption = Some(caption);
     } else if !offscreen.as_bool() {
         let kind = match control_type {
-            UIA_TextControlTypeId => Some(LabelKind::Text),
-            UIA_ButtonControlTypeId => Some(LabelKind::Button),
-            UIA_HyperlinkControlTypeId => Some(LabelKind::Hyperlink),
+            UIA_TEXT_CONTROL_TYPE_ID => Some(LabelKind::Text),
+            UIA_BUTTON_CONTROL_TYPE_ID => Some(LabelKind::Button),
+            UIA_HYPERLINK_CONTROL_TYPE_ID => Some(LabelKind::Hyperlink),
             _ => None,
         };
         if let Some(kind) = kind {
