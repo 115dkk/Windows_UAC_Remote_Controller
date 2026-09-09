@@ -484,17 +484,31 @@ impl DurableInbox {
             .snapshot()
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?
             .to_vec();
-        let preview = ControllerCheckpoint::from_bytes(&bytes)
-            .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
-        if policy_only && !preview.inbox().is_policy_only() {
-            return Err(DurableFailure::new(
-                DurableFault::LifecycleIntegrationRequired,
-            ));
-        }
-        preflight(&preview).map_err(DurableFailure::new)?;
-        let transition = store
-            .begin_transition()
-            .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
+        let (transition, preview) = if policy_only {
+            let preview = ControllerCheckpoint::from_bytes(&bytes)
+                .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
+            if !preview.inbox().is_policy_only() {
+                return Err(DurableFailure::new(
+                    DurableFault::LifecycleIntegrationRequired,
+                ));
+            }
+            preflight(&preview).map_err(DurableFailure::new)?;
+            let transition = store
+                .begin_transition()
+                .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
+            (transition, preview)
+        } else {
+            // Keep the original full recovery contract: once full restoration
+            // starts, even invalid domain bytes leave its durable intent. Only
+            // the explicit policy/key preflight path rejects before mutation.
+            let transition = store
+                .begin_transition()
+                .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
+            let preview = ControllerCheckpoint::from_bytes(&bytes)
+                .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
+            preflight(&preview).map_err(DurableFailure::new)?;
+            (transition, preview)
+        };
         let (checkpoint, history, local_keys) = preview.into_parts();
         let (mut inbox, update) = PhoneInbox::restore_checkpoint(checkpoint, boot, clock)
             .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
