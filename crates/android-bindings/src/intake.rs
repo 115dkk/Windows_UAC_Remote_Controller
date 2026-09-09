@@ -567,15 +567,17 @@ fn fail_reactor(controller: &Weak<MobileController>, intake: &IntakeOwner) {
     }
 }
 
-async fn wait_peer(mut owned: PeerOwned) -> ParkedPeer {
+fn wait_peer(mut owned: PeerOwned) -> impl std::future::Future<Output = ParkedPeer> + Send {
     let stop = owned.completion.control.stop.clone();
-    let work = tokio::select! {
-        biased;
-        _ = stop.cancelled() => PeerWork::Stop,
-        command = owned.commands.recv() => match command { Some(PeerCommand::Decision(value)) => PeerWork::Decision(value), Some(PeerCommand::Probe) => PeerWork::Probe, None => PeerWork::Stop },
-        event = owned.socket.next_event() => PeerWork::Event(event),
-    };
-    ParkedPeer { owned, work }
+    async move {
+        let work = tokio::select! {
+            biased;
+            _ = stop.cancelled() => PeerWork::Stop,
+            command = owned.commands.recv() => match command { Some(PeerCommand::Decision(value)) => PeerWork::Decision(value), Some(PeerCommand::Probe) => PeerWork::Probe, None => PeerWork::Stop },
+            event = owned.socket.next_event() => PeerWork::Event(event),
+        };
+        ParkedPeer { owned, work }
+    }
 }
 fn prepare_attach(
     input: AttachInput,

@@ -79,6 +79,7 @@ async function main() {
       const uiDeadline = Date.now() + 30_000;
       const observations = [];
       let xml = '';
+      let consecutive = 0;
       for (let attempt = 0; attempt < 12 && Date.now() < uiDeadline; attempt += 1) {
         await pause();
         run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
@@ -86,8 +87,9 @@ async function main() {
         let shown = false;
         try { checkNotificationUi(xml, selected); shown = true; } catch { /* Retain actual failed observation. */ }
         const actionsShown = selected === 'withdrawn' || ['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`));
+        consecutive = shown && actionsShown ? consecutive + 1 : 0;
         observations.push({ attempt, shade: xml.includes('package="com.android.systemui"'), shown, actionsShown, xmlSha256: hash(xml) });
-        if (shown && actionsShown) break;
+        if (consecutive >= 2) break;
         if (!xml.includes('package="com.android.systemui"')) {
           run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
         } else if (shown && !actionsShown) {
@@ -104,10 +106,21 @@ async function main() {
       writeFileSync(resolve(output, `${selected}.png`), png);
       writeFileSync(resolve(output, `${selected}.xml`), xml);
       receipt.captures.push({ case: selected, native, observations, pngSha256: hash(png), actualUiChecked: false });
+      if (consecutive < 2) throw new Error('The actual notification did not remain visible across two observations.');
       checkNotificationUi(xml, selected);
       if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`))) {
         throw new Error('All three native notification actions were not visible in the actual UI.');
       }
+      // Accessibility can update before the compositor. Keep each image between
+      // actual UI observations. ROOT must still inspect pixels independently.
+      run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
+      const after = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
+      writeFileSync(resolve(output, `${selected}-after.xml`), after);
+      checkNotificationUi(after, selected);
+      if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => after.includes(`text="${label}"`))) {
+        throw new Error('Native actions disappeared during the actual screenshot capture.');
+      }
+      receipt.captures.at(-1).afterXmlSha256 = hash(after);
       receipt.captures.at(-1).actualUiChecked = true;
     }
     receipt.completed = true;

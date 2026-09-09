@@ -346,7 +346,7 @@ impl ProjectionRegistry {
     }
     pub(crate) fn reserve(&mut self, key: RequestKey) -> Result<(), BridgeError> {
         self.historical
-            .retain(|entry: &Weak<NativePendingRequest>| entry.strong_count() != 0);
+            .retain(|entry| Weak::<NativePendingRequest>::strong_count(entry) != 0);
         if self.historical.len() >= 64
             || (self.entries.len() >= 32 && !self.entries.iter().any(|entry| entry.key() == key))
         {

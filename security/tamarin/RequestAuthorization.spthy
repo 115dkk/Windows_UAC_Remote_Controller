@@ -31,7 +31,7 @@ rule TrustedEnrollment:
   --[ Enrolled(pc, ~device, ~revision, pk(~approval_sk), pk(~denial_sk)) ]->
   [ !PhoneKeys(~device, ~approval_sk, ~denial_sk),
     !EnrollmentKeys(pc, ~device, pk(~approval_sk), pk(~denial_sk)),
-    RegistrySlot(~revision, pc, ~device, 'active'),
+    RegistrySlot(~device, pc, ~revision, 'active'),
     Out(<pc, ~device, ~revision,
       pk(~approval_sk), pk(~denial_sk)>) ]
 
@@ -56,11 +56,11 @@ rule OpenActualRequest:
 // any nonempty subset, including a full serial registry snapshot, is possible.
 rule CaptureEligibleDevice:
   [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
-    RegistrySlot(revision, pc, device, 'active'),
+    RegistrySlot(device, pc, revision, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key) ]
   --[ SnapshotCaptured(pc, device, revision, binding) ]->
   [ RequestSlot(request_id, pc, binding, 'building'),
-    RegistrySlot(revision, pc, device, 'active'),
+    RegistrySlot(device, pc, revision, 'active'),
     !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
 
 // A nonempty frozen snapshot permits publication. Changing the building phase
@@ -102,7 +102,7 @@ rule AcceptApproval:
   let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
         'v1', device, 'approve', binding>
   in
-  [ RegistrySlot(revision, pc, device, 'active'),
+  [ RegistrySlot(device, pc, revision, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     !RequestOrigin(request_id, pc, binding)[+],
     !Snapshot(pc, device, revision, approval_key, denial_key, binding),
@@ -110,7 +110,7 @@ rule AcceptApproval:
     In(<'decision', device, 'approve', binding, signature>) ]
   --[ Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE
       RequestAccepted(pc, device, revision, binding, 'approve') ]->
-  [ RegistrySlot(revision, pc, device, 'active')
+  [ RegistrySlot(device, pc, revision, 'active')
     // CANARY_REPLAY_GUARD
   ]
 
@@ -118,7 +118,7 @@ rule AcceptDenial:
   let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
         'v1', device, 'deny', binding>
   in
-  [ RegistrySlot(revision, pc, device, 'active'),
+  [ RegistrySlot(device, pc, revision, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     !RequestOrigin(request_id, pc, binding)[+],
     !Snapshot(pc, device, revision, approval_key, denial_key, binding),
@@ -126,32 +126,32 @@ rule AcceptDenial:
     In(<'decision', device, 'deny', binding, signature>) ]
   --[ Eq(verify(signature, denial_message, denial_key), true),
       RequestAccepted(pc, device, revision, binding, 'deny') ]->
-  [ RegistrySlot(revision, pc, device, 'active') ]
+  [ RegistrySlot(device, pc, revision, 'active') ]
 
 // Real retirement of the linear active registration. The retired phase permits
 // explicit re-enrollment but never restores the old revision.
 rule RevokeCurrentDevice:
-  [ RegistrySlot(revision, pc, device, 'active') ]
+  [ RegistrySlot(device, pc, revision, 'active') ]
   --[ RegistryRevoked(pc, device, revision) ]->
-  [ RegistrySlot(revision, pc, device, 'retired') ]
+  [ RegistrySlot(device, pc, revision, 'retired') ]
 
 rule TrustedReenrollmentWithSameKeys:
-  [ RegistrySlot(old_revision, pc, device, 'retired'),
+  [ RegistrySlot(device, pc, old_revision, 'retired'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     Fr(~new_revision) ]
   --[ Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
-  [ RegistrySlot(~new_revision, pc, device, 'active'),
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
     Out(~new_revision) ]
 
 // Core replacement likewise invalidates the former revision even with the same
 // keys; no pending snapshot is silently upgraded to the new membership.
 rule TrustedReplacementWithSameKeys:
-  [ RegistrySlot(old_revision, pc, device, 'active'),
+  [ RegistrySlot(device, pc, old_revision, 'active'),
     !EnrollmentKeys(pc, device, approval_key, denial_key),
     Fr(~new_revision) ]
   --[ RegistryRevoked(pc, device, old_revision),
       Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
-  [ RegistrySlot(~new_revision, pc, device, 'active'),
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
     Out(~new_revision) ]
 
 rule CancelExactRequest:
