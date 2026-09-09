@@ -60,8 +60,8 @@ after application-signature verification with that frozen key. `apply_event`
 requires the same connection, healthy owner instance and current exact association
 and local tuple before a domain intent. The socket wait holds no inbox borrow.
 Each connection privately owns its pending clock probe and correlation; raw
-correlations cannot be imported. Its only outbound operation is the fixed
-clock request, not an arbitrary frame/signing API.
+correlations cannot be imported. Outbound operations are the fixed clock request
+and the two sealed prepared-decision types, not arbitrary frames or signing.
 
 Cancellation, fatal error, observed close, explicit abort and Drop invalidate
 shared event/update context and clear clock state. A child cancellation token
@@ -137,16 +137,46 @@ invalidates it. Callback/clock/boot and durable faults do not rearm the owner.
 post-I/O expiry or schedule withdrawal. No local prepare/sign operation resolves
 the request or records a Windows-denied outcome/history row. `PreparedDenial` is
 non-Clone and is signature data, not remote acceptance. Its consuming data
-extraction is not a send permit: a future typed sender must retain its original
-context and recheck native time, request, source, cancellation and write deadlines.
+extraction is not a send permit: the typed sender takes the prepared value itself
+and retains its original context rather than using that extraction.
 
-This slice does not wire Application/UniFFI/Kotlin/UI or socket delivery and does
-not change policy-only startup. Before user-denial key use, the future native
+This slice does not wire Application/UniFFI/Kotlin/UI and does not change
+policy-only startup. Before user-denial key use, the future native
 owner must freshly require configured secure screen lock and cancel/quiesce
 concurrent approval UI and any retained same-request approval transmission. The
 DENIAL operation itself must not request BiometricPrompt/per-use authentication.
 Public key metadata and software-signature fixtures are not hardware-policy or
 enrollment proof. The new host tests are authored for ROOT execution only.
+
+### Guarded typed denial delivery
+
+`AssociatedPcSocket::queue_denial(owner, PreparedDenial, native_clock)` now uses
+the same complete admission pipeline as `queue_approval`. A closed private
+`PreparedDecisionRef` enum has exactly those two sealed inputs; there is no public
+trait, arbitrary statement, purpose, signing or raw-frame admission. Approval's
+public API and tests are unchanged. Both purposes share one private progress
+record and the same driver output slot, which also carries the fixed clock probe.
+Admission is Busy while either the progress record or driver frame is pending;
+it cannot overwrite a prior purpose's ticket before actual drain/terminal cleanup.
+
+Denial has separate `DenialSendTransition`, `DenialSendOutcome`, `QueuedDenial`
+and `DenialWriteProgress` types. Retry returns the same prepared signature,
+original window and deadline without another key operation. Admission rechecks
+owner/current original association/local keys/request window, authenticated service
+epoch/correlation age, native boot/time, policy and the existing bounded request
+lease. Committed checks remain available on rejection. The socket deadline is
+the original remaining native lifetime and can only shorten its ten-second frame
+limit; no retry or other purpose extends it.
+
+The send guard retains the original denial cancellation, owner lifetime and
+request lease, plus the newly checked lease and connection state, through TLS
+buffering and each partial TCP write. Native-slot retirement does not release
+that guard. The native actor must continuously drive the socket and policy/time
+wakes; this change adds no background task or native timer. Cancellation cannot
+recall bytes already handed to TCP. Queued/WrittenToSocket remain local facts,
+never PC acceptance or a Windows-denied history row. Actual native denial key use,
+cross-approval cancellation/preemption, application dispatch and PC decision
+handling are separate integration obligations, not activated by this API.
 
 ## Public interface
 

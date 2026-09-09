@@ -53,8 +53,9 @@ pub use peer_associations::{
 };
 pub use peer_socket::{
     ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, AssociatedPcSocket,
-    AssociatedUpdate, PcSocketEvent, PcSocketInputs, PeerSocketError, QueuedApproval,
-    ReceivedPcEvent, SendIssue, SendRetry,
+    AssociatedUpdate, DenialSendOutcome, DenialSendTransition, DenialWriteProgress, PcSocketEvent,
+    PcSocketInputs, PeerSocketError, QueuedApproval, QueuedDenial, ReceivedPcEvent, SendIssue,
+    SendRetry,
 };
 pub use types::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,

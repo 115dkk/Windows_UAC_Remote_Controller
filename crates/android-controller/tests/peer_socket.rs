@@ -6,6 +6,8 @@
 
 #[path = "peer_socket/approval_send.rs"]
 mod approval_send;
+#[path = "peer_socket/denial_send.rs"]
+mod denial_send;
 #[path = "peer_socket/request_sources.rs"]
 mod request_sources;
 

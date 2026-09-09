@@ -16,7 +16,8 @@
 //!
 //! Every committed downward check is returned even on rejection. Preparing a
 //! denial does not resolve the request or record a Windows-denied history row.
-//! Native key use, Application/ABI wiring and typed socket delivery are absent.
+//! Native key use and Application/ABI wiring are absent. The optional typed
+//! socket sender retains this operation's cancellation/liveness through writes.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -236,6 +237,20 @@ pub struct PreparedDenial {
     signed: SignedDecision,
 }
 impl PreparedDenial {
+    /// Only the crate's closed prepared-decision sender may retain these parts.
+    /// The shared guard keeps cancellation, the original request lease and owner
+    /// lifetime alive through TLS buffering and every partial socket write.
+    pub(crate) fn delivery_parts(
+        &self,
+    ) -> Result<(Vec<u8>, Arc<dyn framed_transport::OutboundFrameGuard>), DenialError> {
+        if self.is_cancelled() {
+            return Err(DenialError::Cancelled);
+        }
+        Ok((
+            self.signed.to_wire(),
+            Arc::new(DenialDeliveryGuard(Arc::clone(&self.shared))),
+        ))
+    }
     pub fn binding(&self) -> RequestBinding {
         self.shared.bound.window.binding()
     }
@@ -264,14 +279,20 @@ impl PreparedDenial {
     pub fn cancel(&self) {
         self.shared.cancel();
     }
-    /// Consuming data extraction, not a delivery permit. A future typed sender
-    /// must recheck this original owner/source/window, fresh native conditions
-    /// and cancellation through final writes. No such sender is added here.
+    /// Consuming data extraction, not a delivery permit. The typed socket sender
+    /// takes PreparedDenial itself instead, retaining the original context and
+    /// cancellation. This extraction must not replace its fresh native checks.
     pub fn into_signed_decision(self) -> Result<SignedDecision, DenialError> {
         if self.is_cancelled() {
             return Err(DenialError::Cancelled);
         }
         Ok(self.signed)
+    }
+}
+struct DenialDeliveryGuard(Arc<SharedAttempt>);
+impl framed_transport::OutboundFrameGuard for DenialDeliveryGuard {
+    fn is_revoked(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 impl fmt::Debug for PreparedDenial {

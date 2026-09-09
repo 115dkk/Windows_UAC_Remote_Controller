@@ -5,8 +5,8 @@
 
 mod delivery;
 pub use delivery::{
-    ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, QueuedApproval, SendIssue,
-    SendRetry,
+    ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, DenialSendOutcome,
+    DenialSendTransition, DenialWriteProgress, QueuedApproval, QueuedDenial, SendIssue, SendRetry,
 };
 
 use std::{
@@ -192,7 +192,7 @@ pub struct AssociatedPcSocket {
     context: Arc<PeerContext>,
     probe: Option<ClockProbe>,
     correlation: Option<ClockCorrelation>,
-    outbound_approval: Option<delivery::WriteState>,
+    outbound_decision: Option<delivery::WriteState>,
 }
 
 impl fmt::Debug for AssociatedPcSocket {
@@ -239,7 +239,7 @@ impl AssociatedPcSocket {
             context,
             probe: None,
             correlation: None,
-            outbound_approval: None,
+            outbound_decision: None,
         })
     }
 
@@ -280,7 +280,7 @@ impl AssociatedPcSocket {
                 })))
             }
             SocketEvent::OutboundDrained => {
-                if let Some(write) = self.outbound_approval.take() {
+                if let Some(write) = self.outbound_decision.take() {
                     write.written();
                 }
                 Ok(PcSocketEvent::OutboundDrained)
@@ -355,7 +355,7 @@ impl AssociatedPcSocket {
                     let correlation = probe
                         .complete(&message.verified, clock.phone_monotonic_nanos())
                         .map_err(PeerSocketError::Clock)?;
-                    let changed_queued_epoch = self.outbound_approval.is_some()
+                    let changed_queued_epoch = self.outbound_decision.is_some()
                         && self
                             .correlation
                             .as_ref()
@@ -365,7 +365,7 @@ impl AssociatedPcSocket {
                         .map_err(PeerSocketError::Persistence)?;
                     if changed_queued_epoch {
                         // Preserve the committed clock update, but never write
-                        // an old-service-epoch approval suffix after this change.
+                        // an old-service-epoch decision suffix after this change.
                         self.abort();
                     } else {
                         self.correlation = Some(correlation);
@@ -426,7 +426,7 @@ impl AssociatedPcSocket {
 
     /// Downward only; never clears replay guards, history, keys or association.
     pub fn abort(&mut self) {
-        if let Some(write) = self.outbound_approval.take() {
+        if let Some(write) = self.outbound_decision.take() {
             write.stopped();
         }
         self.context.active.store(false, Ordering::Release);
