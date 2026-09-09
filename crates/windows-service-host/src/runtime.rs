@@ -120,16 +120,20 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     if cancellation_requested(stop) {
         return Ok(());
     }
-    let _installation = ffi::validate_installation(true)?;
+    let _installation = ffi::validate_installation(true).map_err(|error| error.at_startup(1))?;
     events
         .send(WorkerEvent::Progress)
         .map_err(|_| ServiceError::WorkerFailed)?;
     if cancellation_requested(stop) {
         return Ok(());
     }
-    let directory = ffi::open_activity_directory()?;
-    let mut journal = Journal::open(directory.path(), Limits::default(), now()?)
-        .map_err(|_| ServiceError::JournalUnavailable)?;
+    let directory = ffi::open_activity_directory().map_err(|error| error.at_startup(2))?;
+    let mut journal = Journal::open(
+        directory.path(),
+        Limits::default(),
+        now().map_err(|error| error.at_startup(3))?,
+    )
+    .map_err(|_| ServiceError::JournalUnavailable.at_startup(3))?;
     events
         .send(WorkerEvent::Progress)
         .map_err(|_| ServiceError::WorkerFailed)?;
@@ -138,8 +142,14 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     }
     // Key work stays on the service worker, never the SCM entry callback or
     // a WebView/IPC thread. Only genuine absence permits initial creation.
-    let mut trust_directory = ffi::TrustDirectory::open_for_service()?;
-    let registry_absent = trust_directory.is_empty_registry_absent()?;
+    // Capture the fixed identity-context cause before the trust-store adapter's
+    // intentionally coarse error mapping. This adds no privilege/key mutation.
+    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
+    let mut trust_directory =
+        ffi::TrustDirectory::open_for_service().map_err(|error| error.at_startup(4))?;
+    let registry_absent = trust_directory
+        .is_empty_registry_absent()
+        .map_err(|error| error.at_startup(5))?;
     // This private disposition is produced only here by the actual key API,
     // never supplied by a renderer, file, phone or caller freshness boolean.
     enum IdentityOrigin {
@@ -160,12 +170,11 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
                 return Err(ServiceError::RegistryUnavailable);
             }
             (
-                PcIdentityKey::create_for_service()
-                    .map_err(|_| ServiceError::IdentityUnavailable)?,
+                PcIdentityKey::create_for_service().map_err(ServiceError::from_identity)?,
                 IdentityOrigin::CreatedNow,
             )
         }
-        Err(_) => return Err(ServiceError::IdentityUnavailable),
+        Err(error) => return Err(ServiceError::from_identity(error)),
     };
     let mut registry = match origin {
         IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
@@ -179,9 +188,7 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     let _registry_checkpoint = registry.checkpoint_for_engine().map_err(registry_error)?;
     if cancellation_requested(stop) {
         registry.close().map_err(registry_error)?;
-        return identity
-            .close()
-            .map_err(|_| ServiceError::IdentityUnavailable);
+        return identity.close().map_err(ServiceError::from_identity);
     }
     events
         .send(WorkerEvent::Progress)
@@ -246,9 +253,7 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     PROBE_REQUESTS.close();
     drop(supervisor);
     registry.close().map_err(registry_error)?;
-    identity
-        .close()
-        .map_err(|_| ServiceError::IdentityUnavailable)?;
+    identity.close().map_err(ServiceError::from_identity)?;
     // Journal drops before the directory/installation pins, never the reverse.
     drop(journal);
     drop(directory);

@@ -142,7 +142,7 @@ impl Reporter {
             } else {
                 0
             },
-            dwServiceSpecificExitCode: failure.map_or(0, |error| u32::from(error.exit_code())),
+            dwServiceSpecificExitCode: failure.map_or(0, ServiceError::service_diagnostic_code),
             dwCheckPoint: if pending { checkpoint } else { 0 },
             dwWaitHint: if pending {
                 LIFECYCLE_TIMEOUT.as_millis() as u32

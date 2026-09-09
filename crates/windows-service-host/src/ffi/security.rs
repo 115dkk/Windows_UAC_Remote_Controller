@@ -202,7 +202,7 @@ fn inspect_security(
 }
 
 pub(super) struct OwnServiceSid {
-    words: [u32; 17],
+    words: [u32; 8],
     length: usize,
 }
 
@@ -210,10 +210,13 @@ impl OwnServiceSid {
     pub(super) fn lookup() -> Result<Self, ServiceError> {
         let name = Wide::new(format!("NT SERVICE\\{}", crate::SERVICE_NAME))?;
         let mut value = Self {
-            words: [0; 17],
+            words: [0; 8],
             length: 0,
         };
-        let mut bytes = 68;
+        // This fixed NT SERVICE SID has six subauthorities (32 bytes).
+        // LookupAccountName may leave cbSid at its input capacity on success;
+        // an oversized capacity is not the returned SID's actual length.
+        let mut bytes = 32;
         let mut domain = [0u16; 256];
         let mut domain_units = domain.len() as u32;
         let mut use_kind = SID_NAME_USE::default();
@@ -235,7 +238,7 @@ impl OwnServiceSid {
         if bytes != 32 || domain_units > domain.len() as u32 || use_kind != SidTypeWellKnownGroup {
             return Err(ServiceError::UnsafePermissions);
         }
-        // SAFETY: successful lookup returned a SID within the aligned 68-byte buffer.
+        // SAFETY: successful lookup returned a SID within the aligned 32-byte buffer.
         if !unsafe { IsValidSid(value.ptr()) }.as_bool()
             // SAFETY: IsValidSid succeeded within the owned aligned buffer.
             || unsafe { GetLengthSid(value.ptr()) } != bytes

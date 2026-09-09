@@ -242,6 +242,32 @@ pub enum ServiceError {
     RegistryMaintenanceRequired,
     #[error("the service could not initialize its protected PC identity")]
     IdentityUnavailable,
+    #[cfg(windows)]
+    #[error("PC identity policy rejected: {0:?}")]
+    IdentityPolicy(windows_identity::IdentityPolicy),
+    #[cfg(windows)]
+    #[error("Windows identity operation {operation:?} failed (HRESULT {hresult:#010x})")]
+    IdentityWindows {
+        operation: windows_identity::IdentityOperation,
+        hresult: i32,
+    },
+    #[cfg(windows)]
+    #[error("identity native data is malformed at {0:?}")]
+    IdentityMalformed(windows_identity::IdentityOperation),
+    #[error("identity encoding rejected (fixed code {code})")]
+    IdentityEncoding { code: u8 },
+    #[error("the fixed identity key already exists; no overwrite or retry")]
+    IdentityKeyAlreadyExists,
+    #[error("the fixed identity key is absent")]
+    IdentityKeyNotFound,
+    #[error("identity creation is uncertain (HRESULT {hresult:#010x}); no retry or deletion")]
+    IdentityCreationUncertain { hresult: i32 },
+    #[error("identity cleanup failed (HRESULT {hresult:#010x}); native cause text was discarded")]
+    IdentityCleanupFailed { hresult: i32 },
+    #[error("identity handle was already released")]
+    IdentityHandleAlreadyReleased,
+    #[error("service startup failed at fixed stage {stage} (diagnostic {detail:#010x})")]
+    StartupFailure { stage: u8, detail: u32 },
     #[error("the service clock is outside the supported range")]
     InvalidClock,
     #[error("the service lifecycle worker failed")]
@@ -261,6 +287,62 @@ pub enum ServiceError {
 }
 
 impl ServiceError {
+    /// SCM DWORD diagnostic, distinct from the small process exit class.
+    /// Explicit tables are stable even if upstream enum declaration order changes.
+    pub const fn service_diagnostic_code(self) -> u32 {
+        match self {
+            #[cfg(windows)]
+            Self::IdentityPolicy(policy) => 0xE100_0000 | identity_policy_code(policy),
+            #[cfg(windows)]
+            Self::IdentityWindows { hresult, .. } => hresult as u32,
+            #[cfg(windows)]
+            Self::IdentityMalformed(operation) => 0xE200_0000 | identity_operation_code(operation),
+            Self::IdentityEncoding { code } => 0xE300_0000 | code as u32,
+            Self::IdentityKeyAlreadyExists => 0xE400_0001,
+            Self::IdentityKeyNotFound => 0xE400_0002,
+            Self::IdentityHandleAlreadyReleased => 0xE400_0003,
+            Self::IdentityCreationUncertain { .. } => 0xE400_0004,
+            Self::IdentityCleanupFailed { .. } => 0xE400_0005,
+            Self::StartupFailure { stage, .. } => 0xE500_0000 | stage as u32,
+            _ => self.exit_code() as u32,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn at_startup(self, stage: u8) -> Self {
+        Self::StartupFailure {
+            stage,
+            detail: self.service_diagnostic_code(),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_identity(error: windows_identity::IdentityError) -> Self {
+        use windows_identity::{IdentityEncodingError as E, IdentityError as I};
+        match error {
+            I::UnsupportedPlatform => Self::UnsupportedPlatform,
+            I::Policy(policy) => Self::IdentityPolicy(policy),
+            I::WindowsCall { operation, hresult } => Self::IdentityWindows { operation, hresult },
+            I::MalformedNativeData { operation } => Self::IdentityMalformed(operation),
+            I::Encoding(error) => Self::IdentityEncoding {
+                code: match error {
+                    E::PublicBlobLength => 1,
+                    E::PublicBlobMagic => 2,
+                    E::PublicCoordinateSize => 3,
+                    E::PublicPoint => 4,
+                    E::SignatureLength => 5,
+                    E::SignatureScalar => 6,
+                    E::SignatureVerification => 7,
+                },
+            },
+            I::KeyAlreadyExists => Self::IdentityKeyAlreadyExists,
+            I::KeyNotFound => Self::IdentityKeyNotFound,
+            I::CreationStateUncertain { hresult } => Self::IdentityCreationUncertain { hresult },
+            I::CleanupFailed { hresult, .. } => Self::IdentityCleanupFailed { hresult },
+            I::HandleAlreadyReleased => Self::IdentityHandleAlreadyReleased,
+        }
+    }
+
     /// Stable process exit classes, not raw OS text or truncated Windows codes.
     pub const fn exit_code(self) -> u8 {
         match self {
@@ -278,6 +360,54 @@ impl ServiceError {
             | Self::RegistryMaintenanceRequired => 8,
             _ => 1,
         }
+    }
+}
+
+#[cfg(windows)]
+const fn identity_policy_code(policy: windows_identity::IdentityPolicy) -> u32 {
+    use windows_identity::IdentityPolicy as P;
+    match policy {
+        P::LocalSystemRequired => 1,
+        P::ServiceSidRequired => 2,
+        P::ImpersonationForbidden => 3,
+        P::InvalidServiceSid => 4,
+        P::PlatformProviderRequired => 5,
+        P::HardwareProviderRequired => 6,
+        P::SecurityDescriptorsRequired => 7,
+        P::FixedKeyNameRequired => 8,
+        P::P256SigningKeyRequired => 9,
+        P::SigningOnlyRequired => 10,
+        P::NonExportableRequired => 11,
+        P::MachineKeyRequired => 12,
+        P::ProtectedServiceDaclRequired => 13,
+        P::ReopenedPublicKeyMismatch => 14,
+    }
+}
+
+#[cfg(windows)]
+const fn identity_operation_code(operation: windows_identity::IdentityOperation) -> u32 {
+    use windows_identity::IdentityOperation as O;
+    match operation {
+        O::OpenProcessToken => 1,
+        O::OpenThreadToken => 2,
+        O::ReadProcessUser => 3,
+        O::ReadProcessGroups => 4,
+        O::LookupServiceSid => 5,
+        O::CloseToken => 6,
+        O::OpenProvider => 7,
+        O::ReadProviderPolicy => 8,
+        O::CheckAlgorithmSupport => 9,
+        O::OpenKey => 10,
+        O::CreateKey => 11,
+        O::ReadKeyPolicy => 12,
+        O::SetKeyPolicy => 13,
+        O::BuildSecurityDescriptor => 14,
+        O::FreeSecurityDescriptor => 15,
+        O::FinalizeKey => 16,
+        O::ExportPublicKey => 17,
+        O::SignDigest => 18,
+        O::CloseKey => 19,
+        O::CloseProvider => 20,
     }
 }
 
@@ -319,6 +449,96 @@ pub(crate) fn continuing_pending_start(existing: Option<Instant>, now: Instant) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_diagnostic_keeps_existing_small_exit_classes_for_other_errors() {
+        for error in [
+            ServiceError::InvalidArguments,
+            ServiceError::ElevationRequired,
+            ServiceError::UnsupportedPlatform,
+            ServiceError::UnsafePermissions,
+            ServiceError::Timeout,
+            ServiceError::JournalUnavailable,
+            ServiceError::RegistryUnavailable,
+            ServiceError::WorkerFailed,
+        ] {
+            assert_eq!(
+                error.service_diagnostic_code(),
+                u32::from(error.exit_code())
+            );
+        }
+        fn copy_error<T: Copy>() {}
+        copy_error::<ServiceError>();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identity_diagnostics_use_explicit_policy_operation_and_hresult_codes() {
+        use windows_identity::{IdentityError as I, IdentityOperation as O, IdentityPolicy as P};
+        assert_eq!(
+            ServiceError::from_identity(I::Policy(P::LocalSystemRequired))
+                .service_diagnostic_code(),
+            0xE100_0001
+        );
+        assert_eq!(
+            ServiceError::from_identity(I::Policy(P::NonExportableRequired))
+                .service_diagnostic_code(),
+            0xE100_000B
+        );
+        assert_eq!(
+            ServiceError::from_identity(I::Policy(P::ProtectedServiceDaclRequired))
+                .service_diagnostic_code(),
+            0xE100_000D
+        );
+        assert_eq!(
+            ServiceError::from_identity(I::Policy(P::ReopenedPublicKeyMismatch))
+                .service_diagnostic_code(),
+            0xE100_000E
+        );
+        assert_eq!(
+            ServiceError::from_identity(I::MalformedNativeData {
+                operation: O::FinalizeKey
+            })
+            .service_diagnostic_code(),
+            0xE200_0010
+        );
+        let native = ServiceError::from_identity(I::WindowsCall {
+            operation: O::OpenProvider,
+            hresult: 0x8009_0029_u32 as i32,
+        });
+        assert_eq!(native.service_diagnostic_code(), 0x8009_0029);
+        assert_eq!(native.exit_code(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uncertain_cleanup_encoding_and_preidentity_stages_remain_distinct_metadata() {
+        use windows_identity::{
+            IdentityEncodingError as E, IdentityError as I, IdentityPolicy as P,
+        };
+        let uncertain = ServiceError::from_identity(I::CreationStateUncertain { hresult: -1 });
+        let cleanup = ServiceError::from_identity(I::CleanupFailed {
+            cause: Box::new(I::Policy(P::NonExportableRequired)),
+            hresult: -2,
+        });
+        assert_eq!(uncertain.service_diagnostic_code(), 0xE400_0004);
+        assert_eq!(cleanup.service_diagnostic_code(), 0xE400_0005);
+        assert!(!format!("{cleanup:?}").contains("NonExportableRequired"));
+        assert_eq!(
+            ServiceError::from_identity(I::Encoding(E::PublicPoint)).service_diagnostic_code(),
+            0xE300_0004
+        );
+        assert_eq!(
+            ServiceError::RegistryUnavailable
+                .at_startup(4)
+                .service_diagnostic_code(),
+            0xE500_0004
+        );
+        assert_eq!(
+            ServiceError::from_identity(I::HandleAlreadyReleased).service_diagnostic_code(),
+            0xE400_0003
+        );
+    }
 
     #[test]
     fn default_is_read_only_and_mutations_are_explicit() {

@@ -373,8 +373,9 @@ fn service_sid() -> Result<Vec<u8>> {
     let name: Vec<u16> = format!("NT SERVICE\\{SERVICE_NAME}\0")
         .encode_utf16()
         .collect();
-    let mut words = [0u32; 17];
-    let mut size = 68;
+    // Exact fixed-service SID capacity: successful lookup need not shrink cbSid.
+    let mut words = [0u32; 8];
+    let mut size = 32;
     let mut domain = [0u16; 128];
     let mut domain_size = domain.len() as u32;
     let mut kind = SID_NAME_USE::default();

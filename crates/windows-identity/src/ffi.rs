@@ -718,15 +718,17 @@ fn reject_thread_impersonation() -> Result<(), IdentityError> {
 
 fn lookup_service_sid() -> Result<[u8; 32], IdentityError> {
     let operation = IdentityOperation::LookupServiceSid;
-    let mut sid = NativeBuffer::new(68, operation)?;
-    let mut sid_length = 68_u32;
+    // The fixed service namespace has a 32-byte SID. cbSid may remain the
+    // supplied capacity on successful lookup, so use that exact bounded shape.
+    let mut sid = NativeBuffer::new(32, operation)?;
+    let mut sid_length = 32_u32;
     let mut domain = [0xffff_u16; 64];
     let mut domain_length = 64_u32;
     let mut usage = SID_NAME_USE::default();
     // SAFETY: NULL system name means local lookup; fully-qualified service name
     // is static, with no caller/domain input. SID storage is usize-aligned and
-    // has exactly 68 writable initialized bytes, the documented maximum SID
-    // size. Domain is 64 writable UTF-16 units. Length/use outputs are aligned,
+    // has exactly 32 writable initialized bytes for this fixed service SID.
+    // Domain is 64 writable UTF-16 units. Length/use outputs are aligned,
     // separate and initialized. No native pointer is retained after return.
     unsafe {
         LookupAccountNameW(
