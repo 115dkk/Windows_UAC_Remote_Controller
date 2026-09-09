@@ -119,6 +119,7 @@ Native factories require actual `DirectorySynced` receipts:
 
 - `DurableInbox::create_fresh(directory, policy, limits, boot, clock)`
 - `DurableInbox::open_existing(directory, boot, clock)`
+- `DurableInbox::open_existing_with_key_preflight(directory, boot, clock, preflight)`
 
 Each returns `Result<(DurableInbox, CommittedUpdate), DurableFailure>`. The
 directory is the store's opaque `NativePrivateDirectory`, supplied only by the
@@ -131,6 +132,43 @@ On non-Android builds only, explicitly named `create_fresh_host_model(...)` and
 compile on Android. There is no runtime flag that weakens a native owner. A native
 factory on a weak-profile host rejects the real receipt and may leave an initial
 body-free snapshot; it never silently selects the model factory or removes files.
+
+### Full versus policy-only native key preflight
+
+`open_existing_with_key_preflight` is a source-level full request-bearing restore
+seam, not live intake or a change to Application/UniFFI startup. Its callback has
+type `FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>` and runs under
+the existing SnapshotStore writer lock. The unchanged full path orders work as:
+
+1. Open/validate the outer byte-store frame and retain the exclusive lock.
+2. Reserve durable intent before decoding the controller/domain checkpoint.
+3. Decode strictly, then call native key preflight once on that immutable original
+   checkpoint, before any restore, migration commit or candidate-effect release.
+4. Restore using the supplied native boot/clock, encode/commit the full composite,
+   require the actual DirectorySynced receipt, and only then return owner/update.
+
+A rejected or unwinding **full** preflight can therefore leave a durable intent;
+it must not be treated as a harmless policy-only preview rejection. The caller
+owns partial native-key-reference cleanup, and must obey the returned failure's
+notification cleanup requirement. Missing/corrupt/dirty state never becomes fresh
+initialization or a policy fallback. A failure after an actual commit, including
+an insufficient durability profile, does not prove the old disk state survived.
+
+On non-Android targets only,
+`open_existing_full_host_model_with_key_preflight(...)` uses the same full ordering
+with the existing explicit host-model receipt allowance. It is cfg-excluded on
+Android; no runtime switch selects that weaker profile. **The pre-existing**
+`open_existing_host_model_with_key_preflight(...)` **remains policy-only**: it
+rejects request-bearing state before callback/intent and is not renamed or widened.
+Likewise `open_existing_policy_only_with_key_preflight` and its native callers are
+unchanged. Existing strict legacy migration restrictions still apply in both paths.
+
+The new host tests use actual isolated stores and synthetic public keys/events to
+cover lock/intent ordering, callback rejection/unwind, domain-versus-frame errors,
+request-bearing body-free recovery, post-preflight commit failure and real host
+durability profiles. They do not establish hardware-key verification, enrollment,
+notification delivery or Android durability. ROOT alone executes these tests and
+the Android compile gate; adding these factories does not activate a dispatcher.
 
 Mutating methods are:
 

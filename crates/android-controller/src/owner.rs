@@ -162,6 +162,27 @@ impl DurableInbox {
         )
     }
 
+    /// Full native request-bearing restore with a key preflight under the same
+    /// writer lock. The existing full path reserves intent BEFORE domain decode,
+    /// then calls preflight BEFORE restore and commit. Rejection/unwind can leave
+    /// durable intent; it never permits fresh initialization or policy fallback.
+    /// The native caller owns cleanup of any partially reopened key references.
+    pub fn open_existing_with_key_preflight(
+        directory: NativePrivateDirectory,
+        boot: PhoneBootId,
+        clock: InboxClock,
+        preflight: impl FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>,
+    ) -> Result<(Self, CommittedUpdate), DurableFailure> {
+        Self::open_with_durability(
+            directory,
+            boot,
+            clock,
+            RequiredDurability::DirectorySynced,
+            false,
+            preflight,
+        )
+    }
+
     /// Staging policy ABI preflight under the same writer lock. This refuses
     /// request-bearing state BEFORE a recovery can commit and consume effects.
     pub fn open_existing_policy_only(
@@ -234,6 +255,27 @@ impl DurableInbox {
             RequiredDurability::ExplicitHostModel,
             false,
             |_| Ok(()),
+        )
+    }
+
+    /// Explicit non-Android FULL filesystem model, including request-bearing
+    /// state and intent-before-decode/key-preflight ordering. This is distinct
+    /// from the existing policy-only host preflight factory below. No native
+    /// caller may select this weaker receipt profile as a runtime fallback.
+    #[cfg(not(target_os = "android"))]
+    pub fn open_existing_full_host_model_with_key_preflight(
+        directory: NativePrivateDirectory,
+        boot: PhoneBootId,
+        clock: InboxClock,
+        preflight: impl FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>,
+    ) -> Result<(Self, CommittedUpdate), DurableFailure> {
+        Self::open_with_durability(
+            directory,
+            boot,
+            clock,
+            RequiredDurability::ExplicitHostModel,
+            false,
+            preflight,
         )
     }
 
