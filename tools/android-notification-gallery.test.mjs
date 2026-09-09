@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { checkNotificationUi, matchesNativeReceipt, onlyIsolatedEmulator } from './android-notification-gallery.mjs';
+import { checkNotificationUi, matchesNativeReceipt, onlyIsolatedEmulator, requireBroadcastIdle } from './android-notification-gallery.mjs';
 
 test('native gallery rejects real, ambiguous, unauthorized and missing devices', () => {
   assert.equal(onlyIsolatedEmulator('List of devices attached\nemulator-5554\tdevice\n'), true);
@@ -24,5 +24,12 @@ test('same-case prior receipt cannot prove a fresh native launch', () => {
   for (const invalid of [null, { ...value, nonce: 'previous' }, { ...value, completed: false },
     { ...value, case: 'restore' }, { ...value, scope: 'production authentication' }]) {
     assert.equal(matchesNativeReceipt(invalid, 'sound', 'current'), false);
+  }
+});
+test('cold launch requires the actual setup broadcast completion marker', () => {
+  assert.doesNotThrow(() => requireBroadcastIdle('Waiting for broadcasts...\nAll broadcast queues are idle!\n'));
+  for (const value of ['', 'Unknown command: wait-for-broadcast-idle', 'Permission denied',
+    'Waiting for broadcasts...', 'All broadcast queues are idle!\nError: later failure']) {
+    assert.throws(() => requireBroadcastIdle(value));
   }
 });

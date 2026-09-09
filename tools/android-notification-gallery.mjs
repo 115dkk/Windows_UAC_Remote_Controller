@@ -37,6 +37,12 @@ export function matchesNativeReceipt(value, selected, nonce) {
     && value?.scope === 'shared-renderer-only; no production owner/authentication';
 }
 
+export function requireBroadcastIdle(text) {
+  if (text.length > 64 * 1024 || text.trim().split(/\r?\n/u).at(-1) !== 'All broadcast queues are idle!') {
+    throw new Error('Android did not confirm setup broadcast completion.');
+  }
+}
+
 async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This runner is restricted to the disposable GitHub CI emulator.');
@@ -65,6 +71,13 @@ async function main() {
     receipt.abi = run(['shell', 'getprop', 'ro.product.cpu.abi']).trim();
     run(['install', '-r', resolve(root, apk)]);
     run(['shell', 'pm', 'grant', application, 'android.permission.POST_NOTIFICATIONS']);
+    // Package installation/permission setup dispatches asynchronous package
+    // changes. The observed cold notification was canceled with Android reason5
+    // (PACKAGE_CHANGED), not by our renderer or its60s lifetime. Drain that setup
+    // work before FIRST Activity launch; no warmup/repost or timeout extension.
+    const idle = run(['shell', 'am', 'wait-for-broadcast-idle', '--flush-broadcast-loopers']);
+    writeFileSync(resolve(output, 'setup-broadcast-idle.txt'), idle);
+    requireBroadcastIdle(idle);
     for (const selected of cases) {
       const nonce = randomUUID();
       run(['shell', 'cmd', 'statusbar', 'collapse']);
