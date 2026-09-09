@@ -191,17 +191,16 @@ impl NativeDenialAttempt {
         self.control.core.deadline_nanos()
     }
     pub fn is_cancelled(&self) -> bool {
-        self.control.native_closed.load(Ordering::Acquire)
-            || self.control.core.is_cancelled()
-            || self
-                .control
-                .scope
-                .upgrade()
-                .is_none_or(|scope| scope.cancelled())
+        if self.control.native_closed.load(Ordering::Acquire) || self.control.core.is_cancelled() {
+            return true;
+        }
+        let scope: Option<Arc<ScopeSignal>> = self.control.scope.upgrade();
+        scope.is_none_or(|scope| scope.cancelled())
     }
     pub fn cancel(&self) {
         self.control.core.cancel();
-        if let Some(scope) = self.control.scope.upgrade() {
+        let scope: Option<Arc<ScopeSignal>> = self.control.scope.upgrade();
+        if let Some(scope) = scope {
             scope.cancel();
         }
     }

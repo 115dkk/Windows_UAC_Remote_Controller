@@ -29,6 +29,13 @@ Rust와 Kotlin의 연결부를 구현 중이다. 해당 요청의 인증 작업�
 링크에는 기존 한국어 MSVC 진행 문구 경고가 남아 있다. Clippy 경고는
 억제하지 않았고 `-D warnings`를 통과했다.
 
+[`b622c36` APK 실행](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34375559965)은
+실제 Kotlin 코드 생성·APK 빌드와 JVM 테스트 135개를 통과했다. 결과 XML에서
+실패·오류·건너뛴 테스트가 없음을 확인했다. 다만
+[같은 소스의 Windows·Linux 품질 작업](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34375559820)은
+Rust Analyzer의 타입 추론 오류 두 곳으로 실패했다. 해당 참조 타입을 명시한
+수정안은 로컬 fmt·Clippy·46개 테스트를 통과했고, 실제 분석기 재검사가 필요하다.
+
 사용자가 허가한 UAC 실험 시간은 끝났다. 설치된 Windows 서비스는 기존
 키 초기화 오류로 정지 상태이며 이후 새 UAC, 보호된 설치 파일 교체나
 TPM 설정 변경은 하지 않았다.
