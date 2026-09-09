@@ -7,8 +7,8 @@ import { alertModeText, ko, timeWindowLabel, weekdayOptions } from './messages.k
 import { draftFromPolicy, parseDraft, samePolicy, timeToMinute } from './policy-draft';
 import type { DraftErrors, PolicyDraft, WindowDraft } from './policy-draft';
 
-export function PolicyEditor({ policy, disabled, saving, onSave }: {
-  policy: NotificationPolicy; disabled: boolean; saving: boolean;
+export function PolicyEditor({ policy, available, unavailableBody = ko.policyUnavailableBody, disabled, saving, onSave }: {
+  policy: NotificationPolicy | null; available: boolean; unavailableBody?: string; disabled: boolean; saving: boolean;
   onSave: (policy: NotificationPolicy) => Promise<NotificationPolicy | null>;
 }) {
   // A null draft follows refreshed native settings. A real draft never gets overwritten by a refresh.
@@ -21,9 +21,9 @@ export function PolicyEditor({ policy, disabled, saving, onSave }: {
   const submitLock = useRef(false);
   const form = useRef<HTMLFormElement>(null);
   const id = useId();
-  const value = draft ?? draftFromPolicy(policy);
-  const parsed = parseDraft(value);
-  const dirty = parsed.policy === null || !samePolicy(parsed.policy, policy);
+  const value = draft ?? (policy === null ? null : draftFromPolicy(policy));
+  const parsed = value === null ? null : parseDraft(value);
+  const dirty = parsed !== null && (parsed.policy === null || policy === null || !samePolicy(parsed.policy, policy));
   const busy = saving || submitting;
 
   function edit(next: PolicyDraft) {
@@ -35,13 +35,15 @@ export function PolicyEditor({ policy, disabled, saving, onSave }: {
     return { id: `draft-${String(nextId.current++)}`, days: 0, start: '09:00', end: '18:00', endOfDay: false };
   }
   function selectMode(mode: Schedule['mode']) {
+    if (value === null) return;
     edit({ ...value, mode, windows: mode === 'weekly' && !value.windows.length ? [freshWindow()] : value.windows });
   }
   function changeWindow(windowId: string, patch: Partial<WindowDraft>) {
+    if (value === null) return;
     edit({ ...value, windows: value.windows.map((window) => window.id === windowId ? { ...window, ...patch } : window) });
   }
   async function saveDraft() {
-    if (disabled || submitLock.current || !dirty || composing.current) return;
+    if (disabled || !available || policy === null || value === null || submitLock.current || !dirty || composing.current) return;
     const result = parseDraft(value);
     setErrors(result.errors);
     if (!result.policy) {
@@ -71,6 +73,12 @@ export function PolicyEditor({ policy, disabled, saving, onSave }: {
     event.preventDefault();
     if (!composing.current) void saveDraft();
   }
+
+  // Stay mounted across transient unavailability, but render no stale/default
+  // policy controls. The memory-only draft remains until this client is closed.
+  if (policy === null || !available || value === null) return <section className="notice-box" role="status" aria-labelledby={`${id}-unavailable`}>
+    <Icon name="clock" /><div><h2 id={`${id}-unavailable`}>{ko.policyUnavailableTitle}</h2><p>{unavailableBody}</p>{draft !== null && <p className="supporting-text">{ko.policyDraftKept}</p>}</div>
+  </section>;
 
   return <form ref={form} className="policy-form" onSubmit={submit} noValidate
     onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}

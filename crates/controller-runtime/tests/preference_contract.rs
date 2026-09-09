@@ -30,9 +30,10 @@ fn absent_policy_defaults_without_creating_a_policy_document() {
     let directory = tempfile::tempdir().expect("isolated fixture");
     let mut runtime = open(directory.path()).expect("open local preferences");
     let snapshot = runtime.snapshot();
-    assert_eq!(snapshot.policy, NotificationPolicy::default());
-    assert_eq!(snapshot.policy.schedule(), &Schedule::Always);
-    assert_eq!(snapshot.policy.alert(), AlertMode::Sound);
+    assert_eq!(snapshot.policy, Some(NotificationPolicy::default()));
+    let policy = snapshot.policy.as_ref().expect("observed local policy");
+    assert_eq!(policy.schedule(), &Schedule::Always);
+    assert_eq!(policy.alert(), AlertMode::Sound);
     assert!(!directory.path().join(POLICY_FILE_NAME).exists());
     let lock_path = directory.path().join(POLICY_LOCK_FILE_NAME);
     assert_eq!(fs::metadata(&lock_path).expect("lock metadata").len(), 0);
@@ -92,7 +93,7 @@ fn save_and_reopen_keep_explicit_never_and_alert_mode() {
         let mut runtime = open(directory.path()).expect("open preferences");
         assert_eq!(
             runtime.save_policy(expected.clone()).expect("save").policy,
-            expected
+            Some(expected.clone())
         );
         assert!(!directory.path().join(POLICY_STAGING_FILE_NAME).exists());
         let stored: serde_json::Value = serde_json::from_slice(
@@ -109,11 +110,14 @@ fn save_and_reopen_keep_explicit_never_and_alert_mode() {
     }
     assert!(directory.path().join(POLICY_LOCK_FILE_NAME).exists());
     let mut reopened = open(directory.path()).expect("reopen saved preferences");
-    assert_eq!(reopened.snapshot().policy, expected);
+    assert_eq!(reopened.snapshot().policy, Some(expected));
     reopened
         .save_policy(NotificationPolicy::default())
         .expect("atomic replacement of existing file");
-    assert_eq!(reopened.snapshot().policy, NotificationPolicy::default());
+    assert_eq!(
+        reopened.snapshot().policy,
+        Some(NotificationPolicy::default())
+    );
 }
 
 #[test]
@@ -146,7 +150,7 @@ fn failed_save_preserves_previous_disk_settings_and_cached_policy() {
             .code,
         "preferences_recovery_required"
     );
-    assert_eq!(runtime.snapshot().policy, previous);
+    assert_eq!(runtime.snapshot().policy, Some(previous));
     assert_eq!(fs::read(file).expect("previous file remains"), bytes);
     assert_eq!(
         fs::read(staging).expect("staging remains for explicit recovery"),
@@ -171,7 +175,10 @@ fn external_policy_change_is_not_silently_overwritten() {
             .code,
         "preferences_changed"
     );
-    assert_eq!(runtime.snapshot().policy, NotificationPolicy::default());
+    assert_eq!(
+        runtime.snapshot().policy,
+        Some(NotificationPolicy::default())
+    );
     assert_eq!(fs::read(file).expect("external bytes preserved"), changed);
 }
 
@@ -189,7 +196,7 @@ fn disappeared_policy_is_not_recreated_as_a_default() {
             .code,
         "preferences_changed"
     );
-    assert_eq!(runtime.snapshot().policy, previous);
+    assert_eq!(runtime.snapshot().policy, Some(previous));
     assert!(!directory.path().join(POLICY_FILE_NAME).exists());
 }
 

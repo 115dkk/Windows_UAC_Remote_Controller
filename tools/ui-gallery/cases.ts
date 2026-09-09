@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { phoneServiceGalleryCases } from './phone-service-cases';
 export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings';
 export interface GalleryCase {
   readonly id: string;
@@ -47,4 +48,5 @@ export const galleryCases: readonly GalleryCase[] = [
   row('phone-owner-error-390', 'errors', 390, 844),
   row('desktop-dialog-keyboard-forced-colors-760', 'desktop-devices', 760, 580, 'dialog', 'light', 'active'),
   row('phone-draft-keyboard-cancel-390', 'phone-settings', 390, 844, 'draft'),
+  ...phoneServiceGalleryCases,
 ];

@@ -42,7 +42,10 @@ async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
 // These are presentation gates only. Every command is checked again by its native owner.
 function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boolean {
   switch (command.kind) {
-    case 'service': return snapshot.service?.allowedActions.includes(command.action) === true;
+    case 'service': return snapshot.platform === 'android'
+      ? (command.action === 'start' && snapshot.phoneService?.canStart === true)
+        || (command.action === 'stop' && snapshot.phoneService?.canStop === true)
+      : snapshot.service?.allowedActions.includes(command.action) === true;
     case 'pair': return snapshot.canPair;
     case 'remove': return snapshot.dataAvailability.devices === 'available' && snapshot.canUnpair && snapshot.devices.some((device) => device.id === command.deviceId);
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
@@ -51,7 +54,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
       return snapshot.dataAvailability.requests === 'available' && request?.state === 'pending'
         && (command.decision === 'approve' ? request.canApprove : request.canDeny);
     }
-    case 'policy': return snapshot.platform === 'android';
+    case 'policy': return snapshot.platform === 'android' && snapshot.policy !== null && snapshot.phoneService?.policyOwnerReady === true;
     case 'lock-settings': return snapshot.mobile?.screenLock === 'missing' && snapshot.mobile.canOpenLockSettings;
     case 'notification-settings': return snapshot.platform === 'android' && snapshot.mobile?.notifications === 'denied' && snapshot.mobile.canOpenNotificationSettings;
   }

@@ -140,6 +140,12 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .service-card > .supporting-text { margin-top: var(--space-3); }
 .supporting-text { font-size: var(--text-small); color: var(--muted); line-height: 1.6; }
 .service-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-6); }
+.phone-service-card { padding: var(--space-5); margin-bottom: var(--space-6); }
+.phone-service-card h2 { font-size: var(--text-normal); }
+.phone-service-card > .state-line { margin-block: var(--space-3); font-size: var(--text-caption); }
+.phone-service-card .status-facts { padding-block: var(--space-3); font-size: var(--text-small); }
+.phone-service-card .service-actions { margin-top: var(--space-4); }
+.phone-service-card .service-actions .button { flex: 1 1 auto; }
 .passive-note { display: flex; gap: var(--space-4); margin-top: var(--space-8); color: var(--muted); padding-inline: var(--space-2); }
 .passive-note > .icon { margin-top: var(--space-1); }
 .passive-note h2 { font-size: var(--text-body); color: var(--text); margin-bottom: var(--space-1); }

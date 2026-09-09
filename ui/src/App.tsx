@@ -6,8 +6,9 @@ import { ConfirmDialog } from './ConfirmDialog';
 import type { Confirmation } from './ConfirmDialog';
 import { Icon } from './icons';
 import type { IconName } from './icons';
-import { ko, serviceActionText, serviceConfirmText } from './messages.ko';
+import { ko, policyUnavailableText, serviceActionText, serviceConfirmText } from './messages.ko';
 import { PolicyEditor } from './PolicyEditor';
+import { PhoneServicePanel } from './PhoneServicePanel';
 import { RequestPanel } from './RequestPanel';
 import { EmptyState, MobileNotices, ServicePanel } from './StatusPanels';
 import { useController } from './useController';
@@ -34,6 +35,11 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
   const page = chosenPage ?? (phone ? 'requests' : 'status');
   const disabled = stale || busy !== null;
   function serviceAction(action: ServiceAction) {
+    if (phone) {
+      if (action === 'stop') setConfirmation({ title: ko.phoneStopTitle, body: ko.phoneStopBody, confirmLabel: ko.phoneStopAction, onConfirm: () => { void controller.run({ kind: 'service', action: 'stop' }); } });
+      else if (action === 'start') void controller.run({ kind: 'service', action: 'start' });
+      return;
+    }
     const copy = serviceConfirmText[action];
     if (copy) setConfirmation({ ...copy, confirmLabel: serviceActionText[action], onConfirm: () => { void controller.run({ kind: 'service', action }); } });
     else void controller.run({ kind: 'service', action });
@@ -71,7 +77,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onRemove={removeDevice} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
-      {phone && <div hidden={page !== 'schedule'}><PolicyEditor policy={snapshot.policy} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
+      {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });
         return result?.policy ?? null;
       }} /></div>}

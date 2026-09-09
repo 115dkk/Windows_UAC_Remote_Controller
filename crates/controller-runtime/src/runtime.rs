@@ -381,12 +381,13 @@ impl AppRuntime {
                 })
         });
         AppSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             platform: self.platform,
             computer_name: self.computer_name.clone(),
             service: self.last_service.clone(),
+            phone_service: None,
             mobile: (self.platform == Platform::Android).then_some(self.mobile),
-            policy: self.policy.clone(),
+            policy: Some(self.policy.clone()),
             devices: Vec::new(),
             requests: Vec::new(),
             activity: Vec::new(),

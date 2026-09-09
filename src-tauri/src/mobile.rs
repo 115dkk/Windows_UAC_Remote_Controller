@@ -2,6 +2,9 @@
 use controller_runtime::AppIssue;
 use tauri::plugin::{Builder, TauriPlugin};
 
+#[cfg(any(target_os = "android", test))]
+mod snapshot;
+
 #[cfg(target_os = "android")]
 struct DeviceState(tauri::plugin::PluginHandle<tauri::Wry>);
 
@@ -18,17 +21,6 @@ pub(crate) fn init() -> TauriPlugin<tauri::Wry> {
             Ok(())
         })
         .build()
-}
-
-#[cfg(target_os = "android")]
-pub(crate) fn readiness(
-    app: &tauri::AppHandle,
-) -> Result<controller_runtime::MobileReadiness, AppIssue> {
-    use tauri::Manager;
-    app.state::<DeviceState>()
-        .0
-        .run_mobile_plugin("readiness", ())
-        .map_err(|_| mobile_issue())
 }
 
 pub(crate) fn open_lock_settings(app: &tauri::AppHandle) -> Result<(), AppIssue> {
@@ -106,11 +98,21 @@ impl PolicyReply {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) enum OwnerOperation {
     Read,
     SavePolicy(String),
     ClearHistory,
+    ControlService(controller_runtime::ServiceAction),
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum ServiceControlReply {
+    Requested {},
+    Unavailable {},
+    NotAllowed {},
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -151,52 +153,91 @@ pub(crate) fn policy_snapshot(
     operation: OwnerOperation,
 ) -> Result<controller_runtime::AppSnapshot, AppIssue> {
     use tauri::Manager;
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct SavePolicy {
-        policy_json: String,
+    snapshot::snapshot(&NativeOwnerPort(&app.state::<DeviceState>().0), operation)
+}
+
+#[cfg(target_os = "android")]
+struct NativeOwnerPort<'a>(&'a tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+impl snapshot::OwnerPort for NativeOwnerPort<'_> {
+    fn service(&self) -> Result<controller_runtime::PhoneServiceView, AppIssue> {
+        self.0
+            .run_mobile_plugin("controllerService", ())
+            .map_err(|_| snapshot::service_issue())
     }
-    let plugin = &app.state::<DeviceState>().0;
-    let cleared = if matches!(&operation, OwnerOperation::ClearHistory) {
-        let reply: HistoryReply = plugin
+
+    fn readiness(&self) -> Result<controller_runtime::MobileReadiness, AppIssue> {
+        self.0
+            .run_mobile_plugin("readiness", ())
+            .map_err(|_| mobile_issue())
+    }
+
+    fn policy(&self) -> Result<PolicyReply, AppIssue> {
+        self.0
+            .run_mobile_plugin("controllerPolicy", ())
+            .map_err(|_| mobile_issue())
+    }
+
+    fn save_policy(&self, policy_json: String) -> Result<PolicyReply, AppIssue> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SavePolicy {
+            policy_json: String,
+        }
+        self.0
+            .run_mobile_plugin("saveControllerPolicy", SavePolicy { policy_json })
+            .map_err(|_| mobile_issue())
+    }
+
+    fn history(&self) -> Result<HistoryReply, AppIssue> {
+        self.0
+            .run_mobile_plugin("controllerHistory", ())
+            .map_err(|_| controller_runtime::phone_history_issue())
+    }
+
+    fn clear_history(&self) -> Result<HistoryReply, AppIssue> {
+        self.0
             .run_mobile_plugin("clearControllerHistory", ())
-            .map_err(|_| controller_runtime::phone_history_issue())?;
-        Some(
-            reply
-                .history()?
-                .ok_or_else(controller_runtime::phone_history_issue)?,
-        )
-    } else {
-        None
-    };
-    let reply: PolicyReply = match operation {
-        OwnerOperation::SavePolicy(policy_json) => {
-            plugin.run_mobile_plugin("saveControllerPolicy", SavePolicy { policy_json })
-        }
-        OwnerOperation::Read | OwnerOperation::ClearHistory => {
-            plugin.run_mobile_plugin("controllerPolicy", ())
-        }
+            .map_err(|_| controller_runtime::phone_history_issue())
     }
-    .map_err(|_| mobile_issue())?;
-    let policy = reply.policy()?;
-    let history = match cleared {
-        Some(history) => Some(history),
-        None => plugin
-            .run_mobile_plugin::<HistoryReply>("controllerHistory", ())
-            .map_err(|_| controller_runtime::phone_history_issue())?
-            .history()?,
-    };
-    let readiness = readiness(app).unwrap_or(controller_runtime::MobileReadiness::UNAVAILABLE);
-    Ok(
-        controller_runtime::AppSnapshot::from_android_policy_and_history(
-            policy, readiness, history,
-        ),
-    )
+
+    fn control(
+        &self,
+        action: controller_runtime::ServiceAction,
+    ) -> Result<ServiceControlReply, AppIssue> {
+        let command = match action {
+            controller_runtime::ServiceAction::Start => "startControllerService",
+            controller_runtime::ServiceAction::Stop => "stopControllerService",
+            _ => return Err(controller_runtime::PlatformError::Unsupported.into()),
+        };
+        self.0
+            .run_mobile_plugin(command, ())
+            .map_err(|_| snapshot::service_issue())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryReply, PolicyReply};
+    use super::{HistoryReply, PolicyReply, ServiceControlReply};
+
+    #[test]
+    fn control_acknowledgement_has_no_running_or_authorization_fallback() {
+        for status in ["requested", "not_allowed", "unavailable"] {
+            assert!(
+                serde_json::from_value::<ServiceControlReply>(serde_json::json!({"status":status}))
+                    .is_ok()
+            );
+        }
+        for input in [
+            serde_json::json!({}),
+            serde_json::json!({"status":"running"}),
+            serde_json::json!({"status":"requested", "authenticated":true}),
+            serde_json::json!({"status":"requested", "bootEnabled":true}),
+        ] {
+            assert!(serde_json::from_value::<ServiceControlReply>(input).is_err());
+        }
+    }
 
     #[test]
     fn history_reply_never_turns_native_failure_or_malformed_content_into_empty_data() {

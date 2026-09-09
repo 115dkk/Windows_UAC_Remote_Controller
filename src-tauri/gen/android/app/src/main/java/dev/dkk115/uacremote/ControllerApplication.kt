@@ -7,16 +7,21 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import androidx.lifecycle.Lifecycle
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
 import dev.dkk115.uacremote.background.BootOwnerAction
 import dev.dkk115.uacremote.background.BootServicePolicy
 import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.background.ControllerServiceState
+import dev.dkk115.uacremote.background.ControllerServiceFacts
+import dev.dkk115.uacremote.background.ControllerServiceObservation
 import dev.dkk115.uacremote.background.PolicyOwnerPhase
 import dev.dkk115.uacremote.background.PolicyReply
 import dev.dkk115.uacremote.background.PolicyStatus
 import dev.dkk115.uacremote.background.UserUnlockObservation
 import dev.dkk115.uacremote.background.ResumedHostTrace
+import dev.dkk115.uacremote.background.ServiceStartGenerations
+import dev.dkk115.uacremote.background.NativeStopObservation
 
 /** One Application owner; Direct Boot construction does not touch CE/Rust/keys. */
 class ControllerApplication : Application() {
@@ -25,8 +30,13 @@ class ControllerApplication : Application() {
     private val readLock = Any()
     private val pendingReads = ArrayList<PendingRead>()
     private var serviceToken: Any? = null
+    private var serviceTokenGeneration: Long? = null
+    private val serviceGenerations = ServiceStartGenerations()
     private var serviceListener: ((ControllerServiceState) -> Unit)? = null
     private var serviceWanted = false
+    private var serviceStartPending = false
+    private var explicitStopRequested = false
+    private var shutdownRequestedFor: ApplicationPolicyActor? = null
     private var mayReplaceClosed = false
     private var explicitReplacement = false
     private var ownerFailed = false
@@ -72,14 +82,50 @@ class ControllerApplication : Application() {
         return if (!host.isDestroyed && !host.isFinishing) host else null
     }
 
-    internal fun controllerServiceStartRequested() = onMain {
-        startRejected = false
-        if (policyActor?.lifecyclePhase() != PolicyOwnerPhase.READY) publish(ControllerServiceState.PREPARING)
+    internal fun isCurrentForegroundControllerHost(activity: Activity): Boolean {
+        val current = currentResumedControllerHost() as? MainActivity ?: return false
+        return current === activity && current.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
     }
 
-    internal fun controllerServiceStartRejected() = onMain {
+    /** No actor construction, CE, native key or Rust call occurs while reading. */
+    internal fun observeControllerService(activity: Activity): ControllerServiceObservation {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        return BootServicePolicy.serviceObservation(controllerServiceFacts(), isCurrentForegroundControllerHost(activity))
+    }
+
+    private fun controllerServiceFacts() = ControllerServiceFacts(
+        ControllerForegroundService.componentState(this), state, serviceWanted, serviceToken != null,
+        serviceStartPending, policyActor?.lifecyclePhase(), constructionUncertain, startRejected,
+        serviceGenerations.canReserve() || serviceGenerations.current() != null,
+    )
+
+    /** Automatic starts may not undo an explicit stop, even if its PM write failed. */
+    internal fun canRequestAutomaticServiceStart(): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        return BootServicePolicy.automaticStartAllowed(controllerServiceFacts(), explicitStopRequested, mayReplaceClosed)
+    }
+
+    internal fun controllerServiceStartRequested(): Long? {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val generation = if (serviceWanted && serviceTokenGeneration != null &&
+            serviceGenerations.matches(serviceTokenGeneration)) serviceTokenGeneration
+        else serviceGenerations.reserve()
+        if (generation == null) { controllerServiceStartRejected(); return null }
+        explicitStopRequested = false
+        serviceWanted = true
+        serviceStartPending = true
+        startRejected = false
+        if (serviceToken == null || policyActor?.lifecyclePhase() != PolicyOwnerPhase.READY) publish(ControllerServiceState.PREPARING)
+        return generation
+    }
+
+    internal fun controllerServiceStartRejected(generation: Long? = null, token: Any? = null) = onMain {
+        if (generation != null && !serviceGenerations.matches(generation)) return@onMain
+        if (token != null && serviceToken !== token) return@onMain
         if (startRejected) return@onMain
         startRejected = true
+        serviceGenerations.invalidate()
+        serviceStartPending = false
         serviceWanted = false
         mayReplaceClosed = false
         explicitReplacement = false
@@ -87,7 +133,7 @@ class ControllerApplication : Application() {
         failReads(PolicyStatus.UNAVAILABLE)
         // A failed foreground promotion/update must not leave an independently
         // running replacement owner. Cleanup retains its existing obligations.
-        try { policyActor?.shutdown() } catch (_: Exception) { }
+        requestOwnerShutdown(false)
     }
 
     internal fun attachControllerService(token: Any, listener: (ControllerServiceState) -> Unit): Boolean {
@@ -99,10 +145,26 @@ class ControllerApplication : Application() {
         return true
     }
 
-    internal fun startControllerServiceOwner(token: Any, explicit: Boolean) {
+    internal fun stickyControllerServiceGeneration(token: Any): Long? {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (serviceToken !== token) return
+        if (serviceToken !== token || !BootServicePolicy.stickyStartAllowed(controllerServiceFacts(), explicitStopRequested, mayReplaceClosed)) return null
+        return if (serviceWanted && serviceGenerations.current() != null) serviceGenerations.current()
+        else controllerServiceStartRequested()
+    }
+
+    internal fun isCurrentControllerServiceGeneration(token: Any, generation: Long?): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        return BootServicePolicy.detachOwnsCurrentGeneration(serviceToken, token,
+            serviceGenerations.current(), serviceTokenGeneration, generation)
+    }
+
+    internal fun startControllerServiceOwner(token: Any, explicit: Boolean, generation: Long): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (serviceToken !== token || explicitStopRequested ||
+            !BootServicePolicy.acceptsStartGeneration(serviceGenerations.current(), generation, serviceTokenGeneration)) return false
+        serviceTokenGeneration = generation
         serviceWanted = true
+        serviceStartPending = false
         startRejected = false
         val phase = policyActor?.lifecyclePhase()
         if (explicit && (phase == PolicyOwnerPhase.FAILED || phase == PolicyOwnerPhase.STOPPING || phase == PolicyOwnerPhase.CLOSED)) {
@@ -112,17 +174,38 @@ class ControllerApplication : Application() {
         reconcileOwner()
         if (explicit && (phase == PolicyOwnerPhase.FAILED || phase == PolicyOwnerPhase.STOPPING)) {
             // Exactly one explicit cleanup request. No polling/retry loop.
-            try { policyActor?.shutdown() }
-            catch (_: Exception) { publish(ControllerServiceState.UNAVAILABLE) }
+            requestOwnerShutdown(true)
+        }
+        return true
+    }
+
+    internal fun detachControllerService(token: Any, generation: Long?) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (serviceToken !== token) return
+        val ownsCurrent = isCurrentControllerServiceGeneration(token, generation)
+        serviceToken = null
+        serviceTokenGeneration = null
+        serviceListener = null
+        if (ownsCurrent) {
+            serviceGenerations.invalidate()
+            serviceStartPending = false
+            stopOwner(false)
+        } else {
+            // An old/unactivated object's destruction cannot stop a newly
+            // requested generation or a replacement actor owned by another token.
+            publish(if (serviceWanted) ControllerServiceState.PREPARING else stoppedOwnerState())
         }
     }
 
-    internal fun detachControllerService(token: Any) {
+    /** Only after stopService returned a real OS result (not after an exception).
+     * This acknowledges cancellation of pending launch, NOT Service destruction
+     * or actor cleanup. Those still require their own token/phase observations. */
+    internal fun controllerServiceStopAcknowledged(observation: NativeStopObservation) {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (serviceToken !== token) return
-        serviceToken = null
-        serviceListener = null
-        stopOwner()
+        if (BootServicePolicy.stopAcknowledgmentClearsPending(serviceGenerations.current(), explicitStopRequested, observation)) {
+            serviceStartPending = false
+            publish(stoppedOwnerState())
+        }
     }
 
     private fun reconcileOwner() {
@@ -152,12 +235,13 @@ class ControllerApplication : Application() {
         try {
             val actor = ApplicationPolicyActor(this)
             policyActor = actor
+            shutdownRequestedFor = null
             constructionUncertain = false
             mayReplaceClosed = false
             explicitReplacement = false
             ownerFailed = false
             actor.observeLifecycle { phase -> ownerPhaseChanged(actor, phase) }
-            if (!serviceWanted || startRejected) { actor.shutdown(); return }
+            if (!serviceWanted || startRejected) { requestOwnerShutdown(false); return }
             actor.start()
             drainReads()
         } catch (_: Exception) {
@@ -166,7 +250,7 @@ class ControllerApplication : Application() {
             mayReplaceClosed = false
             publish(ControllerServiceState.UNAVAILABLE)
             failReads(PolicyStatus.UNAVAILABLE)
-            try { policyActor?.shutdown() } catch (_: Exception) { }
+            requestOwnerShutdown(false)
         }
     }
 
@@ -180,7 +264,7 @@ class ControllerApplication : Application() {
             // CLOSED is published only after actual generated-owner destruction,
             // key-reference cleanup and approval cleanup. No optimistic reset.
             if (serviceWanted && mayReplaceClosed) reconcileOwner()
-            else publish(if (serviceWanted) ControllerServiceState.UNAVAILABLE else ControllerServiceState.STOPPED)
+            else publish(if (serviceWanted) ControllerServiceState.UNAVAILABLE else stoppedOwnerState())
         } else if (serviceWanted) {
             when (actor.lifecyclePhase()) {
                 PolicyOwnerPhase.READY -> { publish(ControllerServiceState.LOCAL_SETTINGS_READY); drainReads() }
@@ -288,20 +372,38 @@ class ControllerApplication : Application() {
         else main.post(action)
     }
 
-    private fun stopOwner() {
-        serviceWanted = false
-        explicitReplacement = false
-        if (!ownerFailed) mayReplaceClosed = true
-        failReads(PolicyStatus.UNAVAILABLE)
-        val actor = policyActor
-        publish(if (actor == null || actor.lifecyclePhase() == PolicyOwnerPhase.CLOSED) ControllerServiceState.STOPPED else ControllerServiceState.CLEANUP_PENDING)
-        try { actor?.shutdown() }
+    private fun stoppedOwnerState(): ControllerServiceState = when {
+        constructionUncertain -> ControllerServiceState.UNAVAILABLE
+        serviceToken != null || serviceStartPending ||
+            (policyActor != null && policyActor?.lifecyclePhase() != PolicyOwnerPhase.CLOSED) -> ControllerServiceState.CLEANUP_PENDING
+        else -> ControllerServiceState.STOPPED
+    }
+
+    private fun requestOwnerShutdown(explicitRetry: Boolean) {
+        val actor = policyActor ?: return
+        if (actor.lifecyclePhase() == PolicyOwnerPhase.CLOSED ||
+            (shutdownRequestedFor === actor && !explicitRetry)) return
+        shutdownRequestedFor = actor
+        try { actor.shutdown() }
         catch (_: Exception) {
             mayReplaceClosed = false
             publish(ControllerServiceState.UNAVAILABLE)
         }
     }
 
+    private fun stopOwner(explicitRetry: Boolean) {
+        serviceWanted = false
+        explicitReplacement = false
+        if (!ownerFailed) mayReplaceClosed = true
+        failReads(PolicyStatus.UNAVAILABLE)
+        publish(stoppedOwnerState())
+        requestOwnerShutdown(explicitRetry)
+    }
+
     /** Only an actual native owner termination may call this; no Activity/exit hook does. */
-    internal fun shutdownControllerPolicyOwner() = onMain { stopOwner() }
+    internal fun shutdownControllerPolicyOwner() = onMain {
+        explicitStopRequested = true
+        serviceGenerations.invalidate()
+        stopOwner(true)
+    }
 }

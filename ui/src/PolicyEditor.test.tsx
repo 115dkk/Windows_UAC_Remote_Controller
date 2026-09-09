@@ -23,7 +23,7 @@ describe('notification policy editor', () => {
     const user = userEvent.setup();
     const pending = deferred<NotificationPolicy | null>();
     const save = vi.fn(() => pending.promise);
-    const view = render(<PolicyEditor policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    const view = render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
     expect(screen.getByRole('radio', { name: ko.always })).toBeChecked();
     expect(screen.getByRole('radio', { name: ko.always })).toHaveAccessibleDescription(ko.alwaysDescription);
     expect(screen.getByRole('radio', { name: ko.never })).toHaveAccessibleDescription(ko.neverDescription);
@@ -39,7 +39,7 @@ describe('notification policy editor', () => {
     expect(screen.getByRole('button', { name: ko.saving })).toBeDisabled();
     const confirmed: NotificationPolicy = { schedule: { mode: 'never' }, alert: 'sound' };
     await act(async () => { pending.resolve(confirmed); await pending.promise; });
-    view.rerender(<PolicyEditor policy={confirmed} disabled={false} saving={false} onSave={save} />);
+    view.rerender(<PolicyEditor available policy={confirmed} disabled={false} saving={false} onSave={save} />);
     expect(screen.getByRole('status')).toHaveTextContent(ko.saved);
     expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
   });
@@ -47,7 +47,7 @@ describe('notification policy editor', () => {
   it('maps weekday bits and numeric overnight/end-exclusive inputs without client policy decisions', async () => {
     const user = userEvent.setup();
     const save = vi.fn((policy: NotificationPolicy) => Promise.resolve(policy));
-    render(<PolicyEditor policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
     await user.click(screen.getByRole('radio', { name: ko.weekly }));
     await user.click(screen.getByRole('checkbox', { name: '월요일' }));
     await user.click(screen.getByRole('checkbox', { name: '일요일' }));
@@ -62,7 +62,7 @@ describe('notification policy editor', () => {
   it('validates basic input after submit and does not send an unfinished IME composition', async () => {
     const user = userEvent.setup();
     const save = vi.fn(() => Promise.resolve(null));
-    const { container } = render(<PolicyEditor policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    const { container } = render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
     await user.click(screen.getByRole('radio', { name: ko.weekly }));
     expect(screen.queryByText(ko.daysRequired)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: ko.save }));
@@ -84,10 +84,10 @@ describe('notification policy editor', () => {
   it('preserves a dirty draft across background updates and restores latest native values on cancel', async () => {
     const user = userEvent.setup();
     const save = vi.fn(() => Promise.resolve(null));
-    const view = render(<PolicyEditor policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    const view = render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
     await user.click(screen.getByRole('radio', { name: ko.never }));
     const refreshed: NotificationPolicy = { schedule: { mode: 'always' }, alert: 'silent' };
-    view.rerender(<PolicyEditor policy={refreshed} disabled={false} saving={false} onSave={save} />);
+    view.rerender(<PolicyEditor available policy={refreshed} disabled={false} saving={false} onSave={save} />);
     expect(screen.getByRole('radio', { name: ko.never })).toBeChecked();
     expect(screen.getByRole('radio', { name: '소리' })).toBeChecked();
     await user.click(screen.getByRole('button', { name: ko.cancel }));
@@ -95,11 +95,41 @@ describe('notification policy editor', () => {
     expect(screen.getByRole('radio', { name: '무음' })).toBeChecked();
   });
 
+  it('omits unavailable controls without defaulting or losing a memory-only draft', async () => {
+    const user = userEvent.setup();
+    const save = vi.fn(() => Promise.resolve(null));
+    const view = render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    await user.click(screen.getByRole('radio', { name: ko.never }));
+    view.rerender(<PolicyEditor available={false} policy={null} disabled={false} saving={false} onSave={save} />);
+    expect(screen.getByRole('heading', { name: ko.policyUnavailableTitle })).toBeInTheDocument();
+    expect(screen.getByText(ko.policyDraftKept)).toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+    const refreshed: NotificationPolicy = { schedule: { mode: 'always' }, alert: 'vibrate_only' };
+    view.rerender(<PolicyEditor available policy={refreshed} disabled={false} saving={false} onSave={save} />);
+    expect(screen.getByRole('radio', { name: ko.never })).toBeChecked();
+    expect(screen.getByRole('radio', { name: '소리' })).toBeChecked();
+    expect(screen.getByText(ko.dirty)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.cancel }));
+    expect(screen.getByRole('radio', { name: ko.always })).toBeChecked();
+    expect(screen.getByRole('radio', { name: '진동만' })).toBeChecked();
+  });
+
+  it('does not present controls from a nonnull policy while its native owner is unavailable', () => {
+    const save = vi.fn(() => Promise.resolve(null));
+    render(<PolicyEditor available={false} policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    expect(screen.getByRole('heading', { name: ko.policyUnavailableTitle })).toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it('preserves drafts after failure, rejects duplicate saves, and does not claim a mismatched result was saved', async () => {
     const user = userEvent.setup();
     const pending = deferred<NotificationPolicy | null>();
     const save = vi.fn(() => pending.promise);
-    render(<PolicyEditor policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
+    render(<PolicyEditor available policy={defaultPolicy} disabled={false} saving={false} onSave={save} />);
     await user.click(screen.getByRole('radio', { name: '무음' }));
     const button = screen.getByRole('button', { name: ko.save });
     fireEvent.click(button);
@@ -166,7 +196,7 @@ describe('policy draft formatting, not runtime authorization', () => {
     const policy: NotificationPolicy = { schedule: { mode: 'weekly', windows: [{ days: 1, start_minute: 0, end_minute: 1440 }] }, alert: 'sound' };
     const save = vi.fn((next: NotificationPolicy) => Promise.resolve(next));
     expect(parseDraft(draftFromPolicy(policy)).policy).toEqual(policy);
-    render(<PolicyEditor policy={policy} disabled={false} saving={false} onSave={save} />);
+    render(<PolicyEditor available policy={policy} disabled={false} saving={false} onSave={save} />);
     expect(screen.getByRole('checkbox', { name: ko.endOfDay })).toBeChecked();
     expect(screen.getByLabelText(ko.endTime)).toHaveValue('00:00');
     expect(screen.getByLabelText(ko.endTime)).toBeDisabled();

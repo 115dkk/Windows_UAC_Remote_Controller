@@ -516,14 +516,14 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
     assert_eq!(
         json,
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "platform": "windows",
             "computerName": "합성-PC",
             "service": {
                 "installed": true, "state": "start_pending", "allowedActions": [],
                 "controlHint": "available", "remoteRequestsReady": false
             },
-            "mobile": null,
+            "phoneService": null, "mobile": null,
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
             "devices": [], "requests": [], "activity": [],
             "dataAvailability": {"devices": "unavailable", "requests": "unavailable", "activity": "unavailable"},

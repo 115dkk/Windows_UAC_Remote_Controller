@@ -38,12 +38,13 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         assert!(!debug.contains(secret));
     }
     let snapshot = AppSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         platform: Platform::Android,
         computer_name: secret.into(),
         service: None,
+        phone_service: None,
         mobile: None,
-        policy: NotificationPolicy::default(),
+        policy: Some(NotificationPolicy::default()),
         devices: vec![device],
         requests: vec![request],
         activity: vec![activity],

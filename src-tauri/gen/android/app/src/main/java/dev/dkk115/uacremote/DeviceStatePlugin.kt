@@ -11,6 +11,9 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
@@ -22,7 +25,13 @@ import app.tauri.plugin.Plugin
 import dev.dkk115.uacremote.background.PolicyOwnerBounds
 import dev.dkk115.uacremote.background.PolicyReply
 import dev.dkk115.uacremote.background.PolicyStatus
+import dev.dkk115.uacremote.background.BootServicePolicy
+import dev.dkk115.uacremote.background.ControllerForegroundService
+import dev.dkk115.uacremote.background.ControllerServiceObservation
+import dev.dkk115.uacremote.background.ServiceControlResult
+import org.json.JSONObject
 import org.json.JSONTokener
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foreground OS observations plus the Application-owned policy command adapter.
@@ -41,9 +50,103 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     // Accessed only on Android's main thread. A later foreground lifecycle entry
     // permits another explicit settings request; resuming never launches one.
     private var settingsLaunchPending = false
+    private val serviceMain = Handler(Looper.getMainLooper())
+    private val serviceCommandPending = AtomicBoolean(false)
+    private enum class ServiceCommand { READ, START, STOP }
+    private sealed class ServiceReply {
+        class Observation(val value: ControllerServiceObservation) : ServiceReply()
+        class Mutation(val value: ServiceControlResult) : ServiceReply()
+    }
 
     override fun onResume() {
         settingsLaunchPending = false
+    }
+
+    @Command
+    fun controllerService(invoke: Invoke) = serviceCommand(invoke, ServiceCommand.READ)
+
+    @Command
+    fun startControllerService(invoke: Invoke) = serviceCommand(invoke, ServiceCommand.START)
+
+    @Command
+    fun stopControllerService(invoke: Invoke) = serviceCommand(invoke, ServiceCommand.STOP)
+
+    /** Fixed operations only. At most one queued/running service command per
+     * plugin; no actor/native owner is constructed to inspect its state. */
+    private fun serviceCommand(invoke: Invoke, command: ServiceCommand) {
+        val validArguments = try { BootServicePolicy.acceptsServiceArguments(invoke.getRawArgs()) }
+            catch (_: Exception) { false }
+        if (!validArguments) {
+            rejectServiceCommand(invoke, command, ServiceControlResult.NOT_ALLOWED)
+            return
+        }
+        if (!serviceCommandPending.compareAndSet(false, true)) {
+            rejectServiceCommand(invoke, command, ServiceControlResult.UNAVAILABLE)
+            return
+        }
+        val started = SystemClock.elapsedRealtime()
+        val work = Runnable {
+            val reply = try {
+                if (BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) {
+                    serviceFailure(command, ServiceControlResult.UNAVAILABLE)
+                } else {
+                    val owner = activity.application as? ControllerApplication
+                    if (owner == null) serviceFailure(command, ServiceControlResult.UNAVAILABLE)
+                    else when (command) {
+                        ServiceCommand.READ -> ServiceReply.Observation(owner.observeControllerService(activity))
+                        ServiceCommand.START -> ServiceReply.Mutation(
+                            if (isForeground()) ControllerForegroundService.startExplicit(activity) else ServiceControlResult.NOT_ALLOWED)
+                        ServiceCommand.STOP -> ServiceReply.Mutation(
+                            if (isForeground()) ControllerForegroundService.stopExplicit(activity) else ServiceControlResult.NOT_ALLOWED)
+                    }
+                }
+            } catch (_: Exception) {
+                // Never retry an accepted operation or log exception/intent data.
+                serviceFailure(command, ServiceControlResult.UNAVAILABLE)
+            } finally {
+                serviceCommandPending.set(false)
+            }
+            // The native operation has finished. Release admission BEFORE the
+            // exactly-once reply can wake Rust's next sequential state read.
+            resolveServiceReply(invoke, reply)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) work.run()
+        else if (!serviceMain.post(work)) {
+            serviceCommandPending.set(false)
+            rejectServiceCommand(invoke, command, ServiceControlResult.UNAVAILABLE)
+        }
+    }
+
+    private fun rejectServiceCommand(invoke: Invoke, command: ServiceCommand, result: ServiceControlResult) {
+        resolveServiceReply(invoke, serviceFailure(command, result))
+    }
+
+    private fun serviceFailure(command: ServiceCommand, result: ServiceControlResult): ServiceReply =
+        if (command == ServiceCommand.READ) ServiceReply.Observation(ControllerServiceObservation.UNAVAILABLE)
+        else ServiceReply.Mutation(result)
+
+    private fun resolveServiceReply(invoke: Invoke, reply: ServiceReply) {
+        when (reply) {
+            is ServiceReply.Observation -> resolveServiceObservation(invoke, reply.value)
+            is ServiceReply.Mutation -> resolveServiceMutation(invoke, reply.value)
+        }
+    }
+
+    private fun resolveServiceObservation(invoke: Invoke, observation: ControllerServiceObservation) {
+        val result = JSObject()
+        result.put("state", observation.state.wireValue)
+        // JSONObject.put(key, null) removes the key; the DTO requires explicit null.
+        result.put("bootEnabled", observation.bootEnabled ?: JSONObject.NULL)
+        result.put("canStart", observation.canStart)
+        result.put("canStop", observation.canStop)
+        result.put("policyOwnerReady", observation.policyOwnerReady)
+        try { invoke.resolve(result) } catch (_: Exception) { /* detached reply only */ }
+    }
+
+    private fun resolveServiceMutation(invoke: Invoke, outcome: ServiceControlResult) {
+        val result = JSObject()
+        result.put("status", outcome.wireValue)
+        try { invoke.resolve(result) } catch (_: Exception) { /* never retry a native request */ }
     }
 
     @Command
@@ -228,7 +331,8 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     private fun isForeground(): Boolean {
         val currentHost = host ?: return false
         return !currentHost.isFinishing && !currentHost.isDestroyed &&
-            currentHost.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            currentHost.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+            (activity.application as? ControllerApplication)?.isCurrentForegroundControllerHost(activity) == true
     }
 
     @Command

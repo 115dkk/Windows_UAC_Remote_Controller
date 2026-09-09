@@ -8,8 +8,9 @@ export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientP
 
 export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): AppSnapshot {
   return {
-    schemaVersion: 1, platform, computerName: '화면 예시 PC',
+    schemaVersion: 2, platform, computerName: '화면 예시 PC',
     service: platform === 'windows' ? { installed: false, state: null, allowedActions: [], controlHint: 'needs_installer', remoteRequestsReady: false } : null,
+    phoneService: platform === 'android' ? { state: 'local_settings_ready', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: true } : null,
     mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false } : null,
     policy: { schedule: { mode: 'always' }, alert: 'sound' },
     devices: [], requests: [], activity: [],
@@ -50,6 +51,13 @@ export function qaCase(name: string): QaCase {
     } };
     case 'phone-unavailable': return { page: 'requests', snapshot: { ...phone, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'phone-settings': return { page: 'schedule', snapshot: { ...phone, policy: { schedule: { mode: 'weekly', windows: [{ days: 31, start_minute: 9 * 60, end_minute: 18 * 60 }] }, alert: 'vibrate_only' } } };
+    case 'phone-service-ready': return { page: 'schedule', snapshot: phone };
+    case 'phone-service-stopped': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'stopped', bootEnabled: false, canStart: true, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
+    case 'phone-service-preparing': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'preparing', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
+    case 'phone-service-waiting-unlock': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'waiting_for_unlock', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
+    case 'phone-service-cleanup': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'cleanup_pending', bootEnabled: false, canStart: false, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
+    case 'phone-service-unavailable': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'unavailable', bootEnabled: null, canStart: false, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
+    case 'phone-service-error': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'unavailable', bootEnabled: false, canStart: true, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' }, issue: { code: 'synthetic_service_start_rejected', message: '휴대폰 서비스를 시작하지 못했어요.', nextAction: '서비스 상태를 다시 확인해 주세요.' } } };
     case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true, canOpenNotificationSettings: false } } };
     case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false, canOpenNotificationSettings: false } } };
     case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false, canOpenNotificationSettings: true } } };
@@ -65,6 +73,17 @@ export function createQaBridge(initial: AppSnapshot): ControllerBridge {
     snapshot: () => Promise.resolve(value),
     savePolicy: (policy) => reply({ ...value, policy, issue: null }),
     controlService: (action) => {
+      if (value.platform === 'android') {
+        // Simulated acceptance/pending state ONLY; never synthesize native ready,
+        // a successful persisted policy read or history on a start request.
+        if (action === 'start' && value.phoneService?.canStart) return reply({ ...value, policy: null, issue: null, canClearActivity: false,
+          dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' },
+          phoneService: { state: 'preparing', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: false } });
+        if (action === 'stop' && value.phoneService?.canStop) return reply({ ...value, policy: null, issue: null, canClearActivity: false,
+          dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' },
+          phoneService: { state: 'cleanup_pending', bootEnabled: false, canStart: false, canStop: false, policyOwnerReady: false } });
+        return reply({ ...value, issue: { code: 'synthetic_service_unavailable', message: '이 화면 예시에서는 해당 서비스 작업을 시작할 수 없어요.', nextAction: null } });
+      }
       const state: ServiceState = action === 'stop' || action === 'uninstall' ? 'stopped' : 'running';
       return reply({ ...value, service: { installed: action !== 'uninstall', state, allowedActions: state === 'running' ? ['restart', 'stop', 'uninstall'] : ['start', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } });
     },

@@ -53,6 +53,73 @@ pub struct ServiceView {
     pub remote_requests_ready: bool,
 }
 
+/// Phone process/service availability, never a peer or authentication claim.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhoneServiceState {
+    Stopped,
+    Preparing,
+    WaitingForUnlock,
+    LocalSettingsReady,
+    CleanupPending,
+    Unavailable,
+}
+
+/// Supplied by the native Application and PackageManager, not WebView input.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PhoneServiceView {
+    pub state: PhoneServiceState,
+    #[serde(deserialize_with = "deserialize_boot_enabled")]
+    pub boot_enabled: Option<bool>,
+    pub can_start: bool,
+    pub can_stop: bool,
+    pub policy_owner_ready: bool,
+}
+
+// Require the property to be present even when its observation is null.
+fn deserialize_boot_enabled<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    Option::<bool>::deserialize(deserializer)
+}
+
+impl PhoneServiceView {
+    pub const UNAVAILABLE: Self = Self {
+        state: PhoneServiceState::Unavailable,
+        boot_enabled: None,
+        can_start: false,
+        can_stop: false,
+        policy_owner_ready: false,
+    };
+
+    /// Reject contradictory native observations instead of inventing readiness.
+    pub fn checked(self) -> Option<Self> {
+        if self.can_start
+            && (self.boot_enabled.is_none()
+                || !matches!(
+                    self.state,
+                    PhoneServiceState::Stopped | PhoneServiceState::Unavailable
+                ))
+            || self.policy_owner_ready
+                && (self.state != PhoneServiceState::LocalSettingsReady
+                    || self.boot_enabled != Some(true))
+            || self.state == PhoneServiceState::LocalSettingsReady && !self.policy_owner_ready
+        {
+            return None;
+        }
+        Some(self)
+    }
+
+    pub const fn allows(self, action: ServiceAction) -> bool {
+        match action {
+            ServiceAction::Start => self.can_start,
+            ServiceAction::Stop => self.can_stop,
+            ServiceAction::Install | ServiceAction::Restart | ServiceAction::Uninstall => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenLockState {
@@ -185,8 +252,10 @@ pub struct AppSnapshot {
     /// Bounded display text only, never a peer identity or authorization input.
     pub computer_name: String,
     pub service: Option<ServiceView>,
+    pub phone_service: Option<PhoneServiceView>,
     pub mobile: Option<MobileReadiness>,
-    pub policy: NotificationPolicy,
+    /// None means no current policy observation; never substitute defaults.
+    pub policy: Option<NotificationPolicy>,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
     pub activity: Vec<ActivityView>,
@@ -198,6 +267,27 @@ pub struct AppSnapshot {
 }
 
 impl AppSnapshot {
+    /// Remains renderable while the Android policy owner is stopped/unavailable.
+    pub fn from_android_service(service: PhoneServiceView, readiness: MobileReadiness) -> Self {
+        Self {
+            schema_version: 2,
+            platform: Platform::Android,
+            computer_name: String::new(),
+            service: None,
+            phone_service: Some(service),
+            mobile: Some(readiness),
+            policy: None,
+            devices: Vec::new(),
+            requests: Vec::new(),
+            activity: Vec::new(),
+            data_availability: DataAvailability::UNAVAILABLE,
+            can_pair: false,
+            can_unpair: false,
+            can_clear_activity: false,
+            issue: None,
+        }
+    }
+
     /// Independent native history availability; None is never an empty history.
     pub fn from_android_policy_and_history(
         policy: NotificationPolicy,
@@ -217,12 +307,13 @@ impl AppSnapshot {
     /// remain unavailable, never an apparently confirmed empty collection.
     pub fn from_android_policy(policy: NotificationPolicy, readiness: MobileReadiness) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             platform: Platform::Android,
             computer_name: String::new(),
             service: None,
+            phone_service: None,
             mobile: Some(readiness),
-            policy,
+            policy: Some(policy),
             devices: Vec::new(),
             requests: Vec::new(),
             activity: Vec::new(),

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import type { ActivityView, AlertMode, ServiceAction, ServiceState } from './contracts';
+import type { ActivityView, AlertMode, PhoneServiceView, ServiceAction, ServiceState } from './contracts';
 
 export const ko = {
   appName: '휴대폰 승인',
@@ -62,6 +62,25 @@ export const ko = {
   servicePausedBody: '서비스가 일시 중지되어 있어요.',
   servicePendingBody: 'Windows에서 상태를 변경하고 있어요. 잠시 뒤 다시 확인해 주세요.',
   thisComputer: '이 PC',
+  phoneServiceLabel: '휴대폰 서비스',
+  phoneBootLabel: '부팅 시 자동 시작',
+  phoneBootOn: '켜짐',
+  phoneBootOff: '꺼짐',
+  phoneBootUnknown: '확인할 수 없음',
+  phoneStartAction: '서비스 시작',
+  phoneStopAction: '서비스 중지',
+  phoneStartConsequence: '서비스를 시작하면 부팅 시 자동 시작도 켜집니다.',
+  phoneStopConsequence: '서비스를 중지하면 부팅 시 자동 시작도 꺼집니다.',
+  phoneStopTitle: '휴대폰 서비스를 중지할까요?',
+  phoneStopBody: '휴대폰을 다시 켜거나 앱을 열어도 자동으로 시작하지 않아요. 다시 켜려면 서비스를 시작해 주세요.',
+  phoneServiceUnknownBody: '서비스 상태를 다시 확인해 주세요.',
+  policyUnavailableTitle: '알림 시간 설정을 읽을 수 없어요',
+  policyUnavailableBody: '현재 설정을 다시 확인해 주세요. 읽기 전에는 변경할 수 없어요.',
+  policyStartFirst: '서비스를 시작한 뒤 설정을 다시 확인해 주세요.',
+  policyPreparing: '서비스를 준비하고 있어요. 잠시 후 다시 확인해 주세요.',
+  policyUnlockFirst: '휴대폰 잠금이 해제된 뒤 설정을 다시 확인해 주세요.',
+  policyCleanupPending: '이전 작업을 정리하고 있어요. 서비스 상태를 다시 확인해 주세요.',
+  policyDraftKept: '저장하지 않은 내용은 이 화면에 남아 있어요. 설정을 다시 읽으면 이어서 수정할 수 있어요.',
   devicesUnavailable: '연결된 기기를 확인할 수 없어요',
   devicesUnavailableBody: '현재 연결 목록이 제공되지 않아요.',
   noPhones: '연결된 휴대폰이 없어요',
@@ -125,6 +144,20 @@ export const serviceStateText: Record<ServiceState, string> = {
   running: '서비스 실행 중', continue_pending: '서비스 재개 중', pause_pending: '서비스 일시 중지 중',
   paused: '서비스 일시 중지됨',
 };
+export const phoneServiceStateText: Record<PhoneServiceView['state'], string> = {
+  stopped: '서비스가 중지되어 있어요',
+  preparing: '서비스를 준비하고 있어요',
+  waiting_for_unlock: '휴대폰 잠금 해제를 기다리고 있어요',
+  local_settings_ready: '서비스가 실행 중이에요',
+  cleanup_pending: '이전 작업을 정리하고 있어요',
+  unavailable: '서비스 상태를 확인할 수 없어요',
+};
+export function policyUnavailableText(service: PhoneServiceView | null): string {
+  if (service?.state === 'waiting_for_unlock') return ko.policyUnlockFirst;
+  if (service?.state === 'preparing') return ko.policyPreparing;
+  if (service?.state === 'cleanup_pending') return ko.policyCleanupPending;
+  return service?.canStart ? ko.policyStartFirst : ko.policyUnavailableBody;
+}
 export const serviceActionText: Record<ServiceAction, string> = {
   install: '서비스 설치', start: '서비스 시작', stop: '서비스 중지', restart: '서비스 다시 시작', uninstall: '서비스 제거',
 };

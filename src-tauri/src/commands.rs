@@ -142,17 +142,23 @@ pub(crate) async fn save_notification_policy(
 
 #[tauri::command]
 pub(crate) async fn control_service(
+    app: tauri::AppHandle,
     action: ServiceAction,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
     #[cfg(not(target_os = "android"))]
     {
+        let _ = app;
         with_runtime(&state, move |runtime| runtime.control_service(action)).await
     }
     #[cfg(target_os = "android")]
     {
-        let _ = (state, action);
-        Err(controller_runtime::PlatformError::Unsupported.into())
+        with_android_owner(
+            app,
+            &state,
+            crate::mobile::OwnerOperation::ControlService(action),
+        )
+        .await
     }
 }
 

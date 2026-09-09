@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { galleryCases } from './cases';
 import { test, expect } from './session';
+import { registerPhoneServiceGallery } from './phone-service';
 
-for (const selected of galleryCases) {
+registerPhoneServiceGallery(test);
+
+for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-service-'))) {
   test(selected.id, async ({ page, gallery }) => {
     await gallery.open(selected);
     const fixture = selected.fixture;

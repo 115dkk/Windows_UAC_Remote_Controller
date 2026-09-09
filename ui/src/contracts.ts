@@ -21,6 +21,13 @@ export interface ServiceView {
   readonly controlHint: 'needs_installer' | 'available' | 'unsupported';
   readonly remoteRequestsReady: boolean;
 }
+export interface PhoneServiceView {
+  readonly state: 'stopped' | 'preparing' | 'waiting_for_unlock' | 'local_settings_ready' | 'cleanup_pending' | 'unavailable';
+  readonly bootEnabled: boolean | null;
+  readonly canStart: boolean;
+  readonly canStop: boolean;
+  readonly policyOwnerReady: boolean;
+}
 export interface MobileReadiness {
   readonly screenLock: 'configured' | 'missing' | 'unavailable';
   readonly notifications: 'allowed' | 'denied' | 'unavailable';
@@ -52,12 +59,13 @@ export interface ActivityView {
 }
 export interface AppIssue { readonly code: string; readonly message: string; readonly nextAction: string | null }
 export interface AppSnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly platform: Platform;
   readonly computerName: string;
   readonly service: ServiceView | null;
+  readonly phoneService: PhoneServiceView | null;
   readonly mobile: MobileReadiness | null;
-  readonly policy: NotificationPolicy;
+  readonly policy: NotificationPolicy | null;
   readonly devices: readonly PairedDeviceView[];
   readonly requests: readonly RequestView[];
   readonly activity: readonly ActivityView[];
