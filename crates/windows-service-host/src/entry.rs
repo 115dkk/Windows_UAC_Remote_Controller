@@ -21,7 +21,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            ERROR_CALL_NOT_IMPLEMENTED, ERROR_EXCEPTION_IN_SERVICE, ERROR_SERVICE_SPECIFIC_ERROR,
+            ERROR_BUSY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_EXCEPTION_IN_SERVICE,
+            ERROR_NO_MORE_FILES, ERROR_SERVICE_CANNOT_ACCEPT_CTRL, ERROR_SERVICE_SPECIFIC_ERROR,
         },
         System::Services::{
             RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
@@ -74,8 +75,20 @@ fn handle_control(control: u32) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             STOP_REQUESTED.store(true, Ordering::Release);
+            crate::runtime::PROBE_REQUESTS.close();
         }
         SERVICE_CONTROL_INTERROGATE => (),
+        crate::PROBE_CONTROL_CODE => {
+            // The existing service DACL grants user-defined control only to
+            // SYSTEM/Administrators. This callback only latches one request;
+            // no file, token, UIA or child-process operation occurs here.
+            return match crate::runtime::PROBE_REQUESTS.request() {
+                Ok(()) => 0,
+                Err(ServiceError::ProbeBusy) => ERROR_BUSY.0,
+                Err(ServiceError::ProbeSlotsFull) => ERROR_NO_MORE_FILES.0,
+                Err(_) => ERROR_SERVICE_CANNOT_ACCEPT_CTRL.0,
+            };
+        }
         _ => return ERROR_CALL_NOT_IMPLEMENTED.0,
     }
     // A full notification queue cannot discard Stop: the atomic latch above
@@ -197,6 +210,7 @@ fn lifecycle(
                 }
                 Some(WorkerEvent::Ready) if !stopping => {
                     reporter.report(SERVICE_RUNNING, 0, None)?;
+                    crate::runtime::PROBE_REQUESTS.enable_after_scm_running();
                     pending_since = None;
                 }
                 Some(WorkerEvent::Finished(result)) => {

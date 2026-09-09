@@ -18,6 +18,7 @@ pub enum Command {
     Stop,
     Restart,
     Uninstall,
+    ProbeOnce,
     Help,
 }
 
@@ -84,6 +85,7 @@ impl Command {
             Some("stop") => Ok(Self::Stop),
             Some("restart") => Ok(Self::Restart),
             Some("uninstall") => Ok(Self::Uninstall),
+            Some("probe-once") => Ok(Self::ProbeOnce),
             Some("help" | "--help" | "-h") => Ok(Self::Help),
             _ => Err(ServiceError::InvalidArguments),
         }
@@ -179,6 +181,7 @@ pub enum ServiceOperation {
     ReportStatus,
     LaunchElevatedHelper,
     WaitElevatedHelper,
+    RequestProbe,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -247,6 +250,14 @@ pub enum ServiceError {
     AlreadyDispatched,
     #[error("status output could not be encoded or written")]
     OutputUnavailable,
+    #[error("a read-only diagnostic probe is already pending or running")]
+    ProbeBusy,
+    #[error(
+        "all eight fixed diagnostic slots are occupied; explicit operator recovery is required"
+    )]
+    ProbeSlotsFull,
+    #[error("the read-only diagnostic owner or result storage is unavailable")]
+    ProbeUnavailable,
 }
 
 impl ServiceError {

@@ -3,6 +3,13 @@
 //! It contains no listener, pairing endpoint, prompt adapter or fake UAC.
 #![forbid(unsafe_code)]
 
+use crate::{
+    ProbeSupervisorError, ServiceProbeSupervisor,
+    diagnostic::{
+        CleanupObservation, HelperExitObservation, ProbeAdmission, ProbeDiagnosticRecord,
+        ProbeObservation,
+    },
+};
 use crate::{ServiceError, ServiceRegistry, ffi};
 use activity_journal::{ActivityEvent, FailureKind, Journal, Limits, ServiceOutcome, UnixMillis};
 use std::{
@@ -11,6 +18,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_identity::{IdentityError, PcIdentityKey};
+
+pub(crate) static PROBE_REQUESTS: ProbeAdmission = ProbeAdmission::new();
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WorkerEvent {
@@ -48,6 +57,7 @@ impl Worker {
     }
 
     pub(crate) fn request_stop(&self) {
+        PROBE_REQUESTS.close();
         let _ = self.stop.send(());
     }
 
@@ -190,14 +200,37 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
         &mut journal,
         ActivityEvent::Failure(FailureKind::TransportUnavailable),
     )?;
+    // Passive fixed-slot inspection only, never a startup probe. Failure/full
+    // storage disables this diagnostic without bypassing identity/registry init.
+    PROBE_REQUESTS.prepare(
+        crate::native::probe_control_registration_ready(_installation.executable())
+            .and_then(|()| directory.probe_slot_available()),
+    );
     events
         .send(WorkerEvent::Ready)
         .map_err(|_| ServiceError::WorkerFailed)?;
     let mut last_purge = Instant::now();
+    let mut supervisor = None;
+    let mut supervisor_initialization_failed = None;
     loop {
-        match stop.recv_timeout(Duration::from_secs(1)) {
+        match stop.recv_timeout(Duration::from_millis(200)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => (),
+        }
+        if let Some(request) = PROBE_REQUESTS.take() {
+            // The guard latches unavailable on storage error/unwind. Supervisor
+            // ownership is retained here across every request and quarantine.
+            let result = run_requested_probe(
+                &directory,
+                &mut supervisor,
+                &mut supervisor_initialization_failed,
+                &request,
+            );
+            match result {
+                Ok(quarantined) => request.finish(directory.probe_slot_available(), quarantined),
+                Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
+                Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
+            }
         }
         if last_purge.elapsed() >= Duration::from_secs(3_600) {
             journal
@@ -210,6 +243,8 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
         &mut journal,
         ActivityEvent::Service(ServiceOutcome::Stopping),
     )?;
+    PROBE_REQUESTS.close();
+    drop(supervisor);
     registry.close().map_err(registry_error)?;
     identity
         .close()
@@ -218,6 +253,90 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     drop(journal);
     drop(directory);
     Ok(())
+}
+
+fn diagnostic_time() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+}
+
+fn run_requested_probe(
+    directory: &ffi::ActivityDirectory,
+    supervisor: &mut Option<ServiceProbeSupervisor>,
+    initialization_failure: &mut Option<ProbeSupervisorError>,
+    request: &crate::diagnostic::ProbeRun<'_>,
+) -> Result<bool, ServiceError> {
+    let file = directory.reserve_probe_slot()?;
+    let started = diagnostic_time();
+    let (outcome, cleanup, helper_exit, quarantined) = if request.cancelled() {
+        (
+            ProbeObservation::CancelledBeforeProbe,
+            CleanupObservation::NoRetainedRun,
+            HelperExitObservation::NotStarted,
+            false,
+        )
+    } else {
+        if supervisor.is_none() && initialization_failure.is_none() {
+            match ServiceProbeSupervisor::for_running_service() {
+                Ok(owner) => *supervisor = Some(owner),
+                Err(error) => *initialization_failure = Some(error),
+            }
+        }
+        match supervisor {
+            Some(owner) if !request.cancelled() => match owner.probe_once() {
+                Ok(report) => {
+                    let (outcome, helper_exit) = ProbeObservation::from_report(report);
+                    (
+                        outcome,
+                        CleanupObservation::ReportAndExitConfirmed,
+                        helper_exit,
+                        false,
+                    )
+                }
+                Err(error) => {
+                    let quarantined = owner.is_quarantined();
+                    (
+                        ProbeObservation::SupervisorFailure { failure: error },
+                        if quarantined {
+                            CleanupObservation::Quarantined
+                        } else {
+                            CleanupObservation::NoRetainedRun
+                        },
+                        HelperExitObservation::Unknown,
+                        quarantined,
+                    )
+                }
+            },
+            Some(_) => (
+                ProbeObservation::CancelledBeforeProbe,
+                CleanupObservation::NoRetainedRun,
+                HelperExitObservation::NotStarted,
+                false,
+            ),
+            None => (
+                ProbeObservation::SupervisorFailure {
+                    failure: initialization_failure
+                        .unwrap_or(ProbeSupervisorError::NotRunningService),
+                },
+                CleanupObservation::Unknown,
+                HelperExitObservation::NotStarted,
+                true,
+            ),
+        }
+    };
+    let record = ProbeDiagnosticRecord::new(
+        file.slot(),
+        std::process::id(),
+        started,
+        diagnostic_time(),
+        outcome,
+        cleanup,
+        helper_exit,
+    );
+    file.write_record(record)?;
+    Ok(quarantined)
 }
 
 fn registry_error(error: crate::RegistryError) -> ServiceError {

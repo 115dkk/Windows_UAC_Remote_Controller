@@ -10,8 +10,12 @@
 #![deny(unsafe_code)]
 
 mod contract;
+mod diagnostic;
 mod probe_supervisor;
 mod trust_registry;
+pub use diagnostic::{
+    MAX_PROBE_DIAGNOSTIC_BYTES, PROBE_CONTROL_CODE, PROBE_DIAGNOSTIC_FILES, ProbeRequestAccepted,
+};
 pub use probe_supervisor::{
     LaunchPrivilege, ProbeSupervisorError, ReportOutcome, ServiceProbeSupervisor, SupervisorStage,
 };
@@ -48,6 +52,19 @@ pub fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     #[cfg(windows)]
     {
         native::query_status()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Explicit elevated CLI diagnostic only. Accepted means queued, not observed,
+/// stored, authenticated, approved or applied. No UI intent exposes this call.
+pub fn request_probe_once() -> Result<ProbeRequestAccepted, ServiceError> {
+    #[cfg(windows)]
+    {
+        native::request_probe_once()
     }
     #[cfg(not(windows))]
     {

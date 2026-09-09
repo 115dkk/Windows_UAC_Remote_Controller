@@ -4,13 +4,15 @@
 use std::fmt;
 pub use windows_prompt_probe::supervision::ReportOutcome;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LaunchPrivilege {
     Tcb,
     IncreaseQuota,
     AssignPrimaryToken,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SupervisorStage {
     ServiceConfiguration,
     TokenQuery,
@@ -31,7 +33,8 @@ pub enum SupervisorStage {
     CancelIo,
     CleanupWait,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum ProbeSupervisorError {
     UnsupportedPlatform,
     Busy,

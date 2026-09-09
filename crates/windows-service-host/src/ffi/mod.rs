@@ -4,6 +4,7 @@
 //! Directory/file handles omit FILE_SHARE_DELETE and stay alive through the
 //! privileged operation, pinning validated paths under the intact-OS model.
 
+mod diagnostic;
 mod elevation;
 mod filesystem;
 #[cfg(target_pointer_width = "64")]
@@ -17,7 +18,7 @@ pub(crate) use trust_store::{
 };
 
 pub(crate) use filesystem::{
-    expected_executable, open_activity_directory, provision_activity_directory,
+    ActivityDirectory, expected_executable, open_activity_directory, provision_activity_directory,
     validate_installation,
 };
 pub(crate) use security::{harden_service, require_elevated, verify_service_security};

@@ -27,9 +27,14 @@ for transaction, maintenance and native-proof limitations.
 - `dispatch_service() -> Result<(), ServiceError>` belongs on the service binary's
   main thread. The caller must exit on error, as the supplied binary does. There
   is no interactive daemon fallback or elevated relaunch loop.
+- `request_probe_once() -> Result<ProbeRequestAccepted, ServiceError>` is the
+  fixed elevated-only installed CLI diagnostic. It is not a Tauri/phone intent.
+  Its successful JSON reply is `{"status":"requested","service_pid":...}`:
+  accepted by SCM's one-slot handler, not probe completion or Windows approval.
 
 `uac-service` with no arguments runs `status`. Accepted explicit commands are
-`status`, `service`, `install`, `start`, `stop`, `restart`, `uninstall` and `help`.
+`status`, `service`, `install`, `start`, `stop`, `restart`, `uninstall`,
+`probe-once` and `help`.
 Other/extra arguments are discarded without echoing them. There are no caller-
 supplied service names, accounts, executables, paths, credentials or arguments.
 Non-Windows operations return `UnsupportedPlatform`; native 64-bit Windows is
@@ -121,7 +126,9 @@ Cancellation is checked between startup stages, including before key initializat
 an in-flight native CNG call is not made interruptible by these checks.
 
 The worker records missing platform/transport integration, purges retention
-periodically and handles stop. Future transport and native prompt workers belong
+periodically and handles stop. An explicit read-only diagnostic control can now
+run the retained probe supervisor; it does not activate a prompt/action owner.
+Future transport and native prompt workers belong
 at the trusted Rust initialization/cancellation seam in `runtime::run`, not in
 Tauri. The identity adapter's descriptor grants the service SID explicit rights
 for the Restricted-token access check; actual provider behavior is an OS gate.
@@ -143,13 +150,29 @@ path and ACL are not code-signature or loaded-module attestation.
 The threat model assumes intact Windows/SYSTEM/kernel and trusted elevated
 administration, while explicitly defending against unelevated local malware.
 
-## Dormant read-only probe supervisor
+## Explicit read-only probe supervisor
 
 `ServiceProbeSupervisor::for_running_service()` is an OS/SCM-guarded, thread-affine
 owner. `probe_once(&mut self)` accepts **no path, session, command or target**.
-It is not called by the service worker, CLI, renderer, Tauri, installer or startup.
-Adding such a trusted service-internal call requires a separate review. No helper
-is installed, launched or exercised by this source-authoring evidence.
+The installed `probe-once` CLI validates actual elevation, its own protected file
+identity, the service configuration/DACL/Restricted SID and a Running PID before
+sending fixed user-defined control128. It confirms the same Running PID after
+SCM accepts the control. The existing service DACL grants full control only to
+SYSTEM/Administrators; ordinary users have query rights, not user-defined control.
+The worker also checks that registration security before enabling the facility.
+
+The SCM callback only latches one atomic pending request. Entry enables admission
+only AFTER successfully reporting SERVICE_RUNNING; neither startup nor a
+START_PENDING-to-Running race triggers a probe. The existing worker takes the
+request and owns at most one supervisor for its lifetime. Pending/running requests
+return Busy; initialization failure or unresolved quarantine disables further
+diagnostics. No supervisor is recreated to clear quarantine. Stop atomically closes
+admission, wins over later completion, and remains on the existing lifecycle path.
+An in-flight synchronous native call is not made interruptible by this mechanism.
+
+No renderer/Tauri/phone API exposes this operation. No helper is installed,
+launched or exercised by this source-authoring evidence. Actual requests still
+require ROOT's verification and the user's current native-experiment authority.
 
 The supported subset requires an actual native64 Session0 LocalSystem/system-IL
 process matching the fixed running OWN_PROCESS SCM registration and its protected
@@ -159,8 +182,9 @@ Impersonation query failures are failures; only ERROR_NO_TOKEN proves absence.
 Every run rechecks token, configuration, session and retained installation pins.
 
 The actual token must ALREADY have SeTcbPrivilege, SeIncreaseQuotaPrivilege and
-SeAssignPrimaryTokenPrivilege enabled. An explicit SCM required-privilege list
-must include them. This is a deliberately conservative supported subset, **not**
+SeAssignPrimaryTokenPrivilege enabled. If SCM supplies an explicit required-
+privilege list it must include them; a null list is accepted, while actual token
+checks remain mandatory. This is a deliberately conservative supported subset, **not**
 a claim that Windows universally needs all three for every launch. No privilege
 activation, required-privilege policy write, SID removal, desktop-DACL edit or
 foreign-token duplication is performed. Missing rights return fixed errors.
@@ -234,6 +258,97 @@ actual privileges/desktop access, job restrictions, pipe authentication,
 cancellation and cleanup still require ROOT's review and separately authorized
 Windows QA. Content/counts remain observations; no Windows request identity, remote
 approval, credential input or authorization action is implemented.
+
+### Fixed body-free diagnostic slots
+
+Source status for this integration is `implemented_unverified`; ROOT alone runs
+all builds/tests/native checks. Eight authored pure tests cover CLI/no-UI routing,
+one outstanding request, SCM-ready admission, Stop winning over queued/running
+work, full/unavailable/quarantined states, byte bounds and content redaction.
+They construct only synthetic report data and never call a Windows probe.
+
+The existing pinned private activity-directory owner creates at most these files:
+
+```text
+<native ProgramData>\휴대폰 승인\activity\probe-once-01.json
+...
+<native ProgramData>\휴대폰 승인\activity\probe-once-08.json
+```
+
+The exact public constants are `PROBE_DIAGNOSTIC_FILES` and
+`MAX_PROBE_DIAGNOSTIC_BYTES` (4096). Native creation uses only these fixed leaves,
+CREATE_NEW, an explicit private descriptor, share0, OPEN_REPARSE_POINT and a
+synchronous write-through handle. Existing slots are never overwritten, truncated,
+removed, renamed or followed through aliases. Private ACL/owner, local regular
+file, normalized path, no reparse point, one hard link and bounded size are checked
+on the owned handle. The writer borrows the activity-directory owner so parent
+pins remain live. Partial/failed files still occupy a slot. Full storage rejects
+further controls explicitly; storage errors disable diagnostics. No automatic
+operator cleanup/recovery or unbounded filename generation exists.
+
+Each schema1 record contains only service PID, immutable correlation slot1..8,
+optional actual start/finish Unix milliseconds, a fixed outcome, ProbeCounts,
+cleanup classification and helper-exit classification. No caption, label text,
+RuntimeId values, content hashes, paths, endpoints, keys, challenges or credentials
+are passed into the serializable record. Success reports are projected to counts
+and immediately dropped. Enum names/numeric native errors are stable metadata.
+
+`report_and_exit_confirmed` appears only after the supervisor returns a fully
+validated report/EOF/child-exit/empty-job result. On failure, `quarantined`,
+`no_retained_run` or `unknown` describe only what the native owner actually knows;
+helper exit remains `unknown` unless a verified report establishes it or no helper
+was started. File flush is an OS acknowledgment, not a hardware/directory power-loss
+guarantee. A missing, empty, truncated or invalid result is **failure/unknown**, not
+evidence that no UAC prompt existed. CLI acceptance never promises a result file.
+
+### ROOT build/install/trigger/read procedure
+
+1. Run ROOT's formatting, Clippy and pure tests, then build matching native64 files:
+
+   ```text
+   cargo fmt --all -- --check
+   cargo clippy --locked -p windows-service-host --all-targets -- -D warnings
+   cargo test --locked -p windows-service-host
+   cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-service-host -p windows-prompt-probe --bins
+   ```
+
+2. In the separately authorized elevated installer, verify the exact built-file
+   hashes and provision/copy only `uac-service.exe` and `uac-prompt-probe.exe` to
+   `<native ProgramFiles>\휴대폰 승인`. Do not launch a workspace copy as an
+   installation proxy, relax ACL/share checks, add privilege activation, or change
+   Secure Desktop/UAC. Close installer write handles before invoking the files.
+   From a native64 elevated shell, the fixed commands are:
+
+   ```powershell
+   $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+   $installedService = Join-Path $programFiles '휴대폰 승인\uac-service.exe'
+   & $installedService install
+   # Check the actual exit before continuing; install does not start the service.
+   & $installedService start
+   & $installedService status
+   ```
+
+3. Require actual successful exits and Running status. Existing TPM identity and
+   registry initialization is unchanged and must succeed; a failure there is not
+   a conclusion about Secure Desktop/UIA. Keep an already elevated operator context
+   available so triggering does not add another UAC consent prompt to the sample.
+   While the user holds the intended synthetic prompt open, issue exactly:
+
+   ```powershell
+   & $installedService probe-once
+   ```
+
+   Record its actual exit/accepted PID. There is one request, not a retry or scan
+   loop. Stop initiating native experiments when the current user-approved time
+   window ends. Use the existing fixed `stop` command for orderly service shutdown.
+
+4. The elevated operator reads/copies only the eight fixed private slot files,
+   checks regular/nonlink shape, <=4096-byte size and schema1 JSON, and correlates
+   the new slot/PID/time with the accepted request. Preserve original evidence;
+   never treat old files as a new result. No privileged service writes to a
+   caller-selected export path. Required native gates still include actual process/
+   privilege/restricted-token/session/desktop checks, protected-file sharing,
+   authenticated pipe, UIA provider behavior and cleanup/exit confirmation.
 
 Primary API basis: [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
 [token access rights](https://learn.microsoft.com/en-us/windows/win32/secauthz/access-rights-for-access-token-objects),

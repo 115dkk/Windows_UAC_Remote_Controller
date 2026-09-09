@@ -9,13 +9,14 @@ use std::{
     time::Instant,
 };
 use windows::Win32::Foundation::{
-    ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
-    ERROR_SERVICE_NOT_ACTIVE,
+    ERROR_BUSY, ERROR_NO_MORE_FILES, ERROR_SERVICE_ALREADY_RUNNING,
+    ERROR_SERVICE_CANNOT_ACCEPT_CTRL, ERROR_SERVICE_DOES_NOT_EXIST,
+    ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
 };
 use windows_service::{
     service::{
         Service, ServiceAccess, ServiceConfig, ServiceErrorControl, ServiceInfo, ServiceSidType,
-        ServiceStartType, ServiceState as NativeState, ServiceStatus, ServiceType,
+        ServiceStartType, ServiceState as NativeState, ServiceStatus, ServiceType, UserEventCode,
     },
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
@@ -160,6 +161,74 @@ pub(crate) fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     // A name collision is an error, never this product's fabricated status.
     verify_config(&service, &ffi::expected_executable()?, true)?;
     Ok(snapshot(status(&service)?))
+}
+
+pub(crate) fn request_probe_once() -> Result<crate::ProbeRequestAccepted, ServiceError> {
+    ffi::require_elevated()?;
+    // Only the fixed installed helper may issue this CLI diagnostic. A caller
+    // cannot redirect the service or promote a workspace/download executable.
+    let installation = ffi::validate_installation(true)?;
+    let service = open(
+        &manager(false)?,
+        ServiceAccess::QUERY_STATUS
+            | ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::READ_CONTROL
+            | ServiceAccess::USER_DEFINED_CONTROL,
+    )?
+    .ok_or(ServiceError::NotInstalled)?;
+    verify_config(&service, installation.executable(), false)?;
+    ffi::verify_service_security(&service)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?
+        != ServiceSidType::Restricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    let before = status(&service)?;
+    let pid = before
+        .process_id
+        .filter(|pid| *pid != 0 && before.current_state == NativeState::Running)
+        .ok_or(ServiceError::UnexpectedState)?;
+    let code = UserEventCode::from_raw(crate::PROBE_CONTROL_CODE)
+        .map_err(|_| ServiceError::InvalidArguments)?;
+    match service.notify(code) {
+        Ok(_) => (),
+        Err(error) if is_code(&error, ERROR_BUSY.0) => return Err(ServiceError::ProbeBusy),
+        Err(error) if is_code(&error, ERROR_NO_MORE_FILES.0) => {
+            return Err(ServiceError::ProbeSlotsFull);
+        }
+        Err(error) if is_code(&error, ERROR_SERVICE_CANNOT_ACCEPT_CTRL.0) => {
+            return Err(ServiceError::ProbeUnavailable);
+        }
+        Err(error) => return Err(scm_error(ServiceOperation::RequestProbe, error)),
+    }
+    let after = status(&service)?;
+    if after.current_state != NativeState::Running || after.process_id != Some(pid) {
+        return Err(ServiceError::UnexpectedState);
+    }
+    Ok(crate::ProbeRequestAccepted::new(pid))
+}
+
+/// Startup admission check only: the worker is still START_PENDING here. The
+/// callback is enabled only after entry reports Running; every actual probe
+/// independently verifies the running registration and its own service PID.
+pub(crate) fn probe_control_registration_ready(executable: &Path) -> Result<(), ServiceError> {
+    let service = open(
+        &manager(false)?,
+        ServiceAccess::QUERY_CONFIG | ServiceAccess::READ_CONTROL,
+    )?
+    .ok_or(ServiceError::NotInstalled)?;
+    verify_config(&service, executable, false)?;
+    ffi::verify_service_security(&service)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?
+        != ServiceSidType::Restricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(())
 }
 
 fn service_info(executable: &Path, start_type: ServiceStartType) -> ServiceInfo {
