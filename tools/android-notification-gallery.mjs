@@ -47,10 +47,25 @@ async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This runner is restricted to the disposable GitHub CI emulator.');
   }
-  const run = (args, binary = false) => execFileSync('adb', ['-s', serial, ...args], {
-    cwd: root, encoding: binary ? undefined : 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024,
-    windowsHide: true,
-  });
+  let commandFailureSaved = false;
+  const run = (args, binary = false, timeout = 15_000) => {
+    try {
+      return execFileSync('adb', ['-s', serial, ...args], {
+        cwd: root, encoding: binary ? undefined : 'utf8', timeout, maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+      });
+    } catch (error) {
+      if (!commandFailureSaved) {
+        commandFailureSaved = true;
+        writeFileSync(resolve(output, 'command-failure.json'), JSON.stringify({ args, timeout,
+          code: error.code ?? null, status: error.status ?? null, signal: error.signal ?? null,
+          stdout: binary ? '[binary omitted]' : String(error.stdout ?? '').slice(0, 65536),
+          stderr: String(error.stderr ?? '').slice(0, 65536) }, null, 2));
+      }
+      error.message = `adb ${args.slice(0, 4).join(' ')} failed: ${error.code ?? error.message}`;
+      throw error;
+    }
+  };
   const inventory = execFileSync('adb', ['devices'], { encoding: 'utf8', timeout: 5000 });
   if (!onlyIsolatedEmulator(inventory)) throw new Error('Expected exactly the disposable emulator; refusing all other devices.');
   mkdirSync(output, { recursive: true });
@@ -75,7 +90,10 @@ async function main() {
     // changes. The observed cold notification was canceled with Android reason5
     // (PACKAGE_CHANGED), not by our renderer or its60s lifetime. Drain that setup
     // work before FIRST Activity launch; no warmup/repost or timeout extension.
-    const idle = run(['shell', 'am', 'wait-for-broadcast-idle', '--flush-broadcast-loopers']);
+    // Cold OS setup can outlast a normal adb operation. This separate one-shot
+    // setup budget begins BEFORE any test notification exists; it does not
+    // change the product request or test notification's original60s lifetime.
+    const idle = run(['shell', 'am', 'wait-for-broadcast-idle', '--flush-broadcast-loopers'], false, 60_000);
     writeFileSync(resolve(output, 'setup-broadcast-idle.txt'), idle);
     requireBroadcastIdle(idle);
     for (const selected of cases) {
