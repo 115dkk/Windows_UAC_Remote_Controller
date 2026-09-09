@@ -52,6 +52,7 @@ export class GallerySession {
     expect(response?.status()).toBe(200);
     const heading = selected.fixture === 'desktop-devices' ? '연결된 휴대폰'
       : selected.fixture === 'desktop-history' ? '활동 기록'
+        : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
         : selected.fixture.startsWith('desktop-') ? 'PC 상태'
           : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' ? '알림 시간' : '요청';
     await expect(this.page.getByRole('heading', { name: heading, exact: true, level: 1 })).toBeVisible();

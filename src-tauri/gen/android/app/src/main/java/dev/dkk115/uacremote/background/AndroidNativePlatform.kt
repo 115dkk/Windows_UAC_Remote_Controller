@@ -22,6 +22,15 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     override fun legacyPolicyDocument(): String? = legacy.legacyPolicyDocument()
     override fun hasDeviceKeys(): Boolean = legacy.hasDeviceKeys()
 
+    override fun unixMillis(): ULong {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw BridgeException.NativeUnavailable()
+        val observed = System.currentTimeMillis()
+        if (observed < 0) throw BridgeException.NativeUnavailable()
+        // Actual phone display/retention time only. Rust validates its range;
+        // authorization and expiry use the separate elapsedRealtimeNanos clock.
+        return observed.toULong()
+    }
+
     override fun stateDirectory(): String = when (val result = environment.controllerDirectory()) {
         is NativeEnvironmentOutcome.Value -> result.value.canonicalPath
         is NativeEnvironmentOutcome.Failure -> throw BridgeException.NativeUnavailable()

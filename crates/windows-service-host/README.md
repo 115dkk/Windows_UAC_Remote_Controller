@@ -135,3 +135,88 @@ The installer must separately establish package/dependency provenance; a fixed
 path and ACL are not code-signature or loaded-module attestation.
 The threat model assumes intact Windows/SYSTEM/kernel and trusted elevated
 administration, while explicitly defending against unelevated local malware.
+
+## Dormant read-only probe supervisor
+
+`ServiceProbeSupervisor::for_running_service()` is an OS/SCM-guarded, thread-affine
+owner. `probe_once(&mut self)` accepts **no path, session, command or target**.
+It is not called by the service worker, CLI, renderer, Tauri, installer or startup.
+Adding such a trusted service-internal call requires a separate review. No helper
+is installed, launched or exercised by this source-authoring evidence.
+
+The supported subset requires an actual native64 Session0 LocalSystem/system-IL
+process matching the fixed running OWN_PROCESS SCM registration and its protected
+service executable. The SCM service must have Restricted SID configuration;
+its SID must be enabled in the actual token and present in its restricting SIDs.
+Impersonation query failures are failures; only ERROR_NO_TOKEN proves absence.
+Every run rechecks token, configuration, session and retained installation pins.
+
+The actual token must ALREADY have SeTcbPrivilege, SeIncreaseQuotaPrivilege and
+SeAssignPrimaryTokenPrivilege enabled. An explicit SCM required-privilege list
+must include them. This is a deliberately conservative supported subset, **not**
+a claim that Windows universally needs all three for every launch. No privilege
+activation, required-privilege policy write, SID removal, desktop-DACL edit or
+foreign-token duplication is performed. Missing rights return fixed errors.
+
+Exactly one nonzero WTSActive session is selected natively. Its WTSSessionInfoEx
+session/logon/connect observations are retained and rechecked; ambiguity, reuse,
+missing information or an observed change fails. The service duplicates only its
+own primary token, compares groups/restricted SIDs/privilege flags, changes only
+the duplicate's session and checks again. The child token is queried and compared
+to the same facts. No token is copied from another process.
+
+Only the pinned protected sibling `uac-prompt-probe.exe` may be created. It has
+no arguments, inherited handles or inherited user environment. Its working
+directory is the protected installation and desktop is fixed to
+`winsta0\winlogon`; access failure is not repaired by changing desktop security.
+Creation is suspended. A fresh unnamed job has KILL_ON_JOB_CLOSE and an active
+process limit of1, with no breakaway option. Assignment precedes resume. The
+empty job's Session0 creator is not falsely treated as a ban on its first
+assignment to a target-session child; the actual assignment API decides.
+
+Reporting uses one first-instance, remote-client-rejecting message pipe with a
+new SYSTEM/service-SID-only DACL. No cross-session stdio inheritance is used.
+The service matches the connected client PID/session to its retained created
+child process, creation time, protected image path and token. The helper matches
+the pipe's server PID/session to a retained actual running fixed SCM process,
+SYSTEM/system-IL/service-SID token and fixed protected sibling path. Pipe names
+and random challenges alone never authenticate either side. The leaf probe
+crate owns the strict versioned40-byte challenge/80-byte report codec; no
+dependency cycle or generic RPC surface exists.
+
+One fresh CSPRNG32-byte challenge is sent only after peer checks. The report
+contains only fixed counts/statuses and numeric fixed-operation failures. Excess
+bytes, duplicate/trailing messages, wrong challenge/version, invalid counts,
+malformed tags, EOF without report and inconsistent exit codes are rejected.
+The owner returns no report until authenticated report + EOF + actual process
+exit + empty job + fresh context checks. Helper exit3 (cleanup uncertainty)
+cannot be accepted even if earlier report bytes arrived.
+
+The execution deadline is5seconds, with bounded overlapped waits; failure asks
+only the owned child/job to terminate, then allows a separate1second cleanup
+confirmation budget. This does not promise a universal wall-time bound on a
+synchronous Windows call or OS scheduling. In particular, CreateProcessAsUser,
+SCM/WTS queries and termination APIs may block. A failed termination or pending
+I/O cancellation is never represented as completed. `is_quarantined()` remains
+true, `quarantined_cause()` retains the original fixed error, and
+`retry_cleanup()` only retries ownership cleanup (never launches). On an
+unconfirmed owner drop the job is closed as another kill request, all remaining
+kernel-referenced memory/owners and the process-wide lease are retained until
+process teardown. A CloseHandle failure latches this process against reuse.
+This intentionally trades bounded resource retention for no use-after-free or
+overlapping helper launch. Job/process close is not a fabricated exit proof.
+
+Pure tests cover no-input API shape, the shared fixed service identity, exact
+deadline boundaries, unambiguous synthetic session selection and strict report
+framing. They never call the Windows supervisor/helper/probe. Native launch,
+actual privileges/desktop access, job restrictions, pipe authentication,
+cancellation and cleanup still require ROOT's review and separately authorized
+Windows QA. Counts remain diagnostic; no Windows request identity, remote
+approval, credential input or authorization action is implemented.
+
+Primary API basis: [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
+[token access rights](https://learn.microsoft.com/en-us/windows/win32/secauthz/access-rights-for-access-token-objects),
+[job assignment](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject),
+[CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex),
+[QueryServiceStatusEx](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex),
+[QueryServiceConfig2W](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfig2w).

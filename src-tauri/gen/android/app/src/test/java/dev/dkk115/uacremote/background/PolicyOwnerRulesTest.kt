@@ -138,7 +138,7 @@ class PolicyOwnerRulesTest {
             assertFalse(ControllerLibraryPolicy.permitsInitialProperties(listOf(name)))
         }
         assertEquals("uac_android_controller", ControllerLibraryPolicy.LIBRARY)
-        assertEquals(2u, ControllerLibraryPolicy.ABI_VERSION)
+        assertEquals(3u, ControllerLibraryPolicy.ABI_VERSION)
     }
 
     @Test fun loaderPropertyInspectionIsBounded() {
@@ -159,9 +159,20 @@ class PolicyOwnerRulesTest {
     @Test fun policyResultsUseFixedStatusesAndRedactDocumentDebug() {
         val text = "{\"synthetic\":\"not real policy data\"}"
         assertFalse(PolicyReply.Committed(text).toString().contains(text))
+        assertFalse(PolicyReply.HistoryCommitted(text).toString().contains(text))
         assertEquals("busy", PolicyStatus.BUSY.wireValue)
         assertEquals("unavailable", PolicyStatus.UNAVAILABLE.wireValue)
         assertEquals("invalid_policy", PolicyStatus.INVALID_POLICY.wireValue)
         assertEquals("storage_unavailable", PolicyStatus.STORAGE_UNAVAILABLE.wireValue)
+        assertEquals("history_unavailable", PolicyStatus.HISTORY_UNAVAILABLE.wireValue)
+    }
+
+    @Test fun historyResultSizeHasItsOwnBoundWithoutRelaxingPolicyInput() {
+        val largerThanPolicy = "x".repeat(PolicyOwnerBounds.MAX_POLICY_BYTES + 1)
+        assertFalse(PolicyOwnerBounds.validPolicyString(largerThanPolicy))
+        assertTrue(PolicyOwnerBounds.validHistoryString(largerThanPolicy))
+        assertTrue(PolicyOwnerBounds.validHistoryString("x".repeat(PolicyOwnerBounds.MAX_HISTORY_BYTES)))
+        assertFalse(PolicyOwnerBounds.validHistoryString("x".repeat(PolicyOwnerBounds.MAX_HISTORY_BYTES + 1)))
+        assertFalse(PolicyOwnerBounds.validHistoryString("\uD800"))
     }
 }

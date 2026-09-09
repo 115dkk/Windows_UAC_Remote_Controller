@@ -135,6 +135,50 @@ pub(crate) fn validate_installation(
     })
 }
 
+/// Fixed probe leaf plus the already checked running-service installation.
+/// No caller path/name and no copying/provisioning occurs in this read-only proof.
+#[cfg(target_pointer_width = "64")]
+pub(crate) struct ValidatedProbeInstallation {
+    installation: ValidatedInstallation,
+    probe: PathBuf,
+    _probe_pin: OwnedHandle,
+}
+#[cfg(target_pointer_width = "64")]
+impl ValidatedProbeInstallation {
+    pub(crate) fn service(&self) -> &Path {
+        self.installation.executable()
+    }
+    pub(crate) fn probe(&self) -> &Path {
+        &self.probe
+    }
+}
+#[cfg(target_pointer_width = "64")]
+impl fmt::Debug for ValidatedProbeInstallation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ValidatedProbeInstallation(protected)")
+    }
+}
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn validate_probe_installation() -> Result<ValidatedProbeInstallation, ServiceError> {
+    let installation = validate_installation(true)?;
+    let probe = installation
+        .executable()
+        .parent()
+        .ok_or(ServiceError::UnsafePath)?
+        .join(windows_prompt_probe::supervision::PROBE_EXECUTABLE);
+    let pin = open_checked(
+        &probe,
+        false,
+        ObjectPolicy::Installation,
+        &policy::trusted_system_sids(),
+    )?;
+    Ok(ValidatedProbeInstallation {
+        installation,
+        probe,
+        _probe_pin: pin,
+    })
+}
+
 fn same_path(a: &Path, b: &Path) -> Result<bool, ServiceError> {
     let a = a.to_str().ok_or(ServiceError::UnsafePath)?;
     let b = b.to_str().ok_or(ServiceError::UnsafePath)?;

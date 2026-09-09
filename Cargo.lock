@@ -6,9 +6,14 @@ version = 4
 name = "activity-journal"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "approval-protocol",
+ "notification-policy",
+ "p256",
+ "phone-request-core",
  "rustix",
  "serde",
  "serde_json",
+ "service-protocol",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -47,6 +52,7 @@ dependencies = [
 name = "android-bindings"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "activity-journal",
  "android-controller",
  "controller-runtime",
  "libc",
@@ -63,6 +69,7 @@ dependencies = [
 name = "android-controller"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "activity-journal",
  "approval-protocol",
  "notification-policy",
  "p256",
@@ -561,6 +568,7 @@ dependencies = [
 name = "controller-runtime"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "activity-journal",
  "libc",
  "notification-policy",
  "rustix",
@@ -5039,11 +5047,13 @@ name = "windows-service-host"
 version = "0.1.0-alpha.1"
 dependencies = [
  "activity-journal",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "windows 0.62.2",
  "windows-identity",
+ "windows-prompt-probe",
  "windows-service",
 ]
 

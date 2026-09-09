@@ -2,10 +2,10 @@
 
 use std::fmt;
 
+use activity_journal::{OutcomeHistory, OutcomeHistoryLimits, OutcomeHistoryRecord, UnixMillis};
 use notification_policy::{CapacityLimits, NotificationPolicy, RequestKey};
 use phone_request_core::{
-    InboxCheckpoint, InboxClock, InboxFault, OutcomeDeliveryId, PendingOutcome, PhoneBootId,
-    PhoneInbox,
+    InboxClock, InboxFault, OutcomeDeliveryId, PendingOutcome, PhoneBootId, PhoneInbox,
 };
 use phone_state_store::{
     CommitReceipt, Durability, NativePrivateDirectory, SnapshotStore, Transition,
@@ -13,8 +13,8 @@ use phone_state_store::{
 use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
 use crate::{
-    CommittedCheck, CommittedOutcomeAcknowledgment, CommittedUpdate, DurableFailure, DurableFault,
-    InboxCounts,
+    CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
+    ControllerCheckpoint, DurableFailure, DurableFault, InboxCounts,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +56,7 @@ impl RequiredDurability {
 pub struct DurableInbox {
     store: SnapshotStore,
     inbox: PhoneInbox,
+    history: OutcomeHistory,
     required_durability: RequiredDurability,
     fault: Option<DurableFault>,
 }
@@ -197,6 +198,62 @@ impl DurableInbox {
         Ok(self.inbox.pending_outcomes())
     }
 
+    /// Last committed body-free display history, oldest insertion first. This
+    /// is not an approval result and cannot supply request/peer authority.
+    pub fn history(&self) -> Result<&[OutcomeHistoryRecord], DurableFault> {
+        self.ensure_healthy()?;
+        Ok(self.history.records())
+    }
+
+    /// Put pending outcomes into history and remove exactly those producer rows
+    /// in ONE snapshot commit. No native timestamp means the caller must not
+    /// invoke this operation; UNIX time affects display/retention, not decisions.
+    /// A commit failure exposes neither the candidate history nor an ACK.
+    pub fn record_pending_outcomes(
+        &mut self,
+        recorded_at: UnixMillis,
+    ) -> Result<CommittedHistoryMutation, DurableFailure> {
+        let (receipt, affected) = self.transition_owner(|inbox, history| {
+            // The queue is already bounded/committed by this same sole owner.
+            // Snapshot consistency forbids recorded/pending overlap, including
+            // a supposed partial write from a second recipient (none exists).
+            let pending = inbox.pending_outcomes().to_vec();
+            if pending.iter().any(|row| {
+                history
+                    .records()
+                    .iter()
+                    .any(|record| record.delivery_id() == row.delivery_id().as_bytes())
+            }) {
+                return Err(DurableFault::Composite(
+                    crate::ControllerCheckpointError::RecordedPendingOverlap,
+                ));
+            }
+            for row in &pending {
+                history
+                    .record_pending(row, recorded_at)
+                    .map_err(DurableFault::History)?;
+                if inbox.acknowledge_outcome(row.delivery_id())
+                    != phone_request_core::OutcomeAcknowledgment::Removed
+                {
+                    return Err(DurableFault::TransitionIncomplete);
+                }
+            }
+            // Even an empty outbox can have aged visible history. Never touches
+            // source watermarks, suppression guards, policy or authentication.
+            let _ = history.prune(recorded_at);
+            Ok(pending.len())
+        })?;
+        Ok(CommittedHistoryMutation { receipt, affected })
+    }
+
+    /// Delete the currently visible history only. Pending rows are deliberately
+    /// preserved; native UI must reconcile them first if clearing that whole
+    /// displayed view. Replay/source state is never erased by this command.
+    pub fn clear_history(&mut self) -> Result<CommittedHistoryMutation, DurableFailure> {
+        let (receipt, affected) = self.transition_owner(|_, history| Ok(history.clear()))?;
+        Ok(CommittedHistoryMutation { receipt, affected })
+    }
+
     /// Commit-backed removal only, after the native journal has durably inserted
     /// or deduplicated this exact delivery ID. This API cannot prove that journal
     /// operation occurred. Unknown/duplicate IDs report NotPending, never delivered.
@@ -292,7 +349,8 @@ impl DurableInbox {
         required_durability: RequiredDurability,
     ) -> Result<(Self, CommittedUpdate), DurableFailure> {
         let mut inbox = PhoneInbox::with_phone_boot(policy, limits, boot);
-        let initial = match encode(&inbox) {
+        let history = OutcomeHistory::new(OutcomeHistoryLimits::default());
+        let initial = match encode(&inbox, &history) {
             Ok(initial) => initial,
             Err(cause) => return Err(stop_unowned(&mut inbox, cause)),
         };
@@ -306,6 +364,7 @@ impl DurableInbox {
         let mut owner = Self {
             store,
             inbox,
+            history,
             required_durability,
             fault: None,
         };
@@ -331,9 +390,9 @@ impl DurableInbox {
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?
             .to_vec();
         if policy_only {
-            let preview = InboxCheckpoint::from_bytes(&bytes)
-                .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
-            if !preview.is_policy_only() {
+            let preview = ControllerCheckpoint::from_bytes(&bytes)
+                .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?;
+            if !preview.inbox().is_policy_only() {
                 return Err(DurableFailure::new(
                     DurableFault::LifecycleIntegrationRequired,
                 ));
@@ -342,11 +401,12 @@ impl DurableInbox {
         let transition = store
             .begin_transition()
             .map_err(|error| DurableFailure::new(DurableFault::Storage(error)))?;
-        let checkpoint = InboxCheckpoint::from_bytes(&bytes)
-            .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
+        let (checkpoint, history) = ControllerCheckpoint::from_bytes(&bytes)
+            .map_err(|error| DurableFailure::new(DurableFault::Composite(error)))?
+            .into_parts();
         let (mut inbox, update) = PhoneInbox::restore_checkpoint(checkpoint, boot, clock)
             .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
-        let receipt = match commit_candidate(transition, &inbox, required_durability) {
+        let receipt = match commit_candidate(transition, &inbox, &history, required_durability) {
             Ok(receipt) => receipt,
             Err(cause) => return Err(stop_unowned(&mut inbox, cause)),
         };
@@ -354,6 +414,7 @@ impl DurableInbox {
             Self {
                 store,
                 inbox,
+                history,
                 required_durability,
                 fault: None,
             },
@@ -369,6 +430,13 @@ impl DurableInbox {
         &mut self,
         operation: impl FnOnce(&mut PhoneInbox) -> T,
     ) -> Result<(CommitReceipt, T), DurableFailure> {
+        self.transition_owner(|inbox, _| Ok(operation(inbox)))
+    }
+
+    fn transition_owner<T>(
+        &mut self,
+        operation: impl FnOnce(&mut PhoneInbox, &mut OutcomeHistory) -> Result<T, DurableFault>,
+    ) -> Result<(CommitReceipt, T), DurableFailure> {
         self.ensure_healthy().map_err(DurableFailure::new)?;
         // Read-only APIs must not expose a candidate if an unexpected unwind is
         // caught by a native caller. Only complete durable success clears this.
@@ -376,6 +444,7 @@ impl DurableInbox {
         let result = run_transition(
             &mut self.store,
             &mut self.inbox,
+            &mut self.history,
             self.required_durability,
             operation,
         );
@@ -392,19 +461,20 @@ impl DurableInbox {
     }
 }
 
-fn encode(inbox: &PhoneInbox) -> Result<Vec<u8>, DurableFault> {
-    inbox
-        .checkpoint()
-        .and_then(|checkpoint| checkpoint.to_bytes())
-        .map_err(DurableFault::Checkpoint)
+fn encode(inbox: &PhoneInbox, history: &OutcomeHistory) -> Result<Vec<u8>, DurableFault> {
+    let checkpoint = inbox.checkpoint().map_err(DurableFault::Checkpoint)?;
+    ControllerCheckpoint::new(checkpoint, history.clone())
+        .and_then(|value| value.to_bytes())
+        .map_err(DurableFault::Composite)
 }
 
 fn commit_candidate(
     transition: Transition<'_>,
     inbox: &PhoneInbox,
+    history: &OutcomeHistory,
     required_durability: RequiredDurability,
 ) -> Result<CommitReceipt, DurableFault> {
-    let bytes = encode(inbox)?;
+    let bytes = encode(inbox, history)?;
     let receipt = transition.commit(&bytes).map_err(DurableFault::Storage)?;
     required_durability.check(receipt)
 }
@@ -432,16 +502,22 @@ impl Drop for UncommittedInbox<'_> {
 fn run_transition<T>(
     store: &mut SnapshotStore,
     inbox: &mut PhoneInbox,
+    history: &mut OutcomeHistory,
     required_durability: RequiredDurability,
-    operation: impl FnOnce(&mut PhoneInbox) -> T,
+    operation: impl FnOnce(&mut PhoneInbox, &mut OutcomeHistory) -> Result<T, DurableFault>,
 ) -> Result<(CommitReceipt, T), DurableFault> {
     let transition = store.begin_transition().map_err(DurableFault::Storage)?;
     let mut candidate_owner = UncommittedInbox {
         inbox,
         completed: false,
     };
-    let candidate = operation(&mut *candidate_owner.inbox);
-    let receipt = commit_candidate(transition, &*candidate_owner.inbox, required_durability)?;
+    let candidate = operation(&mut *candidate_owner.inbox, history)?;
+    let receipt = commit_candidate(
+        transition,
+        &*candidate_owner.inbox,
+        history,
+        required_durability,
+    )?;
     candidate_owner.completed = true;
     Ok((receipt, candidate))
 }

@@ -10,8 +10,9 @@ use windows::{
     Win32::{
         Foundation::{ERROR_NO_TOKEN, HANDLE},
         Security::{
-            GetTokenInformation, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-            TOKEN_USER, TokenIntegrityLevel, TokenSessionId, TokenUser,
+            GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenIntegrityLevel,
+            TokenRestrictedSids, TokenSessionId, TokenUser,
         },
         System::{
             RemoteDesktop::ProcessIdToSessionId,
@@ -69,6 +70,69 @@ pub(super) fn process_identity(
     expected_session: Option<u32>,
     cleanup: &CleanupLog,
 ) -> Result<u32, ProbeError> {
+    identity(process, pid, expected_session, true, cleanup)
+}
+
+// Only the fixed supervised-pipe peer check may inspect the service in session0.
+// The public probe/worker still always require a nonzero interactive session.
+pub(super) fn service_identity(
+    process: HANDLE,
+    pid: u32,
+    expected_session: u32,
+    service_sid: &[u8],
+    cleanup: &CleanupLog,
+) -> Result<(), ProbeError> {
+    identity(process, pid, Some(expected_session), false, cleanup)?;
+    let mut token = HANDLE::default();
+    // SAFETY: retained service/own process only; QUERY does not copy/adjust token.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
+        .map_err(|error| native_error(NativeOperation::OpenProcessToken, error))?;
+    let token = OwnedHandle::acquired(token, NativeOperation::CloseToken, cleanup)?;
+    for class in [TokenGroups, TokenRestrictedSids] {
+        let groups = TokenBuffer::read(token.raw(), class, NativeOperation::TokenUser)?;
+        let bytes = groups.bytes();
+        let count = u32::from_ne_bytes(
+            bytes
+                .get(..4)
+                .ok_or_else(|| malformed(NativeOperation::TokenUser))?
+                .try_into()
+                .map_err(|_| malformed(NativeOperation::TokenUser))?,
+        ) as usize;
+        if count > 128 {
+            return Err(malformed(NativeOperation::TokenUser));
+        }
+        let start = mem::offset_of!(TOKEN_GROUPS, Groups);
+        let size = mem::size_of::<SID_AND_ATTRIBUTES>();
+        let rows = bytes
+            .get(start..start + count * size)
+            .ok_or_else(|| malformed(NativeOperation::TokenUser))?;
+        let mut matched = false;
+        for row in rows.chunks_exact(size) {
+            // SAFETY: exact initialized bounded C-layout row. sid() validates
+            // its contained SID pointer against this same stable allocation.
+            let group =
+                unsafe { std::ptr::read_unaligned(row.as_ptr().cast::<SID_AND_ATTRIBUTES>()) };
+            if groups.sid(group.Sid.0)? == service_sid
+                && (class == TokenRestrictedSids
+                    || (group.Attributes & 4 != 0 && group.Attributes & 16 == 0))
+            {
+                matched = true;
+            }
+        }
+        if !matched {
+            return Err(ProbeError::new(ProbeFailure::SystemUserRequired));
+        }
+    }
+    Ok(())
+}
+
+fn identity(
+    process: HANDLE,
+    pid: u32,
+    expected_session: Option<u32>,
+    interactive: bool,
+    cleanup: &CleanupLog,
+) -> Result<u32, ProbeError> {
     let mut raw_token = HANDLE::default();
     // SAFETY: borrowed live process handle, fixed QUERY access, initialized
     // exclusive token output. The acquired real token is uniquely adopted.
@@ -115,7 +179,7 @@ pub(super) fn process_identity(
     // HWND/process recheck remains necessary; this query is not atomic identity.
     unsafe { ProcessIdToSessionId(pid, &mut process_session) }
         .map_err(|error| native_error(NativeOperation::ProcessSession, error))?;
-    if token_session == 0
+    if (interactive && token_session == 0)
         || token_session != process_session
         || expected_session.is_some_and(|expected| expected != token_session)
     {

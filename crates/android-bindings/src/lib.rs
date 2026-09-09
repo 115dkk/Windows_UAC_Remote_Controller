@@ -38,6 +38,8 @@ pub enum BridgeError {
     InvalidPolicy,
     #[error("the native owner is closed")]
     Closed,
+    #[error("native history timestamp is unavailable")]
+    HistoryTimeUnavailable,
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
@@ -64,6 +66,8 @@ pub trait NativePlatform: Send + Sync {
     /// Fixed canonical getNoBackupFilesDir()/controller-state, never caller data.
     fn state_directory(&self) -> Result<String, BridgeError>;
     fn clock(&self) -> Result<NativeClock, BridgeError>;
+    /// Actual phone wall time for history only, never authorization or expiry.
+    fn unix_millis(&self) -> Result<u64, BridgeError>;
     /// Read only the former fixed Tauri policy document, never a renderer path.
     fn legacy_policy_document(&self) -> Result<Option<String>, BridgeError>;
     /// Existing controller aliases prevent fresh state; unavailable is an error.
@@ -116,7 +120,7 @@ impl fmt::Debug for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    2
+    3
 }
 
 #[uniffi::export]
@@ -169,6 +173,35 @@ impl MobileController {
         }
     }
 
+    /// Fixed native history read; no path, peer body, key or result supplied by UI.
+    pub fn history_json(&self) -> Result<String, BridgeError> {
+        let _admission = self.enter()?;
+        self.maintain_history_while_admitted()?;
+        self.read_history_while_admitted()
+    }
+
+    /// Reconcile already committed pending outcomes, then clear visible history.
+    /// Both phases retain source/replay state. If the clear fails, no cleared
+    /// result is returned; the native owner stops rather than claiming rollback.
+    pub fn clear_history_json(&self) -> Result<String, BridgeError> {
+        let _admission = self.enter()?;
+        self.maintain_history_while_admitted()?;
+        let result = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(error) => {
+                    drop(error.into_inner());
+                    return self.fail_closed(BridgeError::Closed);
+                }
+            };
+            state.as_mut().ok_or(BridgeError::Closed)?.clear_history()
+        };
+        if result.is_err() {
+            return self.fail_closed(BridgeError::StorageUnavailable);
+        }
+        self.read_history_while_admitted()
+    }
+
     /// Downward-only close; no key deletion, file recovery or service activation.
     pub fn shutdown_native_owner(&self) -> Result<(), BridgeError> {
         let _admission = self.enter()?;
@@ -184,6 +217,51 @@ enum OpenMode {
 }
 
 impl MobileController {
+    fn maintain_history_while_admitted(&self) -> Result<(), BridgeError> {
+        // Callback/shape rejection is BEFORE any storage intent or ACK. A valid
+        // backwards wall-clock observation is acceptable; monotonic request time
+        // remains governed by read_clock and the inbox's independent invariants.
+        let now = self
+            .platform
+            .unix_millis()
+            .ok()
+            .and_then(|value| activity_journal::UnixMillis::new(value).ok())
+            .ok_or(BridgeError::HistoryTimeUnavailable)?;
+        let result = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(error) => {
+                    drop(error.into_inner());
+                    return self.fail_closed(BridgeError::Closed);
+                }
+            };
+            state
+                .as_mut()
+                .ok_or(BridgeError::Closed)?
+                .record_pending_outcomes(now)
+        };
+        if result.is_err() {
+            return self.fail_closed(BridgeError::StorageUnavailable);
+        }
+        Ok(())
+    }
+
+    fn read_history_while_admitted(&self) -> Result<String, BridgeError> {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(error) => {
+                drop(error.into_inner());
+                return self.fail_closed(BridgeError::Closed);
+            }
+        };
+        let owner = state.as_ref().ok_or(BridgeError::Closed)?;
+        controller_runtime::encode_phone_history(
+            owner
+                .history()
+                .map_err(|_| BridgeError::StorageUnavailable)?,
+        )
+        .map_err(|_| BridgeError::StorageUnavailable)
+    }
     fn open(platform: Arc<dyn NativePlatform>, mode: OpenMode) -> Result<Arc<Self>, BridgeError> {
         let owner_lease = OwnerLease::acquire()?;
         let result = (|| {
@@ -355,12 +433,16 @@ mod tests {
     struct TestPlatform {
         path: String,
         clock: Mutex<NativeClock>,
+        history_time: Mutex<Result<u64, BridgeError>>,
         cleared: AtomicUsize,
         clear_fails: AtomicBool,
         reenter: Mutex<Option<Weak<MobileController>>>,
         saw_busy: AtomicBool,
     }
     impl NativePlatform for TestPlatform {
+        fn unix_millis(&self) -> Result<u64, BridgeError> {
+            *self.history_time.lock().unwrap()
+        }
         fn legacy_policy_document(&self) -> Result<Option<String>, BridgeError> {
             Ok(None)
         }
@@ -401,6 +483,7 @@ mod tests {
         let platform = Arc::new(TestPlatform {
             path: directory.path().to_str().unwrap().into(),
             clock: Mutex::new(clock),
+            history_time: Mutex::new(Ok(1_234_567)),
             cleared: AtomicUsize::new(0),
             clear_fails: AtomicBool::new(false),
             reenter: Mutex::new(None),
@@ -424,6 +507,34 @@ mod tests {
             _owner_lease: OwnerLease::acquire().unwrap(),
         });
         test(&controller, &platform);
+    }
+
+    #[test]
+    fn history_clock_failure_does_not_ack_or_stop_the_policy_owner() {
+        with_model(|controller, platform| {
+            *platform.history_time.lock().unwrap() = Err(BridgeError::NativeUnavailable);
+            assert_eq!(
+                controller.history_json(),
+                Err(BridgeError::HistoryTimeUnavailable)
+            );
+            assert!(controller.notification_policy_json().is_ok());
+            assert_eq!(platform.cleared.load(Ordering::Relaxed), 0);
+            *platform.history_time.lock().unwrap() = Ok(u64::MAX);
+            assert_eq!(
+                controller.clear_history_json(),
+                Err(BridgeError::HistoryTimeUnavailable)
+            );
+            assert!(controller.notification_policy_json().is_ok());
+            *platform.history_time.lock().unwrap() = Ok(123);
+            assert_eq!(
+                controller.history_json().unwrap(),
+                r#"{"schemaVersion":1,"records":[]}"#
+            );
+            assert_eq!(
+                controller.clear_history_json().unwrap(),
+                r#"{"schemaVersion":1,"records":[]}"#
+            );
+        });
     }
 
     #[test]

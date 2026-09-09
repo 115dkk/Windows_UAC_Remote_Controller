@@ -6,6 +6,8 @@
 
 mod elevation;
 mod filesystem;
+#[cfg(target_pointer_width = "64")]
+pub(crate) mod probe_supervisor;
 mod security;
 
 pub(crate) use elevation::request_elevated_control;

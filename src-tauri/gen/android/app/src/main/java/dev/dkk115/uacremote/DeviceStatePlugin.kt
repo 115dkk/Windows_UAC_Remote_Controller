@@ -59,6 +59,22 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun controllerHistory(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        val owner = activity.application as? ControllerApplication
+        if (owner == null) resolveHistory(invoke, PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
+        else owner.readControllerHistory { result -> resolveHistory(invoke, result) }
+    }
+
+    @Command
+    fun clearControllerHistory(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        val owner = activity.application as? ControllerApplication
+        if (owner == null) resolveHistory(invoke, PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
+        else owner.clearControllerHistory { result -> resolveHistory(invoke, result) }
+    }
+
+    @Command
     fun saveControllerPolicy(invoke: Invoke) {
         val policy = policyArgument(invoke.getRawArgs())
         if (policy == null) {
@@ -93,11 +109,30 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
                     result.put("status", "ok")
                     result.put("policyJson", reply.policyJson)
                 }
+                is PolicyReply.HistoryCommitted -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
                 is PolicyReply.Failed -> result.put("status", reply.status.wireValue)
             }
             try { invoke.resolve(result) } catch (_: Exception) {
                 // The old Activity/Invoke can disappear during rotation. Never
                 // shut down the Application owner or retry a committed write.
+            }
+        }
+    }
+
+    private fun resolveHistory(invoke: Invoke, reply: PolicyReply) {
+        activity.runOnUiThread {
+            val result = JSObject()
+            if (activity.isDestroyed || activity.isFinishing) result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
+            else when (reply) {
+                is PolicyReply.HistoryCommitted -> {
+                    result.put("status", "ok")
+                    result.put("historyJson", reply.historyJson)
+                }
+                is PolicyReply.Committed -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
+                is PolicyReply.Failed -> result.put("status", reply.status.wireValue)
+            }
+            try { invoke.resolve(result) } catch (_: Exception) {
+                // Activity loss does not reset or retry a committed history clear.
             }
         }
     }

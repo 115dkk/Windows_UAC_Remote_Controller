@@ -107,9 +107,48 @@ impl PolicyReply {
 }
 
 #[cfg(target_os = "android")]
+pub(crate) enum OwnerOperation {
+    Read,
+    SavePolicy(String),
+    ClearHistory,
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum HistoryReply {
+    Ok {
+        #[serde(rename = "historyJson")]
+        history_json: String,
+    },
+    Busy {},
+    Unavailable {},
+    InvalidPolicy {},
+    StorageUnavailable {},
+    HistoryUnavailable {},
+}
+
+#[cfg(any(target_os = "android", test))]
+impl HistoryReply {
+    fn history(self) -> Result<Option<Vec<controller_runtime::ActivityView>>, AppIssue> {
+        match self {
+            Self::Ok { history_json } => {
+                controller_runtime::decode_phone_history_json(history_json.as_bytes()).map(Some)
+            }
+            Self::HistoryUnavailable {} => Ok(None),
+            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::StorageUnavailable {} => Err(crate::commands::storage_issue()),
+            Self::Unavailable {} | Self::InvalidPolicy {} => {
+                Err(controller_runtime::phone_history_issue())
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
 pub(crate) fn policy_snapshot(
     app: &tauri::AppHandle,
-    policy_json: Option<String>,
+    operation: OwnerOperation,
 ) -> Result<controller_runtime::AppSnapshot, AppIssue> {
     use tauri::Manager;
     #[derive(serde::Serialize)]
@@ -118,23 +157,73 @@ pub(crate) fn policy_snapshot(
         policy_json: String,
     }
     let plugin = &app.state::<DeviceState>().0;
-    let reply: PolicyReply = match policy_json {
-        Some(policy_json) => {
+    let cleared = if matches!(&operation, OwnerOperation::ClearHistory) {
+        let reply: HistoryReply = plugin
+            .run_mobile_plugin("clearControllerHistory", ())
+            .map_err(|_| controller_runtime::phone_history_issue())?;
+        Some(
+            reply
+                .history()?
+                .ok_or_else(controller_runtime::phone_history_issue)?,
+        )
+    } else {
+        None
+    };
+    let reply: PolicyReply = match operation {
+        OwnerOperation::SavePolicy(policy_json) => {
             plugin.run_mobile_plugin("saveControllerPolicy", SavePolicy { policy_json })
         }
-        None => plugin.run_mobile_plugin("controllerPolicy", ()),
+        OwnerOperation::Read | OwnerOperation::ClearHistory => {
+            plugin.run_mobile_plugin("controllerPolicy", ())
+        }
     }
     .map_err(|_| mobile_issue())?;
     let policy = reply.policy()?;
+    let history = match cleared {
+        Some(history) => Some(history),
+        None => plugin
+            .run_mobile_plugin::<HistoryReply>("controllerHistory", ())
+            .map_err(|_| controller_runtime::phone_history_issue())?
+            .history()?,
+    };
     let readiness = readiness(app).unwrap_or(controller_runtime::MobileReadiness::UNAVAILABLE);
-    Ok(controller_runtime::AppSnapshot::from_android_policy(
-        policy, readiness,
-    ))
+    Ok(
+        controller_runtime::AppSnapshot::from_android_policy_and_history(
+            policy, readiness, history,
+        ),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PolicyReply;
+    use super::{HistoryReply, PolicyReply};
+
+    #[test]
+    fn history_reply_never_turns_native_failure_or_malformed_content_into_empty_data() {
+        for input in [
+            r#"{}"#,
+            r#"{"status":"ok"}"#,
+            r#"{"status":"history_unavailable","historyJson":"{}"}"#,
+        ] {
+            assert!(serde_json::from_str::<HistoryReply>(input).is_err());
+        }
+        for status in ["busy", "unavailable", "storage_unavailable"] {
+            let reply: HistoryReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            assert!(reply.history().is_err());
+        }
+        let reply: HistoryReply =
+            serde_json::from_value(serde_json::json!({"status":"ok", "historyJson":"{}"})).unwrap();
+        assert!(reply.history().is_err());
+        let reply: HistoryReply = serde_json::from_value(
+            serde_json::json!({"status":"ok", "historyJson":r#"{"schemaVersion":1,"records":[]}"#}),
+        )
+        .unwrap();
+        assert!(reply.history().unwrap().unwrap().is_empty());
+        let partial: HistoryReply =
+            serde_json::from_value(serde_json::json!({"status":"history_unavailable"})).unwrap();
+        assert!(partial.history().unwrap().is_none());
+    }
 
     #[test]
     fn native_policy_reply_has_no_default_or_raw_error_fallback() {

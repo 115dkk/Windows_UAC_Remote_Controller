@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod contract;
+mod phone_history;
 mod runtime;
 mod storage;
 mod unwired;
@@ -11,6 +12,10 @@ mod windows;
 
 pub use contract::*;
 pub use notification_policy::{AlertMode, NotificationPolicy, Schedule};
+pub use phone_history::{
+    MAX_PHONE_HISTORY_JSON_BYTES, decode_phone_history_json, encode_phone_history,
+    phone_history_issue,
+};
 pub use runtime::{
     AppRuntime, DecisionIntent, MAX_COMPUTER_NAME_BYTES, MAX_COMPUTER_NAME_CHARACTERS,
     ObservedServiceState, PlatformAdapter, PlatformError, ServiceCommandOutcome,

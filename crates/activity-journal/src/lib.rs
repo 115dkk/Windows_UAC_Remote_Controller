@@ -1,4 +1,9 @@
-//! Bounded diagnostic activity storage for a trusted, application-private directory.
+//! Bounded diagnostic storage and a separate pure terminal-outcome history model.
+//!
+//! [`OutcomeHistory`] performs no filesystem I/O. Its bounded bytes must be
+//! committed with the producer inbox and its acknowledgments in one transaction.
+//! Its wall-clock and retained-row deduplication rules deliberately differ from
+//! the filesystem-backed [`Journal`] described below. Neither model is authority.
 //!
 //! This crate is not authorization state, a credential store, or tamper-proof
 //! audit storage. Its typed events cannot carry arbitrary strings or payloads.
@@ -44,6 +49,7 @@
 #![forbid(unsafe_code)]
 
 mod format;
+mod outcome_history;
 mod storage;
 mod types;
 
@@ -53,6 +59,10 @@ use std::path::Path;
 use thiserror::Error;
 
 use format::State;
+pub use outcome_history::{
+    HistoryInsert, HistoryPruneReport, MAX_OUTCOME_HISTORY_BYTES, MAX_OUTCOME_HISTORY_RECORDS,
+    OutcomeHistory, OutcomeHistoryError, OutcomeHistoryLimits, OutcomeHistoryRecord,
+};
 use storage::Storage;
 pub use types::{
     ActivityEvent, ActivityRecord, ConnectionOutcome, Decision, FailureKind, Limits, LimitsError,

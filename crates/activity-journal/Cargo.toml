@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+notification-policy = { path = "../notification-policy" }
+phone-request-core = { path = "../phone-request-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -16,6 +18,9 @@ thiserror.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+approval-protocol = { path = "../approval-protocol" }
+p256.workspace = true
+service-protocol = { path = "../service-protocol" }
 tempfile = "3.23.0"
 
 [lints]

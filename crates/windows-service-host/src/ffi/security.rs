@@ -279,4 +279,18 @@ impl OwnServiceSid {
             "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
         ))
     }
+
+    /// New private supervisor kernel objects only, never a desktop/SCM ACL edit.
+    #[cfg(target_pointer_width = "64")]
+    pub(super) fn probe_descriptor(&self) -> Result<SecurityDescriptor, ServiceError> {
+        let mut text = PWSTR::null();
+        // SAFETY: bounded owned SID; returned SID string is LocalAlloc-owned.
+        unsafe { ConvertSidToStringSidW(self.ptr(), &mut text) }
+            .map_err(|error| win_error(ServiceOperation::ResolveServiceSid, error))?;
+        let _allocation = LocalAllocation(text.0.cast());
+        // SAFETY: successful converter returns a NUL-terminated SID string,
+        // used only in this fixed SYSTEM/service-SID descriptor, never output.
+        let sid = unsafe { text.to_string() }.map_err(|_| ServiceError::UnsafePermissions)?;
+        SecurityDescriptor::from_sddl(&format!("O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;{sid})"))
+    }
 }

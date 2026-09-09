@@ -9,6 +9,7 @@ publish.workspace = true
 description = "Commit-before-effects native phone inbox ownership"
 
 [dependencies]
+activity-journal = { path = "../activity-journal" }
 notification-policy = { path = "../notification-policy" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }

@@ -13,6 +13,7 @@ name = "uac_android_controller"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+activity-journal = { path = "../activity-journal" }
 android-controller = { path = "../android-controller" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }

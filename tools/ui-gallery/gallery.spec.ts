@@ -24,6 +24,16 @@ for (const selected of galleryCases) {
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toBeVisible();
+    if (fixture === 'phone-history') {
+      await expect(page.getByRole('heading', { name: 'PC에서 요청 종료됨', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '요청 시간 만료', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '요청 승인됨', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toBeEnabled();
+    }
+    if (fixture === 'phone-history-empty') {
+      await expect(page.getByRole('heading', { name: '표시할 활동 기록이 없어요', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toHaveCount(0);
+    }
     if (fixture === 'phone-unavailable') {
       await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
       await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(1);

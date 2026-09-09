@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+pub mod supervision;
+
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[allow(unsafe_code)]
 mod ffi;

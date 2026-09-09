@@ -37,6 +37,17 @@ export function qaCase(name: string): QaCase {
     case 'phone-terminal': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, programName: 'PowerShell', executablePath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', details: `pwsh.exe -NoProfile -Command "Write-Output '화면 예시'"` }] } };
     case 'phone-long-request': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, programName: '화면 예시 · 길이가 긴 프로그램 이름 설치 관리자.exe', executablePath: `C:\\${'한글 경로와 English mixed-direction אבג '.repeat(8)}\\${'unbroken'.repeat(22)}.exe`, details: `${'<img src=x onerror="exampleOnly()">\n'.repeat(4)}${'아주 긴 프로그램 요청의 예시 내용입니다. '.repeat(35)}` }] } };
     case 'phone-empty': return { page: 'requests', snapshot: phone };
+    case 'phone-history': return { page: 'activity', snapshot: { ...phone,
+      dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'available' },
+      canClearActivity: true,
+      activity: [
+        { id: 'synthetic-history-1', timestampMillis: Date.UTC(2026, 8, 8, 12, 30), kind: 'pc_completed' },
+        { id: 'synthetic-history-2', timestampMillis: Date.UTC(2026, 8, 8, 12, 20), kind: 'expired' },
+      ],
+    } };
+    case 'phone-history-empty': return { page: 'activity', snapshot: { ...phone,
+      dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'available' },
+    } };
     case 'phone-unavailable': return { page: 'requests', snapshot: { ...phone, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'phone-settings': return { page: 'schedule', snapshot: { ...phone, policy: { schedule: { mode: 'weekly', windows: [{ days: 31, start_minute: 9 * 60, end_minute: 18 * 60 }] }, alert: 'vibrate_only' } } };
     case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true, canOpenNotificationSettings: false } } };

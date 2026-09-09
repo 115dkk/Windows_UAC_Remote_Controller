@@ -13,6 +13,10 @@ pub enum DurableFault {
     Storage(StoreError),
     #[error("phone checkpoint validation failed")]
     Checkpoint(InboxCheckpointError),
+    #[error("the combined inbox/history checkpoint is invalid")]
+    Composite(crate::ControllerCheckpointError),
+    #[error("the bounded outcome history rejected this transition")]
+    History(activity_journal::OutcomeHistoryError),
     #[error("the native owner requires directory-synchronized storage")]
     DirectorySynchronizationRequired,
     #[error("the phone owner transition did not complete")]
@@ -115,6 +119,23 @@ impl CommittedUpdate {
 pub struct CommittedOutcomeAcknowledgment {
     pub(crate) receipt: CommitReceipt,
     pub(crate) acknowledgment: OutcomeAcknowledgment,
+}
+
+/// Atomic local history mutation only, not native notification/Windows proof.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommittedHistoryMutation {
+    pub(crate) receipt: CommitReceipt,
+    pub(crate) affected: usize,
+}
+impl CommittedHistoryMutation {
+    pub const fn receipt(self) -> CommitReceipt {
+        self.receipt
+    }
+    /// Outbox rows recorded/acknowledged, or visible rows explicitly cleared.
+    pub const fn affected(self) -> usize {
+        self.affected
+    }
 }
 
 impl CommittedOutcomeAcknowledgment {

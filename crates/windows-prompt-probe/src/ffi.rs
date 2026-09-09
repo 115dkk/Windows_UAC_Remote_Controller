@@ -31,6 +31,7 @@ use windows::{
     },
     core::{BOOL, Error as WinError, PWSTR},
 };
+pub(super) mod pipe_client;
 mod resources;
 mod security;
 mod uia;

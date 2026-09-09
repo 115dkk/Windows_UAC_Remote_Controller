@@ -110,6 +110,11 @@ impl InboxCheckpoint {
     pub fn policy(&self) -> &NotificationPolicy {
         &self.policy
     }
+    /// Body-free persisted deliveries for a trusted composite owner's consistency
+    /// checks. This is neither peer authority nor proof of a recipient write.
+    pub fn pending_outcomes(&self) -> &[PendingOutcome] {
+        &self.pending_outcomes
+    }
     pub const fn phone_boot(&self) -> PhoneBootId {
         self.phone_boot
     }

@@ -133,6 +133,7 @@ pub enum ActivityKind {
     Approved,
     Denied,
     Failure,
+    PcCompleted,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
@@ -197,6 +198,20 @@ pub struct AppSnapshot {
 }
 
 impl AppSnapshot {
+    /// Independent native history availability; None is never an empty history.
+    pub fn from_android_policy_and_history(
+        policy: NotificationPolicy,
+        readiness: MobileReadiness,
+        history: Option<Vec<ActivityView>>,
+    ) -> Self {
+        let mut value = Self::from_android_policy(policy, readiness);
+        if let Some(history) = history {
+            value.can_clear_activity = !history.is_empty();
+            value.activity = history;
+            value.data_availability.activity = Availability::Available;
+        }
+        value
+    }
     /// Present committed policy supplied by the one native Android owner.
     /// No preference store is opened, and missing request/device/history owners
     /// remain unavailable, never an apparently confirmed empty collection.

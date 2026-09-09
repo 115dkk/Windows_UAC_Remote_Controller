@@ -9,6 +9,7 @@ publish.workspace = true
 description = "Fail-closed presentation orchestration and local notification preferences"
 
 [dependencies]
+activity-journal = { path = "../activity-journal" }
 notification-policy = { path = "../notification-policy" }
 serde.workspace = true
 serde_json.workspace = true

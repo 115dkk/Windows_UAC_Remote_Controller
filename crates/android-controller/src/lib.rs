@@ -17,11 +17,13 @@
 
 #![forbid(unsafe_code)]
 
+mod checkpoint;
 mod owner;
 mod types;
 
+pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
 pub use owner::DurableInbox;
 pub use types::{
-    CommittedCheck, CommittedOutcomeAcknowledgment, CommittedUpdate, DurableFailure, DurableFault,
-    InboxCounts, NotificationCleanup,
+    CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
+    DurableFailure, DurableFault, InboxCounts, NotificationCleanup,
 };

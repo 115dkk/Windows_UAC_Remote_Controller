@@ -36,6 +36,18 @@ class ControllerApplication : Application() {
         else actor.savePolicy(policyJson, callback)
     }
 
+    internal fun readControllerHistory(callback: (PolicyReply) -> Unit) {
+        val actor = policyActor
+        if (actor == null) callback(PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
+        else actor.readHistory(callback)
+    }
+
+    internal fun clearControllerHistory(callback: (PolicyReply) -> Unit) {
+        val actor = policyActor
+        if (actor == null) callback(PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
+        else actor.clearHistory(callback)
+    }
+
     /** Only an actual native owner termination may call this; no Activity/exit hook does. */
     internal fun shutdownControllerPolicyOwner() { policyActor?.shutdown() }
 }

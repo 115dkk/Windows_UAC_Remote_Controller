@@ -199,6 +199,25 @@ describe('request interaction boundaries', () => {
 });
 
 describe('destructive action confirmation', () => {
+  it('shows coarse PC completion without claiming approval and clears only after the owner confirms', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-history');
+    const cleared = deferred<AppSnapshot>();
+    const clearActivity = vi.fn<ControllerBridge['clearActivity']>(() => cleared.promise);
+    render(<App bridge={bridgeFor(fixture.snapshot, { clearActivity })} initialPage={fixture.page} />);
+    expect(await screen.findByRole('heading', { name: 'PC에서 요청 종료됨' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '요청 승인됨' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.clearActivity }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: ko.cancel }));
+    expect(clearActivity).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: ko.clearActivity }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: ko.clearActivity }));
+    expect(clearActivity).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: 'PC에서 요청 종료됨' })).toBeInTheDocument();
+    await act(async () => { cleared.resolve({ ...fixture.snapshot, activity: [], canClearActivity: false }); await cleared.promise; });
+    expect(await screen.findByRole('heading', { name: ko.noActivity })).toBeInTheDocument();
+  });
+
   it('supports cancel, Escape, focus return and a single confirmed service command', async () => {
     const user = userEvent.setup();
     const snapshot = qaCase('desktop-running').snapshot;

@@ -163,6 +163,9 @@ mod tests {
         fn clock(&self) -> Result<NativeClock, BridgeError> {
             unreachable!("not a native clock test")
         }
+        fn unix_millis(&self) -> Result<u64, BridgeError> {
+            unreachable!("bootstrap does not record outcomes")
+        }
         fn clear_request_notifications(&self) -> Result<(), BridgeError> {
             unreachable!("bootstrap does not clear notifications")
         }

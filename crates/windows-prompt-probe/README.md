@@ -4,12 +4,14 @@ This crate is a **diagnostic probe, not a request identity or approval adapter**
 The safe outward API is `probe_once() -> Result<ProbeReport, ProbeError>`, with no
 caller-selected process, HWND, path, session, desktop, property, input or action.
 The helper binary `uac-prompt-probe` accepts no arguments. Other arguments fail
-without echoing them. No service launcher, installation, supervision, elevation,
-registration, token adjustment, policy change, network or user-input endpoint is
-implemented here.
+without echoing them. It now requires the authenticated private service pipe;
+there is no unsupervised stdout fallback. No installation, elevation, SCM
+registration, token adjustment, policy change, network or user-input endpoint
+is implemented in this crate.
 
-ROOT must integrate a fixed, protected installed helper and a separately reviewed
-five-second process supervisor before privileged use. No workspace executable is
+`windows-service-host` now contains a dormant fixed-helper supervisor. ROOT must
+review and integrate that service-internal path, and separately provision the
+protected installed helper, before privileged use. No workspace executable is
 automatically installed or launched by this crate. A Session-0 service does not
 become a per-session SYSTEM UI process merely because the service is Running.
 
@@ -75,7 +77,7 @@ and pointer boundaries document their lifetime/ownership invariants inline.
 Cooperative five-second checks and UIA's timeout settings are **not a hard bound**:
 native/provider calls, COM release and apartment teardown can block. The function
 joins its worker fully; it never reports a timed-out join as successful termination
-or emits observations while the worker continues. The mandatory future process
+or emits observations while the worker continues. The mandatory process
 supervisor must bound/terminate the complete helper, not `consent.exe`.
 
 ## Cleanup and output
@@ -86,12 +88,34 @@ first cleanup operation/HRESULT and cleanup-failure count remain attached. A cle
 operation with failed cleanup becomes an error, never a capability report. COM
 Release/CoUninitialize expose no HRESULT and are not labelled successfully timed.
 
-Normal success/error output occurs only after worker completion and resource
-scopes. On observed native cleanup failure, the binary emits no report and returns
-exit 3 so process teardown completes outstanding OS cleanup. The library error
-still preserves both causes. The dedicated binary silences raw panic payloads;
+Normal report creation occurs only after worker completion and probe-resource
+scopes. On observed probe cleanup failure, the binary emits no report and returns
+exit3. The service must confirm actual process exit rather than assuming teardown
+from this code. A later pipe/SCM/process close failure also changes exit to3, so
+previously buffered report bytes cannot be accepted. The library error still
+preserves both probe causes. The dedicated binary silences raw panic payloads;
 the library does not replace a host panic hook. Windows/API/worker failures return
 nonzero; argument rejection returns 2. Successful metadata is not authorization.
+
+`supervision::run_supervised_helper()` is argument-free. Before probing, it checks
+the actual own SYSTEM/system-IL/session/restricted-service-SID token, opens only
+the fixed local PID-derived pipe, uses identification-only security QoS, and
+matches the pipe server to the running fixed SCM service. A retained server
+process handle, creation time, native64 architecture, Session0, service SID and
+fixed sibling image path are rechecked. No foreign token is duplicated and no
+pipe impersonation API exists. The service independently authenticates its
+retained created child. The namespace or challenge alone is not authentication.
+
+The safe `supervision` module owns a strict versioned40-byte challenge and
+80-byte reply with reserved-zero fields, fixed status tags, bounded UIA counts
+and no arbitrary strings. It is a leaf dependency of the service host. A fresh
+32-byte random challenge is generated only by the service; the codec's shape
+constructor cannot prove entropy or provenance. An echoed challenge binds only
+this already-authenticated local report exchange, not a UAC request or approval.
+The client writes exactly one report message then closes; the service rejects
+trailing messages and requires EOF and actual matching process exit before
+returning any observation. Helper authentication/protocol failures produce only
+fixed rejection exit2, never raw exceptions/paths or permissive fallback.
 
 ## Source/test boundary
 

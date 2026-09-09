@@ -10,6 +10,10 @@
 #![deny(unsafe_code)]
 
 mod contract;
+mod probe_supervisor;
+pub use probe_supervisor::{
+    LaunchPrivilege, ProbeSupervisorError, ReportOutcome, ServiceProbeSupervisor, SupervisorStage,
+};
 #[cfg(any(windows, test))]
 mod policy;
 

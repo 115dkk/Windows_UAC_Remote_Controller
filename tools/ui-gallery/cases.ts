@@ -28,6 +28,8 @@ export const galleryCases: readonly GalleryCase[] = [
   row('desktop-top-nav-boundary-672', 'desktop-empty', 672, 760),
   row('desktop-rail-boundary-673', 'desktop-empty', 673, 760),
   row('phone-empty-390', 'phone-empty', 390, 844),
+  row('phone-history-390', 'phone-history', 390, 844),
+  row('phone-history-empty-390', 'phone-history-empty', 390, 844),
   row('phone-unavailable-390', 'phone-unavailable', 390, 844),
   row('phone-pending-390', 'phone-pending', 390, 844),
   row('phone-terminal-390', 'phone-terminal', 390, 844, 'details'),

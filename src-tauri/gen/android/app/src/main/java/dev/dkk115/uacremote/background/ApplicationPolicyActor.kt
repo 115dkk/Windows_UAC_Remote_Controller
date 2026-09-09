@@ -8,6 +8,7 @@ import android.os.SystemClock
 import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.MobileController
 import dev.dkk115.uacremote.nativecore.bridgeVersion
+import dev.dkk115.uacremote.nativecore.uniffiEnsureInitialized
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.RejectedExecutionException
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Callbacks run on main, but all JNA/filesystem work stays on the sole worker.
  */
 internal class ApplicationPolicyActor(private val application: Application) {
+    private enum class Operation { READ_POLICY, SAVE_POLICY, READ_HISTORY, CLEAR_HISTORY }
     private val lifecycle = PolicyOwnerLifecycle()
     private val main = Handler(Looper.getMainLooper())
     private val pending = ConcurrentHashMap<PendingCall, Unit>()
@@ -47,14 +49,16 @@ internal class ApplicationPolicyActor(private val application: Application) {
         catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE) }
     }
 
-    fun readPolicy(callback: (PolicyReply) -> Unit) = submit(null, callback)
+    fun readPolicy(callback: (PolicyReply) -> Unit) = submit(Operation.READ_POLICY, null, callback)
+    fun readHistory(callback: (PolicyReply) -> Unit) = submit(Operation.READ_HISTORY, null, callback)
+    fun clearHistory(callback: (PolicyReply) -> Unit) = submit(Operation.CLEAR_HISTORY, null, callback)
 
     fun savePolicy(policyJson: String, callback: (PolicyReply) -> Unit) {
         if (!PolicyOwnerBounds.validPolicyString(policyJson)) {
             deliverImmediate(callback, PolicyReply.Failed(PolicyStatus.INVALID_POLICY))
             return
         }
-        submit(policyJson, callback)
+        submit(Operation.SAVE_POLICY, policyJson, callback)
     }
 
     /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
@@ -74,6 +78,9 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 return
             }
             PackagedControllerLibrary.prepare(application)
+            // Run the generator's contract/API checksum checks before any
+            // controller operation; our coarse ABI number is not a substitute.
+            uniffiEnsureInitialized()
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
             // Rust alone decides initial creation versus adoption/migration.
             // In particular Kotlin never pre-clears notifications or retries a
@@ -92,7 +99,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         }
     }
 
-    private fun submit(policyJson: String?, callback: (PolicyReply) -> Unit) {
+    private fun submit(operation: Operation, policyJson: String?, callback: (PolicyReply) -> Unit) {
         val rejected = lifecycle.admit()
         if (rejected != null) {
             deliverImmediate(callback, PolicyReply.Failed(rejected))
@@ -105,13 +112,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
             failOwner(PolicyStatus.UNAVAILABLE)
             return
         }
-        try { worker.execute { runCall(call, policyJson) } }
+        try { worker.execute { runCall(call, operation, policyJson) } }
         catch (_: RejectedExecutionException) {
             deliver(call, PolicyReply.Failed(if (lifecycle.phase() == PolicyOwnerPhase.READY) PolicyStatus.BUSY else lifecycle.failure()))
         }
     }
 
-    private fun runCall(call: PendingCall, policyJson: String?) {
+    private fun runCall(call: PendingCall, operation: Operation, policyJson: String?) {
         try {
             if (call.finished()) return
             if (PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())) {
@@ -123,15 +130,22 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 return
             }
             val owner = controller ?: throw IllegalStateException("Native policy owner unavailable")
-            val committed = if (policyJson == null) owner.notificationPolicyJson()
-                else owner.saveNotificationPolicy(policyJson)
-            if (!PolicyOwnerBounds.validPolicyString(committed)) throw IllegalStateException("Native policy result unavailable")
-            // Only a Rust-returned committed result can become an ok reply.
-            deliver(call, PolicyReply.Committed(committed))
+            val committed = when (operation) {
+                Operation.READ_POLICY -> owner.notificationPolicyJson()
+                Operation.SAVE_POLICY -> owner.saveNotificationPolicy(checkNotNull(policyJson))
+                Operation.READ_HISTORY -> owner.historyJson()
+                Operation.CLEAR_HISTORY -> owner.clearHistoryJson()
+            }
+            val history = operation == Operation.READ_HISTORY || operation == Operation.CLEAR_HISTORY
+            val valid = if (history) PolicyOwnerBounds.validHistoryString(committed)
+                else PolicyOwnerBounds.validPolicyString(committed)
+            if (!valid) throw IllegalStateException("Native bounded result unavailable")
+            // Result kind is fixed by this native method, not renderer data.
+            deliver(call, if (history) PolicyReply.HistoryCommitted(committed) else PolicyReply.Committed(committed))
         } catch (failure: Throwable) {
             rethrowFatal(failure)
             val status = failureStatus(failure)
-            if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY) failOwner(status)
+            if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY && status != PolicyStatus.HISTORY_UNAVAILABLE) failOwner(status)
             deliver(call, PolicyReply.Failed(status))
         } finally {
             cleanupIfStopped()
@@ -158,7 +172,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             lifecycle.release()
             val expired = PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())
             if (expired) failOwner(PolicyStatus.UNAVAILABLE)
-            val actual = if (expired || (reply is PolicyReply.Committed && lifecycle.phase() != PolicyOwnerPhase.READY)) {
+            val actual = if (expired || (reply !is PolicyReply.Failed && lifecycle.phase() != PolicyOwnerPhase.READY)) {
                 PolicyReply.Failed(lifecycle.failure())
             } else reply
             safelyCallback(callback, actual)
@@ -238,6 +252,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private fun failureStatus(error: Throwable, initializing: Boolean = false): PolicyStatus = when (error) {
         is BridgeException.InvalidPolicy -> if (initializing) PolicyStatus.STORAGE_UNAVAILABLE else PolicyStatus.INVALID_POLICY
         is BridgeException.Busy -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.BUSY
+        is BridgeException.HistoryTimeUnavailable -> if (initializing) PolicyStatus.UNAVAILABLE else PolicyStatus.HISTORY_UNAVAILABLE
         is BridgeException.StorageUnavailable, is BridgeException.LifecycleIntegrationRequired,
         is BridgeException.OwnerFaulted -> PolicyStatus.STORAGE_UNAVAILABLE
         else -> PolicyStatus.UNAVAILABLE

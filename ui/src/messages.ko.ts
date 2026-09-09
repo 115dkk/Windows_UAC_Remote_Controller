@@ -20,7 +20,7 @@ export const ko = {
   loadingBody: 'PC 또는 휴대폰의 응답을 기다리고 있어요.',
   loadFailure: '앱 상태를 불러오지 못했어요. 앱이 실행 중인지 확인한 뒤 다시 시도해 주세요.',
   actionFailure: '작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.',
-  saveFailure: '알림 시간을 저장하지 못했어요. 입력한 내용은 유지됩니다. 다시 확인한 뒤 저장해 주세요.',
+  saveFailure: '저장 결과를 확인하지 못했어요. 입력한 내용은 이 화면에 남아 있어요. 현재 상태를 다시 확인해 주세요.',
   unexpectedTitle: '앱과 연결하지 못했어요',
   stale: '마지막으로 확인한 상태예요. 다시 확인하기 전에는 상태를 변경할 수 없어요.',
   updated: '현재 상태를 확인했어요.',
@@ -140,6 +140,7 @@ export const activityText: Record<ActivityView['kind'], string> = {
   connected: '기기 연결됨', disconnected: '기기 연결 해제됨', service_started: '서비스 시작됨',
   service_stopped: '서비스 중지됨', expired: '요청 시간 만료', cancelled: '요청 취소됨',
   approved: '요청 승인됨', denied: '요청 거부됨', failure: '요청 처리 실패',
+  pc_completed: 'PC에서 요청 종료됨',
 };
 export const weekdayOptions = [
   { bit: 1, short: '월', label: '월요일' }, { bit: 2, short: '화', label: '화요일' },

@@ -13,6 +13,8 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 activity-journal = { path = "../activity-journal" }
+windows-prompt-probe = { path = "../windows-prompt-probe" }
+getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }
@@ -24,6 +26,11 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Memory",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
     "Win32_System_Registry",
     "Win32_System_Services",
     "Win32_System_Threading",

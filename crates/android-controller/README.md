@@ -6,6 +6,16 @@ mutable interfaces private, and does not construct another application runtime.
 The policy in the checkpoint is the sole policy source for this owner. The crate
 is safe Rust and original project code is GPL-2.0-or-later.
 
+The same owner also keeps a pure bounded `OutcomeHistory` in a versioned composite
+payload. `record_pending_outcomes(native_unix_time)` records terminal projections
+and removes those exact outbox rows in one snapshot commit. `history()` exposes
+only the last committed view; `clear_history()` deletes visible history without
+touching pending/replay/source/policy state. The native application reconciles its
+queued terminal outcomes before clearing that view. See
+[ADR-0006](../../docs/adr/0006-atomic-phone-history.md) for migration, clock and
+failure semantics. This is not a second filesystem store or an independent
+exactly-once recipient.
+
 This is a storage/domain integration layer, not an Android runtime, notification
 plugin, signing API, enrollment authority, or implementation of Windows UAC. There
 are no native callbacks, network operations, private keys, FFI, renderer commands,

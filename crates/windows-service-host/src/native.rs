@@ -120,6 +120,33 @@ pub(crate) fn verify_ui_helper_target(executable: &Path) -> Result<(), ServiceEr
     Ok(())
 }
 
+/// A dormant supervisor must be this exact running SCM process, not merely an
+/// elevated or SYSTEM process. No service configuration is changed here.
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, ServiceError> {
+    let service = open(
+        &manager(false)?,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::READ_CONTROL,
+    )?
+    .ok_or(ServiceError::NotInstalled)?;
+    verify_config(&service, executable, false)?;
+    ffi::verify_service_security(&service)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
+        != ServiceSidType::Restricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    let observed = status(&service)?;
+    if observed.current_state != NativeState::Running
+        || observed.process_id != Some(std::process::id())
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(service)
+}
+
 pub(crate) fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     let manager = manager(false)?;
     let Some(service) = open(

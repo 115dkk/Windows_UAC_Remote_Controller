@@ -8,7 +8,11 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use android_controller::{DurableFailure, DurableFault, DurableInbox, NotificationCleanup};
+use activity_journal::UnixMillis;
+use android_controller::{
+    ControllerCheckpoint, ControllerCheckpointError, DurableFailure, DurableFault, DurableInbox,
+    NotificationCleanup,
+};
 use approval_protocol::{
     BootEpoch, ChallengeNonce, ExpiryTick, OsSession, PcIdentity, RequestBinding, RequestContent,
     RequestId,
@@ -19,8 +23,8 @@ use notification_policy::{
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use phone_request_core::{
-    InboxCheckpointError, InboxClock, InboxFault, OutcomeAcknowledgment, PendingOutcome,
-    PhoneBootId, PhoneInbox, request_key,
+    InboxClock, InboxFault, OutcomeAcknowledgment, PendingOutcome, PhoneBootId, PhoneInbox,
+    request_key,
 };
 use phone_state_store::{
     Durability, INTENT_FILE_NAME, LOCK_FILE_NAME, NativePrivateDirectory, SNAPSHOT_FILE_NAME,
@@ -216,6 +220,176 @@ fn owner_with_pending(temp: &tempfile::TempDir, id: u64) -> (DurableInbox, Pendi
 }
 
 #[test]
+fn history_and_pending_ack_are_one_committed_snapshot_across_reopen_and_clear() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, pending) = owner_with_pending(&temp, 9_101);
+    let sources = owner.counts().unwrap().sources();
+    let recorded = owner
+        .record_pending_outcomes(UnixMillis::new(12_345).unwrap())
+        .unwrap();
+    assert_eq!(recorded.affected(), 1);
+    assert!(recorded.receipt().changed());
+    assert!(owner.pending_outcomes().unwrap().is_empty());
+    assert_eq!(owner.history().unwrap().len(), 1);
+    assert_eq!(
+        owner.history().unwrap()[0].delivery_id(),
+        pending.delivery_id().as_bytes()
+    );
+    assert_eq!(owner.history().unwrap()[0].timestamp().get(), 12_345);
+    drop(owner);
+
+    let (mut owner, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_100, 600))
+            .unwrap();
+    assert!(owner.pending_outcomes().unwrap().is_empty());
+    assert_eq!(owner.history().unwrap().len(), 1);
+    let repeated = owner
+        .record_pending_outcomes(UnixMillis::new(12_400).unwrap())
+        .unwrap();
+    assert_eq!(repeated.affected(), 0);
+    assert!(!repeated.receipt().changed());
+    assert_eq!(owner.history().unwrap()[0].timestamp().get(), 12_345);
+    let cleared = owner.clear_history().unwrap();
+    assert_eq!(cleared.affected(), 1);
+    assert_eq!(owner.counts().unwrap().sources(), sources);
+    assert!(owner.pending_outcomes().unwrap().is_empty());
+    drop(owner);
+    let (owner, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1_200, 600))
+            .unwrap();
+    assert!(owner.history().unwrap().is_empty());
+    assert_eq!(owner.counts().unwrap().sources(), sources);
+}
+
+#[test]
+fn failed_atomic_history_write_exposes_neither_history_nor_ack() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, _) = owner_with_pending(&temp, 9_102);
+    let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
+    fs::write(
+        temp.path().join(STAGING_FILE_NAME),
+        b"synthetic foreign staging",
+    )
+    .unwrap();
+    assert!(
+        owner
+            .record_pending_outcomes(UnixMillis::new(123).unwrap())
+            .is_err()
+    );
+    assert!(owner.history().is_err());
+    assert!(owner.pending_outcomes().is_err());
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+        before
+    );
+}
+
+fn owner_payload(temp: &tempfile::TempDir) -> Vec<u8> {
+    let store = SnapshotStore::open_existing(directory(temp)).unwrap();
+    store.snapshot().unwrap().to_vec()
+}
+
+fn envelope(inbox: &[u8], history: &[u8]) -> Vec<u8> {
+    let mut bytes = b"UACOWNR\0".to_vec();
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&(inbox.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&(history.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(inbox);
+    bytes.extend_from_slice(history);
+    bytes
+}
+
+#[test]
+fn composite_checkpoint_rejects_truncation_unknown_version_nested_limits_and_trailing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    drop(fresh_owner(&temp, NotificationPolicy::default()));
+    let bytes = owner_payload(&temp);
+    assert!(ControllerCheckpoint::from_bytes(&bytes).is_ok());
+    for end in 0..bytes.len() {
+        assert!(ControllerCheckpoint::from_bytes(&bytes[..end]).is_err());
+    }
+    let mut unknown = bytes.clone();
+    unknown[8..10].copy_from_slice(&2_u16.to_be_bytes());
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&unknown).unwrap_err(),
+        ControllerCheckpointError::UnsupportedVersion
+    );
+    for offset in [10, 14] {
+        let mut excessive = bytes.clone();
+        excessive[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            ControllerCheckpoint::from_bytes(&excessive).unwrap_err(),
+            ControllerCheckpointError::TooLarge
+        );
+    }
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&trailing).unwrap_err(),
+        ControllerCheckpointError::InvalidEncoding
+    );
+}
+
+#[test]
+fn composite_checkpoint_rejects_a_pending_recorded_overlap_and_foreign_history_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, pending) = owner_with_pending(&temp, 9_103);
+    drop(owner);
+    let decoded = ControllerCheckpoint::from_bytes(&owner_payload(&temp)).unwrap();
+    let inner = decoded.inbox().to_bytes().unwrap();
+    let mut history =
+        activity_journal::OutcomeHistory::new(activity_journal::OutcomeHistoryLimits::default());
+    history
+        .record_pending(&pending, UnixMillis::new(1).unwrap())
+        .unwrap();
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&envelope(&inner, &history.to_bytes().unwrap()))
+            .unwrap_err(),
+        ControllerCheckpointError::RecordedPendingOverlap
+    );
+    let foreign = activity_journal::OutcomeHistory::new(
+        activity_journal::OutcomeHistoryLimits::new(1, 1).unwrap(),
+    );
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&envelope(&inner, &foreign.to_bytes().unwrap()))
+            .unwrap_err(),
+        ControllerCheckpointError::HistoryProfileMismatch
+    );
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&inner).unwrap_err(),
+        ControllerCheckpointError::LegacyHistoryReconciliationRequired
+    );
+}
+
+#[test]
+fn cleared_history_does_not_reappear_from_a_replayed_original_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut owner, _) = owner_with_pending(&temp, 9_104);
+    let _recorded = owner
+        .record_pending_outcomes(UnixMillis::new(1_000).unwrap())
+        .unwrap();
+    let _cleared = owner.clear_history().unwrap();
+    let old = opened(9_104, 0, 1_000);
+    let retry = owner
+        .receive_opened(&old, &mut correlation(0, 0), clock(1_100, 600))
+        .unwrap();
+    assert!(
+        retry
+            .update()
+            .effects()
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Show(_) | Effect::RecordOutcome { .. }))
+    );
+    let again = owner
+        .record_pending_outcomes(UnixMillis::new(900).unwrap())
+        .unwrap();
+    assert_eq!(again.affected(), 0);
+    assert!(owner.history().unwrap().is_empty());
+    assert!(owner.pending_outcomes().unwrap().is_empty());
+    assert_eq!(owner.counts().unwrap().sources(), 1);
+}
+
+#[test]
 fn durable_outbox_retries_across_boot_change_without_reemitting_notifications_or_history() {
     let temp = tempfile::tempdir().unwrap();
     let (owner, row) = owner_with_pending(&temp, 9_002);
@@ -347,7 +521,10 @@ fn valid_schema1_policy_snapshot_is_migrated_only_by_a_real_committed_open() {
     assert!(migrated.receipt().changed());
     drop(owner);
     let store = SnapshotStore::open_existing(directory(&temp)).unwrap();
-    assert_eq!(&store.snapshot().unwrap()[8..10], &2_u16.to_be_bytes());
+    let migrated = ControllerCheckpoint::from_bytes(store.snapshot().unwrap()).unwrap();
+    assert!(migrated.inbox().is_policy_only());
+    assert!(migrated.history().records().is_empty());
+    assert_eq!(&store.snapshot().unwrap()[..8], b"UACOWNR\0");
 }
 
 #[test]
@@ -816,7 +993,7 @@ fn invalid_domain_checkpoint_fails_after_reserved_intent_without_defaulting_poli
         .expect_err("valid byte frame is not valid domain state");
     assert_eq!(
         failure.cause(),
-        DurableFault::Checkpoint(InboxCheckpointError::InvalidState)
+        DurableFault::Composite(ControllerCheckpointError::InvalidEncoding)
     );
     assert_cleanup(failure);
     assert!(temp.path().join(INTENT_FILE_NAME).exists());

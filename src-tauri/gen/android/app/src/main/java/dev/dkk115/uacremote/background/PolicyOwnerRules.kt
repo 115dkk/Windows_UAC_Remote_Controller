@@ -4,19 +4,23 @@ package dev.dkk115.uacremote.background
 internal enum class PolicyStatus(val wireValue: String) {
     BUSY("busy"), UNAVAILABLE("unavailable"), INVALID_POLICY("invalid_policy"),
     STORAGE_UNAVAILABLE("storage_unavailable"),
+    HISTORY_UNAVAILABLE("history_unavailable"),
 }
 
 internal sealed class PolicyReply {
     class Committed(val policyJson: String) : PolicyReply()
+    class HistoryCommitted(val historyJson: String) : PolicyReply()
     class Failed(val status: PolicyStatus) : PolicyReply()
     final override fun toString(): String = when (this) {
         is Committed -> "PolicyReply.Committed([redacted])"
+        is HistoryCommitted -> "PolicyReply.HistoryCommitted([redacted])"
         is Failed -> "PolicyReply.Failed($status)"
     }
 }
 
 internal object PolicyOwnerBounds {
     const val MAX_POLICY_BYTES = 16 * 1024
+    const val MAX_HISTORY_BYTES = 128 * 1024
     const val MAX_RAW_ARGUMENT_CHARS = MAX_POLICY_BYTES * 6 + 128
     const val MAX_PENDING = 8
     const val RESPONSE_TIMEOUT_MILLIS = 15_000L
@@ -24,8 +28,11 @@ internal object PolicyOwnerBounds {
     const val MAX_KEY_ALIASES = 4096
 
     /** Strict scalar/UTF-8 size check without allocating an unbounded byte copy. */
-    fun validPolicyString(value: String): Boolean {
-        if (value.isEmpty() || value.length > MAX_POLICY_BYTES) return false
+    fun validPolicyString(value: String): Boolean = validBoundedString(value, MAX_POLICY_BYTES)
+    fun validHistoryString(value: String): Boolean = validBoundedString(value, MAX_HISTORY_BYTES)
+
+    private fun validBoundedString(value: String, maximum: Int): Boolean {
+        if (value.isEmpty() || value.length > maximum) return false
         var bytes = 0
         var index = 0
         while (index < value.length) {
@@ -41,7 +48,7 @@ internal object PolicyOwnerBounds {
                 Character.isLowSurrogate(char) -> return false
                 else -> 3
             }
-            if (bytes > MAX_POLICY_BYTES) return false
+            if (bytes > maximum) return false
             index += 1
         }
         return true
@@ -118,7 +125,7 @@ internal class PolicyOwnerLifecycle {
 /** Only property names are inspected; values are never logged or used as paths. */
 internal object ControllerLibraryPolicy {
     const val LIBRARY = "uac_android_controller"
-    const val ABI_VERSION = 2u
+    const val ABI_VERSION = 3u
 
     fun permitsInitialProperties(names: Iterable<String>): Boolean {
         var count = 0
