@@ -45,6 +45,24 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
     private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
+    @Volatile private var lifecycleObserver: ((PolicyOwnerPhase) -> Unit)? = null
+
+    /** Read-only native service observation; CLOSED follows actual cleanup. */
+    internal fun lifecyclePhase(): PolicyOwnerPhase = lifecycle.phase()
+    internal fun observeLifecycle(observer: ((PolicyOwnerPhase) -> Unit)?) {
+        lifecycleObserver = observer
+        publishLifecycle()
+    }
+    private fun publishLifecycle() {
+        val observer = lifecycleObserver ?: return
+        val phase = lifecycle.phase()
+        val action = Runnable {
+            if (lifecycleObserver === observer) {
+                try { observer(phase) } catch (_: Exception) { }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) action.run() else main.post(action)
+    }
 
     init { platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests) }
 
@@ -64,10 +82,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
         if (!main.postDelayed(initializationTimeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
             lifecycle.fail(PolicyStatus.UNAVAILABLE)
             worker.shutdown()
+            publishLifecycle()
             return
         }
         try { worker.execute { initialize(started) } }
         catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE) }
+        // Initialization is queued before observers may submit startup reads.
+        publishLifecycle()
     }
 
     fun readPolicy(callback: (PolicyReply) -> Unit) = submit(Operation.READ_POLICY, null, callback)
@@ -87,6 +108,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         approvals.stop()
         approvals.retryCleanup()
         lifecycle.stop()
+        publishLifecycle()
         explicitCleanupRetry.set(true)
         main.removeCallbacks(initializationTimeout)
         finishAll(PolicyStatus.UNAVAILABLE)
@@ -118,6 +140,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             failOwner(failureStatus(failure, initializing = true))
         } finally {
             main.removeCallbacks(initializationTimeout)
+            publishLifecycle()
             cleanupIfStopped()
         }
     }
@@ -178,6 +201,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private fun failOwner(status: PolicyStatus) {
         approvals.stop()
         lifecycle.fail(status)
+        publishLifecycle()
         main.removeCallbacks(initializationTimeout)
         finishAll(status)
         requestWorkerCleanup()
@@ -217,6 +241,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             lifecycle.release()
         }
         lifecycle.fail(PolicyStatus.UNAVAILABLE)
+        publishLifecycle()
     }
 
     private fun requestWorkerCleanup() {
@@ -277,6 +302,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         if (approvals.hasPendingCleanup()) return
         lifecycle.closed()
         worker.shutdown()
+        publishLifecycle()
     }
 
     private inner class PendingCall(val started: Long, callback: (PolicyReply) -> Unit) {

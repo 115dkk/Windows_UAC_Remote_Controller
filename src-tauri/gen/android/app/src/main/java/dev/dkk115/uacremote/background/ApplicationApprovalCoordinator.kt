@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import dev.dkk115.uacremote.MainActivity
+import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.nativecore.MobileController
 import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.NativeApprovalAttempt
@@ -49,7 +50,10 @@ internal class ApplicationApprovalCoordinator(
     private val current = AtomicReference<Session?>(null)
     private val stopped = AtomicBoolean(false)
     // Main-thread only, observed from actual framework callbacks.
-    private var resumedHost: Activity? = null
+    // The foreground service may construct this coordinator after the Activity
+    // resumed. Prime only from the Application's actual framework lifecycle
+    // trace, on main; no renderer-supplied resumed/authentication boolean.
+    private var resumedHost: Activity? = (application as? ControllerApplication)?.currentResumedControllerHost()
 
     init { application.registerActivityLifecycleCallbacks(this) }
 

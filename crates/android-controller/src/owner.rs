@@ -484,19 +484,19 @@ impl DurableInbox {
     ) -> Result<CommitReceipt, LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let candidate =
-            self.liveness
-                .preserve_on_return(|| -> Result<_, LocalKeyMutationError> {
-                    let mut candidate = self.local_keys.clone();
-                    candidate
-                        .begin_creation(handle, challenge)
-                        .map_err(LocalKeyMutationError::Rejected)?;
-                    self.peer_associations
-                        .validate_relationships(&candidate)
-                        .map_err(LocalKeyMutationError::RejectedAssociation)?;
-                    Ok(candidate)
-                })?;
-        self.transition_all(|_, _, keys| {
+        let candidate: LocalKeyLedger = self.liveness.preserve_on_return(
+            || -> Result<LocalKeyLedger, LocalKeyMutationError> {
+                let mut candidate = self.local_keys.clone();
+                candidate
+                    .begin_creation(handle, challenge)
+                    .map_err(LocalKeyMutationError::Rejected)?;
+                self.peer_associations
+                    .validate_relationships(&candidate)
+                    .map_err(LocalKeyMutationError::RejectedAssociation)?;
+                Ok(candidate)
+            },
+        )?;
+        self.transition_all(move |_, _, keys| {
             *keys = candidate;
             Ok(())
         })
@@ -513,9 +513,9 @@ impl DurableInbox {
     ) -> Result<(CommitReceipt, LocalKeyObservation), LocalKeyMutationError> {
         self.ensure_healthy()
             .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
-        let (candidate, observation) =
-            self.liveness
-                .preserve_on_return(|| -> Result<_, LocalKeyMutationError> {
+        let (candidate, observation): (LocalKeyLedger, LocalKeyObservation) =
+            self.liveness.preserve_on_return(
+                || -> Result<(LocalKeyLedger, LocalKeyObservation), LocalKeyMutationError> {
                     let mut candidate = self.local_keys.clone();
                     let observation = candidate
                         .record_created(descriptor)
@@ -524,8 +524,9 @@ impl DurableInbox {
                         .validate_relationships(&candidate)
                         .map_err(LocalKeyMutationError::RejectedAssociation)?;
                     Ok((candidate, observation))
-                })?;
-        self.transition_all(|_, _, keys| {
+                },
+            )?;
+        self.transition_all(move |_, _, keys| {
             *keys = candidate;
             Ok(observation)
         })

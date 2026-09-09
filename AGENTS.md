@@ -55,6 +55,15 @@
   required gates. Only root executes them locally. A passing gate must not be
   fabricated with skipped work, mocks presented as real devices or ignored exits.
 - License original project code as GPL-2.0-or-later; retain third-party notices.
+- Starting the Windows or Android service means boot auto-start is enabled by
+  default. Windows installs AutoStart after hardening. Android must have an actual
+  default-enabled boot/foreground-service path; Application launch alone is not
+  boot startup. Keep credential-protected state/keys unopened before first unlock,
+  never start an Activity/auth prompt from boot, and respect OS force-stop rules.
+- CI must run a real connection/protocol security prover with source-mapped
+  assumptions, executable honest traces and broken-protocol negative controls.
+  Missing, falsified or inconclusive required proofs fail CI. A symbolic proof is
+  not evidence of native isolation, hardware authentication or implementation refinement.
 
 ## After all programming is complete
 

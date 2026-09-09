@@ -39,6 +39,8 @@ jobs:
         run: node --test tools/verify-android-apk.test.mjs
       - name: Install locked frontend dependencies
         run: npm ci
+      - name: Test the merged boot-manifest gate
+        run: node --test tools/verify-android-boot-manifest.test.mjs
       - name: Install Rust and the actual Android target
         run: |
           rustup show active-toolchain
@@ -71,6 +73,9 @@ jobs:
           test "${#packages[@]}" -gt 0
           for package in "${packages[@]}"; do
             node tools/verify-android-apk.mjs "$package" > "$package.inspection.json"
+            android_sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+            "$android_sdk_path/cmdline-tools/latest/bin/apkanalyzer" manifest print "$package" > "$package.manifest.xml"
+            node tools/verify-android-boot-manifest.mjs "$package.manifest.xml" > "$package.boot-inspection.json"
           done
       - name: Retain the debug APK and test reports
         if: ${{ !cancelled() }}
@@ -80,6 +85,8 @@ jobs:
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             src-tauri/gen/android/app/build/outputs/apk/**/*.inspection.json
+            src-tauri/gen/android/app/build/outputs/apk/**/*.boot-inspection.json
+            src-tauri/gen/android/app/build/outputs/apk/**/*.manifest.xml
             src-tauri/gen/android/app/build/test-results/**/*.xml
             src-tauri/gen/android/app/build/reports/tests/
           if-no-files-found: error

@@ -1,6 +1,7 @@
 /target/
 /node_modules/
 /dist/
+/artifacts/
 /.superloopy/
 /src-tauri/gen/schemas/
 /src-tauri/gen/android/.gradle/

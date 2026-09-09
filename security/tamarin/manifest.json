@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "toolVersion": "1.12.0",
+  "sourceBindings": [
+    { "path": "crates/secure-channel/src/identity.rs", "sha256": "6c30a9e75b242d1cee6db460aa496828d448180de670ee2dbcaa7e9405c220bb" },
+    { "path": "crates/secure-channel/src/config.rs", "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d" },
+    { "path": "crates/secure-channel/src/channel.rs", "sha256": "6691286abe228941f523ab0b9716e1be145ac17dd6c5bdb5a82641291bc9ef8c" },
+    { "path": "crates/approval-protocol/src/lib.rs", "sha256": "4434b763dd5864e93f81b1e6644a0a23c59989c3303fdc78735243090a55c0bd" },
+    { "path": "crates/approval-core/src/lib.rs", "sha256": "aba41c673fe61f29cf4931aa96c30a281e1c5a1627a78bb9da3bf80d1bb55b2d" }
+  ],
+  "models": [
+    {
+      "id": "pinned-channel",
+      "path": "security/tamarin/PinnedTransport.spthy",
+      "expected": {
+        "honest_channel_trace": { "trace": "exists-trace", "verdict": "verified" },
+        "phone_pins_authenticated_pc": { "trace": "all-traces", "verdict": "verified" },
+        "pc_pins_authenticated_phone": { "trace": "all-traces", "verdict": "verified" },
+        "application_secret_confidential": { "trace": "all-traces", "verdict": "verified" }
+      },
+      "canaries": [
+        {
+          "id": "missing-pc-pin",
+          "mutation": {
+            "from": "Eq(presented_pc_key, pinned_pc_key), // CANARY_PC_PIN",
+            "to": "Eq(presented_pc_key, presented_pc_key), // CANARY_PC_PIN_DISABLED"
+          },
+          "expected": {
+            "phone_pins_authenticated_pc": { "trace": "all-traces", "verdict": "falsified" },
+            "application_secret_confidential": { "trace": "all-traces", "verdict": "falsified" }
+          }
+        }
+      ]
+    },
+    {
+      "id": "request-authorization",
+      "path": "security/tamarin/RequestAuthorization.spthy",
+      "expected": {
+        "honest_approve_trace": { "trace": "exists-trace", "verdict": "verified" },
+        "honest_deny_without_approval_auth_trace": { "trace": "exists-trace", "verdict": "verified" },
+        "honest_two_approvers_single_winner_trace": { "trace": "exists-trace", "verdict": "verified" },
+        "accepted_approval_requires_same_binding_auth": { "trace": "all-traces", "verdict": "verified" },
+        "accepted_decision_matches_opened_request": { "trace": "all-traces", "verdict": "verified" },
+        "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "verified" },
+        "no_accept_after_revision_revoked": { "trace": "all-traces", "verdict": "verified" },
+        "no_accept_after_request_cancelled": { "trace": "all-traces", "verdict": "verified" },
+        "no_accept_after_request_expired": { "trace": "all-traces", "verdict": "verified" }
+      },
+      "canaries": [
+        {
+          "id": "missing-approval-signature",
+          "mutation": {
+            "from": "Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE",
+            "to": "Eq('unchecked-signature', 'unchecked-signature'), // CANARY_APPROVAL_SIGNATURE_DISABLED"
+          },
+          "expected": { "accepted_approval_requires_same_binding_auth": { "trace": "all-traces", "verdict": "falsified" } }
+        },
+        {
+          "id": "missing-replay-consumption",
+          "mutation": { "from": "// CANARY_REPLAY_GUARD", "to": ", Pending(pc, binding)" },
+          "expected": { "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "falsified" } }
+        }
+      ]
+    }
+  ]
+}

@@ -93,14 +93,15 @@ impl LeaseRegistry {
     ) -> Result<NativePeerLease, PeerLeaseError> {
         // A revoked but still-held lease is deliberately NOT evicted. Only a
         // genuinely dead Weak releases capacity; clones share the same entry.
-        self.entries.retain(|entry| entry.strong_count() != 0);
+        self.entries
+            .retain(|entry: &Weak<LeaseState>| entry.strong_count() != 0);
         if self.entries.len() >= MAX_LEASES {
             return Err(PeerLeaseError::Capacity);
         }
         self.entries
             .try_reserve_exact(1)
             .map_err(|_| PeerLeaseError::AllocationFailed)?;
-        let state = Arc::new(LeaseState {
+        let state: Arc<LeaseState> = Arc::new(LeaseState {
             owner_epoch,
             association,
             local_keys,
@@ -124,7 +125,7 @@ impl LeaseRegistry {
         local_keys: &LocalKeyLedger,
     ) {
         let healthy = inbox.fault().is_none();
-        self.entries.retain(|entry| {
+        self.entries.retain(|entry: &Weak<LeaseState>| {
             let Some(state) = entry.upgrade() else {
                 return false;
             };
