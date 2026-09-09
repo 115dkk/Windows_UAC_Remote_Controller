@@ -156,7 +156,7 @@ fn created_public_metadata_reopens_and_survives_policy_and_history_changes() {
     assert_eq!(result, LocalKeyObservation::AlreadyRecordedUnverified);
     drop(owner);
     let encoded = payload(&temp);
-    assert_eq!(&encoded[8..10], &2_u16.to_be_bytes());
+    assert_eq!(&encoded[8..10], &3_u16.to_be_bytes());
     assert_eq!(
         ControllerCheckpoint::from_bytes(&encoded)
             .unwrap()

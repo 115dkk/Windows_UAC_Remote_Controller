@@ -73,6 +73,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "activity-journal",
  "approval-protocol",
+ "framed-transport",
  "notification-policy",
  "p256",
  "phone-request-core",
@@ -81,6 +82,8 @@ dependencies = [
  "service-protocol",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

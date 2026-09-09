@@ -23,10 +23,59 @@ keys under the store lock before V1 migration/write. No missing-key regeneration
 key deletion, additional file or Kotlin writer is introduced. Policy/history
 changes retain the ledger. See [ADR0008](../../docs/adr/0008-phone-local-key-lifecycle.md).
 
+V3 adds the phone's peer-association ledger to that same payload, not another
+file/owner. Each explicit trusted-host record binds PC/device/revision, exact
+local handle and both PC pins to a monotonic local association generation. V1/V2
+migration supplies absent metadata only; neither key presence nor a parsed
+association is an enrollment witness. See
+[ADR0009](../../docs/adr/0009-phone-peer-association-ingress.md).
+
 This is a storage/domain integration layer, not an Android runtime, notification
 plugin, signing API, enrollment authority, or implementation of Windows UAC. There
-are no native implementations, network operations, private keys, FFI, renderer commands,
-or boolean authentication shortcuts.
+are no native key/UI implementations, private keys, FFI, renderer commands, or
+boolean authentication shortcuts. The optional `AssociatedPcSocket` connects the
+existing real TLS/socket pipeline to current recorded associations; it does not
+start a network task from the Application or relax its policy-only startup gate.
+
+## Association-bound receiving connection
+
+The native host records associations only after separately verifying the complete
+pairing grant/receipt, endpoint/key ownership and required attestation. This crate
+does not provide that ceremony or a foreign/renderer enrollment setter.
+`record_peer_association_from_trusted_host` prevalidates the candidate and complete
+checkpoint before intent, then publishes only after its commit. Revoke requires
+the exact current generation and retains the generation highwater. Both methods
+preserve inbox/replay/history/local-key state. Every local-key mutation rechecks
+global PC-versus-local-role isolation; invalid candidate metadata does not start
+an intent or turn a previously healthy owner into a faulted one.
+
+`AssociatedPcSocket::new` resolves an existing association and local key tuple,
+requires the supplied native CLIENT identity's exact transport key, and creates
+the actual PeerTransport/SocketDriver pinned to that PC's transport key. It also
+freezes the PC event-verification key and a fresh, nonpersistent owner-instance
+identity. IP addresses, carrier/relay markers and TLS Ready are not enrollment.
+
+Only its actual received TLS frames can produce a non-Clone `ReceivedPcEvent`,
+after application-signature verification with that frozen key. `apply_event`
+requires the same connection, healthy owner instance and current exact association
+and local tuple before a domain intent. The socket wait holds no inbox borrow.
+Each connection privately owns its pending clock probe and correlation; raw
+correlations cannot be imported. Its only outbound operation is the fixed
+clock request, not an arbitrary frame/signing API.
+
+Cancellation, fatal error, observed close, explicit abort and Drop invalidate
+shared event/update context and clear clock state. A child cancellation token
+keeps one connection's abort from cancelling unrelated PCs. Queued messages may
+not create new inbox state after any observed termination, including normal EOF.
+Already committed downward withdrawal/history effects still need processing;
+new display requires fresh post-I/O context/request checks. No atomic rollback
+is claimed for cancellation arriving during a disk commit.
+
+`AssociatedUpdate` identifies the triggering message's source, not an approval
+plan or the original source of every preexisting request affected by maintenance.
+Full per-request source retention, authenticated intake/effect dispatch, native
+key operations and phone authentication remain required. Removing an association
+does not itself withdraw existing Android notifications or erase replay guards.
 
 ## Public interface
 
@@ -105,7 +154,7 @@ Every mutable call follows one private path:
 1. Reserve the store's durable intent before inspecting/mutating the domain input
    or accepting any retained/dropped disposition.
 2. Run the domain transition privately; its effects/body view remain a candidate.
-3. Encode the complete strict, bounded, body-free `InboxCheckpoint`.
+3. Encode the complete strict, bounded four-component controller checkpoint.
 4. Commit through the reserved guard and verify the actual durability receipt.
 5. Only then return the committed update/check to the caller.
 
@@ -115,6 +164,12 @@ decoding/restoration/polling. The restoration result is checkpointed and committ
 before the new owner or its effects escape. Fresh creation first commits an empty
 boot-bound checkpoint, then separately reserves/commits the initial clock poll.
 It never performs that clock transition before an intent barrier.
+
+Local-key and association metadata inputs additionally validate detached
+candidates before reserving their intent. Policy-only native preflight still
+runs under the same store lock before migration writes; full recovery preserves
+intent-before-domain-decode ordering. These are distinct paths, not a blanket
+permission to move every recovery check before its intent.
 
 A store or codec error irreversibly faults this owner. It calls
 `PhoneInbox::stop_for_owner_failure()` to release owned body/recovery state and

@@ -46,6 +46,26 @@ and only `VerifiedPcEvent` is a signature-checked expected-PC message. Public
 event data may be constructed without authentication; receiving application
 interfaces must require the verified wrapper, not a cloned bare enum.
 
+`VerifiedPcEvent` also retains the exact verification key; equality cannot treat
+the same PC/body verified under a replacement key as the same authenticated
+observation. `PcPublicKey::from_spki_der` accepts canonical91-byte P-256 SPKI and
+compares as the same key as its SEC1 encoding. These facts still do not establish
+current enrollment, TLS peer, recipient/revision or native provenance.
+
+## Phone clock request
+
+`ClockProbe::request()` produces a fixed80-byte request from that pending probe:
+`UACCLCK\0`, version1 u16, two reserved zeros, PC32, nonce32, four reserved zeros.
+All numeric fields are big-endian; parsing rejects any other size, version,
+reserved bytes or zero identifier. It cannot carry a command, timestamp, key
+selector or arbitrary signing payload. The PC handler must check the actual
+enrolled transport and its own PC identity before constructing its clock reply.
+This parser does not implement or authorize that privileged handler.
+
+The phone association/socket wrapper keeps probe, correlation, TLS pin, event key,
+recipient and owner generation together. Raw ClockCorrelation remains a general
+library type; callers outside that wrapper still own its association/provenance.
+
 ## Framing and memory
 
 An encrypted application stream prefixes each payload with a u32 length. The

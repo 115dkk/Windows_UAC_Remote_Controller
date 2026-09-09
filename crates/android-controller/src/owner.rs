@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use activity_journal::{OutcomeHistory, OutcomeHistoryLimits, OutcomeHistoryRecord, UnixMillis};
 use notification_policy::{CapacityLimits, NotificationPolicy, RequestKey};
@@ -12,11 +12,13 @@ use phone_state_store::{
 };
 use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
+use crate::types::PeerAssociationMutationError;
 use crate::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
     ControllerCheckpoint, DurableFailure, DurableFault, InboxCounts, LocalAttestationChallenge,
     LocalKeyHandle, LocalKeyLedger, LocalKeyMutationError, LocalKeyObservation,
-    LocalKeySetDescriptor,
+    LocalKeySetDescriptor, PeerAssociationDescriptor, PeerAssociationLedger,
+    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +62,10 @@ pub struct DurableInbox {
     inbox: PhoneInbox,
     history: OutcomeHistory,
     local_keys: LocalKeyLedger,
+    peer_associations: PeerAssociationLedger,
+    // Per-lifetime identity only. Never encoded or restored from checkpoint
+    // bytes, and retaining this Arc does not keep this owner alive/healthy.
+    owner_epoch: Arc<()>,
     required_durability: RequiredDurability,
     fault: Option<DurableFault>,
 }
@@ -213,6 +219,127 @@ impl DurableInbox {
         Ok(&self.local_keys)
     }
 
+    /// Immutable current association lookup/list/generations. A borrowed
+    /// structure does not prove native enrollment ceremony or current liveness.
+    pub fn peer_associations(&self) -> Result<&PeerAssociationLedger, DurableFault> {
+        self.ensure_healthy()?;
+        Ok(&self.peer_associations)
+    }
+
+    /// Internal connection-owner identity; callers must also check health and
+    /// current association generation. No handles/storage live inside the Arc.
+    pub(crate) fn owner_epoch(&self) -> Arc<()> {
+        Arc::clone(&self.owner_epoch)
+    }
+
+    /// Only a separately trusted native enrollment owner may choose this input.
+    /// No QR, signature, UI flag or CreatedUnverified-to-paired promotion occurs.
+    /// The full candidate is validated before intent and published after commit.
+    pub fn record_peer_association_from_trusted_host(
+        &mut self,
+        descriptor: PeerAssociationDescriptor,
+    ) -> Result<(CommitReceipt, PeerAssociationMutation), PeerAssociationMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
+        let mut candidate = self.peer_associations.clone();
+        let mutation = candidate
+            .record_from_trusted_host(descriptor, &self.local_keys)
+            .map_err(PeerAssociationMutationError::Rejected)?;
+        let bytes = self.prevalidate_peer_candidate(&candidate)?;
+        let receipt = self
+            .commit_peer_candidate(candidate, &bytes)
+            .map_err(PeerAssociationMutationError::Owner)?;
+        Ok((receipt, mutation))
+    }
+
+    /// Exact-generation removal only. A stale reference cannot remove a later
+    /// association. Even NotCurrent completes a durable no-op reservation.
+    pub fn revoke_peer_association_from_trusted_host(
+        &mut self,
+        reference: PeerAssociationRef,
+    ) -> Result<(CommitReceipt, PeerAssociationRemoval), PeerAssociationMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
+        let mut candidate = self.peer_associations.clone();
+        let removal = candidate.remove_from_trusted_host(reference);
+        let bytes = self.prevalidate_peer_candidate(&candidate)?;
+        let receipt = self
+            .commit_peer_candidate(candidate, &bytes)
+            .map_err(PeerAssociationMutationError::Owner)?;
+        Ok((receipt, removal))
+    }
+
+    fn prevalidate_peer_candidate(
+        &mut self,
+        candidate: &PeerAssociationLedger,
+    ) -> Result<Vec<u8>, PeerAssociationMutationError> {
+        candidate
+            .validate_relationships(&self.local_keys)
+            .map_err(PeerAssociationMutationError::Rejected)?;
+        match encode(&self.inbox, &self.history, &self.local_keys, candidate) {
+            Ok(bytes) => Ok(bytes),
+            Err(DurableFault::Composite(crate::ControllerCheckpointError::TooLarge)) => {
+                Err(PeerAssociationMutationError::RejectedCheckpoint(
+                    crate::ControllerCheckpointError::TooLarge,
+                ))
+            }
+            Err(DurableFault::Composite(crate::ControllerCheckpointError::PeerAssociations(
+                error,
+            ))) if error != crate::PeerAssociationError::AllocationFailed => {
+                Err(PeerAssociationMutationError::Rejected(error))
+            }
+            Err(cause) => {
+                // An existing-state/codec failure is not harmless rejected peer
+                // input. Preserve the ordinary downward fault, without intent.
+                self.fault = Some(cause);
+                Err(PeerAssociationMutationError::Owner(stop_unowned(
+                    &mut self.inbox,
+                    cause,
+                )))
+            }
+        }
+    }
+
+    fn commit_peer_candidate(
+        &mut self,
+        candidate: PeerAssociationLedger,
+        bytes: &[u8],
+    ) -> Result<CommitReceipt, DurableFailure> {
+        self.ensure_healthy().map_err(DurableFailure::new)?;
+        self.fault = Some(DurableFault::TransitionIncomplete);
+        let required = self.required_durability;
+        // Metadata commits still need the existing unwind/failed-transition
+        // body-release obligation even though the inbox itself is unchanged.
+        let mut uncommitted = UncommittedInbox {
+            inbox: &mut self.inbox,
+            completed: false,
+        };
+        let result = self
+            .store
+            .begin_transition()
+            .map_err(DurableFault::Storage)
+            .and_then(|transition| transition.commit(bytes).map_err(DurableFault::Storage))
+            .and_then(|receipt| required.check(receipt));
+        if result.is_ok() {
+            uncommitted.completed = true;
+        }
+        drop(uncommitted);
+        match result {
+            Ok(receipt) => {
+                self.peer_associations = candidate;
+                self.fault = None;
+                Ok(receipt)
+            }
+            Err(cause) => {
+                self.fault = Some(cause);
+                // Keep the last committed in-memory association ledger; callers
+                // cannot read it after fault. Disk may contain a newer candidate:
+                // this is not a rollback/persistence-absence assertion.
+                Err(stop_unowned(&mut self.inbox, cause))
+            }
+        }
+    }
+
     /// Local generation bookkeeping, not pairing or permission to retry native
     /// creation. A caller must generate handle/challenge through the trusted
     /// pairing owner, durably reserve here, then consume its native request once.
@@ -227,6 +354,9 @@ impl DurableInbox {
         candidate
             .begin_creation(handle, challenge)
             .map_err(LocalKeyMutationError::Rejected)?;
+        self.peer_associations
+            .validate_relationships(&candidate)
+            .map_err(LocalKeyMutationError::RejectedAssociation)?;
         self.transition_all(|_, _, keys| {
             *keys = candidate;
             Ok(())
@@ -248,6 +378,9 @@ impl DurableInbox {
         let observation = candidate
             .record_created(descriptor)
             .map_err(LocalKeyMutationError::Rejected)?;
+        self.peer_associations
+            .validate_relationships(&candidate)
+            .map_err(LocalKeyMutationError::RejectedAssociation)?;
         self.transition_all(|_, _, keys| {
             *keys = candidate;
             Ok(observation)
@@ -443,7 +576,8 @@ impl DurableInbox {
         let mut inbox = PhoneInbox::with_phone_boot(policy, limits, boot);
         let history = OutcomeHistory::new(OutcomeHistoryLimits::default());
         let local_keys = LocalKeyLedger::default();
-        let initial = match encode(&inbox, &history, &local_keys) {
+        let peer_associations = PeerAssociationLedger::default();
+        let initial = match encode(&inbox, &history, &local_keys, &peer_associations) {
             Ok(initial) => initial,
             Err(cause) => return Err(stop_unowned(&mut inbox, cause)),
         };
@@ -459,6 +593,8 @@ impl DurableInbox {
             inbox,
             history,
             local_keys,
+            peer_associations,
+            owner_epoch: Arc::new(()),
             required_durability,
             fault: None,
         };
@@ -509,7 +645,7 @@ impl DurableInbox {
             preflight(&preview).map_err(DurableFailure::new)?;
             (transition, preview)
         };
-        let (checkpoint, history, local_keys) = preview.into_parts();
+        let (checkpoint, history, local_keys, peer_associations) = preview.into_parts();
         let (mut inbox, update) = PhoneInbox::restore_checkpoint(checkpoint, boot, clock)
             .map_err(|error| DurableFailure::new(DurableFault::Checkpoint(error)))?;
         let receipt = match commit_candidate(
@@ -517,6 +653,7 @@ impl DurableInbox {
             &inbox,
             &history,
             &local_keys,
+            &peer_associations,
             required_durability,
         ) {
             Ok(receipt) => receipt,
@@ -528,6 +665,8 @@ impl DurableInbox {
                 inbox,
                 history,
                 local_keys,
+                peer_associations,
+                owner_epoch: Arc::new(()),
                 required_durability,
                 fault: None,
             },
@@ -570,6 +709,7 @@ impl DurableInbox {
             &mut self.inbox,
             &mut self.history,
             &mut self.local_keys,
+            &self.peer_associations,
             self.required_durability,
             operation,
         );
@@ -590,11 +730,17 @@ fn encode(
     inbox: &PhoneInbox,
     history: &OutcomeHistory,
     local_keys: &LocalKeyLedger,
+    peer_associations: &PeerAssociationLedger,
 ) -> Result<Vec<u8>, DurableFault> {
     let checkpoint = inbox.checkpoint().map_err(DurableFault::Checkpoint)?;
-    ControllerCheckpoint::with_local_keys(checkpoint, history.clone(), local_keys.clone())
-        .and_then(|value| value.to_bytes())
-        .map_err(DurableFault::Composite)
+    ControllerCheckpoint::with_peer_associations(
+        checkpoint,
+        history.clone(),
+        local_keys.clone(),
+        peer_associations.clone(),
+    )
+    .and_then(|value| value.to_bytes())
+    .map_err(DurableFault::Composite)
 }
 
 fn commit_candidate(
@@ -602,9 +748,10 @@ fn commit_candidate(
     inbox: &PhoneInbox,
     history: &OutcomeHistory,
     local_keys: &LocalKeyLedger,
+    peer_associations: &PeerAssociationLedger,
     required_durability: RequiredDurability,
 ) -> Result<CommitReceipt, DurableFault> {
-    let bytes = encode(inbox, history, local_keys)?;
+    let bytes = encode(inbox, history, local_keys, peer_associations)?;
     let receipt = transition.commit(&bytes).map_err(DurableFault::Storage)?;
     required_durability.check(receipt)
 }
@@ -634,6 +781,7 @@ fn run_transition<T>(
     inbox: &mut PhoneInbox,
     history: &mut OutcomeHistory,
     local_keys: &mut LocalKeyLedger,
+    peer_associations: &PeerAssociationLedger,
     required_durability: RequiredDurability,
     operation: impl FnOnce(
         &mut PhoneInbox,
@@ -652,6 +800,7 @@ fn run_transition<T>(
         &*candidate_owner.inbox,
         history,
         local_keys,
+        peer_associations,
         required_durability,
     )?;
     candidate_owner.completed = true;

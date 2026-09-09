@@ -57,6 +57,12 @@ impl ClockProbe {
         self.nonce
     }
 
+    /// Fixed request for this exact pending probe. Its bytes must be queued only
+    /// on the same enrolled peer connection whose response completes the probe.
+    pub const fn request(&self) -> crate::ClockProbeRequest {
+        crate::ClockProbeRequest::from_probe(self.expected_pc, self)
+    }
+
     /// Accept only a signature-verified clock event matching this PC and nonce.
     /// The caller must have verified with the enrolled PC's current key, not an
     /// arbitrary key that happens to verify the event. Revocation remains the

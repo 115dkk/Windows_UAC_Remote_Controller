@@ -10,7 +10,7 @@ description = "Bounded signed PC request and lifecycle messages"
 
 [dependencies]
 approval-protocol = { path = "../approval-protocol" }
-p256.workspace = true
+p256 = { workspace = true, features = ["pkcs8"] }
 thiserror.workspace = true
 getrandom.workspace = true
 

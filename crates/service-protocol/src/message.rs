@@ -6,6 +6,7 @@ use approval_protocol::{
     PcIdentity, RequestBinding, RequestContent,
 };
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
 use thiserror::Error;
 
 use crate::codec;
@@ -165,10 +166,27 @@ impl UnsignedPcEvent {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PcPublicKey(VerifyingKey);
 
 impl PcPublicKey {
+    /// Canonical uncompressed P-256 SPKI, as retained in native peer metadata.
+    /// Parsing a public key does not establish its enrollment or provenance.
+    pub fn from_spki_der(bytes: &[u8]) -> Result<Self, PcEventError> {
+        if bytes.len() != 91 {
+            return Err(PcEventError::InvalidKey);
+        }
+        let key =
+            p256::PublicKey::from_public_key_der(bytes).map_err(|_| PcEventError::InvalidKey)?;
+        let canonical = key
+            .to_public_key_der()
+            .map_err(|_| PcEventError::InvalidKey)?;
+        if canonical.as_bytes() != bytes {
+            return Err(PcEventError::InvalidKey);
+        }
+        Ok(Self(VerifyingKey::from(key)))
+    }
+
     pub fn from_sec1_bytes(bytes: &[u8]) -> Result<Self, PcEventError> {
         if !matches!(
             (bytes.len(), bytes.first()),
@@ -223,7 +241,10 @@ impl SignedPcEvent {
         if self.event.pc() != expected_pc {
             return Err(PcEventError::WrongPc);
         }
-        Ok(VerifiedPcEvent(self.event.clone()))
+        Ok(VerifiedPcEvent {
+            event: self.event.clone(),
+            verification_key: key.clone(),
+        })
     }
 }
 
@@ -239,7 +260,13 @@ impl fmt::Debug for SignedPcEvent {
 /// Freshness, a live epoch, revocation, delivery schedule and OS success still
 /// belong to the receiving service/application state machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedPcEvent(PcEvent);
+pub struct VerifiedPcEvent {
+    event: PcEvent,
+    // Preserve the key that actually passed verification. A caller must not
+    // later attach a replacement association merely because its PC ID matches.
+    // PcPublicKey's Debug is redacted and there is no public event constructor.
+    verification_key: PcPublicKey,
+}
 
 impl VerifiedPcEvent {
     pub fn from_wire(
@@ -269,10 +296,19 @@ impl VerifiedPcEvent {
         if event.pc() != expected_pc {
             return Err(PcEventError::WrongPc);
         }
-        Ok(Self(event))
+        Ok(Self {
+            event,
+            verification_key: key.clone(),
+        })
     }
     pub fn event(&self) -> &PcEvent {
-        &self.0
+        &self.event
+    }
+    /// The exact cryptographic verification key, not a fresh enrollment lookup.
+    /// This still does not prove a TLS peer, recipient, current registration,
+    /// native provenance or permission to issue a device decision.
+    pub fn verification_key(&self) -> &PcPublicKey {
+        &self.verification_key
     }
 }
 

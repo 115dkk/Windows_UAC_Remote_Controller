@@ -5,6 +5,7 @@ use approval_protocol::{
     MAX_PROGRAM_NAME_BYTES, OsSession, PcIdentity, RequestBinding, RequestContent, RequestId,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+use p256::pkcs8::EncodePublicKey;
 use service_protocol::{
     ClockProbeNonce, MAX_PC_EVENT_BYTES, MAX_REQUEST_LIFETIME_NANOS, PcEvent, PcEventError,
     PcPublicKey, RequestResolution, ServiceTick, UnsignedPcEvent, VerifiedPcEvent,
@@ -84,6 +85,52 @@ fn exact_request_round_trip_and_owned_verification() {
             .event(),
         &original
     );
+}
+
+#[test]
+fn verification_retains_the_actual_key_across_same_pc_reregistration() {
+    let first_key = key();
+    let replacement = SigningKey::from_slice(&[7; 32]).unwrap();
+    let original = opened();
+    let first_signed = signed(original.clone());
+    let first = first_signed.verify(pc(), &public(&first_key)).unwrap();
+    let wire_first =
+        VerifiedPcEvent::from_wire(&first_signed.to_wire(), pc(), &public(&first_key)).unwrap();
+    assert_eq!(first, wire_first);
+    assert_eq!(first.verification_key(), &public(&first_key));
+    assert_ne!(first.verification_key(), &public(&replacement));
+
+    let unsigned = UnsignedPcEvent::new(original.clone()).unwrap();
+    let signature: Signature = replacement.sign(&unsigned.signing_bytes());
+    let second = unsigned
+        .with_der_signature(signature.to_der().as_bytes())
+        .unwrap()
+        .verify(pc(), &public(&replacement))
+        .unwrap();
+    assert_eq!(first.event(), second.event());
+    assert_ne!(first, second);
+    assert_eq!(second.verification_key(), &public(&replacement));
+    assert_eq!(
+        format!("{:?}", first.verification_key()),
+        "PcPublicKey([redacted])"
+    );
+}
+
+#[test]
+fn canonical_spki_and_sec1_identify_the_same_verification_key() {
+    let key = key();
+    let point =
+        p256::PublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+            .unwrap();
+    let der = point.to_public_key_der().unwrap();
+    let parsed = PcPublicKey::from_spki_der(der.as_bytes()).unwrap();
+    assert_eq!(parsed, public(&key));
+    let mut trailing = der.as_bytes().to_vec();
+    trailing.push(0);
+    assert!(PcPublicKey::from_spki_der(&trailing).is_err());
+    let mut wrong_algorithm = der.as_bytes().to_vec();
+    wrong_algorithm[13] ^= 1;
+    assert!(PcPublicKey::from_spki_der(&wrong_algorithm).is_err());
 }
 
 #[test]

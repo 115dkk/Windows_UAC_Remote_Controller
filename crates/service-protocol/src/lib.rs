@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod clock;
+mod clock_request;
 mod codec;
 mod frame;
 mod message;
@@ -15,6 +16,7 @@ pub use clock::{
     ClockCorrelation, ClockError, ClockProbe, MAX_CLOCK_CORRELATION_AGE_NANOS,
     MAX_CLOCK_PROBE_RTT_NANOS, MappedRequestWindow,
 };
+pub use clock_request::{CLOCK_REQUEST_BYTES, ClockProbeRequest};
 pub use frame::{FrameDecoder, FrameError, FrameFeed, MAX_STREAM_CHUNK_BYTES, encode_frame};
 pub use message::{
     ClockProbeNonce, MAX_PC_EVENT_BYTES, MAX_REQUEST_LIFETIME_NANOS, PcEvent, PcEventError,

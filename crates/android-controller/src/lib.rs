@@ -13,13 +13,17 @@
 //! callers must take fresh native time after I/O, recheck current pending state,
 //! enrollment, screen-lock and per-use authentication before any applicable
 //! native action. This crate contains no notification, authentication, signing,
-//! private-key, network, FFI or application-runtime implementation.
+//! private-key, FFI or application-runtime implementation. The optional peer
+//! socket owner binds the existing TLS/socket pipeline to a recorded association;
+//! it does not establish pairing or activate Application intake/authentication.
 
 #![forbid(unsafe_code)]
 
 mod checkpoint;
 mod local_keys;
 mod owner;
+mod peer_associations;
+mod peer_socket;
 mod types;
 
 pub use checkpoint::{ControllerCheckpoint, ControllerCheckpointError};
@@ -28,7 +32,17 @@ pub use local_keys::{
     LocalKeySetDescriptor, LocalKeySetPhase, MAX_LOCAL_KEY_LEDGER_BYTES, MAX_LOCAL_KEY_SETS,
 };
 pub use owner::DurableInbox;
+pub use peer_associations::{
+    MAX_PEER_ASSOCIATION_LEDGER_BYTES, MAX_PEER_ASSOCIATIONS, PeerAssociation,
+    PeerAssociationDescriptor, PeerAssociationError, PeerAssociationLedger,
+    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
+};
+pub use peer_socket::{
+    AssociatedPcSocket, AssociatedUpdate, PcSocketEvent, PcSocketInputs, PeerSocketError,
+    ReceivedPcEvent,
+};
 pub use types::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,
     DurableFailure, DurableFault, InboxCounts, LocalKeyMutationError, NotificationCleanup,
+    PeerAssociationMutationError,
 };

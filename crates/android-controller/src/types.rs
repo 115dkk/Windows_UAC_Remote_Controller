@@ -13,7 +13,7 @@ pub enum DurableFault {
     Storage(StoreError),
     #[error("phone checkpoint validation failed")]
     Checkpoint(InboxCheckpointError),
-    #[error("the combined inbox/history checkpoint is invalid")]
+    #[error("the composite phone checkpoint is invalid")]
     Composite(crate::ControllerCheckpointError),
     #[error("the bounded outcome history rejected this transition")]
     History(activity_journal::OutcomeHistoryError),
@@ -141,7 +141,22 @@ pub struct CommittedHistoryMutation {
 pub enum LocalKeyMutationError {
     #[error("local key metadata input was rejected")]
     Rejected(crate::LocalKeyError),
+    #[error("local key metadata conflicts with an existing peer association")]
+    RejectedAssociation(crate::PeerAssociationError),
     #[error("the local metadata storage owner stopped")]
+    Owner(DurableFailure),
+}
+
+/// Trusted-host association input is structure only, never a QR/enrollment or
+/// authentication assertion. Rejections occur before durable intent; uncertain
+/// persistence stops the owner and never returns a successful association change.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum PeerAssociationMutationError {
+    #[error("peer association metadata input was rejected")]
+    Rejected(crate::PeerAssociationError),
+    #[error("the peer association candidate exceeds the composite checkpoint profile")]
+    RejectedCheckpoint(crate::ControllerCheckpointError),
+    #[error("the association storage owner stopped")]
     Owner(DurableFailure),
 }
 impl CommittedHistoryMutation {

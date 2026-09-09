@@ -10,17 +10,21 @@ description = "Commit-before-effects native phone inbox ownership"
 
 [dependencies]
 activity-journal = { path = "../activity-journal" }
+approval-protocol = { path = "../approval-protocol" }
+framed-transport = { path = "../framed-transport" }
 notification-policy = { path = "../notification-policy" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }
 secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }
 thiserror.workspace = true
+tokio = { version = "=1.53.1", features = ["net"] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
 
 [dev-dependencies]
-approval-protocol = { path = "../approval-protocol" }
 p256.workspace = true
 tempfile = "3.23.0"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

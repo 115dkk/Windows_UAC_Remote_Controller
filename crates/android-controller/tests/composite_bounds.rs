@@ -12,10 +12,11 @@ use activity_journal::{
 use android_controller::{
     ControllerCheckpoint, ControllerCheckpointError, LocalAttestationChallenge, LocalKeyHandle,
     LocalKeyLedger, LocalKeySetDescriptor, MAX_LOCAL_KEY_LEDGER_BYTES,
+    MAX_PEER_ASSOCIATION_LEDGER_BYTES, PeerAssociationDescriptor, PeerAssociationLedger,
 };
 use approval_protocol::{
-    BootEpoch, ChallengeNonce, ExpiryTick, OsSession, PcIdentity, RequestBinding, RequestContent,
-    RequestId,
+    BootEpoch, ChallengeNonce, DeviceId, ExpiryTick, OsSession, PcIdentity, RequestBinding,
+    RequestContent, RequestId,
 };
 use notification_policy::Weekday;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
@@ -34,8 +35,8 @@ use service_protocol::{
 const MILLI: u64 = 1_000_000;
 const RECORD_CAP: usize = 512;
 const BODY_MARKER: &str = "SYNTHETIC_COMPOSITE_BODY_NOT_PERSISTED";
-// Published v2 format sizes; no access to private constructors or state fields.
-const COMPOSITE_HEADER_BYTES: usize = 22;
+// Published v3 format sizes; no access to private constructors or state fields.
+const COMPOSITE_HEADER_BYTES: usize = 26;
 const HISTORY_HEADER_BYTES: usize = 22;
 
 fn pc(peer: u16) -> PcIdentity {
@@ -181,15 +182,16 @@ fn full_disjoint_history(pending_ids: &BTreeSet<[u8; 32]>) -> OutcomeHistory {
     history
 }
 
+fn public(seed: u8) -> TlsPublicKey {
+    let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
+    let key = p256::PublicKey::from_sec1_bytes(
+        signing.verifying_key().to_encoded_point(false).as_bytes(),
+    )
+    .unwrap();
+    TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
+}
+
 fn full_local_keys() -> LocalKeyLedger {
-    fn public(seed: u8) -> TlsPublicKey {
-        let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
-        let key = p256::PublicKey::from_sec1_bytes(
-            signing.verifying_key().to_encoded_point(false).as_bytes(),
-        )
-        .unwrap();
-        TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
-    }
     let mut keys = LocalKeyLedger::default();
     for index in 0..32_u8 {
         let handle = LocalKeyHandle::from_bytes([index + 1; 32]).unwrap();
@@ -210,24 +212,45 @@ fn full_local_keys() -> LocalKeyLedger {
     keys
 }
 
-fn envelope(inbox: &[u8], history: &[u8], keys: &[u8]) -> Vec<u8> {
+fn full_peer_associations(keys: &LocalKeyLedger) -> PeerAssociationLedger {
+    let mut peers = PeerAssociationLedger::new();
+    for index in 0..32u8 {
+        let descriptor = PeerAssociationDescriptor::new(
+            pc(u16::from(index) + 1),
+            DeviceId::from_bytes([index + 1; 16]).unwrap(),
+            1,
+            LocalKeyHandle::from_bytes([index + 1; 32]).unwrap(),
+            public(128 + index * 2),
+            public(129 + index * 2),
+        )
+        .unwrap();
+        // Synthetic structural relationship only, never enrollment evidence.
+        peers.record_from_trusted_host(descriptor, keys).unwrap();
+    }
+    peers
+}
+
+fn envelope(inbox: &[u8], history: &[u8], keys: &[u8], peers: &[u8]) -> Vec<u8> {
     // ControllerCheckpoint::new remains native-private. Supplying the published
     // envelope to its public strict decoder tests the same boundary as a load.
-    let mut bytes =
-        Vec::with_capacity(COMPOSITE_HEADER_BYTES + inbox.len() + history.len() + keys.len());
+    let mut bytes = Vec::with_capacity(
+        COMPOSITE_HEADER_BYTES + inbox.len() + history.len() + keys.len() + peers.len(),
+    );
     bytes.extend_from_slice(b"UACOWNR\0");
-    bytes.extend_from_slice(&2_u16.to_be_bytes());
+    bytes.extend_from_slice(&3_u16.to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(inbox.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(history.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(keys.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&u32::try_from(peers.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(inbox);
     bytes.extend_from_slice(history);
     bytes.extend_from_slice(keys);
+    bytes.extend_from_slice(peers);
     bytes
 }
 
 #[test]
-fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_cap() {
+fn maximum_four_components_roundtrip_within_the_unchanged_snapshot_cap() {
     // This tests maximum record occupancy using default policy. It does not
     // assert every optional field or policy encoding has its maximum byte size.
     assert_eq!(MAX_SNAPSHOT_BYTES, 384 * 1024);
@@ -245,10 +268,17 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
     let keys = full_local_keys();
     let key_bytes = keys.to_bytes().unwrap();
     assert_eq!(key_bytes.len(), MAX_LOCAL_KEY_LEDGER_BYTES);
-    let bytes = envelope(&inbox_bytes, &history_bytes, &key_bytes);
+    let peers = full_peer_associations(&keys);
+    let peer_bytes = peers.to_bytes().unwrap();
+    assert_eq!(peer_bytes.len(), MAX_PEER_ASSOCIATION_LEDGER_BYTES);
+    let bytes = envelope(&inbox_bytes, &history_bytes, &key_bytes, &peer_bytes);
     assert_eq!(
         bytes.len(),
-        COMPOSITE_HEADER_BYTES + inbox_bytes.len() + history_bytes.len() + key_bytes.len()
+        COMPOSITE_HEADER_BYTES
+            + inbox_bytes.len()
+            + history_bytes.len()
+            + key_bytes.len()
+            + peer_bytes.len()
     );
     assert!(
         bytes.len() <= MAX_SNAPSHOT_BYTES,
@@ -269,6 +299,7 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
     );
     assert_eq!(composite.history().records(), history.records());
     assert_eq!(composite.local_keys(), &keys);
+    assert_eq!(composite.peer_associations(), &peers);
     let encoded = composite.to_bytes().unwrap();
     assert_eq!(encoded, bytes);
     assert!(encoded.len() <= MAX_SNAPSHOT_BYTES);
@@ -286,6 +317,7 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
         Effect::Show(_) | Effect::Restore(_) | Effect::RecordOutcome { .. }
     )));
     assert_eq!(reread.history().records().len(), RECORD_CAP);
+    assert_eq!(reread.peer_associations(), &peers);
 
     // Each malformed candidate retains the same valid full inbox fixture; no
     // producer fields, replay guards or record limits are weakened to fit it.
@@ -294,22 +326,33 @@ fn maximum_inbox_and_disjoint_history_roundtrip_within_the_unchanged_snapshot_ca
         .copy_from_slice(inbox.pending_outcomes()[0].delivery_id().as_bytes());
     assert!(OutcomeHistory::from_bytes(&overlapping_history).is_ok());
     assert_eq!(
-        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &overlapping_history, &key_bytes))
-            .unwrap_err(),
+        ControllerCheckpoint::from_bytes(&envelope(
+            &inbox_bytes,
+            &overlapping_history,
+            &key_bytes,
+            &peer_bytes
+        ))
+        .unwrap_err(),
         ControllerCheckpointError::RecordedPendingOverlap
     );
 
     let mut excessive_count = history_bytes;
     excessive_count[20..22].copy_from_slice(&513_u16.to_be_bytes());
     assert_eq!(
-        ControllerCheckpoint::from_bytes(&envelope(&inbox_bytes, &excessive_count, &key_bytes))
-            .unwrap_err(),
+        ControllerCheckpoint::from_bytes(&envelope(
+            &inbox_bytes,
+            &excessive_count,
+            &key_bytes,
+            &peer_bytes
+        ))
+        .unwrap_err(),
         ControllerCheckpointError::History(OutcomeHistoryError::TooManyRecords)
     );
     for (start, claimed_length) in [
         (10, MAX_SNAPSHOT_BYTES + 1),
         (14, MAX_OUTCOME_HISTORY_BYTES + 1),
         (18, MAX_LOCAL_KEY_LEDGER_BYTES + 1),
+        (22, MAX_PEER_ASSOCIATION_LEDGER_BYTES + 1),
     ] {
         let mut excess_nested = bytes.clone();
         excess_nested[start..start + 4]
