@@ -52,6 +52,12 @@ async function main() {
     commit: process.env.GITHUB_SHA, source, sourceSha256: null,
     apk, apkSha256: null, serial, sdk: null, abi: null, captures: [], completed: false, failure: null };
   const pause = () => new Promise((done) => setTimeout(done, 500));
+  const diagnostics = (stage) => {
+    // Read-only package-scoped OS state. Do not restart the Activity to observe
+    // it: onCreate itself clears/posts and would change the cold-case behavior.
+    writeFileSync(resolve(output, `${stage}-notifications.txt`), run(['shell', 'dumpsys', 'notification', '--package', application]));
+    writeFileSync(resolve(output, `${stage}-trace.json`), run(['shell', 'run-as', application, 'cat', 'files/gallery-trace.json']));
+  };
   try {
     receipt.sourceSha256 = hash(readFileSync(resolve(root, source)));
     receipt.apkSha256 = hash(readFileSync(resolve(root, apk)));
@@ -73,6 +79,7 @@ async function main() {
         await pause();
       }
       if (!matchesNativeReceipt(native, selected, nonce)) throw new Error('Native renderer checks did not finish for this exact launch.');
+      diagnostics(`${selected}-posted`);
       run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
       // App.onCreate/notify returning does not mean SystemUI finished its first
       // post-boot render. Await the actual shade/title/actions, not a fixed delay.
@@ -89,6 +96,7 @@ async function main() {
         const actionsShown = selected === 'withdrawn' || ['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`));
         consecutive = shown && actionsShown ? consecutive + 1 : 0;
         observations.push({ attempt, shade: xml.includes('package="com.android.systemui"'), shown, actionsShown, xmlSha256: hash(xml) });
+        diagnostics(`${selected}-observation-${attempt}`);
         if (consecutive >= 2) break;
         if (!xml.includes('package="com.android.systemui"')) {
           run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
@@ -105,6 +113,7 @@ async function main() {
       if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Actual screenshot is not PNG.');
       writeFileSync(resolve(output, `${selected}.png`), png);
       writeFileSync(resolve(output, `${selected}.xml`), xml);
+      diagnostics(`${selected}-captured`);
       receipt.captures.push({ case: selected, native, observations, pngSha256: hash(png), actualUiChecked: false });
       if (consecutive < 2) throw new Error('The actual notification did not remain visible across two observations.');
       checkNotificationUi(xml, selected);
@@ -132,6 +141,10 @@ async function main() {
     try { writeFileSync(resolve(output, 'failure-logcat.txt'), run(['logcat', '-d', '-t', '200'])); } catch { /* Preserve original failure. */ }
     throw error;
   } finally {
+    // Unlike the noisy tail of main/system buffers, these events carry actual
+    // enqueue/cancellation reason/lifespan, visibility and alert observations.
+    try { writeFileSync(resolve(output, 'notification-events.txt'), run(['logcat', '-b', 'events', '-d', '-v', 'threadtime', '-s',
+      'notification_enqueue', 'notification_canceled', 'notification_visibility', 'notification_alert'])); } catch { /* Keep primary verdict. */ }
     writeFileSync(resolve(output, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
   }
 }
