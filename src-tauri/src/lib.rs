@@ -85,6 +85,7 @@ pub fn run() {
             commands::begin_pairing,
             commands::remove_device,
             commands::decide_request,
+            commands::request_details,
             commands::clear_activity,
             commands::open_lock_settings,
             commands::open_notification_settings,

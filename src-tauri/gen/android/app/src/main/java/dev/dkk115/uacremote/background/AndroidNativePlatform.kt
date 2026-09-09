@@ -17,6 +17,11 @@ import dev.dkk115.uacremote.nativecore.NativeDenialScope
 import dev.dkk115.uacremote.nativecore.NativeDenialAttempt
 import dev.dkk115.uacremote.nativecore.NativeApprovalDrainState
 import dev.dkk115.uacremote.nativecore.NativeDenialOperationState
+import dev.dkk115.uacremote.nativecore.NativePendingRequest
+import dev.dkk115.uacremote.nativecore.NativePresentationClock
+import dev.dkk115.uacremote.nativecore.NativeRequestPresentation
+import dev.dkk115.uacremote.nativecore.NativeRequestAlert
+import dev.dkk115.uacremote.nativecore.NativeRequestSinkOutcome
 import dev.dkk115.uacremote.security.DeviceKeyStore
 import dev.dkk115.uacremote.security.KeyStoreOutcome
 import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
@@ -35,6 +40,32 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val environment = NativeEnvironment(application)
     private val legacy = LegacyPolicyObservation(application)
     private val keyStore = DeviceKeyStore(application)
+    @Volatile private var requestProgress: (() -> Unit)? = null
+    @Volatile private var requestChanged: (() -> Unit)? = null
+    @Volatile private var timeChanged: (() -> Unit)? = null
+    @Volatile private var requestCleanup: (() -> Unit)? = null
+    private val presentation = NativePresentationClockSource {
+        requests.invalidateTime()
+        timeChanged?.invoke()
+    }
+    internal val requests = NativeRequestRegistry(application, presentation,
+        { requestChanged?.invoke() }, { requestCleanup?.invoke() })
+
+    internal fun bindRequests(progress: () -> Unit, changed: () -> Unit, temporal: () -> Unit, cleanup: () -> Unit) {
+        check(requestProgress == null)
+        requestProgress = progress; requestChanged = changed; timeChanged = temporal; requestCleanup = cleanup
+    }
+    override fun intakeProgress() { requestProgress?.invoke() ?: throw BridgeException.NativeUnavailable() }
+    override fun presentationClock(): NativePresentationClock = presentation.observe()
+    override fun publishPendingRequest(request: NativePendingRequest, intent: NativeRequestPresentation, alert: NativeRequestAlert): NativeRequestSinkOutcome =
+        requests.publish(request, intent, alert)
+    internal fun refreshPresentationClock() { clock() }
+    internal fun invalidateRequestTime() { presentation.invalidate() }
+    internal fun stopRequests() { requests.stop() }
+    internal fun closeRequestClock() { presentation.close() }
+    internal fun secureLockConfigured(): Boolean = try {
+        application.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure ?: throw BridgeException.NativeUnavailable()
+    } catch (_: Exception) { throw BridgeException.NativeUnavailable() }
     private var withdrawal: ((NativeRequestSelection) -> Unit)? = null
     private var clearHeldApprovals: (() -> Unit)? = null
     private val transportLock = Any()
@@ -280,6 +311,8 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
             for (request in requests) {
                 // Invalidate any held auth attempt before the OS notification IO.
                 withdrawal?.invoke(request)
+                denials?.withdraw(request)
+                this.requests.withdraw(request)
                 manager.cancel(NativeRequestIdentity.notificationTag(request), 1)
             }
         } catch (_: Exception) { throw BridgeException.NativeUnavailable() }
@@ -348,6 +381,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         if (observed.credentialStorage != CredentialStorageState.AVAILABLE) {
             throw BridgeException.NativeUnavailable()
         }
+        presentation.warm(observed.bootCount)
         // Values have already passed native shape/coherence checks. Rust checks
         // them again and owns all schedule/expiry/recovery decisions. This sample
         // is not a post-I/O action permit; native dispatch must observe time again.
@@ -363,6 +397,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         if (Looper.myLooper() == Looper.getMainLooper()) throw BridgeException.NativeUnavailable()
         try {
             clearHeldApprovals?.invoke()
+            requests.clear()
             val manager = application.getSystemService(NotificationManager::class.java)
                 ?: throw BridgeException.NativeUnavailable()
             for (notification in manager.activeNotifications) {

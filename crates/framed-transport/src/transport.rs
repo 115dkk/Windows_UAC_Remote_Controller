@@ -326,6 +326,23 @@ impl PeerTransport {
         self.flush_one(now)
     }
 
+    /// Parked socket maintenance only: no packet processing, frame consumption,
+    /// plaintext flushing or native signing. Existing receive/send and TLS
+    /// deadlines remain in force while the application waits for admission.
+    pub(crate) fn observe_liveness(&mut self, now: Instant) -> Result<(), TransportError> {
+        self.socket_adoption_available = false;
+        if self.failure.is_some() {
+            return Err(TransportError::Failed);
+        }
+        if self.local_closed {
+            return Err(TransportError::Closed);
+        }
+        let result = self.channel_mut()?.observe_liveness(now);
+        self.channel_result(result)?;
+        self.note_pending_input(now);
+        self.check_deadlines(now)
+    }
+
     /// Actual relay EOF, not an empty chunk. A TLS truncation or any final
     /// partial application frame poisons the transport. Poll complete frames
     /// still buffered after authenticated close_notify before dropping the owner.

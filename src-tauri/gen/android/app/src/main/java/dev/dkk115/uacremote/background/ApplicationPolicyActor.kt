@@ -20,8 +20,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * One Application-lifetime worker and one real generated controller. No Activity,
- * generic work submission, request ingress, signing or notification posting API.
- * Callbacks run on main, but all JNA/filesystem work stays on the sole worker.
+ * generic work submission, untrusted request ingress or signing API.
+ * UI callbacks run on main. Owner/storage work uses this sole worker; main
+ * projection reads use only callback-free Rust getters and the light clock.
  */
 internal class ApplicationPolicyActor(private val application: Application) {
     private enum class Operation { READ_POLICY, SAVE_POLICY, READ_HISTORY, CLEAR_HISTORY }
@@ -42,6 +43,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
         { lifecycle.phase() == PolicyOwnerPhase.READY }, { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, ::nativeCleanupProgress)
     private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval,
         { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, denials::blocksApproval, denials::nativeProgress)
+    private val requests = NativeRequestCoordinator(application, platform, { controller }, ::enqueueRequest,
+        { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
+        approvals::canRequest, denials::canRequest, denials::externalProgress,
+        { failOwner(PolicyStatus.UNAVAILABLE) })
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
@@ -70,24 +75,38 @@ internal class ApplicationPolicyActor(private val application: Application) {
         platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests)
         platform.bindDenials(denials)
         denials.bindCapture { job -> approvals.captureDenialDrain(job.selection) }
+        platform.bindRequests(requests::progress, requests::changed, requests::progress, ::nativeCleanupProgress)
     }
 
-    /** Native selection only; no Tauri/intent ingress is exposed in this slice. */
+    /** Native selection only; public locators first pass the original-handle check. */
     internal fun requestApproval(selection: NativeRequestSelection, host: Activity, callback: (NativeApprovalReply) -> Unit) =
         approvals.request(selection, host, callback)
     internal fun leaveApprovalRequest(host: Activity) = approvals.leaveRequest(host)
-    /** Trusted native selection only; intentionally not a Tauri/receiver command. */
+    /** Trusted native selection only; no arbitrary signing bytes are accepted. */
     internal fun requestDenial(selection: NativeRequestSelection, callback: (NativeDenialReply) -> Unit) = denials.request(selection, callback)
+    internal fun readRequests(locator: String?, callback: (NativeRequestReadReply) -> Unit) = requests.read(locator, callback)
+    internal fun requestAction(locator: String, action: NativeRequestAction, host: Activity?, route: NativeNotificationRoute?, callback: (NativeRequestActionResult) -> Unit) =
+        requests.action(locator, action, host, route, callback)
+    internal fun requestReview(): NativeRequestReview = requests.review()
+    internal fun validRequestReply(value: NativeRequestPayload): Boolean = requests.validReply(value)
+    internal fun maintainRequests() = requests.progress()
+    internal fun invalidateRequestTime() { platform.invalidateRequestTime(); requests.progress() }
+
+    private fun enqueueRequest(action: () -> Unit): Boolean = try {
+        worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
+        true
+    } catch (_: RejectedExecutionException) { false }
 
     private fun enqueueApproval(action: () -> Unit): Boolean = try {
-        worker.execute { try { action() } finally { cleanupIfStopped() } }
+        worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
         true
     } catch (_: RejectedExecutionException) { false }
 
     private fun enqueueDenial(action: () -> Unit): Boolean = try {
-        worker.execute { try { action() } finally { cleanupIfStopped() } }
+        worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
         true
     } catch (_: RejectedExecutionException) { false }
+    private fun resumeQueuedWork() { denials.resumeQueued(); requests.resumeQueued() }
 
     /** Actual native cleanup progress may resume owner shutdown, not failed scope steps. */
     private fun nativeCleanupProgress() {
@@ -124,6 +143,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
     fun shutdown(explicitRetry: Boolean = false) {
+        requests.stop()
         denials.stop()
         approvals.stop()
         if (explicitRetry) approvals.retryCleanup()
@@ -155,6 +175,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 failOwner(lifecycle.failure())
                 return
             }
+            requests.progress()
         } catch (failure: Throwable) {
             rethrowFatal(failure)
             failOwner(failureStatus(failure, initializing = true))
@@ -215,11 +236,14 @@ internal class ApplicationPolicyActor(private val application: Application) {
             deliver(call, PolicyReply.Failed(status))
         } finally {
             denials.externalProgress()
+            if (operation == Operation.SAVE_POLICY) requests.progress()
+            resumeQueuedWork()
             cleanupIfStopped()
         }
     }
 
     private fun failOwner(status: PolicyStatus) {
+        requests.stop()
         denials.stop()
         approvals.stop()
         lifecycle.fail(status)
@@ -275,10 +299,12 @@ internal class ApplicationPolicyActor(private val application: Application) {
     }
 
     private fun cleanupIfStopped() {
+        platform.requests.continueCleanup()
         approvals.cleanupOnWorker()
         if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
         val explicitRetry = explicitCleanupRetry.getAndSet(false)
         val resumed = cleanupWake.getAndSet(false)
+        if (explicitRetry) platform.requests.retryCleanup()
         denials.prepareShutdownCleanup(explicitRetry)
         if (explicitRetry) platform.retryUnboundDenialCleanup()
         val owner = controller
@@ -300,7 +326,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             // Logical Rust close keeps exact core owners available for native
             // retirement. Never destroy the ABI handle while its native session
             // or scope wrappers still need cleanup-only calls through it.
-            if (approvals.hasPendingCleanup() || !denials.ownerShutdownSucceeded() || !platform.denialReferencesClear()) return
+            if (approvals.hasPendingCleanup() || !denials.ownerShutdownSucceeded() || !platform.denialReferencesClear() || !platform.requests.cleanupComplete()) return
             try {
                 owner.close()
                 cleanup.destroyed()
@@ -328,7 +354,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
         // An OS cancellation request is not a terminal callback. Keep the
         // already bounded worker available to release the last opaque handles
         // once native signing/prompt cleanup actually becomes quiescent.
-        if (approvals.hasPendingCleanup() || denials.hasPendingCleanup()) return
+        if (approvals.hasPendingCleanup() || denials.hasPendingCleanup() || !platform.requests.cleanupComplete()) return
+        platform.closeRequestClock()
         lifecycle.closed()
         worker.shutdown()
         publishLifecycle()

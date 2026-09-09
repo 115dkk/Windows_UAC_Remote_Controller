@@ -10,4 +10,20 @@
     <string name="controller_service_cleanup">이전 작업을 정리하고 있습니다.</string>
     <string name="controller_service_unavailable">앱을 준비하지 못했습니다. 앱에서 상태를 확인하세요.</string>
     <string name="controller_service_stopping">서비스를 중지하고 있습니다.</string>
+    <string name="request_channel_sound">요청 알림 · 소리</string>
+    <string name="request_channel_vibration">요청 알림 · 진동</string>
+    <string name="request_channel_silent">요청 알림 · 무음</string>
+    <string name="request_channel_description">컴퓨터에서 보낸 요청을 알립니다.</string>
+    <string name="request_notification_title">UAC 인증 요청</string>
+    <string name="request_computer_context">연결한 컴퓨터</string>
+    <string name="request_notification_public_body">자세한 내용은 앱에서 확인하세요.</string>
+    <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="request_action_approve">승인</string>
+    <string name="request_action_deny">거부</string>
+    <string name="request_action_details">자세히 보기</string>
+    <string name="request_unavailable">요청을 확인할 수 없어요.</string>
+    <string name="request_unavailable_next">컴퓨터에서 요청 상태를 확인하세요.</string>
+    <string name="request_permission_missing">요청 알림을 허용해 주세요.</string>
+    <string name="request_notifications_disabled">요청 알림이 꺼져 있어요.</string>
+    <string name="request_notifications_next">휴대폰 알림 설정을 확인하세요.</string>
 </resources>

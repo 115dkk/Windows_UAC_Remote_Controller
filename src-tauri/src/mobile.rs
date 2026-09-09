@@ -104,6 +104,143 @@ pub(crate) enum OwnerOperation {
     SavePolicy(String),
     ClearHistory,
     ControlService(controller_runtime::ServiceAction),
+    Decide(String, controller_runtime::DecisionIntent),
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestsReply {
+    Ok {
+        #[serde(rename = "requestsJson")]
+        requests_json: String,
+    },
+    Busy {},
+    Unavailable {},
+}
+
+#[cfg(any(target_os = "android", test))]
+impl RequestsReply {
+    fn requests(self) -> Result<controller_runtime::PhoneRequestCatalog, AppIssue> {
+        match self {
+            Self::Ok { requests_json } => {
+                controller_runtime::decode_phone_requests_json(requests_json.as_bytes())
+            }
+            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::Unavailable {} => Err(controller_runtime::phone_request_issue()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestActionReply {
+    Queued {},
+    Busy {},
+    Unavailable {},
+    Stale {},
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestReviewReply {
+    Ok {
+        #[serde(deserialize_with = "required_review_locator")]
+        locator: Option<String>,
+        revision: String,
+    },
+    Busy {},
+    Unavailable {},
+}
+
+#[cfg(any(target_os = "android", test))]
+fn required_review_locator<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    serde::Deserialize::deserialize(deserializer)
+}
+
+#[cfg(any(target_os = "android", test))]
+impl RequestReviewReply {
+    fn review(self) -> Result<Option<controller_runtime::RequestReviewView>, AppIssue> {
+        match self {
+            Self::Ok { locator, revision } => {
+                let parsed = revision
+                    .parse::<u64>()
+                    .map_err(|_| controller_runtime::phone_request_issue())?;
+                if parsed.to_string() != revision {
+                    return Err(controller_runtime::phone_request_issue());
+                }
+                locator
+                    .map(|locator| {
+                        controller_runtime::check_request_locator(&locator)?;
+                        Ok(controller_runtime::RequestReviewView { locator, revision })
+                    })
+                    .transpose()
+            }
+            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::Unavailable {} => Err(controller_runtime::phone_request_issue()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+impl RequestActionReply {
+    fn accepted(self) -> Result<(), AppIssue> {
+        match self {
+            Self::Queued {} => Ok(()),
+            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::Unavailable {} | Self::Stale {} => Err(controller_runtime::phone_request_issue()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestDetailsReply {
+    Ok {
+        #[serde(rename = "detailsJson")]
+        details_json: String,
+    },
+    Busy {},
+    Unavailable {},
+    Stale {},
+}
+
+#[cfg(any(target_os = "android", test))]
+impl RequestDetailsReply {
+    fn details(self, locator: &str) -> Result<controller_runtime::RequestDetailsView, AppIssue> {
+        match self {
+            Self::Ok { details_json } => controller_runtime::decode_phone_request_details_json(
+                details_json.as_bytes(),
+                locator,
+            ),
+            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::Unavailable {} | Self::Stale {} => Err(controller_runtime::phone_request_issue()),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn request_details(
+    app: &tauri::AppHandle,
+    locator: String,
+) -> Result<controller_runtime::RequestDetailsView, AppIssue> {
+    use tauri::Manager;
+    controller_runtime::check_request_locator(&locator)?;
+    #[derive(serde::Serialize)]
+    struct Selection<'a> {
+        locator: &'a str,
+    }
+    let reply: RequestDetailsReply = app
+        .state::<DeviceState>()
+        .0
+        .run_mobile_plugin("controllerRequestDetails", Selection { locator: &locator })
+        .map_err(|_| controller_runtime::phone_request_issue())?;
+    reply.details(&locator)
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -161,6 +298,37 @@ struct NativeOwnerPort<'a>(&'a tauri::plugin::PluginHandle<tauri::Wry>);
 
 #[cfg(target_os = "android")]
 impl snapshot::OwnerPort for NativeOwnerPort<'_> {
+    fn review(&self) -> Result<RequestReviewReply, AppIssue> {
+        self.0
+            .run_mobile_plugin("controllerRequestReview", ())
+            .map_err(|_| controller_runtime::phone_request_issue())
+    }
+    fn requests(&self) -> Result<RequestsReply, AppIssue> {
+        self.0
+            .run_mobile_plugin("controllerRequests", ())
+            .map_err(|_| controller_runtime::phone_request_issue())
+    }
+
+    fn decide(
+        &self,
+        locator: String,
+        decision: controller_runtime::DecisionIntent,
+    ) -> Result<RequestActionReply, AppIssue> {
+        #[derive(serde::Serialize)]
+        struct Action {
+            locator: String,
+            action: controller_runtime::DecisionIntent,
+        }
+        self.0
+            .run_mobile_plugin(
+                "controllerRequestAction",
+                Action {
+                    locator,
+                    action: decision,
+                },
+            )
+            .map_err(|_| controller_runtime::phone_request_issue())
+    }
     fn service(&self) -> Result<controller_runtime::PhoneServiceView, AppIssue> {
         self.0
             .run_mobile_plugin("controllerService", ())
@@ -219,7 +387,101 @@ impl snapshot::OwnerPort for NativeOwnerPort<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryReply, PolicyReply, ServiceControlReply};
+    use super::{
+        HistoryReply, PolicyReply, RequestActionReply, RequestDetailsReply, RequestReviewReply,
+        RequestsReply, ServiceControlReply,
+    };
+
+    #[test]
+    fn request_reply_boundaries_have_no_success_or_authority_fallback() {
+        for document in [
+            serde_json::json!({}),
+            serde_json::json!({"status":"approved"}),
+            serde_json::json!({"status":"queued","authenticated":true}),
+        ] {
+            assert!(serde_json::from_value::<RequestActionReply>(document).is_err());
+        }
+        for status in ["queued", "busy", "unavailable", "stale"] {
+            let reply: RequestActionReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            assert_eq!(reply.accepted().is_ok(), status == "queued");
+        }
+        for status in ["busy", "unavailable"] {
+            let reply: RequestsReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            assert!(reply.requests().is_err());
+        }
+        let malformed = RequestsReply::Ok {
+            requests_json: "{}".into(),
+        };
+        assert!(malformed.requests().is_err());
+    }
+
+    #[test]
+    fn on_demand_reply_is_bound_to_exact_locator_and_keeps_details_out_of_errors() {
+        let locator = "a".repeat(32);
+        for status in ["busy", "unavailable", "stale"] {
+            let reply: RequestDetailsReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            assert!(reply.details(&locator).is_err());
+        }
+        let reply = RequestDetailsReply::Ok { details_json: serde_json::json!({"version":1,"id":locator,
+            "programName":"original-program","executablePath":"original-path","details":"synthetic-original-body",
+            "remainingSeconds":12,"refreshAfterMillis":1000}).to_string() };
+        assert_eq!(
+            reply.details(&locator).unwrap().details,
+            "synthetic-original-body"
+        );
+        assert!(
+            serde_json::from_value::<RequestDetailsReply>(
+                serde_json::json!({"status":"ok","detailsJson":"{}","approved":true})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sticky_review_is_navigation_only_and_revision_is_not_a_lossy_number() {
+        for document in [
+            serde_json::json!({"status":"ok","revision":"0"}),
+            serde_json::json!({"status":"ok","revision":1,"locator":null}),
+            serde_json::json!({"status":"ok","revision":"1","locator":null,"approve":true}),
+        ] {
+            assert!(serde_json::from_value::<RequestReviewReply>(document).is_err());
+        }
+        for status in ["busy", "unavailable"] {
+            let reply: RequestReviewReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            assert!(reply.review().is_err());
+        }
+        assert!(
+            RequestReviewReply::Ok {
+                locator: None,
+                revision: "0".into()
+            }
+            .review()
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            RequestReviewReply::Ok {
+                locator: None,
+                revision: "00".into()
+            }
+            .review()
+            .is_err()
+        );
+        let locator = "b".repeat(32);
+        let review = RequestReviewReply::Ok {
+            locator: Some(locator.clone()),
+            revision: u64::MAX.to_string(),
+        }
+        .review()
+        .unwrap()
+        .unwrap();
+        assert_eq!(review.locator, locator);
+        assert!(!format!("{review:?}").contains(&locator));
+    }
 
     #[test]
     fn control_acknowledgement_has_no_running_or_authorization_fallback() {

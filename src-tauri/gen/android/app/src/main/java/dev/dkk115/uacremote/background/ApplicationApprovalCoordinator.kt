@@ -37,8 +37,8 @@ internal sealed class NativeApprovalReply {
 /**
  * One auth slot on the existing Application worker/DeviceKeyStore. It does not
  * create another controller/executor/key owner. No background start or public
- * Activity intent can create a plan. Request ingress/notification actions are
- * still not wired; the existing policy-only startup gate remains unchanged.
+ * Activity intent alone cannot create a plan: the native request registry and
+ * Rust original-request check precede this fixed action.
  */
 internal class ApplicationApprovalCoordinator(
     private val application: Application,
@@ -60,18 +60,21 @@ internal class ApplicationApprovalCoordinator(
 
     init { application.registerActivityLifecycleCallbacks(this) }
 
-    fun request(selection: NativeRequestSelection, host: Activity, callback: (NativeApprovalReply) -> Unit) {
+    fun canRequest(selection: NativeRequestSelection): Boolean = !stopped.get() && current.get() == null && !denialBlocked(selection)
+
+    /** Boolean reports bounded job admission only, never authentication. */
+    fun request(selection: NativeRequestSelection, host: Activity, callback: (NativeApprovalReply) -> Unit): Boolean {
         if (Looper.myLooper() != Looper.getMainLooper() || stopped.get() || host !is MainActivity ||
             host.application !== application || resumedHost !== host || host.isFinishing || host.isDestroyed) {
             callback(NativeApprovalReply.Unavailable)
-            return
+            return false
         }
         val copied = NativeRequestIdentity.copy(selection)
-        if (copied == null) { callback(NativeApprovalReply.Unavailable); return }
-        if (denialBlocked(copied)) { callback(NativeApprovalReply.Busy); return }
+        if (copied == null) { callback(NativeApprovalReply.Unavailable); return false }
+        if (denialBlocked(copied)) { callback(NativeApprovalReply.Busy); return false }
         val session = Session(copied, host, callback)
-        if (!current.compareAndSet(null, session)) { callback(NativeApprovalReply.Busy); return }
-        work(session) {
+        if (!current.compareAndSet(null, session)) { callback(NativeApprovalReply.Busy); return false }
+        return work(session) {
             if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return@work }
             val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
             val plan = controller.beginApproval(session.selection)
@@ -243,7 +246,7 @@ internal class ApplicationApprovalCoordinator(
         } finally { der.fill(0) }
     }
 
-    private fun work(session: Session, action: () -> Unit) {
+    private fun work(session: Session, action: () -> Unit): Boolean {
         session.jobs.incrementAndGet()
         if (!enqueue {
             try { if (!session.cancelled.get()) action() }
@@ -256,7 +259,9 @@ internal class ApplicationApprovalCoordinator(
         }) {
             session.jobs.decrementAndGet()
             cancel(session, NativeApprovalReply.Unavailable)
+            return false
         }
+        return true
     }
 
     private fun cancel(session: Session, reply: NativeApprovalReply, explicitRetry: Boolean = false) {

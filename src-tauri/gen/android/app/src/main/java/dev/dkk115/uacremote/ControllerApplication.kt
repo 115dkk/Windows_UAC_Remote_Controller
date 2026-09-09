@@ -3,6 +3,7 @@ package dev.dkk115.uacremote
 
 import android.app.Application
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -22,6 +23,14 @@ import dev.dkk115.uacremote.background.UserUnlockObservation
 import dev.dkk115.uacremote.background.ResumedHostTrace
 import dev.dkk115.uacremote.background.ServiceStartGenerations
 import dev.dkk115.uacremote.background.NativeStopObservation
+import dev.dkk115.uacremote.background.NativeNotificationRoute
+import dev.dkk115.uacremote.background.NativeRequestAction
+import dev.dkk115.uacremote.background.NativeRequestActionResult
+import dev.dkk115.uacremote.background.NativeRequestPayload
+import dev.dkk115.uacremote.background.NativeRequestReadReply
+import dev.dkk115.uacremote.background.NativeRequestReview
+import dev.dkk115.uacremote.background.NativeRequestRules
+import java.lang.ref.WeakReference
 
 /** One Application owner; Direct Boot construction does not touch CE/Rust/keys. */
 class ControllerApplication : Application() {
@@ -45,14 +54,24 @@ class ControllerApplication : Application() {
     private var state = ControllerServiceState.STOPPED
     private var freshServiceObserver = false
     private val resumedControllerHost = ResumedHostTrace<MainActivity>()
+    private var requestWakeOwner: WeakReference<Activity>? = null
+    private var requestWake: (() -> Unit)? = null
+    private var routeHost: WeakReference<Activity>? = null
+    private var pendingRoute: NativeNotificationRoute? = null
     private val controllerHosts = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityPostResumed(activity: Activity) {
-            if (activity is MainActivity) resumedControllerHost.resumed(activity)
+            if (activity is MainActivity) {
+                resumedControllerHost.resumed(activity)
+                policyActor?.maintainRequests()
+                dispatchNotificationRoute(activity)
+            }
         }
         override fun onActivityPrePaused(activity: Activity) { clearHost(activity) }
         override fun onActivityDestroyed(activity: Activity) { clearHost(activity) }
         private fun clearHost(activity: Activity) {
             resumedControllerHost.pausedOrDestroyed(activity)
+            if (routeHost?.get() === activity) { routeHost = null; pendingRoute = null }
+            if (activity.isDestroyed && requestWakeOwner?.get() === activity) { requestWakeOwner = null; requestWake = null }
         }
         override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
         override fun onActivityStarted(activity: Activity) = Unit
@@ -86,6 +105,69 @@ class ControllerApplication : Application() {
         val current = currentResumedControllerHost() as? MainActivity ?: return false
         return current === activity && current.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
     }
+
+    /** Native listener gets an empty wake only; sticky review is read separately. */
+    internal fun observeRequestChanges(activity: Activity, listener: (() -> Unit)?) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (listener == null) {
+            if (requestWakeOwner?.get() === activity) { requestWakeOwner = null; requestWake = null }
+        } else if (activity is MainActivity && !activity.isDestroyed) {
+            requestWakeOwner = WeakReference(activity); requestWake = listener
+        }
+    }
+    internal fun requestSnapshotChanged() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val host = requestWakeOwner?.get() ?: return
+        if (isCurrentForegroundControllerHost(host)) try { requestWake?.invoke() } catch (_: Exception) { }
+    }
+    internal fun readControllerRequests(activity: Activity, locator: String?, callback: (NativeRequestReadReply) -> Unit) {
+        onMain {
+            val actor = policyActor
+            if (!isCurrentForegroundControllerHost(activity) || actor == null) {
+                callback(NativeRequestReadReply.Failed(if (actor == null && preOwnerMutationStatus() == PolicyStatus.BUSY) NativeRequestActionResult.BUSY else NativeRequestActionResult.UNAVAILABLE))
+            } else actor.readRequests(locator) { result ->
+                val live = policyActor === actor && isCurrentForegroundControllerHost(activity)
+                callback(if (live) result else NativeRequestReadReply.Failed(NativeRequestActionResult.UNAVAILABLE))
+            }
+        }
+    }
+    internal fun validControllerRequestReply(activity: Activity, value: NativeRequestPayload): Boolean =
+        isCurrentForegroundControllerHost(activity) && policyActor?.validRequestReply(value) == true
+    internal fun controllerRequestReview(activity: Activity): NativeRequestReview? {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!isCurrentForegroundControllerHost(activity)) return null
+        return try { policyActor?.requestReview() } catch (_: Exception) { null }
+    }
+    internal fun controllerRequestAction(activity: Activity, locator: String, action: NativeRequestAction, callback: (NativeRequestActionResult) -> Unit) {
+        onMain {
+            val actor = policyActor
+            if (!isCurrentForegroundControllerHost(activity) || actor == null) callback(NativeRequestActionResult.UNAVAILABLE)
+            else actor.requestAction(locator, action, activity, null, callback)
+        }
+    }
+
+    /** Only an existing process-local original handle may consume this selector.
+     * Restored Activity state/cold process/unknown locator never starts auth. */
+    internal fun receiveRequestIntent(activity: MainActivity, intent: Intent, restored: Boolean) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val route = NativeRequestRules.route(intent) ?: return
+        if (!NativeRequestRules.mayRouteActivity(restored, policyActor?.lifecyclePhase() == PolicyOwnerPhase.READY, route.action)) return
+        routeHost = WeakReference(activity); pendingRoute = route
+        if (isCurrentForegroundControllerHost(activity)) dispatchNotificationRoute(activity)
+    }
+    private fun dispatchNotificationRoute(activity: Activity) {
+        if (routeHost?.get() !== activity || !isCurrentForegroundControllerHost(activity)) return
+        val route = pendingRoute ?: return
+        routeHost = null; pendingRoute = null // Consume before any asynchronous hop.
+        policyActor?.requestAction(route.locator, route.action, activity, route) { requestSnapshotChanged() }
+    }
+    internal fun denyNotificationRequest(route: NativeNotificationRoute, callback: (NativeRequestActionResult) -> Unit) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val actor = policyActor
+        if (route.action != NativeRequestAction.DENY || actor == null) callback(NativeRequestActionResult.UNAVAILABLE)
+        else actor.requestAction(route.locator, route.action, null, route, callback)
+    }
+    internal fun requestTimeChanged() { policyActor?.invalidateRequestTime() }
 
     /** No actor construction, CE, native key or Rust call occurs while reading. */
     internal fun observeControllerService(activity: Activity): ControllerServiceObservation {

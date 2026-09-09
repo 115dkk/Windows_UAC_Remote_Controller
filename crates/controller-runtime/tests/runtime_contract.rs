@@ -516,7 +516,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
     assert_eq!(
         json,
         json!({
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "platform": "windows",
             "computerName": "합성-PC",
             "service": {
@@ -526,6 +526,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "phoneService": null, "mobile": null,
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
             "devices": [], "requests": [], "activity": [],
+            "requestCatalog": null, "requestReview": null,
             "dataAvailability": {"devices": "unavailable", "requests": "unavailable", "activity": "unavailable"},
             "canPair": false, "canUnpair": false, "canClearActivity": false, "issue": null
         })

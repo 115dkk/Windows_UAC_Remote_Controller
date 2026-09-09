@@ -42,7 +42,7 @@ fn stopped_service_snapshot_has_no_fabricated_policy_or_available_history() {
         policy_owner_ready: false,
     };
     let snapshot = AppSnapshot::from_android_service(service, MobileReadiness::UNAVAILABLE);
-    assert_eq!(snapshot.schema_version, 2);
+    assert_eq!(snapshot.schema_version, 3);
     assert_eq!(snapshot.phone_service, Some(service));
     assert!(snapshot.policy.is_none());
     assert_eq!(snapshot.data_availability, DataAvailability::UNAVAILABLE);

@@ -474,10 +474,17 @@ async fn real_tls_fixed_clock_exchange_and_opened_event_keep_current_association
         let reply = initial_clock(&mut pair, &owner, &clock, PC_SIGNING_KEY)
             .await
             .unwrap();
+        assert_eq!(pair.phone.correlation_received_nanos(), None);
+        let accepted_clock = clock.inbox();
+        let accepted_nanos = accepted_clock.phone_monotonic_nanos();
         let clock_update = pair
             .phone
-            .apply_event(&mut owner, reply, clock.inbox())
+            .apply_event(&mut owner, reply, accepted_clock)
             .unwrap();
+        assert_eq!(
+            pair.phone.correlation_received_nanos(),
+            Some(accepted_nanos)
+        );
         assert_clock_update(&clock_update, &owner, reference);
         let (event, binding) = opened(1);
         let message = send(&mut pair, event).await;
@@ -487,6 +494,15 @@ async fn real_tls_fixed_clock_exchange_and_opened_event_keep_current_association
             .unwrap();
         assert_eq!(opened_update.association().reference(), reference);
         opened_update.check_current(&owner).unwrap();
+        assert_eq!(
+            pair.phone.correlation_received_nanos(),
+            Some(accepted_nanos)
+        );
+        pair.phone.queue_clock_probe(&owner, clock.inbox()).unwrap();
+        assert_eq!(
+            pair.phone.correlation_received_nanos(),
+            Some(accepted_nanos)
+        );
         assert!(
             opened_update
                 .committed()
@@ -512,6 +528,7 @@ async fn real_tls_fixed_clock_exchange_and_opened_event_keep_current_association
         assert!(owner.history().unwrap().is_empty());
         // Explicit abort invalidates retained context, not the shared parent token.
         pair.phone.abort();
+        assert_eq!(pair.phone.correlation_received_nanos(), None);
         assert_eq!(
             clock_update.check_current(&owner),
             Err(PeerSocketError::ConnectionClosed)
@@ -892,4 +909,60 @@ async fn dropping_connection_invalidates_retained_update_without_cancelling_shar
     })
     .await
     .expect("bounded dropped connection context deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parked_liveness_preserves_then_invalidates_received_context_without_an_inbox_commit() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let temp = tempfile::tempdir().unwrap();
+        let clock = HostClock::new();
+        let (mut owner, reference) = owner(&temp, &clock);
+        let stop = CancellationToken::new();
+        let budget = Arc::new(ConnectionBudget::new(2).unwrap());
+        let mut pair = pair(
+            &owner,
+            reference,
+            clock.clone(),
+            stop.clone(),
+            budget.clone(),
+        )
+        .await;
+        let reply = initial_clock(&mut pair, &owner, &clock, PC_SIGNING_KEY)
+            .await
+            .unwrap();
+        let update = pair
+            .phone
+            .apply_event(&mut owner, reply, clock.inbox())
+            .unwrap();
+        let queued = send(&mut pair, opened(6).0).await;
+        let before = witness(&temp, &owner);
+        let pending = pair.phone.pending_counts();
+        stage_canary(&temp);
+        pair.phone.observe_liveness().unwrap();
+        assert_eq!(pair.phone.pending_counts(), pending);
+        assert_preintent_unchanged(&temp, &owner, &before);
+        stop.cancel();
+        assert_eq!(
+            pair.phone.observe_liveness().unwrap_err(),
+            PeerSocketError::Socket(SocketError::Cancelled)
+        );
+        assert_eq!(
+            update.check_current(&owner),
+            Err(PeerSocketError::ConnectionClosed)
+        );
+        assert_eq!(
+            pair.phone
+                .apply_event(&mut owner, queued, clock.inbox())
+                .unwrap_err(),
+            PeerSocketError::ConnectionClosed
+        );
+        assert_preintent_unchanged(&temp, &owner, &before);
+        drop(pair.phone);
+        assert_eq!(budget.active(), 1);
+        pair.pc.abort();
+        drop(pair.pc);
+        assert_eq!(budget.active(), 0);
+    })
+    .await
+    .expect("bounded parked associated-context maintenance");
 }

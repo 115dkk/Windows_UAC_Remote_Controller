@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { invoke, isTauri } from '@tauri-apps/api/core';
-import type { AppSnapshot, ControllerBridge } from './contracts';
+import { addPluginListener, invoke, isTauri } from '@tauri-apps/api/core';
+import type { AppSnapshot, ControllerBridge, RequestDetailsView } from './contracts';
 
 function native<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -16,6 +16,12 @@ export const controllerBridge: ControllerBridge = {
   beginPairing: () => native<AppSnapshot>('begin_pairing'),
   removeDevice: (deviceId) => native<AppSnapshot>('remove_device', { deviceId }),
   decide: (requestId, decision) => native<AppSnapshot>('decide_request', { requestId, decision }),
+  requestDetails: (requestId) => native<RequestDetailsView>('request_details', { requestId }),
+  watchRequests: async (notify) => {
+    if (!isTauri()) return () => Promise.resolve();
+    const listener = await addPluginListener('device-state', 'request-review', () => { notify(); });
+    return () => listener.unregister();
+  },
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),

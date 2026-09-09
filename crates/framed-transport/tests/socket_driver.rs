@@ -37,10 +37,36 @@ use tokio::{
 const TEST_DEADLINE: Duration = Duration::from_secs(2);
 const SETUP_FRAME: &[u8] = b"synthetic socket setup; not authority";
 
+#[tokio::test]
+async fn raw_tcp_duplex_half_close_preserves_every_byte_before_eof() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        for _ in 0..16 {
+            let (first, second) = sockets(false).await;
+            let exchange = |mut socket: TcpStream| async move {
+                socket.set_nodelay(true).unwrap();
+                socket.write_all(&[1; 23]).await.unwrap();
+                socket.write_all(&[2]).await.unwrap();
+                socket.shutdown().await.unwrap();
+                let mut payload = [0; 24];
+                socket.read_exact(&mut payload).await.unwrap();
+                assert_eq!(&payload[..23], &[1; 23]);
+                assert_eq!(payload[23], 2);
+                assert_eq!(socket.read(&mut [0; 1]).await.unwrap(), 0);
+            };
+            // The raw pair uses the same runtime/Windows stack as SocketDriver.
+            // No TLS or production owner state participates in this control.
+            tokio::join!(exchange(first), exchange(second));
+        }
+    })
+    .await
+    .expect("bounded raw TCP half-close control");
+}
+
 struct SyntheticClock {
     origin: Instant,
     nanos: AtomicU64,
     unavailable: AtomicBool,
+    advance_after_read: AtomicU64,
 }
 
 impl SyntheticClock {
@@ -49,6 +75,7 @@ impl SyntheticClock {
             origin: Instant::now(),
             nanos: AtomicU64::new(0),
             unavailable: AtomicBool::new(false),
+            advance_after_read: AtomicU64::new(0),
         })
     }
 
@@ -63,8 +90,13 @@ impl SocketClock for SyntheticClock {
         if self.unavailable.load(Ordering::SeqCst) {
             return Err(SocketClockUnavailable);
         }
+        let observed = self.nanos.load(Ordering::SeqCst);
+        let next = self.advance_after_read.swap(0, Ordering::SeqCst);
+        if next != 0 {
+            self.nanos.store(next, Ordering::SeqCst);
+        }
         self.origin
-            .checked_add(Duration::from_nanos(self.nanos.load(Ordering::SeqCst)))
+            .checked_add(Duration::from_nanos(observed))
             .ok_or(SocketClockUnavailable)
     }
 }
@@ -688,7 +720,10 @@ async fn graceful_close_notify_and_local_close_are_distinct_and_release_no_autho
         );
         let (local, remote) = tokio::join!(fixture.phone.next_event(), fixture.pc.next_event());
         assert!(matches!(local, Ok(SocketEvent::LocallyClosed)));
-        assert!(matches!(remote, Ok(SocketEvent::PeerClosed)));
+        assert!(
+            matches!(remote, Ok(SocketEvent::PeerClosed)),
+            "remote close observation: {remote:?}"
+        );
         assert_eq!(fixture.phone.failure_reason(), None);
         assert_eq!(fixture.pc.failure_reason(), None);
         assert!(matches!(
@@ -878,4 +913,242 @@ async fn native_time_advancing_during_signer_cannot_evade_handshake_expiry() {
     })
     .await
     .expect("bounded post-signer fresh-time expiry");
+}
+
+#[tokio::test]
+async fn parked_observation_performs_no_socket_io_or_frame_delivery() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let (mut driver, mut peer, clock, budget, _) = lonely(SocketLimits::default()).await;
+        peer.write_all(b"synthetic unread peer bytes")
+            .await
+            .unwrap();
+        let before = driver.pending_counts();
+        for millis in 1..=4 {
+            clock.set(Duration::from_millis(millis));
+            driver.observe_liveness().unwrap();
+            assert_eq!(driver.pending_counts(), before);
+        }
+        // Even the initial ClientHello must still be in the local TLS buffers.
+        let mut bytes = [0; 64];
+        assert_eq!(
+            peer.try_read(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(driver);
+        assert_eq!(budget.active(), 0);
+    })
+    .await
+    .expect("bounded parked no-I/O observation");
+}
+
+#[tokio::test]
+async fn parked_observation_preserves_a_queued_frame_until_normal_driving_resumes() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut fixture = ready_pair(false, 17).await;
+        let payload = b"one preserved parked frame";
+        fixture
+            .phone
+            .queue_frame(encode_frame(payload).unwrap())
+            .unwrap();
+        let before = fixture.phone.pending_counts();
+        for millis in 1..=4 {
+            fixture.clock.set(Duration::from_millis(millis));
+            fixture.phone.observe_liveness().unwrap();
+            assert_eq!(fixture.phone.pending_counts(), before);
+        }
+        let (sent, received) = tokio::join!(fixture.phone.next_event(), fixture.pc.next_event());
+        assert!(matches!(sent.unwrap(), SocketEvent::OutboundDrained));
+        let SocketEvent::Frame(frame) = received.unwrap() else {
+            panic!("expected preserved frame")
+        };
+        assert_eq!(frame.into_bytes(), payload);
+    })
+    .await
+    .expect("bounded parked frame resumption");
+}
+
+#[tokio::test]
+async fn parked_observation_enforces_handshake_expiry_including_its_final_clock_sample() {
+    for jump in [false, true] {
+        tokio::time::timeout(TEST_DEADLINE, async {
+            let (mut driver, mut peer, clock, budget, _) = lonely(SocketLimits::default()).await;
+            if jump {
+                clock.set(HANDSHAKE_TIMEOUT - Duration::from_nanos(1));
+                clock.advance_after_read.store(
+                    u64::try_from(HANDSHAKE_TIMEOUT.as_nanos()).unwrap(),
+                    Ordering::SeqCst,
+                );
+            } else {
+                clock.set(HANDSHAKE_TIMEOUT);
+            }
+            let expected =
+                SocketError::Transport(TransportError::Channel(ChannelError::HandshakeExpired));
+            assert_eq!(driver.observe_liveness().unwrap_err(), expected);
+            assert_eq!(driver.failure_reason(), Some(expected));
+            assert_eq!(driver.observe_liveness().unwrap_err(), SocketError::Failed);
+            let mut byte = [0; 1];
+            assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+            drop(driver);
+            assert_eq!(budget.active(), 0);
+        })
+        .await
+        .expect("bounded parked TLS deadline");
+    }
+}
+
+#[tokio::test]
+async fn parked_observation_checks_cancellation_clock_idle_and_absolute_limits() {
+    for variant in 0..5 {
+        tokio::time::timeout(TEST_DEADLINE, async {
+            let limits = match variant {
+                3 => SocketLimits::new(Duration::from_secs(1), MAX_SOCKET_LIFETIME).unwrap(),
+                4 => SocketLimits::new(MAX_SOCKET_IDLE_TIMEOUT, Duration::from_secs(1)).unwrap(),
+                _ => SocketLimits::default(),
+            };
+            let (mut driver, _, clock, budget, stop) = lonely(limits).await;
+            let expected = match variant {
+                0 => {
+                    stop.cancel();
+                    SocketError::Cancelled
+                }
+                1 => {
+                    clock.unavailable.store(true, Ordering::SeqCst);
+                    SocketError::ClockUnavailable
+                }
+                2 => {
+                    clock.set(Duration::from_nanos(1));
+                    driver.observe_liveness().unwrap();
+                    clock.set(Duration::ZERO);
+                    SocketError::ClockRegressed
+                }
+                3 => {
+                    clock.set(Duration::from_secs(1));
+                    SocketError::IdleDeadline
+                }
+                _ => {
+                    clock.set(Duration::from_secs(1));
+                    SocketError::AbsoluteDeadline
+                }
+            };
+            assert_eq!(driver.observe_liveness().unwrap_err(), expected);
+            assert_eq!(driver.failure_reason(), Some(expected));
+            drop(driver);
+            assert_eq!(budget.active(), 0);
+        })
+        .await
+        .expect("bounded parked local liveness failure");
+    }
+}
+
+#[tokio::test]
+async fn local_close_waits_for_owned_peer_eof_and_remains_cancellable_after_output_drains() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut fixture = ready_pair(false, 23).await;
+        fixture.phone.begin_close().unwrap();
+        assert!(fixture.phone.pending_counts().transport.outbound_tls_bytes > 0);
+
+        // Keep the ready peer owned but undriven: it can acknowledge TCP bytes,
+        // but neither its TLS close handling nor socket EOF has been triggered.
+        let mut drained = false;
+        for _ in 0..64 {
+            pending_poll(&mut fixture.phone).await;
+            let pending = fixture.phone.pending_counts();
+            if pending.socket_write_bytes == 0 && pending.transport.outbound_tls_bytes == 0 {
+                drained = true;
+                break;
+            }
+        }
+        assert!(drained, "bounded polls must hand the close record to TCP");
+        pending_poll(&mut fixture.phone).await;
+        assert_eq!(fixture.phone.failure_reason(), None);
+        assert_eq!(fixture.budget.active(), 2);
+
+        fixture.phone_stop.cancel();
+        assert!(matches!(
+            fixture.phone.next_event().await,
+            Err(SocketError::Cancelled)
+        ));
+        assert_eq!(fixture.phone.failure_reason(), Some(SocketError::Cancelled));
+        assert_eq!(fixture.phone.pending_counts().socket_write_bytes, 0);
+        assert_eq!(fixture.budget.active(), 2);
+        drop((fixture.phone, fixture.pc));
+        assert_eq!(fixture.budget.active(), 0);
+    })
+    .await
+    .expect("bounded cancellation while graceful close waits for peer EOF");
+}
+
+#[tokio::test]
+async fn local_close_peer_eof_wait_keeps_the_original_close_deadline() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut fixture = ready_pair(false, 23).await;
+        let started = Duration::from_millis(17);
+        fixture.clock.set(started);
+        fixture.phone.begin_close().unwrap();
+        assert!(fixture.phone.pending_counts().transport.outbound_tls_bytes > 0);
+
+        let mut drained = false;
+        for _ in 0..64 {
+            pending_poll(&mut fixture.phone).await;
+            let pending = fixture.phone.pending_counts();
+            if pending.socket_write_bytes == 0 && pending.transport.outbound_tls_bytes == 0 {
+                drained = true;
+                break;
+            }
+        }
+        assert!(drained, "bounded polls must hand the close record to TCP");
+        // Repeated waiting must not restart the deadline at the last write,
+        // write-half shutdown or later read attempt. No real sleep is involved.
+        fixture.clock.set(started + FRAME_TIMEOUT / 2);
+        pending_poll(&mut fixture.phone).await;
+        fixture.clock.set(started + FRAME_TIMEOUT);
+        assert!(matches!(
+            fixture.phone.next_event().await,
+            Err(SocketError::WriteDeadline)
+        ));
+        assert_eq!(
+            fixture.phone.failure_reason(),
+            Some(SocketError::WriteDeadline)
+        );
+        assert_eq!(fixture.phone.pending_counts().socket_write_bytes, 0);
+        assert!(matches!(
+            fixture.phone.next_event().await,
+            Err(SocketError::Failed)
+        ));
+        assert_eq!(fixture.budget.active(), 2);
+        drop((fixture.phone, fixture.pc));
+        assert_eq!(fixture.budget.active(), 0);
+    })
+    .await
+    .expect("bounded original close deadline while peer remains open");
+}
+
+#[tokio::test]
+async fn simultaneous_local_close_finishes_both_without_claiming_authenticated_peer_close() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut fixture = ready_pair(false, 23).await;
+        fixture.phone.begin_close().unwrap();
+        fixture.pc.begin_close().unwrap();
+        let (phone, pc) = tokio::join!(fixture.phone.next_event(), fixture.pc.next_event());
+        assert!(
+            matches!(phone, Ok(SocketEvent::LocallyClosed)),
+            "phone: {phone:?}"
+        );
+        assert!(matches!(pc, Ok(SocketEvent::LocallyClosed)), "pc: {pc:?}");
+        assert_eq!(fixture.phone.failure_reason(), None);
+        assert_eq!(fixture.pc.failure_reason(), None);
+        assert!(matches!(
+            fixture.phone.next_event().await,
+            Err(SocketError::Closed)
+        ));
+        assert!(matches!(
+            fixture.pc.next_event().await,
+            Err(SocketError::Closed)
+        ));
+        assert_eq!(fixture.budget.active(), 2);
+        drop((fixture.phone, fixture.pc));
+        assert_eq!(fixture.budget.active(), 0);
+    })
+    .await
+    .expect("bounded simultaneous local TCP shutdown without TLS authority");
 }

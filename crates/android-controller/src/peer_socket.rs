@@ -424,6 +424,32 @@ impl AssociatedPcSocket {
         Ok(())
     }
 
+    /// Actual accepted correlation receipt time, for native refresh scheduling
+    /// only. Unrelated messages/probes do not change this value. This readonly
+    /// observation does not check current owner membership or extend any request
+    /// mapping/deadline; apply/queue and liveness checks remain required.
+    pub fn correlation_received_nanos(&self) -> Option<u64> {
+        if !self.context.active.load(Ordering::Acquire) || self.context.stop.is_cancelled() {
+            return None;
+        }
+        self.correlation
+            .as_ref()
+            .filter(|correlation| !correlation.is_faulted())
+            .map(ClockCorrelation::phone_probe_received_nanos)
+    }
+
+    /// Parked-mailbox deadline/cancellation maintenance without an inbox borrow
+    /// or another event/read/write/signature. This does not prove that the saved
+    /// association is still current; apply/queue must still check the owner.
+    pub fn observe_liveness(&mut self) -> Result<(), PeerSocketError> {
+        self.ensure_open()?;
+        if let Err(error) = self.driver.observe_liveness() {
+            self.abort();
+            return Err(PeerSocketError::Socket(error));
+        }
+        self.ensure_open()
+    }
+
     /// Downward only; never clears replay guards, history, keys or association.
     pub fn abort(&mut self) {
         if let Some(write) = self.outbound_decision.take() {

@@ -153,6 +153,22 @@ impl SyntheticNativePlatform {
     }
 }
 impl NativePlatform for SyntheticNativePlatform {
+    fn intake_progress(&self) -> Result<(), BridgeError> {
+        self.unused()
+    }
+    fn presentation_clock(
+        &self,
+    ) -> Result<uac_android_controller::NativePresentationClock, BridgeError> {
+        self.unused()
+    }
+    fn publish_pending_request(
+        &self,
+        _: Arc<uac_android_controller::NativePendingRequest>,
+        _: uac_android_controller::NativeRequestPresentation,
+        _: uac_android_controller::NativeRequestAlert,
+    ) -> Result<uac_android_controller::NativeRequestSinkOutcome, BridgeError> {
+        self.unused()
+    }
     fn advance_approval_drain_for_denial(
         &self,
         _: Arc<uac_android_controller::NativeDenialScope>,

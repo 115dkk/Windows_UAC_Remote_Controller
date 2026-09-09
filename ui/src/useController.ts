@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, ControllerBridge, NotificationPolicy, ServiceAction } from './contracts';
 import { ko } from './messages.ko';
+import { ageRequestPresentation, withoutRequestBodies } from './requestPresentation';
 
 export type ClientCommand =
   | { readonly kind: 'service'; readonly action: ServiceAction }
@@ -21,19 +22,22 @@ interface ViewState {
   readonly stale: boolean;
   readonly error: string | null;
   readonly notice: string | null;
+  readonly requestObservedAt: number;
 }
 
 function emptyState(owner: ControllerBridge): ViewState {
-  return { owner, snapshot: null, refreshing: true, busy: null, stale: false, error: null, notice: null };
+  return { owner, snapshot: null, refreshing: true, busy: null, stale: false, error: null, notice: null, requestObservedAt: 0 };
 }
 
 async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
+  const started = performance.now();
   let timer: number | undefined;
   try {
-    return await Promise.race([
+    const snapshot = await Promise.race([
       bridge.snapshot(),
       new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => { reject(new Error('snapshot_timeout')); }, 15000); }),
     ]);
+    return ageRequestPresentation(snapshot, performance.now() - started);
   } finally {
     window.clearTimeout(timer);
   }
@@ -51,8 +55,8 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
-      return snapshot.dataAvailability.requests === 'available' && request?.state === 'pending'
-        && (command.decision === 'approve' ? request.canApprove : request.canDeny);
+      return snapshot.dataAvailability.requests === 'available' && request !== undefined
+        && (command.decision === 'approve' ? request.state === 'pending' && request.canApprove : request.canDeny);
     }
     case 'policy': return snapshot.platform === 'android' && snapshot.policy !== null && snapshot.phoneService?.policyOwnerReady === true;
     case 'lock-settings': return snapshot.mobile?.screenLock === 'missing' && snapshot.mobile.canOpenLockSettings;
@@ -93,10 +97,11 @@ export function useController(bridge: ControllerBridge) {
     try {
       const snapshot = await readSnapshot(bridge);
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null });
+      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now() });
     } catch {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
-      publish({ ...previous, refreshing: false, busy: null, stale: previous.snapshot !== null, error: ko.loadFailure, notice: null });
+      const latest = current.current;
+      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: ko.loadFailure, notice: null });
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
     }
@@ -106,6 +111,12 @@ export function useController(bridge: ControllerBridge) {
     const previous = current.current;
     if (liveOwner.current !== bridge || commandPending.current || previous.owner !== bridge
       || previous.stale || !previous.snapshot || !exposedBySnapshot(previous.snapshot, command)) return null;
+    if (command.kind === 'decision' && previous.snapshot.requests.some((request) => request.id === command.requestId
+      && performance.now() - previous.requestObservedAt >= request.refreshAfterMillis)) {
+      publish({ ...previous, snapshot: withoutRequestBodies(previous.snapshot) });
+      void refresh();
+      return null;
+    }
     commandPending.current = true;
     readPending.current = false;
     const attempt = ++revision.current; // A command supersedes an older snapshot request.
@@ -118,19 +129,34 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
-      const snapshot = await dispatch(bridge, command);
+      const started = performance.now();
+      const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       // Native cancellation and errors are AppIssue results, never local success.
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null });
+      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now() });
       return snapshot.issue ? null : snapshot;
     } catch {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-      publish({ ...previous, refreshing: false, busy: null, stale: true, error: command.kind === 'policy' ? ko.saveFailure : ko.actionFailure, notice: null });
+      const latest = current.current;
+      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true, error: command.kind === 'policy' ? ko.saveFailure : ko.actionFailure, notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
     }
-  }, [bridge, publish]);
+  }, [bridge, publish, refresh]);
+
+  useEffect(() => {
+    const snapshot = state.snapshot;
+    if (!snapshot?.requests.length || state.owner !== bridge) return;
+    const delay = Math.max(0, Math.min(...snapshot.requests.map((request) => request.refreshAfterMillis))
+      - (performance.now() - state.requestObservedAt));
+    const timer = window.setTimeout(() => {
+      if (liveOwner.current !== bridge || current.current.snapshot !== snapshot) return;
+      publish({ ...current.current, snapshot: withoutRequestBodies(snapshot) });
+      if (document.visibilityState === 'visible') void refresh();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot]);
 
   useEffect(() => {
     liveOwner.current = bridge;
@@ -140,18 +166,27 @@ export function useController(bridge: ControllerBridge) {
     void Promise.resolve().then(() => refresh());
     const onForeground = () => {
       if (document.visibilityState === 'visible') void refresh();
+      else if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
     };
+    let disposed = false;
+    let unsubscribe: (() => Promise<void>) | undefined;
+    void bridge.watchRequests?.(onForeground).then((stop) => {
+      if (disposed) void stop().catch(() => undefined);
+      else unsubscribe = stop;
+    }).catch(() => undefined); // Sticky native review + periodic read still work.
     window.addEventListener('focus', onForeground);
     document.addEventListener('visibilitychange', onForeground);
     const timer = window.setInterval(onForeground, 5000);
     return () => {
+      disposed = true;
+      void unsubscribe?.().catch(() => undefined);
       liveOwner.current = null;
       revision.current += 1;
       window.clearInterval(timer);
       window.removeEventListener('focus', onForeground);
       document.removeEventListener('visibilitychange', onForeground);
     };
-  }, [bridge, refresh]);
+  }, [bridge, publish, refresh]);
 
   return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run };
 }

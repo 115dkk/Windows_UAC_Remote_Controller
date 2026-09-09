@@ -11,7 +11,14 @@ mod denial;
 mod denial_fixture;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod denial_tests;
+mod effects;
+mod intake;
+mod intake_delivery;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod intake_tests;
 mod local_keys;
+mod native_clock;
+mod request_projection;
 mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
@@ -20,7 +27,15 @@ pub use denial::{
     NativeApprovalDrainState, NativeDenialAdvance, NativeDenialAttempt, NativeDenialOperationState,
     NativeDenialScope, NativeDenialWait,
 };
+pub use intake::IntakePeerId;
+pub use intake_delivery::NativeDecisionProgress;
 pub use local_keys::NativeLocalKeySet;
+pub use native_clock::NativePresentationClock;
+pub use request_projection::{
+    NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
+    NativeRequestCatalogStatus, NativeRequestDetails, NativeRequestNotPosted,
+    NativeRequestPresentation, NativeRequestPreview, NativeRequestSinkOutcome,
+};
 pub use transport::{
     NativeCertificateVerify, NativeTransportBinding, native_client_transport_identity,
 };
@@ -67,6 +82,10 @@ pub enum BridgeError {
     ApprovalRejected,
     #[error("the denial attempt is no longer eligible")]
     DenialRejected,
+    #[error("the current request projection is unavailable")]
+    RequestUnavailable,
+    #[error("native presentation time is awaiting a known-owner refresh")]
+    PresentationRefreshRequired,
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
@@ -90,6 +109,20 @@ impl fmt::Debug for NativeClock {
 
 #[uniffi::export(foreign)]
 pub trait NativePlatform: Send + Sync {
+    /// Lightweight real temporal bookends. No storage/key/UI work or synchronous
+    /// owner reentry. Each returned local field uses the same wall-after sample.
+    fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError>;
+    /// One owned bounded delta, not delivery/authentication evidence. Restore
+    /// and Update must not re-alert. Native failures retain exact cleanup.
+    fn publish_pending_request(
+        &self,
+        request: Arc<NativePendingRequest>,
+        intent: NativeRequestPresentation,
+        alert: NativeRequestAlert,
+    ) -> Result<NativeRequestSinkOutcome, BridgeError>;
+    /// Coalesced native-worker progress wake only; never synchronously call or
+    /// wait for this controller from the callback.
+    fn intake_progress(&self) -> Result<(), BridgeError>;
     /// Scope-bound actual session cancellation/progress. Never wait for or
     /// synchronously reenter the actor/controller; queue native cleanup instead.
     fn advance_approval_drain_for_denial(
@@ -154,6 +187,7 @@ impl Drop for Admission<'_> {
             self.0.drop_owner();
         }
         self.0.active.store(false, Ordering::Release);
+        self.0.intake.admission_released();
     }
 }
 
@@ -183,6 +217,8 @@ pub struct MobileController {
     approval_owner: Mutex<Option<android_controller::ApprovalPlanOwner>>,
     approval_native_plan: Mutex<Option<Arc<NativeApprovalPlan>>>,
     denial_state: Mutex<denial::DenialState>,
+    projections: Mutex<request_projection::ProjectionRegistry>,
+    intake: Arc<intake::IntakeOwner>,
     approval_alive: Arc<AtomicBool>,
     active: AtomicBool,
     cleanup_pending: AtomicBool,
@@ -191,7 +227,7 @@ pub struct MobileController {
     key_cleanup_failed: AtomicBool,
     native_floor_nanos: AtomicU64,
     // Hold through close/cleanup and until the generated object is destroyed.
-    _owner_lease: OwnerLease,
+    _owner_lease: Arc<OwnerLease>,
 }
 impl fmt::Debug for MobileController {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -203,13 +239,19 @@ impl Drop for MobileController {
         // Last-resort downward invalidation only. Native actor must retain this
         // object until explicit cleanup succeeds; Drop claims no quiescence.
         self.approval_alive.store(false, Ordering::Release);
+        self.intake.stop();
+        let _ = self
+            .projections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .revoke_all();
         self.close_denial_state();
     }
 }
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    7
+    8
 }
 
 #[uniffi::export]
@@ -240,26 +282,37 @@ impl MobileController {
             .map_err(|_| BridgeError::InvalidPolicy)?;
         let _admission = self.enter()?;
         let clock = self.read_clock()?;
-        let result = {
-            let mut state = match self.state.lock() {
-                Ok(state) => state,
-                Err(error) => {
-                    drop(error.into_inner());
-                    return self.fail_closed(BridgeError::Closed);
-                }
-            };
-            let owner = state.as_mut().ok_or(BridgeError::Closed)?;
-            owner.update_policy(policy, clock).map(|committed| {
-                // This first surface has no native effect dispatcher. Do not
-                // silently throw away request effects if preexisting active
-                // state is ever encountered; close and require reconciliation.
-                committed.update().effects().is_empty() && committed.update().fault().is_none()
-            })
+        let changed = self.with_inbox(|owner| {
+            Ok(owner
+                .policy()
+                .map_err(|_| BridgeError::StorageUnavailable)?
+                != &policy)
+        })?;
+        let refresh = if changed {
+            let mut projections = self.projections.lock().map_err(|_| BridgeError::Closed)?;
+            let keys = projections.keys();
+            projections.revoke_all()?;
+            for key in &keys {
+                projections.defer_refresh(*key, clock.phone_monotonic_nanos())?;
+            }
+            keys
+        } else {
+            Vec::new()
         };
-        match result {
-            Ok(true) => self.read_policy_while_admitted(),
-            Ok(false) | Err(_) => self.fail_closed(BridgeError::StorageUnavailable),
+        let result = self.with_inbox(|owner| {
+            owner
+                .update_policy(policy, clock)
+                .map_err(|_| BridgeError::StorageUnavailable)
+        })?;
+        self.dispatch_effects(
+            result.update().effects().to_vec(),
+            result.update().fault().is_some(),
+        )?;
+        if !refresh.is_empty() {
+            self.maintain_requests_admitted()?;
         }
+        self.signal_intake_maintenance();
+        self.read_policy_while_admitted()
     }
 
     /// Fixed native history read; no path, peer body, key or result supplied by UI.
@@ -309,6 +362,17 @@ impl MobileController {
         self.drop_owner();
         self.finish_cleanup()
     }
+    /// Atomic downward stop can be requested while a previous command/provider
+    /// is in progress. Actual cleanup remains on the admitted continuation path.
+    pub fn stop_intake(&self) {
+        self.approval_alive.store(false, Ordering::Release);
+        self.intake.stop();
+        let _ = self
+            .projections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .revoke_all();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -322,12 +386,19 @@ impl MobileController {
         // Callback/shape rejection is BEFORE any storage intent or ACK. A valid
         // backwards wall-clock observation is acceptable; monotonic request time
         // remains governed by read_clock and the inbox's independent invariants.
-        let now = self
-            .platform
-            .unix_millis()
+        let now = native_clock::native_callback(|| self.platform.unix_millis())
             .ok()
             .and_then(|value| activity_journal::UnixMillis::new(value).ok())
             .ok_or(BridgeError::HistoryTimeUnavailable)?;
+        let pending = self.with_inbox(|owner| {
+            Ok(owner
+                .pending_outcomes()
+                .map_err(|_| BridgeError::StorageUnavailable)?
+                .to_vec())
+        })?;
+        for outcome in pending {
+            self.observe_denial_terminal(outcome);
+        }
         let result = {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
@@ -364,7 +435,7 @@ impl MobileController {
         .map_err(|_| BridgeError::StorageUnavailable)
     }
     fn open(platform: Arc<dyn NativePlatform>, mode: OpenMode) -> Result<Arc<Self>, BridgeError> {
-        let owner_lease = OwnerLease::acquire()?;
+        let owner_lease = Arc::new(OwnerLease::acquire()?);
         let mut key_cleanup_needed = false;
         let result = (|| {
             let path = platform.state_directory()?;
@@ -392,7 +463,7 @@ impl MobileController {
                     clock,
                 )
             } else {
-                DurableInbox::open_existing_policy_only_with_key_preflight(
+                DurableInbox::open_existing_with_key_preflight(
                     directory,
                     boot,
                     clock,
@@ -437,21 +508,6 @@ impl MobileController {
             {
                 return Err(BridgeError::OwnerFaulted);
             }
-            if !update.update().effects().is_empty()
-                || owner
-                    .counts()
-                    .map_err(|_| BridgeError::StorageUnavailable)?
-                    .recovering()
-                    != 0
-            {
-                return Err(BridgeError::StorageUnavailable);
-            }
-            if matches!(mode, OpenMode::Application) {
-                // Only after taking the real store lock and accepting policy-
-                // only state. Rejected/competing constructors must not clear an
-                // existing owner's notifications.
-                platform.clear_request_notifications()?;
-            }
             let (finished_boot, finished_clock) = map_clock(platform.clock()?)?;
             if finished_boot != boot
                 || finished_clock.phone_monotonic_nanos() < clock.phone_monotonic_nanos()
@@ -467,25 +523,39 @@ impl MobileController {
                 owner,
                 approval_owner,
                 denial_state,
+                update,
             ))
         })();
         match result {
-            Ok((boot, native_floor, owner, approval_owner, denial_state)) => Ok(Arc::new(Self {
-                platform,
-                boot,
-                state: Mutex::new(Some(owner)),
-                approval_owner: Mutex::new(Some(approval_owner)),
-                approval_native_plan: Mutex::new(None),
-                denial_state: Mutex::new(denial_state),
-                approval_alive: Arc::new(AtomicBool::new(true)),
-                active: AtomicBool::new(false),
-                cleanup_pending: AtomicBool::new(false),
-                notification_cleanup_failed: AtomicBool::new(false),
-                key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
-                key_cleanup_failed: AtomicBool::new(false),
-                native_floor_nanos: AtomicU64::new(native_floor),
-                _owner_lease: owner_lease,
-            })),
+            Ok((boot, native_floor, owner, approval_owner, denial_state, update)) => {
+                let controller = Arc::new(Self {
+                    platform,
+                    boot,
+                    state: Mutex::new(Some(owner)),
+                    approval_owner: Mutex::new(Some(approval_owner)),
+                    approval_native_plan: Mutex::new(None),
+                    denial_state: Mutex::new(denial_state),
+                    projections: Mutex::new(request_projection::ProjectionRegistry::default()),
+                    intake: Arc::new(intake::IntakeOwner::default()),
+                    approval_alive: Arc::new(AtomicBool::new(true)),
+                    active: AtomicBool::new(false),
+                    cleanup_pending: AtomicBool::new(false),
+                    notification_cleanup_failed: AtomicBool::new(false),
+                    key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
+                    key_cleanup_failed: AtomicBool::new(false),
+                    native_floor_nanos: AtomicU64::new(native_floor),
+                    _owner_lease: owner_lease,
+                });
+                let initialized = (|| {
+                    let _admission = controller.enter()?;
+                    controller.initialize_effects(update)?;
+                    controller.start_intake_reactor()
+                })();
+                if let Err(error) = initialized {
+                    return controller.fail_closed(error);
+                }
+                Ok(controller)
+            }
             // A rejected constructor is not the notification owner. In
             // particular Busy/preflight failures must not clear another owner.
             Err(error) => {
@@ -499,6 +569,9 @@ impl MobileController {
         }
     }
     fn enter(&self) -> Result<Admission<'_>, BridgeError> {
+        if native_clock::callback_active() {
+            return Err(BridgeError::Busy);
+        }
         self.active
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .map(|_| Admission(self))
@@ -522,7 +595,7 @@ impl MobileController {
     }
     fn read_clock(&self) -> Result<InboxClock, BridgeError> {
         // Foreign callbacks occur outside the state mutex; re-entry is Busy.
-        match self.platform.clock().and_then(map_clock) {
+        match native_clock::native_callback(|| self.platform.clock()).and_then(map_clock) {
             Ok((boot, clock)) if boot == self.boot => {
                 let observed = clock.phone_monotonic_nanos();
                 if observed < self.native_floor_nanos.load(Ordering::Acquire) {
@@ -537,6 +610,12 @@ impl MobileController {
     }
     fn drop_owner(&self) -> bool {
         self.approval_alive.store(false, Ordering::Release);
+        self.intake.stop();
+        let _ = self
+            .projections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .revoke_all();
         // Logical close, not loss of the native retirement owner. Native cleanup
         // may still need retire_approval after provider return.
         if let Some(plans) = self
@@ -560,28 +639,15 @@ impl MobileController {
         had_owner
     }
     fn finish_cleanup(&self) -> Result<(), BridgeError> {
+        let io_clean = self.intake.cleanup_complete();
         let actions = self.finish_denial_cleanup();
         let approval_clean = self
             .approval_native_plan
             .lock()
             .map(|slot| slot.is_none())
             .unwrap_or(false);
-        let notifications = if !self.cleanup_pending.load(Ordering::Acquire) {
-            Ok(())
-        } else if self.notification_cleanup_failed.load(Ordering::Acquire) {
-            Err(BridgeError::NativeUnavailable)
-        } else {
-            // Set before foreign work so an unwinding callback also leaves a
-            // failure latch. Only its completed success clears the obligation.
-            self.notification_cleanup_failed
-                .store(true, Ordering::Release);
-            self.platform.clear_request_notifications().map(|()| {
-                self.cleanup_pending.store(false, Ordering::Release);
-                self.notification_cleanup_failed
-                    .store(false, Ordering::Release);
-            })
-        };
-        let keys = if actions.is_err() || !approval_clean {
+        let notifications = self.attempt_notification_cleanup();
+        let keys = if actions.is_err() || !approval_clean || !io_clean {
             // Pending action cleanup is NOT a failed key-reference callback.
             // A later continuation may make its FIRST attempt without a retry.
             Err(BridgeError::NativeUnavailable)
@@ -591,10 +657,12 @@ impl MobileController {
             Err(BridgeError::NativeUnavailable)
         } else {
             self.key_cleanup_failed.store(true, Ordering::Release);
-            self.platform.release_local_key_references().map(|()| {
-                self.key_cleanup_pending.store(false, Ordering::Release);
-                self.key_cleanup_failed.store(false, Ordering::Release);
-            })
+            native_clock::native_callback(|| self.platform.release_local_key_references()).map(
+                |()| {
+                    self.key_cleanup_pending.store(false, Ordering::Release);
+                    self.key_cleanup_failed.store(false, Ordering::Release);
+                },
+            )
         };
         // Attempt both independent downward cleanups; one failure must not skip
         // the other. Failed obligations remain for explicit shutdown retry.
@@ -610,6 +678,25 @@ impl MobileController {
             self.destroy_clean_denial_owner();
         }
         result
+    }
+    fn attempt_notification_cleanup(&self) -> Result<(), BridgeError> {
+        if !self.cleanup_pending.load(Ordering::Acquire) {
+            Ok(())
+        } else if self.notification_cleanup_failed.load(Ordering::Acquire) {
+            Err(BridgeError::NativeUnavailable)
+        } else {
+            // Set before foreign work so an unwinding callback also leaves a
+            // failure latch. Only its completed success clears the obligation.
+            self.notification_cleanup_failed
+                .store(true, Ordering::Release);
+            native_clock::native_callback(|| self.platform.clear_request_notifications()).map(
+                |()| {
+                    self.cleanup_pending.store(false, Ordering::Release);
+                    self.notification_cleanup_failed
+                        .store(false, Ordering::Release);
+                },
+            )
+        }
     }
     fn fail_closed<T>(&self, error: BridgeError) -> Result<T, BridgeError> {
         self.drop_owner();
@@ -692,6 +779,31 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn intake_progress(&self) -> Result<(), BridgeError> {
+            Ok(())
+        }
+        fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError> {
+            let clock = self.clock()?;
+            Ok(NativePresentationClock {
+                boot_count: clock.boot_count,
+                elapsed_before_nanos: clock.monotonic_nanos,
+                elapsed_after_nanos: clock.monotonic_nanos,
+                wall_before_millis: 1_700_000_000_000,
+                wall_after_millis: 1_700_000_000_000,
+                weekday: clock.weekday,
+                minute: clock.minute,
+                millis_within_minute: 0,
+                time_epoch: 1,
+            })
+        }
+        fn publish_pending_request(
+            &self,
+            _: Arc<NativePendingRequest>,
+            _: NativeRequestPresentation,
+            _: NativeRequestAlert,
+        ) -> Result<NativeRequestSinkOutcome, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
         fn advance_approval_drain_for_denial(
             &self,
             _: Arc<NativeDenialScope>,
@@ -817,6 +929,8 @@ mod tests {
             approval_alive: Arc::new(AtomicBool::new(true)),
             approval_native_plan: Mutex::new(None),
             denial_state: Mutex::new(denial::DenialState::new(&owner, boot).unwrap()),
+            projections: Mutex::new(request_projection::ProjectionRegistry::default()),
+            intake: Arc::new(intake::IntakeOwner::default()),
             state: Mutex::new(Some(owner)),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
@@ -824,7 +938,7 @@ mod tests {
             key_cleanup_pending: AtomicBool::new(false),
             key_cleanup_failed: AtomicBool::new(false),
             native_floor_nanos: AtomicU64::new(clock.phone_monotonic_nanos()),
-            _owner_lease: OwnerLease::acquire().unwrap(),
+            _owner_lease: Arc::new(OwnerLease::acquire().unwrap()),
         });
         test(&controller, &platform);
     }

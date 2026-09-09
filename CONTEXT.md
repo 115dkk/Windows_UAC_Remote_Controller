@@ -50,6 +50,10 @@ observer/probe and dormant service supervisor do not implement request-bound UAC
 approval. Enrolled-key initialization interfaces are trusted-host interfaces, not
 public IPC. No real Windows approval/credential-entry adapter, native phone
 authentication/notification journey, trusted QR enrollment, or deployed cross-device
-transport has yet been proven. Application startup remains policy-only until the
-trusted identity and authenticated intake/effect owners are integrated. See
+transport has yet been proven. ABI8 now composes a Rust-only provisioned socket,
+full durable startup/effect reconciliation, opaque request projections and native
+notification/action routes. Host tests exercise synthetic actual TCP/TLS, not
+physical-phone authentication or Windows UAC. No QR enrollment or carrier
+discovery is supplied by those trusted-host interfaces. See
+[ADR0015](docs/adr/0015-native-intake-and-request-presentation.md) and
 [the implementation plan](docs/IMPLEMENTATION_PLAN.md) for remaining work.

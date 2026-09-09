@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { AppSnapshot, ControllerBridge, PairedDeviceView, ServiceAction } from './contracts';
 import { ActivityPanel, DevicesPanel } from './CollectionPanels';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -21,18 +21,25 @@ function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
   const devices: NavItem = { page: 'devices', label: phone ? ko.computers : ko.phones, icon: phone ? 'pc' : 'phone', available: snapshot.dataAvailability.devices === 'available' };
   const activity: NavItem = { page: 'activity', label: phone ? ko.phoneActivity : ko.activity, icon: 'history', available: snapshot.dataAvailability.activity === 'available' };
   return phone ? [
-    { page: 'requests', label: ko.requests, icon: 'request', available: snapshot.dataAvailability.requests === 'available' },
+    // Request recovery remains reachable even while native inventory is unknown.
+    { page: 'requests', label: ko.requests, icon: 'request', available: true },
     devices, { page: 'schedule', label: ko.schedule, icon: 'clock', available: true }, activity,
   ] : [{ page: 'status', label: ko.status, icon: 'pc', available: true }, devices, activity];
 }
 
 export function App({ bridge, initialPage }: { bridge: ControllerBridge; initialPage?: ClientPage }) {
   const controller = useController(bridge);
-  const [chosenPage, setChosenPage] = useState<ClientPage | null>(initialPage ?? null);
+  const readDetails = useCallback((id: string) => bridge.requestDetails(id), [bridge]);
+  const [navigationState, setNavigationState] = useState<{ page: ClientPage | null; reviewKey: string | null }>({ page: initialPage ?? null, reviewKey: null });
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const { snapshot, refreshing, busy, stale, error, notice } = controller;
   const phone = snapshot?.platform === 'android';
-  const page = chosenPage ?? (phone ? 'requests' : 'status');
+  const review = snapshot?.requestReview;
+  const reviewKey = review ? `${review.revision}:${review.locator}` : null;
+  const newReview = reviewKey !== null && reviewKey !== navigationState.reviewKey;
+  if (newReview) setNavigationState({ page: 'requests', reviewKey });
+  const page = newReview ? 'requests' : navigationState.page ?? (phone ? 'requests' : 'status');
+  function navigate(next: ClientPage) { setNavigationState({ page: next, reviewKey }); }
   const disabled = stale || busy !== null;
   function serviceAction(action: ServiceAction) {
     if (phone) {
@@ -60,7 +67,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
   const navigation = <aside className="navigation-shell">
     <div className="app-brand"><span className="brand-symbol"><Icon name="link" /></span><span>{ko.appName}</span></div>
     <nav aria-label={ko.navigation}>{items.map((item) => item.available
-      ? <button key={item.page} type="button" className={`navigation-item ${page === item.page ? 'current' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => setChosenPage(item.page)}><Icon name={item.icon} /><span>{item.label}</span></button>
+      ? <button key={item.page} type="button" className={`navigation-item ${page === item.page ? 'current' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => navigate(item.page)}><Icon name={item.icon} /><span>{item.label}</span></button>
       : <span key={item.page} className={`navigation-item passive ${page === item.page ? 'current' : ''}`}><Icon name={item.icon} /><span>{item.label}<small>{ko.unavailable}</small></span></span>)}</nav>
     <p className="rail-caption">{ko.appDescription}</p>
   </aside>;
@@ -74,7 +81,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       <div className={`global-feedback ${busy || notice ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{busy ? (busy === 'policy' ? ko.saving : ko.pending) : notice}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} onAction={serviceAction} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
-      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} />}
+      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onRemove={removeDevice} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {

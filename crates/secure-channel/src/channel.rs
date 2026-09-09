@@ -272,6 +272,14 @@ impl Channel {
         self.advance()
     }
 
+    /// Check only original time bounds and failure/close state. Does not process
+    /// TLS packets, invoke a signer, consume plaintext, or promote readiness.
+    /// Success is not a new peer-authentication or network-liveness observation.
+    pub fn observe_liveness(&mut self, now: Instant) -> Result<(), ChannelError> {
+        self.observe_time(now)?;
+        self.ensure_open()
+    }
+
     /// Immediate irreversible local abort. Drops the connection and buffered
     /// data; the owner must also close the relay. Use this for revocation.
     /// It does not assert that the peer received TLS close_notify.
@@ -320,6 +328,18 @@ impl Channel {
     }
 
     fn observe(&mut self, now: Instant) -> Result<(), ChannelError> {
+        self.observe_time(now)?;
+        // A potentially blocking native signer must not make a completed
+        // handshake silently evade its deadline. A subsequent public operation
+        // supplies fresh time before any application data is exposed.
+        if self.ready_candidate {
+            self.ready_candidate = false;
+            self.ready = true;
+        }
+        Ok(())
+    }
+
+    fn observe_time(&mut self, now: Instant) -> Result<(), ChannelError> {
         if self.failure.is_some() {
             return Err(ChannelError::Failed);
         }
@@ -329,13 +349,6 @@ impl Channel {
         self.last_observed = now;
         if !self.ready && !self.local_closed && now >= self.deadline {
             return Err(self.fail(ChannelError::HandshakeExpired));
-        }
-        // A potentially blocking native signer must not make a completed
-        // handshake silently evade its deadline. A subsequent public operation
-        // supplies a fresh host Instant before any application data is exposed.
-        if self.ready_candidate {
-            self.ready_candidate = false;
-            self.ready = true;
         }
         Ok(())
     }

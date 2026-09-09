@@ -196,6 +196,7 @@ pub(crate) async fn remove_device(
 
 #[tauri::command]
 pub(crate) async fn decide_request(
+    app: tauri::AppHandle,
     request_id: String,
     decision: DecisionIntent,
     state: tauri::State<'_, ControllerState>,
@@ -203,12 +204,42 @@ pub(crate) async fn decide_request(
     check_identifier(&request_id)?;
     #[cfg(not(target_os = "android"))]
     {
+        let _ = app;
         with_runtime(&state, move |runtime| runtime.decide(&request_id, decision)).await
     }
     #[cfg(target_os = "android")]
     {
-        let _ = (state, decision);
-        Err(controller_runtime::UnwiredCapability::Decisions.issue())
+        controller_runtime::check_request_locator(&request_id)?;
+        with_android_owner(
+            app,
+            &state,
+            crate::mobile::OwnerOperation::Decide(request_id, decision),
+        )
+        .await
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn request_details(
+    app: tauri::AppHandle,
+    request_id: String,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<controller_runtime::RequestDetailsView, AppIssue> {
+    controller_runtime::check_request_locator(&request_id)?;
+    #[cfg(target_os = "android")]
+    {
+        let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _lease = lease;
+            crate::mobile::request_details(&app, request_id)
+        })
+        .await
+        .map_err(|_| worker_issue())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, state);
+        Err(controller_runtime::phone_request_issue())
     }
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Actual client TLS identity backed by the Application's existing native key
 //! owner. No foreign/public constructor can manufacture the signing request.
+use crate::native_clock::native_callback;
 use crate::{BridgeError, NativeLocalKeySet, NativePlatform};
 use android_controller::{DurableInbox, NativePeerLease, PeerAssociationRef};
 use secure_channel::{
@@ -103,6 +104,33 @@ pub fn native_client_transport_identity(
     let lease = owner
         .lease_peer_association(association)
         .map_err(|_| BridgeError::LocalKeysUnavailable)?;
+    prepare_identity((), lease, platform).map(|(_, identity)| identity)
+}
+
+/// Fixed Client identity preparation off owner admission. Carrier drops BEFORE
+/// native lease/signer release on every failure; no generic signing input.
+pub(crate) fn native_identity_with_socket(
+    socket: tokio::net::TcpStream,
+    lease: NativePeerLease,
+    platform: Arc<dyn NativePlatform>,
+) -> Result<(tokio::net::TcpStream, TlsIdentity), BridgeError> {
+    prepare_identity(socket, lease, platform)
+}
+fn prepare_identity<C>(
+    carrier: C,
+    lease: NativePeerLease,
+    platform: Arc<dyn NativePlatform>,
+) -> Result<(C, TlsIdentity), BridgeError> {
+    struct Owned<C> {
+        carrier: Option<C>,
+        lease: Option<NativePeerLease>,
+        signer: Option<Arc<NativeClientSigner>>,
+    }
+    let mut owned = Owned {
+        carrier: Some(carrier),
+        lease: Some(lease),
+        signer: None,
+    };
     let reference = NEXT_BINDING
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
@@ -110,7 +138,7 @@ pub fn native_client_transport_identity(
         .map_err(|_| BridgeError::NativeUnavailable)?;
     let binding = Arc::new(NativeTransportBinding {
         reference,
-        lease,
+        lease: owned.lease.take().ok_or(BridgeError::NativeUnavailable)?,
         closed: AtomicBool::new(false),
         signing: AtomicBool::new(false),
         released: AtomicBool::new(false),
@@ -118,14 +146,21 @@ pub fn native_client_transport_identity(
     // The adapter owns a release obligation BEFORE native publication. A failed
     // prepare may have partially published a holder in the retained platform.
     let signer = Arc::new(NativeClientSigner { binding, platform });
-    signer
-        .platform
-        .prepare_transport_signer(Arc::clone(&signer.binding))?;
+    owned.signer = Some(Arc::clone(&signer));
+    native_callback(|| {
+        signer
+            .platform
+            .prepare_transport_signer(Arc::clone(&signer.binding))
+    })?;
     if signer.binding.is_closed() {
         return Err(BridgeError::NativeUnavailable);
     }
-    TlsIdentity::from_trusted_host(EndpointRole::Client, signer)
-        .map_err(|_| BridgeError::NativeUnavailable)
+    let identity = TlsIdentity::from_trusted_host(EndpointRole::Client, signer)
+        .map_err(|_| BridgeError::NativeUnavailable)?;
+    Ok((
+        owned.carrier.take().ok_or(BridgeError::NativeUnavailable)?,
+        identity,
+    ))
 }
 
 struct NativeClientSigner {
@@ -168,10 +203,11 @@ impl PlatformTlsSigner for NativeClientSigner {
             bytes: input.as_bytes().into(),
             taken: AtomicBool::new(false),
         });
-        let der = self
-            .platform
-            .sign_client_certificate_verify(Arc::clone(&request))
-            .map_err(|_| SignerError::Unavailable)?;
+        let der = native_callback(|| {
+            self.platform
+                .sign_client_certificate_verify(Arc::clone(&request))
+        })
+        .map_err(|_| SignerError::Unavailable)?;
         if self.binding.is_closed() || !request.taken.load(Ordering::Acquire) {
             return Err(SignerError::Rejected);
         }
@@ -202,9 +238,10 @@ impl Drop for NativeClientSigner {
             // At most ONE callback per binding. Kotlin retains any failed/partial
             // cleanup for its explicit owner-scoped cleanup path, not a loop of
             // newly allocated callback wrappers. No key aliases are removed.
-            let _ = self
-                .platform
-                .release_transport_signer(Arc::clone(&self.binding));
+            let _ = native_callback(|| {
+                self.platform
+                    .release_transport_signer(Arc::clone(&self.binding))
+            });
         }
     }
 }

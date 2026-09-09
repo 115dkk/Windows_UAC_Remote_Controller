@@ -12,7 +12,7 @@ use std::{
 
 use secure_channel::{MAX_DRAIN_BYTES, MAX_INGRESS_BYTES};
 use thiserror::Error;
-use tokio::net::TcpStream;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -103,7 +103,9 @@ pub enum SocketEvent {
     OutboundDrained,
     /// Authenticated TLS close_notify and a complete framing boundary.
     PeerClosed,
-    /// Our close_notify was handed to TCP; no peer acknowledgment is asserted.
+    /// Our close_notify was handed to TCP and write-half shutdown completed,
+    /// then the read API reported closure. No delivery acknowledgment or
+    /// authenticated peer/application result is asserted.
     LocallyClosed,
 }
 
@@ -151,6 +153,7 @@ pub struct SocketDriver {
     ready_reported: bool,
     eof: bool,
     closing: bool,
+    write_shutdown: bool,
     terminal: bool,
     failure: Option<SocketError>,
 }
@@ -167,6 +170,7 @@ impl fmt::Debug for SocketDriver {
 }
 
 enum Step {
+    ShutdownWrite,
     Event(SocketEvent),
     Progress,
     Pending,
@@ -242,6 +246,7 @@ impl SocketDriver {
             ready_reported: false,
             eof: false,
             closing: false,
+            write_shutdown: false,
             terminal: false,
             failure: None,
         };
@@ -335,6 +340,8 @@ impl SocketDriver {
 
     /// Start local graceful termination only after application output/unread
     /// framing has drained. Continue next_event until LocallyClosed or error.
+    /// After close_notify, shutdown the write half and drain raw input to EOF
+    /// within the original close deadline. No new application input is released.
     /// Revocation/protocol failure must use immediate abort instead.
     pub fn begin_close(&mut self) -> Result<(), SocketError> {
         let now = self.observe()?;
@@ -384,14 +391,49 @@ impl SocketDriver {
         self.drive()
     }
 
+    /// Observe a temporarily parked driver without reading/writing the socket,
+    /// processing TLS, signing, consuming a frame or emitting readiness/drain.
+    /// The owner must keep calling this while it parks a verified event/command.
+    /// Failure closes resources through the normal path. Success only means
+    /// existing local bounds have not failed, not that the peer is reachable.
+    pub fn observe_liveness(&mut self) -> Result<(), SocketError> {
+        let now = self.observe()?;
+        if !self.closing {
+            let result = self.transport.observe_liveness(now);
+            self.transport_result(result)?;
+        }
+        let after = self.observe()?;
+        if !self.closing {
+            let result = self.transport.observe_liveness(after);
+            self.transport_result(result)?;
+        }
+        Ok(())
+    }
+
     async fn drive(&mut self) -> Result<SocketEvent, SocketError> {
         loop {
             match self.step()? {
                 Step::Event(event) => return Ok(event),
+                Step::ShutdownWrite => self.shutdown_write().await?,
                 Step::Progress => tokio::task::yield_now().await,
                 Step::Pending => self.wait_for_io().await?,
             }
         }
+    }
+
+    async fn shutdown_write(&mut self) -> Result<(), SocketError> {
+        self.observe()?;
+        let socket = self.socket.as_mut().ok_or(SocketError::Closed)?;
+        let result = tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => Err(SocketError::Cancelled),
+            _ = tokio::time::sleep(CLOCK_POLL_INTERVAL) => Ok(false),
+            result = socket.shutdown() => result.map(|()| true).map_err(|_| SocketError::Io),
+        };
+        let completed = result.map_err(|error| self.fail(error))?;
+        self.observe()?;
+        self.write_shutdown |= completed;
+        Ok(())
     }
 
     fn step(&mut self) -> Result<Step, SocketError> {
@@ -437,10 +479,8 @@ impl SocketDriver {
 
         let pending = self.transport.pending_counts();
         if self.output_start == self.output_end && pending.outbound_tls_bytes == 0 {
-            if self.closing {
-                self.observe()?;
-                self.finish_socket();
-                return Ok(Step::Event(SocketEvent::LocallyClosed));
+            if self.closing && !self.write_shutdown {
+                return Ok(Step::ShutdownWrite);
             }
             if self.frame_deadline.is_some() && !pending.outbound_frame {
                 self.observe()?;
@@ -481,6 +521,12 @@ impl SocketDriver {
                     self.input_end = 0;
                     self.input_deadline = None;
                 }
+                // The complete authenticated close was already framed. A later
+                // raw socket reset must not overwrite that observed TLS event.
+                if self.transport.status() == TransportStatus::PeerClosed {
+                    self.finish_socket();
+                    return Ok(Step::Event(SocketEvent::PeerClosed));
+                }
             }
         }
 
@@ -513,6 +559,11 @@ impl SocketDriver {
             match result {
                 Ok(0) => {
                     self.eof = true;
+                    if self.closing {
+                        self.observe()?;
+                        self.finish_socket();
+                        return Ok(Step::Event(SocketEvent::LocallyClosed));
+                    }
                     let now = self.observe()?;
                     let result = self.transport.transport_eof(now);
                     self.transport_result(result)?;
@@ -520,13 +571,21 @@ impl SocketDriver {
                     progress = true;
                 }
                 Ok(count) => {
-                    self.input_end = count;
                     let now = self.observe()?;
                     self.last_activity = now;
-                    self.input_deadline = Some(
-                        now.checked_add(FRAME_TIMEOUT)
-                            .ok_or_else(|| self.fail(SocketError::ClockRange))?,
-                    );
+                    if self.closing {
+                        // Drain at most one bounded chunk per turn after SD_SEND.
+                        // These bytes are discarded, never processed as TLS or
+                        // exposed as a frame/peer result. Original close deadline
+                        // remains unchanged even if the peer keeps sending.
+                        self.input[..count].fill(0);
+                    } else {
+                        self.input_end = count;
+                        self.input_deadline = Some(
+                            now.checked_add(FRAME_TIMEOUT)
+                                .ok_or_else(|| self.fail(SocketError::ClockRange))?,
+                        );
+                    }
                     progress = true;
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => (),
@@ -541,6 +600,9 @@ impl SocketDriver {
     }
 
     fn can_read(&self) -> bool {
+        if self.closing {
+            return self.write_shutdown && !self.eof;
+        }
         let pending = self.transport.pending_counts();
         !self.closing
             && !self.eof

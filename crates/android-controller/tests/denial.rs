@@ -1030,3 +1030,59 @@ fn handle_and_transition_debug_never_include_request_text_or_key_material() {
         DenialError::Cancelled
     );
 }
+
+#[test]
+fn repeated_denial_uses_one_request_lease_at_capacity_without_sharing_operation_cancel() {
+    let mut f = fixture();
+    let mut denials = DenialOwner::new(&f.owner, boot()).unwrap();
+    let (first_attempt, prepared) = prepare(&mut f, &mut denials);
+    denials.retire_after_native_cleanup(&first_attempt).unwrap();
+
+    // Real public owner API: one request lease above plus 63 independent
+    // connection-only leases fills the existing 64-entry limit. No fabricated
+    // request/source is inserted; fixture() used real associated TCP/TLS ingress.
+    let connections: Vec<_> = (0..63)
+        .map(|_| f.owner.lease_peer_association(f.reference).unwrap())
+        .collect();
+    assert_eq!(
+        f.owner.lease_peer_association(f.reference).unwrap_err(),
+        android_controller::PeerLeaseError::Capacity
+    );
+    let mut retired = Vec::new();
+    for index in 0..16_u64 {
+        let attempt = begin(&mut f, &mut denials, 8 + index * 3);
+        attempt.cancel();
+        denials.retire_after_native_cleanup(&attempt).unwrap();
+        // Shared domain liveness is NOT a shared per-operation cancel token.
+        assert!(!prepared.is_cancelled());
+        retired.push(attempt);
+        assert_eq!(
+            f.owner.lease_peer_association(f.reference).unwrap_err(),
+            android_controller::PeerLeaseError::Capacity
+        );
+    }
+    assert_eq!(retired.len(), 16);
+    assert!(retired.iter().all(DenialAttempt::is_cancelled));
+    assert!(connections.iter().all(|lease| !lease.is_revoked()));
+
+    // A real committed request-wide withdrawal DOES invalidate the shared
+    // request lease, without revoking still-current connection-only leases.
+    let withdrawn = f
+        .owner
+        .update_policy(
+            NotificationPolicy::new(Some(Schedule::Never), AlertMode::Silent),
+            inbox_clock(200),
+        )
+        .unwrap();
+    assert!(
+        withdrawn
+            .update()
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Withdraw { .. }))
+    );
+    assert!(prepared.is_cancelled());
+    assert!(connections.iter().all(|lease| !lease.is_revoked()));
+    assert!(f.owner.pending_outcomes().unwrap().is_empty());
+    assert!(f.owner.history().unwrap().is_empty());
+}

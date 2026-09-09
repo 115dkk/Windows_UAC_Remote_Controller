@@ -381,7 +381,7 @@ impl AppRuntime {
                 })
         });
         AppSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             platform: self.platform,
             computer_name: self.computer_name.clone(),
             service: self.last_service.clone(),
@@ -390,6 +390,8 @@ impl AppRuntime {
             policy: Some(self.policy.clone()),
             devices: Vec::new(),
             requests: Vec::new(),
+            request_catalog: None,
+            request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
             can_pair: false,

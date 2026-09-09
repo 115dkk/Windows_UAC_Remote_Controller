@@ -45,11 +45,23 @@ export interface RequestView {
   readonly computerName: string;
   readonly programName: string;
   readonly executablePath: string;
-  readonly details: string;
+  readonly programElided: boolean;
+  readonly pathElided: boolean;
+  readonly hasDetails: boolean;
   readonly remainingSeconds: number;
-  readonly state: 'pending' | 'authenticating' | 'sending' | 'expired';
+  readonly refreshAfterMillis: number;
+  readonly state: 'pending' | 'authenticating' | 'waiting' | 'sending' | 'awaiting_outcome' | 'unavailable' | 'expired';
   readonly canApprove: boolean;
   readonly canDeny: boolean;
+}
+export interface RequestDetailsView {
+  readonly version: 1;
+  readonly id: string;
+  readonly programName: string;
+  readonly executablePath: string;
+  readonly details: string;
+  readonly remainingSeconds: number;
+  readonly refreshAfterMillis: number;
 }
 export interface ActivityView {
   readonly id: string;
@@ -59,7 +71,7 @@ export interface ActivityView {
 }
 export interface AppIssue { readonly code: string; readonly message: string; readonly nextAction: string | null }
 export interface AppSnapshot {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly platform: Platform;
   readonly computerName: string;
   readonly service: ServiceView | null;
@@ -68,6 +80,8 @@ export interface AppSnapshot {
   readonly policy: NotificationPolicy | null;
   readonly devices: readonly PairedDeviceView[];
   readonly requests: readonly RequestView[];
+  readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number } | null;
+  readonly requestReview: { readonly locator: string; readonly revision: string } | null;
   readonly activity: readonly ActivityView[];
   readonly dataAvailability: {
     readonly devices: 'available' | 'unavailable';
@@ -86,6 +100,8 @@ export interface ControllerBridge {
   beginPairing(): Promise<AppSnapshot>;
   removeDevice(deviceId: string): Promise<AppSnapshot>;
   decide(requestId: string, decision: 'approve' | 'deny'): Promise<AppSnapshot>;
+  requestDetails(requestId: string): Promise<RequestDetailsView>;
+  watchRequests?(notify: () => void): Promise<() => Promise<void>>;
   clearActivity(): Promise<AppSnapshot>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;

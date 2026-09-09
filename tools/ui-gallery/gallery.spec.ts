@@ -27,6 +27,20 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toBeVisible();
+    const intakeCopy: Record<string, string> = {
+      'phone-unpaired': '연결된 PC가 없어요', 'phone-disconnected': '컴퓨터와 연결을 기다리고 있어요',
+      'phone-reconciling': '받은 요청을 확인하고 있어요', 'phone-authenticating': '휴대폰에서 본인 확인을 진행해 주세요.',
+      'phone-waiting': '앞선 작업이 끝나기를 기다리고 있어요.', 'phone-awaiting-outcome': 'Windows의 처리 결과를 기다리고 있어요.',
+    };
+    if (intakeCopy[fixture]) {
+      await expect(page.getByText(intakeCopy[fixture], { exact: true })).toBeVisible();
+      await expect(page.getByText('요청 승인됨', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('요청 시간이 지났어요.', { exact: true })).toHaveCount(0);
+      if (fixture === 'phone-authenticating') {
+        await expect(page.getByRole('button', { name: '승인', exact: true })).toBeDisabled();
+        await expect(page.getByRole('button', { name: '거부', exact: true })).toBeEnabled();
+      }
+    }
     if (fixture === 'phone-history') {
       await expect(page.getByRole('heading', { name: 'PC에서 요청 종료됨', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: '요청 시간 만료', exact: true })).toBeVisible();
@@ -39,7 +53,7 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     }
     if (fixture === 'phone-unavailable') {
       await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
-      await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(1);
+      await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(2);
     }
     if (fixture === 'phone-pending' || fixture === 'phone-long-request' || fixture === 'phone-terminal') {
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeEnabled();
@@ -154,11 +168,11 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     if (selected.action === 'deny') {
       await page.getByRole('button', { name: '거부', exact: true }).focus();
       await page.keyboard.press('Enter');
-      await expect(page.getByText('Windows의 처리 결과를 기다리고 있어요.', { exact: true })).toBeVisible();
+      await expect(page.getByText('선택한 내용을 컴퓨터로 보내고 있어요.', { exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeDisabled();
       await expect(page.getByRole('button', { name: '거부', exact: true })).toBeDisabled();
       await expect(page.getByText('휴대폰에서 본인 확인을 진행해 주세요.', { exact: true })).toHaveCount(0);
-      await gallery.capture('simulated-waiting', '합성 응답 대기 상태만 표시 · 거부 완료/Windows 동작 증거 아님');
+      await gallery.capture('simulated-sending', '합성 전송 상태만 표시 · 거부 완료/Windows 동작 증거 아님');
     }
     if (selected.id === 'phone-pending-landscape-844') {
       await page.getByRole('button', { name: '승인', exact: true }).scrollIntoViewIfNeeded();

@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import app.tauri.annotation.Command
@@ -29,6 +30,9 @@ import dev.dkk115.uacremote.background.BootServicePolicy
 import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.background.ControllerServiceObservation
 import dev.dkk115.uacremote.background.ServiceControlResult
+import dev.dkk115.uacremote.background.NativeRequestActionResult
+import dev.dkk115.uacremote.background.NativeRequestReadReply
+import dev.dkk115.uacremote.background.NativeRequestRules
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,6 +56,7 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
     private var settingsLaunchPending = false
     private val serviceMain = Handler(Looper.getMainLooper())
     private val serviceCommandPending = AtomicBoolean(false)
+    private val requestCommands = HashSet<String>()
     private enum class ServiceCommand { READ, START, STOP }
     private sealed class ServiceReply {
         class Observation(val value: ControllerServiceObservation) : ServiceReply()
@@ -60,6 +65,124 @@ class DeviceStatePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun onResume() {
         settingsLaunchPending = false
+        bindRequestWake()
+    }
+
+    override fun load(webView: WebView) { bindRequestWake() }
+    override fun onDestroy(activity: AppCompatActivity) {
+        (this.activity.application as? ControllerApplication)?.observeRequestChanges(this.activity, null)
+    }
+    private fun bindRequestWake() {
+        val bind = Runnable {
+            if (!activity.isDestroyed && !activity.isFinishing) {
+                (activity.application as? ControllerApplication)?.observeRequestChanges(activity) {
+                    if (isForeground()) try { trigger("request-review", JSObject()) } catch (_: Exception) { }
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) bind.run() else serviceMain.post(bind)
+    }
+
+    @Command fun controllerRequests(invoke: Invoke) = readRequests(invoke, false)
+    @Command fun controllerRequestDetails(invoke: Invoke) = readRequests(invoke, true)
+
+    private fun readRequests(invoke: Invoke, details: Boolean) {
+        val fields = requestArguments(invoke.getRawArgs(), if (details) setOf("locator") else emptySet())
+        val locator = fields?.get("locator")
+        if (fields == null || (details && (locator == null || !NativeRequestRules.locator(locator)))) {
+            resolveRequestStatus(invoke, NativeRequestActionResult.UNAVAILABLE); return
+        }
+        requestCommand(invoke, if (details) "details" else "list") { finish ->
+            val app = activity.application as? ControllerApplication
+            if (app == null || !isForeground()) finish { requestStatus(NativeRequestActionResult.UNAVAILABLE) }
+            else app.readControllerRequests(activity, locator) { reply ->
+                finish {
+                    if (!isForeground()) requestStatus(NativeRequestActionResult.UNAVAILABLE)
+                    else when (reply) {
+                        is NativeRequestReadReply.Failed -> requestStatus(if (reply.status == NativeRequestActionResult.BUSY) reply.status else NativeRequestActionResult.UNAVAILABLE)
+                        is NativeRequestReadReply.Data -> {
+                            if (!app.validControllerRequestReply(activity, reply.value)) requestStatus(NativeRequestActionResult.UNAVAILABLE)
+                            else JSObject().apply { put("status", "ok"); put(if (details) "detailsJson" else "requestsJson", reply.value.json) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Command fun controllerRequestReview(invoke: Invoke) {
+        if (requestArguments(invoke.getRawArgs(), emptySet()) == null) { resolveRequestStatus(invoke, NativeRequestActionResult.UNAVAILABLE); return }
+        requestCommand(invoke, "review") { finish ->
+            finish {
+                val value = if (isForeground()) (activity.application as? ControllerApplication)?.controllerRequestReview(activity) else null
+                if (value == null) requestStatus(NativeRequestActionResult.UNAVAILABLE)
+                else JSObject().apply { put("status", "ok"); put("locator", value.locator ?: JSONObject.NULL); put("revision", value.revision) }
+            }
+        }
+    }
+
+    @Command fun controllerRequestAction(invoke: Invoke) {
+        val fields = requestArguments(invoke.getRawArgs(), setOf("locator", "action"))
+        val locator = fields?.get("locator")
+        val action = fields?.get("action")?.let { NativeRequestRules.action(it) }
+        if (locator == null || !NativeRequestRules.locator(locator) || action == null) { resolveRequestStatus(invoke, NativeRequestActionResult.UNAVAILABLE); return }
+        requestCommand(invoke, "action") { finish ->
+            val app = activity.application as? ControllerApplication
+            if (app == null || !isForeground()) finish { requestStatus(NativeRequestActionResult.UNAVAILABLE) }
+            else app.controllerRequestAction(activity, locator, action) { result -> finish { requestStatus(result) } }
+        }
+    }
+
+    /** Exact closed string keys only; duplicate/extra/trailing values fail. */
+    private fun requestArguments(raw: String, expected: Set<String>): Map<String, String>? = try {
+        if (raw.length > 512) null
+        else if (expected.isEmpty()) if (raw.trim() in setOf("{}", "null")) emptyMap() else null
+        else {
+            val input = JSONTokener(raw)
+            val values = LinkedHashMap<String, String>()
+            if (input.nextClean() != '{') null else {
+                var valid = true
+                for (index in expected.indices) {
+                    if (input.nextClean() != '"') { valid = false; break }
+                    val key = input.nextString('"')
+                    if (key !in expected || values.containsKey(key) || input.nextClean() != ':' || input.nextClean() != '"') { valid = false; break }
+                    values[key] = input.nextString('"')
+                    if (input.nextClean() != if (index == expected.size - 1) '}' else ',') { valid = false; break }
+                }
+                if (valid && values.keys == expected && input.nextClean() == '\u0000') values else null
+            }
+        }
+    } catch (_: Exception) { null }
+
+    private fun requestCommand(invoke: Invoke, name: String, action: ((() -> JSObject) -> Unit) -> Unit) {
+        if (!synchronized(requestCommands) { requestCommands.add(name) }) { resolveRequestStatus(invoke, NativeRequestActionResult.BUSY); return }
+        val finished = AtomicBoolean(false)
+        val timeout = Runnable {
+            if (finished.compareAndSet(false, true)) {
+                synchronized(requestCommands) { requestCommands.remove(name) }
+                resolveRequestStatus(invoke, NativeRequestActionResult.UNAVAILABLE)
+            }
+        }
+        val finish: (() -> JSObject) -> Unit = { value ->
+            val deliver = Runnable {
+                if (finished.compareAndSet(false, true)) {
+                    serviceMain.removeCallbacks(timeout)
+                    synchronized(requestCommands) { requestCommands.remove(name) }
+                    val result = try { if (activity.isDestroyed || activity.isFinishing) requestStatus(NativeRequestActionResult.UNAVAILABLE) else value() }
+                        catch (_: Exception) { requestStatus(NativeRequestActionResult.UNAVAILABLE) }
+                    try { invoke.resolve(result) } catch (_: Exception) { }
+                }
+            }
+            if (Looper.myLooper() == Looper.getMainLooper()) deliver.run() else serviceMain.post(deliver)
+        }
+        if (!serviceMain.postDelayed(timeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) { timeout.run(); return }
+        val run = Runnable { try { action(finish) } catch (_: Exception) { finish { requestStatus(NativeRequestActionResult.UNAVAILABLE) } } }
+        if (Looper.myLooper() == Looper.getMainLooper()) run.run() else if (!serviceMain.post(run)) timeout.run()
+    }
+    private fun requestStatus(value: NativeRequestActionResult): JSObject = JSObject().apply { put("status", value.wire) }
+    private fun resolveRequestStatus(invoke: Invoke, value: NativeRequestActionResult) {
+        val deliver = Runnable { try { invoke.resolve(requestStatus(value)) } catch (_: Exception) { } }
+        if (Looper.myLooper() == Looper.getMainLooper()) deliver.run() else serviceMain.post(deliver)
     }
 
     @Command

@@ -114,6 +114,7 @@ struct ScopeSignal {
     cancelled: AtomicBool,
     released: AtomicBool,
     attempt: OnceLock<Arc<AttemptControl>>,
+    delivery: Arc<crate::intake_delivery::DeliveryControl>,
 }
 impl ScopeSignal {
     fn cancelled(&self) -> bool {
@@ -144,6 +145,11 @@ impl NativeDenialScope {
     }
     pub fn deadline_nanos(&self) -> u64 {
         self.signal.bound.deadline
+    }
+    /// Local transport progress only. AwaitingOutcome at the scope level also
+    /// includes queued/uncertain exposure; it must not be rendered as written.
+    pub fn delivery_progress(&self) -> crate::NativeDecisionProgress {
+        self.signal.delivery.progress()
     }
     pub fn same_scope(&self, other: Arc<NativeDenialScope>) -> bool {
         Arc::ptr_eq(&self.signal, &other.signal)
@@ -241,6 +247,7 @@ struct ScopeEntry {
     operation_quiescent: bool,
     native_retired: bool,
     prepared: Option<PreparedDenial>,
+    terminal_observed: bool,
 }
 pub(crate) struct DenialState {
     owner: Option<DenialOwner>,
@@ -291,6 +298,7 @@ impl MobileController {
                 cancelled: AtomicBool::new(false),
                 released: AtomicBool::new(false),
                 attempt: OnceLock::new(),
+                delivery: crate::intake_delivery::DeliveryControl::new(),
             }),
         });
         // Fence is retained BEFORE cancellation. Any later failure keeps it.
@@ -306,6 +314,7 @@ impl MobileController {
                 operation_quiescent: false,
                 native_retired: false,
                 prepared: None,
+                terminal_observed: false,
             });
         let cancelled = (|| {
             let mut plans = self
@@ -361,6 +370,9 @@ impl MobileController {
             return Err(error);
         }
         if phase == Phase::Finished {
+            if scope.signal.delivery.ever_admitted.load(Ordering::Acquire) {
+                return Ok(NativeDenialAdvance::AwaitingOutcome);
+            }
             if scope.is_cancelled()
                 || self.with_scope(&scope, |entry| {
                     entry
@@ -372,7 +384,7 @@ impl MobileController {
                 scope.cancel();
                 return Err(BridgeError::DenialRejected);
             }
-            return Ok(NativeDenialAdvance::Prepared);
+            return self.advance_denial_delivery(&scope);
         }
         if phase == Phase::Settling {
             return self.settle_denial_admitted(&scope);
@@ -711,6 +723,26 @@ impl MobileController {
         if self.with_scope(scope, |entry| entry.failed)? {
             return Ok(NativeDenialAdvance::CleanupFailed);
         }
+        if scope.signal.delivery.ever_admitted.load(Ordering::Acquire) {
+            let terminal = self.with_scope(scope, |entry| entry.terminal_observed)?;
+            let expired = if self.approval_alive.load(Ordering::Acquire) {
+                self.read_clock()?.phone_monotonic_nanos() >= scope.signal.bound.deadline
+            } else {
+                true
+            }; // No future admission in this logically closed owner.
+            if !terminal && !expired {
+                return Ok(NativeDenialAdvance::AwaitingOutcome);
+            }
+            scope.cancel();
+            if !scope
+                .signal
+                .delivery
+                .sender_finished
+                .load(Ordering::Acquire)
+            {
+                return Ok(NativeDenialAdvance::CleanupPending);
+            }
+        }
         if !scope.is_cancelled() {
             if self.seal_denial_bound(&scope.signal.bound).is_ok() && !scope.is_cancelled() {
                 if self.with_scope(scope, |entry| {
@@ -749,8 +781,8 @@ impl MobileController {
         {
             return self.fail_scope(scope);
         }
-        // No transport exists in this ABI: any prepared value was never admitted
-        // and has now been discarded. Native retirement alone was not enough.
+        // Unsent abandonment, or terminal/expired exposed data with actual
+        // sender/native cleanup. Written/Stopped alone never proves zero bytes.
         scope.signal.released.store(true, Ordering::Release);
         let mut state = self.denial_state.lock().map_err(|_| BridgeError::Closed)?;
         state
@@ -973,6 +1005,96 @@ impl MobileController {
             .unwrap_or_else(|error| error.into_inner());
         if state.scopes.is_empty() && !state.uncertain {
             state.owner.take();
+        }
+    }
+}
+impl NativeDenialScope {
+    pub(crate) fn delivery_control(&self) -> Arc<crate::intake_delivery::DeliveryControl> {
+        Arc::clone(&self.signal.delivery)
+    }
+    pub(crate) fn association_reference(&self) -> android_controller::PeerAssociationRef {
+        self.signal.bound.association.reference()
+    }
+    pub(crate) fn request_key(&self) -> RequestKey {
+        self.signal.bound.key()
+    }
+}
+impl MobileController {
+    fn advance_denial_delivery(
+        &self,
+        scope: &Arc<NativeDenialScope>,
+    ) -> Result<NativeDenialAdvance, BridgeError> {
+        if !self.with_scope(scope, |entry| entry.native_retired)? {
+            return Ok(NativeDenialAdvance::Prepared);
+        }
+        let control = scope.delivery_control();
+        match control.progress() {
+            crate::NativeDecisionProgress::Queued
+            | crate::NativeDecisionProgress::WrittenToSocket => {
+                Ok(NativeDenialAdvance::AwaitingOutcome)
+            }
+            crate::NativeDecisionProgress::Stopped | crate::NativeDecisionProgress::Rejected => {
+                scope.cancel();
+                self.settle_denial_admitted(scope)
+            }
+            _ => {
+                match self
+                    .intake
+                    .enqueue_delivery(crate::intake_delivery::DeliveryCommand::Denial(Arc::clone(
+                        scope,
+                    ))) {
+                    Ok(()) | Err(BridgeError::Busy) => Ok(NativeDenialAdvance::Waiting {
+                        reason: NativeDenialWait::Transport,
+                    }),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+    pub(crate) fn take_denial_for_delivery(
+        &self,
+        scope: &Arc<NativeDenialScope>,
+    ) -> Result<PreparedDenial, BridgeError> {
+        self.require_scope(scope)?;
+        if scope.is_cancelled() {
+            return Err(BridgeError::DenialRejected);
+        }
+        self.seal_denial_bound(&scope.signal.bound)?;
+        self.with_scope(scope, |entry| {
+            if !entry.native_retired || entry.phase != Phase::Finished {
+                return Err(BridgeError::DenialRejected);
+            }
+            entry.prepared.take().ok_or(BridgeError::DenialRejected)
+        })?
+    }
+    pub(crate) fn restore_denial_retry(
+        &self,
+        scope: &Arc<NativeDenialScope>,
+        prepared: PreparedDenial,
+    ) -> Result<(), BridgeError> {
+        self.with_scope(scope, |entry| {
+            if entry.scope.is_cancelled() {
+                return Err(BridgeError::DenialRejected);
+            }
+            if entry.prepared.is_some() {
+                return Err(BridgeError::OwnerFaulted);
+            }
+            entry.prepared = Some(prepared);
+            Ok(())
+        })?
+    }
+    pub(crate) fn observe_denial_terminal(&self, outcome: phone_request_core::PendingOutcome) {
+        let mut state = self
+            .denial_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for entry in &mut state.scopes {
+            if entry.scope.signal.bound.window.binding() == outcome.binding()
+                && entry.scope.signal.bound.window.service_issued_at() == outcome.issued_at()
+            {
+                entry.terminal_observed = true;
+                entry.scope.cancel();
+            }
         }
     }
 }

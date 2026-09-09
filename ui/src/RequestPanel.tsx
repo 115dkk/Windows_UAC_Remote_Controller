@@ -1,32 +1,49 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { useId, useState } from 'react';
-import type { AppSnapshot, RequestView } from './contracts';
+import { useEffect, useId, useRef } from 'react';
+import type { AppSnapshot, ControllerBridge, RequestView } from './contracts';
 import { Icon } from './icons';
 import { ko, remainingLabel } from './messages.ko';
 import { EmptyState } from './StatusPanels';
+import { RequestDetailsDisclosure } from './RequestDetailsDisclosure';
 
-function RequestCard({ request, disabled, onDecision }: {
+const requestStateText: Record<Exclude<RequestView['state'], 'pending'>, string> = {
+  authenticating: ko.authenticating, waiting: ko.requestWaiting, sending: ko.sending,
+  awaiting_outcome: ko.awaitingOutcome, unavailable: ko.requestUnavailable, expired: ko.expired,
+};
+
+function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen }: {
   request: RequestView; disabled: boolean; onDecision: (requestId: string, decision: 'approve' | 'deny') => void;
+  readDetails: ControllerBridge['requestDetails']; initiallyOpen: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const detailsId = useId();
   const headingId = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { if (initiallyOpen) heading.current?.focus(); }, [initiallyOpen]);
   const pending = request.state === 'pending';
+  if (request.state === 'unavailable') return <EmptyState icon="request" title={ko.requestUnavailable} description={ko.requestUnavailableBody} />;
   return <article className="surface request-card" aria-labelledby={headingId}>
     <div className="request-context"><Icon name="pc" /><bdi>{request.computerName}</bdi></div>
     <p className="eyebrow request-eyebrow">{ko.needsDecision}</p>
-    <h2 id={headingId} className="program-name"><bdi>{request.programName}</bdi></h2>
+    <h2 id={headingId} ref={heading} tabIndex={-1} className="program-name"><bdi>{request.programName}</bdi></h2>
     <dl className="request-facts"><div><dt>{ko.executable}</dt><dd className="path-output" dir="auto">{request.executablePath}</dd></div></dl>
-    {request.details && <div className="request-disclosure"><button type="button" className="disclosure-button" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(!expanded)}>{expanded ? ko.fewerDetails : ko.details}<Icon name="chevron" className={expanded ? 'chevron-expanded' : ''} /></button>{expanded && <section id={detailsId} className="command-region" role="region" aria-label={ko.commandDetails} tabIndex={0}><h3>{ko.commandDetails}</h3><pre dir="auto">{request.details}</pre></section>}</div>}
-    <div className="request-result" aria-live="polite">{pending ? <p className="time-remaining"><Icon name="clock" />{remainingLabel(request.remainingSeconds)}</p> : <p className="pending-copy">{request.state === 'authenticating' ? ko.authenticating : request.state === 'sending' ? ko.sending : ko.expired}</p>}</div>
-    <div className="request-actions"><button type="button" className="button secondary" disabled={disabled || !pending || !request.canDeny} onClick={() => onDecision(request.id, 'deny')}>{ko.deny}</button><button type="button" className="button primary" disabled={disabled || !pending || !request.canApprove} onClick={() => onDecision(request.id, 'approve')}><Icon name="check" />{ko.approve}</button></div>
+    {request.hasDetails && <RequestDetailsDisclosure request={request} disabled={disabled} read={readDetails} initiallyOpen={initiallyOpen} />}
+    <div className="request-result" aria-live="polite">{pending ? <p className="time-remaining"><Icon name="clock" />{remainingLabel(request.remainingSeconds)}</p> : <p className="pending-copy">{requestStateText[request.state]}</p>}</div>
+    <div className="request-actions"><button type="button" className="button secondary" disabled={disabled || !request.canDeny} onClick={() => onDecision(request.id, 'deny')}>{ko.deny}</button><button type="button" className="button primary" disabled={disabled || !pending || !request.canApprove} onClick={() => onDecision(request.id, 'approve')}><Icon name="check" />{ko.approve}</button></div>
   </article>;
 }
 
-export function RequestPanel({ snapshot, disabled, onDecision }: {
+export function RequestPanel({ snapshot, disabled, onDecision, readDetails }: {
   snapshot: AppSnapshot; disabled: boolean; onDecision: (requestId: string, decision: 'approve' | 'deny') => void;
+  readDetails: ControllerBridge['requestDetails'];
 }) {
+  if (snapshot.requestCatalog?.status === 'reconciling') return <EmptyState icon="request" title={ko.requestReconciling} description={ko.requestReconcilingBody} />;
   if (snapshot.dataAvailability.requests !== 'available') return <EmptyState icon="request" title={ko.requestUnavailable} description={ko.requestUnavailableBody} />;
+  if (!snapshot.requests.length && snapshot.requestCatalog?.peerCount === 0) return <EmptyState icon="pc" title={ko.noComputers} description={ko.pairingUnavailable} />;
+  if (!snapshot.requests.length && snapshot.requestCatalog?.connectedPeerCount === 0) return <EmptyState icon="pc" title={ko.requestDisconnected} description={ko.requestDisconnectedBody} />;
   if (!snapshot.requests.length) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
-  return <div className="request-list">{snapshot.requests.map((request) => <RequestCard key={request.id} request={request} disabled={disabled} onDecision={onDecision} />)}</div>;
+  const selected = snapshot.requests.find((request) => request.id === snapshot.requestReview?.locator);
+  const requests = selected ? [selected, ...snapshot.requests.filter((request) => request !== selected)] : snapshot.requests;
+  return <div className="request-list">{requests.map((request) => {
+    const review = snapshot.requestReview?.locator === request.id ? snapshot.requestReview : null;
+    return <RequestCard key={`${request.id}:${review?.revision ?? ''}`} request={request} disabled={disabled} onDecision={onDecision} readDetails={readDetails} initiallyOpen={review !== null} />;
+  })}</div>;
 }

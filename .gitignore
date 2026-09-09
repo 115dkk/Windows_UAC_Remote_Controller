@@ -7,6 +7,9 @@
 /src-tauri/gen/android/.gradle/
 /src-tauri/gen/android/**/build/
 /src-tauri/gen/android/local.properties
+/tools/android-notification-gallery/.gradle/
+/tools/android-notification-gallery/build/
+/tools/android-notification-gallery/local.properties
 /src-tauri/binaries/*.exe
 *.pdb
 *.jks

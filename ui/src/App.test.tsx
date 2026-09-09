@@ -171,7 +171,7 @@ describe('request interaction boundaries', () => {
     expect(screen.queryByRole('button', { name: ko.approve })).not.toBeInTheDocument();
   });
 
-  it('preserves a labelled stale snapshot and disables mutations after refresh failure', async () => {
+  it('keeps recovery but withdraws request bodies and decisions after refresh failure', async () => {
     const user = userEvent.setup();
     const initial = qaCase('phone-pending').snapshot;
     const snapshot = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(initial).mockRejectedValue(new Error('network internals'));
@@ -179,9 +179,10 @@ describe('request interaction boundaries', () => {
     await screen.findByRole('button', { name: ko.approve });
     await user.click(screen.getByRole('button', { name: ko.refresh }));
     expect(await screen.findByText(ko.stale)).toBeInTheDocument();
-    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: ko.approve })).toBeDisabled();
-    expect(screen.getByRole('button', { name: ko.deny })).toBeDisabled();
+    expect(screen.queryByText('설정 도우미.exe')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.approve })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.deny })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: ko.requestUnavailable })).toBeInTheDocument();
   });
 
   it('ignores a previous bridge response after a new bridge takes ownership', async () => {

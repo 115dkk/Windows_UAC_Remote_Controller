@@ -4,7 +4,7 @@
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -14,7 +14,7 @@ use android_controller::{
     ApprovalPlanOwner, ApprovalSubmission, ApprovalTime, ApprovalTransition,
     CommittedAssociatedCheck, DurableInbox,
 };
-use notification_policy::{Effect, RequestKey};
+use notification_policy::RequestKey;
 
 use crate::{BridgeError, MobileController, NativeLocalKeySet, NativePlatform, map_clock};
 
@@ -125,7 +125,9 @@ impl NativeApprovalAttempt {
 /// Actual native transport ownership/handoff remains a separate integration.
 #[derive(uniffi::Object)]
 pub struct NativeApprovalSubmission {
-    core: ApprovalSubmission,
+    core: Mutex<Option<ApprovalSubmission>>,
+    plan: Arc<NativeApprovalPlan>,
+    delivery: Arc<crate::intake_delivery::DeliveryControl>,
     controller_alive: Arc<AtomicBool>,
 }
 impl fmt::Debug for NativeApprovalSubmission {
@@ -136,7 +138,48 @@ impl fmt::Debug for NativeApprovalSubmission {
 #[uniffi::export]
 impl NativeApprovalSubmission {
     pub fn is_cancelled(&self) -> bool {
-        !self.controller_alive.load(Ordering::Acquire) || self.core.is_cancelled()
+        !self.controller_alive.load(Ordering::Acquire) || self.plan.core.is_cancelled()
+    }
+    pub fn delivery_progress(&self) -> crate::NativeDecisionProgress {
+        self.delivery.progress()
+    }
+}
+impl NativeApprovalSubmission {
+    pub(crate) fn belongs_to_controller(&self, owner: &MobileController) -> bool {
+        Arc::ptr_eq(&self.controller_alive, &owner.approval_alive)
+    }
+    pub(crate) fn request_key(&self) -> RequestKey {
+        phone_request_core::request_key(self.plan.core.binding())
+    }
+    pub(crate) fn association_reference(&self) -> android_controller::PeerAssociationRef {
+        self.plan.core.association().reference()
+    }
+    pub(crate) fn delivery_control(&self) -> Arc<crate::intake_delivery::DeliveryControl> {
+        Arc::clone(&self.delivery)
+    }
+    pub(crate) fn cancel_context(&self) {
+        self.plan.core.cancel();
+    }
+    pub(crate) fn take_core(&self) -> Result<ApprovalSubmission, BridgeError> {
+        if self.is_cancelled() {
+            return Err(BridgeError::ApprovalRejected);
+        }
+        self.core
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .take()
+            .ok_or(BridgeError::ApprovalRejected)
+    }
+    pub(crate) fn restore_retry(&self, core: ApprovalSubmission) -> Result<(), BridgeError> {
+        if self.is_cancelled() {
+            return Err(BridgeError::ApprovalRejected);
+        }
+        let mut stored = self.core.lock().map_err(|_| BridgeError::Closed)?;
+        if stored.is_some() {
+            return Err(BridgeError::OwnerFaulted);
+        }
+        *stored = Some(core);
+        Ok(())
     }
 }
 
@@ -234,7 +277,9 @@ impl MobileController {
                     return Err(error);
                 }
                 Ok(Arc::new(NativeApprovalSubmission {
-                    core,
+                    core: Mutex::new(Some(core)),
+                    plan: Arc::clone(&attempt.plan),
+                    delivery: crate::intake_delivery::DeliveryControl::new(),
                     controller_alive: Arc::clone(&self.approval_alive),
                 }))
             }
@@ -452,42 +497,12 @@ impl MobileController {
         &self,
         checks: Vec<CommittedAssociatedCheck>,
     ) -> Result<(), BridgeError> {
-        let mut withdrawn = std::collections::BTreeSet::new();
-        let mut faulted = false;
-        for checked in checks {
-            faulted |= checked.update().fault().is_some();
-            for effect in checked.update().effects() {
-                match *effect {
-                    Effect::Withdraw { key, .. } => {
-                        self.cancel_denial_request(key);
-                        withdrawn.insert(key);
-                    }
-                    // Outcome delivery remains in the durable body-free outbox.
-                    Effect::RecordOutcome { .. } | Effect::Drop { .. } => {}
-                    Effect::Fault(_) => faulted = true,
-                    Effect::Show(_) | Effect::Restore(_) | Effect::UpdateAlert { .. } => {
-                        faulted = true
-                    }
-                }
-            }
-        }
-        if !withdrawn.is_empty()
-            && self
-                .platform
-                .withdraw_requests(
-                    withdrawn
-                        .into_iter()
-                        .map(NativeRequestSelection::from_key)
-                        .collect(),
-                )
-                .is_err()
-        {
-            return self.fail_closed(BridgeError::NativeUnavailable);
-        }
-        if faulted {
-            return self.fail_closed(BridgeError::OwnerFaulted);
-        }
-        Ok(())
+        let faulted = checks.iter().any(|check| check.update().fault().is_some());
+        let effects = checks
+            .iter()
+            .flat_map(|check| check.update().effects().iter().copied())
+            .collect();
+        self.dispatch_effects(effects, faulted)
     }
 }
 
@@ -547,9 +562,7 @@ impl<'a> NativeApprovalClock<'a> {
 }
 impl ApprovalClock for NativeApprovalClock<'_> {
     fn read(&mut self) -> Result<ApprovalTime, ApprovalClockError> {
-        let result = self
-            .platform
-            .clock()
+        let result = crate::native_clock::native_callback(|| self.platform.clock())
             .and_then(map_clock)
             .and_then(|(boot, clock)| {
                 if boot != self.boot

@@ -56,6 +56,24 @@ impl Port {
 }
 
 impl OwnerPort for Port {
+    fn requests(&self) -> Result<RequestsReply, AppIssue> {
+        self.calls.borrow_mut().push("requests");
+        Ok(RequestsReply::Ok { requests_json: r#"{"version":1,"status":"unavailable","revision":"0","peerCount":0,"connectedPeerCount":0,"requests":[]}"#.into() })
+    }
+    fn review(&self) -> Result<RequestReviewReply, AppIssue> {
+        Ok(RequestReviewReply::Ok {
+            locator: None,
+            revision: "0".into(),
+        })
+    }
+    fn decide(
+        &self,
+        _locator: String,
+        _decision: controller_runtime::DecisionIntent,
+    ) -> Result<RequestActionReply, AppIssue> {
+        self.calls.borrow_mut().push("decision");
+        Ok(RequestActionReply::Queued {})
+    }
     fn service(&self) -> Result<PhoneServiceView, AppIssue> {
         self.calls.borrow_mut().push("service");
         if let Some(next) = self.observations.borrow_mut().pop_front() {
@@ -114,7 +132,7 @@ impl OwnerPort for Port {
 fn stopped_owner_still_has_recovery_surface_without_policy_or_history_calls() {
     let port = Port::new(&[stopped()]);
     let view = snapshot(&port, OwnerOperation::Read).unwrap();
-    assert_eq!(view.schema_version, 2);
+    assert_eq!(view.schema_version, 3);
     assert_eq!(view.phone_service, Some(stopped()));
     assert!(view.policy.is_none() && view.issue.is_none());
     assert_eq!(
@@ -122,6 +140,45 @@ fn stopped_owner_still_has_recovery_surface_without_policy_or_history_calls() {
         controller_runtime::DataAvailability::UNAVAILABLE
     );
     assert_eq!(port.count("policy") + port.count("history"), 0);
+}
+
+#[test]
+fn queued_phone_decision_is_not_an_optimistic_windows_result() {
+    let port = Port::new(&[ready()]);
+    let view = snapshot(
+        &port,
+        OwnerOperation::Decide("a".repeat(32), controller_runtime::DecisionIntent::Approve),
+    )
+    .unwrap();
+    assert_eq!(port.count("decision"), 1);
+    assert!(view.requests.is_empty());
+    assert_eq!(view.data_availability.requests, Availability::Unavailable);
+    assert!(view.activity.is_empty());
+    assert!(view.request_review.is_none());
+}
+
+#[test]
+fn stopped_or_invalid_locator_never_reaches_phone_decision() {
+    let port = Port::new(&[stopped()]);
+    let view = snapshot(
+        &port,
+        OwnerOperation::Decide("a".repeat(32), controller_runtime::DecisionIntent::Deny),
+    )
+    .unwrap();
+    assert!(view.issue.is_some());
+    assert_eq!(port.count("decision"), 0);
+    let port = Port::new(&[ready()]);
+    assert!(
+        snapshot(
+            &port,
+            OwnerOperation::Decide(
+                "../../invalid".into(),
+                controller_runtime::DecisionIntent::Approve
+            )
+        )
+        .is_err()
+    );
+    assert_eq!(port.count("decision"), 0);
 }
 
 #[test]

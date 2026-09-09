@@ -1,0 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+    <!-- DESIGN.md accent token; OS still owns notification template colors. -->
+    <color name="request_notification_accent">#0b7285</color>
+</resources>

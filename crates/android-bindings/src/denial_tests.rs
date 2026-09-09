@@ -80,6 +80,31 @@ impl Platform {
     }
 }
 impl NativePlatform for Platform {
+    fn intake_progress(&self) -> Result<(), BridgeError> {
+        Ok(())
+    }
+    fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError> {
+        let clock = self.clock()?;
+        Ok(NativePresentationClock {
+            boot_count: clock.boot_count,
+            elapsed_before_nanos: clock.monotonic_nanos,
+            elapsed_after_nanos: clock.monotonic_nanos,
+            wall_before_millis: 1_700_000_000_000,
+            wall_after_millis: 1_700_000_000_000,
+            weekday: clock.weekday,
+            minute: clock.minute,
+            millis_within_minute: 0,
+            time_epoch: 1,
+        })
+    }
+    fn publish_pending_request(
+        &self,
+        _: Arc<NativePendingRequest>,
+        _: NativeRequestPresentation,
+        _: NativeRequestAlert,
+    ) -> Result<NativeRequestSinkOutcome, BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
     fn advance_approval_drain_for_denial(
         &self,
         _: Arc<NativeDenialScope>,
@@ -237,6 +262,8 @@ fn with_fixture_deadlines(
         )),
         approval_native_plan: Mutex::new(None),
         denial_state: Mutex::new(crate::denial::DenialState::new(&owner, boot).unwrap()),
+        projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
+        intake: Arc::new(crate::intake::IntakeOwner::default()),
         approval_alive: Arc::new(AtomicBool::new(true)),
         state: Mutex::new(Some(owner)),
         active: AtomicBool::new(false),
@@ -245,7 +272,7 @@ fn with_fixture_deadlines(
         key_cleanup_pending: AtomicBool::new(true),
         key_cleanup_failed: AtomicBool::new(false),
         native_floor_nanos: AtomicU64::new(100_000_000),
-        _owner_lease: OwnerLease::acquire().unwrap(),
+        _owner_lease: Arc::new(OwnerLease::acquire().unwrap()),
     });
     *platform.controller.lock().unwrap() = Arc::downgrade(&controller);
     test(&controller, &platform, &selections);
@@ -283,7 +310,7 @@ fn cancel_and_release(
 #[test]
 fn genuine_request_fence_and_one_shot_bytes_produce_only_prepared_unsent_denial() {
     with_fixture(1, |controller, platform, requests| {
-        assert_eq!(bridge_version(), 7);
+        assert_eq!(bridge_version(), 8);
         let scope = controller.reserve_denial(requests[0].clone()).unwrap();
         assert!(scope.same_scope(controller.reserve_denial(requests[0].clone()).unwrap()));
         assert_eq!(
@@ -735,8 +762,19 @@ fn approval_publication_after_real_withdrawal_callback_cannot_cross_original_dea
                 assert_eq!(error, BridgeError::ApprovalRejected);
                 assert_eq!(platform.withdrawals.load(Ordering::SeqCst), 2);
                 let state = controller.state.lock().unwrap();
-                assert_eq!(state.as_ref().unwrap().pending_outcomes().unwrap().len(), 2);
-                assert!(state.as_ref().unwrap().history().unwrap().is_empty());
+                assert!(
+                    state
+                        .as_ref()
+                        .unwrap()
+                        .pending_outcomes()
+                        .unwrap()
+                        .is_empty()
+                );
+                let history = state.as_ref().unwrap().history().unwrap();
+                assert_eq!(history.len(), 2);
+                assert!(history.iter().all(
+                    |row| row.outcome() == notification_policy::RequestOutcome::ExpiredLocally
+                ));
                 drop(state);
                 if let Some(plan) = plan {
                     assert!(plan.is_cancelled());

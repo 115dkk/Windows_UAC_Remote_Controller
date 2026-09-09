@@ -157,6 +157,20 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn intake_progress(&self) -> Result<(), BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn presentation_clock(&self) -> Result<crate::NativePresentationClock, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+        fn publish_pending_request(
+            &self,
+            _: std::sync::Arc<crate::NativePendingRequest>,
+            _: crate::NativeRequestPresentation,
+            _: crate::NativeRequestAlert,
+        ) -> Result<crate::NativeRequestSinkOutcome, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
         fn advance_approval_drain_for_denial(
             &self,
             _: std::sync::Arc<crate::NativeDenialScope>,

@@ -338,9 +338,11 @@ impl DurableInbox {
             .register(self.owner_epoch(), association, local, None)
     }
 
-    /// Called only by the current native request owner after its fresh check;
-    /// retained metadata cannot itself turn a stale snapshot into permission.
-    pub(crate) fn lease_pending_request(
+    /// Called only by trusted native Rust composition after its fresh check.
+    /// This downward-only lease is not exported through UniFFI/Tauri and cannot
+    /// turn retained metadata into an enrollment, signing or presentation permit.
+    /// Every existing owner/source/window/key/body/fault check remains mandatory.
+    pub fn lease_pending_request(
         &mut self,
         request: &AssociatedPendingRequest,
     ) -> Result<NativePeerLease, PeerLeaseError> {

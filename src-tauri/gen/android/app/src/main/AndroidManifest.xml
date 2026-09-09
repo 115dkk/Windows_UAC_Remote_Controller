@@ -56,6 +56,15 @@
             </intent-filter>
         </receiver>
 
+        <receiver android:name=".background.ControllerRequestActionReceiver" android:exported="false" />
+        <receiver android:name=".background.ControllerRequestTimeReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

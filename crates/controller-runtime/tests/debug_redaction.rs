@@ -19,8 +19,11 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         computer_name: secret.into(),
         program_name: secret.into(),
         executable_path: secret.into(),
-        details: secret.into(),
+        program_elided: false,
+        path_elided: false,
+        has_details: true,
         remaining_seconds: 17,
+        refresh_after_millis: 1000,
         state: RequestState::Pending,
         can_approve: false,
         can_deny: false,
@@ -38,7 +41,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         assert!(!debug.contains(secret));
     }
     let snapshot = AppSnapshot {
-        schema_version: 2,
+        schema_version: 3,
         platform: Platform::Android,
         computer_name: secret.into(),
         service: None,
@@ -47,6 +50,8 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         policy: Some(NotificationPolicy::default()),
         devices: vec![device],
         requests: vec![request],
+        request_catalog: None,
+        request_review: None,
         activity: vec![activity],
         data_availability: DataAvailability::UNAVAILABLE,
         can_pair: false,
@@ -57,7 +62,12 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
     assert!(!format!("{snapshot:#?}").contains(secret));
     // Redaction is not a mutation of user-facing details in the intended DTO.
     assert_eq!(
-        serde_json::to_value(&snapshot).unwrap()["requests"][0]["details"],
+        serde_json::to_value(&snapshot).unwrap()["requests"][0]["programName"],
         secret
+    );
+    assert!(
+        serde_json::to_value(&snapshot).unwrap()["requests"][0]
+            .get("details")
+            .is_none()
     );
 }

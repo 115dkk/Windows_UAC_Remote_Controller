@@ -517,3 +517,62 @@ async fn atomic_revocation_wakes_a_real_backpressured_guarded_write() {
     .await
     .expect("bounded wake for revoked output without guard-owned task");
 }
+
+#[tokio::test]
+async fn parked_guard_revocation_closes_without_another_write_or_event_poll() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut pair = ready_pair(false, 17).await;
+        let guard = Arc::new(AtomicGuard::default());
+        pair.phone
+            .queue_guarded_frame(
+                encode_frame(&vec![0x56; 2048]).unwrap(),
+                pair.clock.at(Duration::from_secs(1)),
+                guard.clone(),
+            )
+            .unwrap();
+        partial_write(&mut pair.phone).await;
+        guard.revoke();
+        assert_eq!(
+            pair.phone.observe_liveness(),
+            Err(SocketError::OutboundRevoked)
+        );
+        assert_discarded(&pair.phone, SocketError::OutboundRevoked);
+        assert_eq!(Arc::strong_count(&guard), 1);
+        assert!(!matches!(
+            pair.pc.next_event().await,
+            Ok(SocketEvent::Frame(_))
+        ));
+    })
+    .await
+    .expect("bounded parked guard cancellation");
+}
+
+#[tokio::test]
+async fn parked_guard_keeps_the_original_shorter_send_deadline() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let mut pair = ready_pair(false, 17).await;
+        let guard = Arc::new(AtomicGuard::default());
+        let lifetime = Duration::from_millis(100);
+        pair.phone
+            .queue_guarded_frame(
+                encode_frame(&vec![0x57; 2048]).unwrap(),
+                pair.clock.at(lifetime),
+                guard.clone(),
+            )
+            .unwrap();
+        partial_write(&mut pair.phone).await;
+        pair.clock.set(lifetime);
+        assert_eq!(
+            pair.phone.observe_liveness(),
+            Err(SocketError::SendDeadline)
+        );
+        assert_discarded(&pair.phone, SocketError::SendDeadline);
+        assert_eq!(Arc::strong_count(&guard), 1);
+        assert!(!matches!(
+            pair.pc.next_event().await,
+            Ok(SocketEvent::Frame(_))
+        ));
+    })
+    .await
+    .expect("bounded parked original deadline");
+}

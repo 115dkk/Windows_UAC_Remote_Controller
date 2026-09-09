@@ -165,24 +165,31 @@ pub struct PairedDeviceView {
     pub last_seen_label: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestState {
     Pending,
     Authenticating,
+    Waiting,
     Sending,
+    AwaitingOutcome,
+    Unavailable,
     Expired,
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RequestView {
     pub id: String,
     pub computer_name: String,
     pub program_name: String,
     pub executable_path: String,
-    pub details: String,
+    pub program_elided: bool,
+    pub path_elided: bool,
+    pub has_details: bool,
     pub remaining_seconds: u32,
+    /// Display lease only, not an authorization deadline. Subtract bridge time.
+    pub refresh_after_millis: u32,
     pub state: RequestState,
     pub can_approve: bool,
     pub can_deny: bool,
@@ -258,6 +265,10 @@ pub struct AppSnapshot {
     pub policy: Option<NotificationPolicy>,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
+    /// None is no current native observation, not an empty provisioned map.
+    pub request_catalog: Option<crate::RequestCatalogView>,
+    /// Native review navigation only. Never starts authentication or a decision.
+    pub request_review: Option<crate::RequestReviewView>,
     pub activity: Vec<ActivityView>,
     pub data_availability: DataAvailability,
     pub can_pair: bool,
@@ -270,7 +281,7 @@ impl AppSnapshot {
     /// Remains renderable while the Android policy owner is stopped/unavailable.
     pub fn from_android_service(service: PhoneServiceView, readiness: MobileReadiness) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             platform: Platform::Android,
             computer_name: String::new(),
             service: None,
@@ -279,6 +290,8 @@ impl AppSnapshot {
             policy: None,
             devices: Vec::new(),
             requests: Vec::new(),
+            request_catalog: None,
+            request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
             can_pair: false,
@@ -307,7 +320,7 @@ impl AppSnapshot {
     /// remain unavailable, never an apparently confirmed empty collection.
     pub fn from_android_policy(policy: NotificationPolicy, readiness: MobileReadiness) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             platform: Platform::Android,
             computer_name: String::new(),
             service: None,
@@ -316,6 +329,8 @@ impl AppSnapshot {
             policy: Some(policy),
             devices: Vec::new(),
             requests: Vec::new(),
+            request_catalog: None,
+            request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
             can_pair: false,

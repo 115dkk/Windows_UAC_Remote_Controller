@@ -10,11 +10,12 @@ import dev.dkk115.uacremote.nativecore.NativeDenialAdvance
 import dev.dkk115.uacremote.nativecore.NativeDenialAttempt
 import dev.dkk115.uacremote.nativecore.NativeDenialScope
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
+import dev.dkk115.uacremote.nativecore.NativeDecisionProgress
 import dev.dkk115.uacremote.security.DenialSigningException
 import dev.dkk115.uacremote.security.NativeDenialOperation
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal enum class NativeDenialReply { WAITING, PREPARED, AWAITING_OUTCOME, CANCELLED, RELEASED, UNAVAILABLE, BUSY }
+internal enum class NativeDenialReply { WAITING, PREPARED, SENDING, AWAITING_OUTCOME, CANCELLED, RELEASED, UNAVAILABLE, BUSY }
 internal enum class DenialStep { RESERVE, ADVANCE, SIGN, FINISH, RETIRE, SETTLE, FAILED }
 
 /** Presentation freshness only; never a signing/authentication permit. */
@@ -99,18 +100,23 @@ internal class DenialJobs(
         book.get(NativeRequestIdentity.notificationTag(selection)) != null
     } catch (_: Exception) { true }
 
-    fun request(selection: NativeRequestSelection, callback: (NativeDenialReply) -> Unit) {
+    fun canRequest(selection: NativeRequestSelection): Boolean = !stopping.get() && ready() && !blocksApproval(selection) && book.snapshot().size < 32
+
+    /** WAITING means the exact bounded job/blocker was retained, not signed. */
+    fun request(selection: NativeRequestSelection, callback: (NativeDenialReply) -> Unit): NativeDenialReply {
         val copied = NativeRequestIdentity.copy(selection)
-        if (copied == null || stopping.get() || !ready()) { reply(callback, NativeDenialReply.UNAVAILABLE); return }
+        if (copied == null || stopping.get() || !ready()) { reply(callback, NativeDenialReply.UNAVAILABLE); return NativeDenialReply.UNAVAILABLE }
         val key = NativeRequestIdentity.notificationTag(copied)
         val existing = book.get(key)
         if (existing != null) {
-            reply(callback, if (existing.cleanupFailed) NativeDenialReply.UNAVAILABLE else NativeDenialReply.BUSY)
-            wake(existing); return
+            val result = if (existing.cleanupFailed) NativeDenialReply.UNAVAILABLE else NativeDenialReply.BUSY
+            reply(callback, result)
+            wake(existing); return result
         }
         val job = DenialJob(key, copied, callback)
-        if (!book.add(key, job)) { reply(callback, NativeDenialReply.BUSY); return }
+        if (!book.add(key, job)) { reply(callback, NativeDenialReply.BUSY); return NativeDenialReply.BUSY }
         wake(job) // Blocker is installed BEFORE enqueue/reservation/cancellation.
+        return NativeDenialReply.WAITING
     }
 
     fun nativeProgress() {
@@ -118,7 +124,13 @@ internal class DenialJobs(
         if (stopping.get()) cleanupProgress()
     }
     fun externalProgress() { for (job in book.snapshot()) if (!job.cleanupFailed && !job.nativeReleased) wake(job) }
+    /** Only jobs already pending after bounded queue saturation; no Busy retry. */
+    fun resumeQueued() { schedule() }
     fun stop() { stopping.set(true); for (job in book.snapshot()) job.cancel() }
+    fun withdraw(selection: NativeRequestSelection) {
+        val job = try { book.get(NativeRequestIdentity.notificationTag(selection)) } catch (_: Exception) { null }
+        if (job != null) { job.cancel(); wake(job) }
+    }
 
     private fun wake(job: DenialJob) {
         if (book.get(job.key) !== job || job.nativeReleased || job.cleanupFailed) return
@@ -219,7 +231,15 @@ internal class DenialJobs(
                 else job.step = DenialStep.ADVANCE // No live transport is fabricated/retried here.
             }
             is NativeDenialAdvance.AwaitingOutcome -> {
-                notify(job, NativeDenialReply.AWAITING_OUTCOME)
+                // The outer phase includes queued/uncertain admission. Only
+                // the opaque scope's actual transport state proves a write.
+                val progress = synchronized(job.handles) { requireScope(job).deliveryProgress() }
+                notify(job, when (progress) {
+                    NativeDecisionProgress.PREPARED, NativeDecisionProgress.WAITING_FOR_PEER -> NativeDenialReply.WAITING
+                    NativeDecisionProgress.QUEUED -> NativeDenialReply.SENDING
+                    NativeDecisionProgress.WRITTEN_TO_SOCKET -> NativeDenialReply.AWAITING_OUTCOME
+                    NativeDecisionProgress.STOPPED, NativeDecisionProgress.REJECTED -> NativeDenialReply.UNAVAILABLE
+                })
                 if (!job.nativeRetired) { job.step = DenialStep.RETIRE; wake(job) } else job.step = DenialStep.SETTLE
             }
             is NativeDenialAdvance.CleanupPending -> {
@@ -283,7 +303,7 @@ internal class DenialJobs(
         if (job.lastReply == value) return
         job.lastReply = value
         val action = Runnable {
-            val positive = value == NativeDenialReply.PREPARED || value == NativeDenialReply.AWAITING_OUTCOME
+            val positive = value == NativeDenialReply.PREPARED || value == NativeDenialReply.SENDING || value == NativeDenialReply.AWAITING_OUTCOME
             val actual = if (positive) {
                 val live = synchronized(job.handles) {
                     if (job.scopeClosed) false
@@ -302,5 +322,5 @@ internal class DenialJobs(
         if (Looper.myLooper() == Looper.getMainLooper()) action.run() else main.post(action)
     }
     private fun rethrowFatal(error: Throwable) { if (error is VirtualMachineError || error is ThreadDeath || error is LinkageError) throw error }
-    override fun toString(): String = "DenialJobs([redacted], no_live_ingress)"
+    override fun toString(): String = "DenialJobs([redacted], native_original_requests_only)"
 }
