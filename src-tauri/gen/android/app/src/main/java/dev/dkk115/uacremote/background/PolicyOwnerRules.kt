@@ -136,7 +136,7 @@ internal class PolicyOwnerLifecycle {
 /** Only property names are inspected; values are never logged or used as paths. */
 internal object ControllerLibraryPolicy {
     const val LIBRARY = "uac_android_controller"
-    const val ABI_VERSION = 4u
+    const val ABI_VERSION = 5u
 
     fun permitsInitialProperties(names: Iterable<String>): Boolean {
         var count = 0

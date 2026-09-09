@@ -4,8 +4,12 @@
 //! wiring and peer/notification/authentication operations remain separate gates.
 #![forbid(unsafe_code)]
 
+mod approval;
 mod bootstrap;
 mod local_keys;
+pub use approval::{
+    NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
+};
 pub use local_keys::NativeLocalKeySet;
 
 use android_controller::{DurableFault, DurableInbox};
@@ -46,6 +50,8 @@ pub enum BridgeError {
     LocalKeysReconciliationRequired,
     #[error("native local key references could not be reopened")]
     LocalKeysUnavailable,
+    #[error("the approval attempt is no longer eligible")]
+    ApprovalRejected,
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
@@ -90,6 +96,14 @@ pub trait NativePlatform: Send + Sync {
     /// Must clear only this app's request notifications and caller-held views.
     /// No Activity, permission prompt or authentication may be opened here.
     fn clear_request_notifications(&self) -> Result<(), BridgeError>;
+    /// Downward-only exact committed withdrawals, including native held views.
+    fn withdraw_requests(&self, requests: Vec<NativeRequestSelection>) -> Result<(), BridgeError> {
+        if requests.is_empty() {
+            Ok(())
+        } else {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+    }
 }
 
 struct Admission<'a>(&'a AtomicBool);
@@ -122,6 +136,8 @@ pub struct MobileController {
     platform: Arc<dyn NativePlatform>,
     boot: PhoneBootId,
     state: Mutex<Option<DurableInbox>>,
+    approval_owner: Mutex<Option<android_controller::ApprovalPlanOwner>>,
+    approval_alive: Arc<AtomicBool>,
     active: AtomicBool,
     cleanup_pending: AtomicBool,
     key_cleanup_pending: AtomicBool,
@@ -137,7 +153,7 @@ impl fmt::Debug for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    4
+    5
 }
 
 #[uniffi::export]
@@ -374,13 +390,22 @@ impl MobileController {
             {
                 return Err(BridgeError::InvalidObservation);
             }
-            Ok((boot, finished_clock.phone_monotonic_nanos(), owner))
+            let approval_owner = android_controller::ApprovalPlanOwner::new(&owner, boot)
+                .map_err(|_| BridgeError::OwnerFaulted)?;
+            Ok((
+                boot,
+                finished_clock.phone_monotonic_nanos(),
+                owner,
+                approval_owner,
+            ))
         })();
         match result {
-            Ok((boot, native_floor, owner)) => Ok(Arc::new(Self {
+            Ok((boot, native_floor, owner, approval_owner)) => Ok(Arc::new(Self {
                 platform,
                 boot,
                 state: Mutex::new(Some(owner)),
+                approval_owner: Mutex::new(Some(approval_owner)),
+                approval_alive: Arc::new(AtomicBool::new(true)),
                 active: AtomicBool::new(false),
                 cleanup_pending: AtomicBool::new(false),
                 key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
@@ -437,6 +462,13 @@ impl MobileController {
         }
     }
     fn drop_owner(&self) -> bool {
+        self.approval_alive.store(false, Ordering::Release);
+        let plans = self
+            .approval_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        drop(plans);
         let owner = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.take()
@@ -626,6 +658,10 @@ mod tests {
         let controller = Arc::new(MobileController {
             platform: platform.clone(),
             boot,
+            approval_owner: Mutex::new(Some(
+                android_controller::ApprovalPlanOwner::new(&owner, boot).unwrap(),
+            )),
+            approval_alive: Arc::new(AtomicBool::new(true)),
             state: Mutex::new(Some(owner)),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
@@ -634,6 +670,104 @@ mod tests {
             _owner_lease: OwnerLease::acquire().unwrap(),
         });
         test(&controller, &platform);
+    }
+
+    fn approval_selection() -> NativeRequestSelection {
+        NativeRequestSelection {
+            pc: vec![1; 32],
+            epoch: vec![2; 32],
+            request: vec![3; 32],
+        }
+    }
+
+    #[test]
+    fn empty_policy_owner_never_invents_an_approval_plan_or_faults_on_normal_rejection() {
+        with_model(|controller, platform| {
+            assert!(matches!(
+                controller.begin_approval(approval_selection()),
+                Err(BridgeError::ApprovalRejected)
+            ));
+            assert!(controller.notification_policy_json().is_ok());
+            assert!(controller.approval_alive.load(Ordering::Acquire));
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn malformed_approval_selection_is_rejected_before_clock_or_owner_transition() {
+        with_model(|controller, platform| {
+            platform.clock.lock().unwrap().boot_count = 2;
+            let mut invalid = approval_selection();
+            invalid.request = vec![0; 32];
+            assert!(matches!(
+                controller.begin_approval(invalid),
+                Err(BridgeError::InvalidObservation)
+            ));
+            assert!(controller.approval_alive.load(Ordering::Acquire));
+            assert!(controller.state.lock().unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn approval_clock_failure_closes_owner_and_preserves_downward_cleanup() {
+        with_model(|controller, platform| {
+            platform.clock.lock().unwrap().boot_count = 2;
+            assert!(matches!(
+                controller.begin_approval(approval_selection()),
+                Err(BridgeError::InvalidObservation)
+            ));
+            assert!(!controller.approval_alive.load(Ordering::Acquire));
+            assert!(controller.state.lock().unwrap().is_none());
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn poisoned_approval_mutex_does_not_leave_existing_owner_or_handles_live() {
+        with_model(|controller, platform| {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = controller.approval_owner.lock().unwrap();
+                panic!("poison fixture");
+            }));
+            assert!(matches!(
+                controller.begin_approval(approval_selection()),
+                Err(BridgeError::Closed)
+            ));
+            assert!(!controller.approval_alive.load(Ordering::Acquire));
+            assert!(controller.state.lock().unwrap().is_none());
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn failed_approval_check_commit_is_not_an_ordinary_rejected_request() {
+        with_model(|controller, platform| {
+            let blocker =
+                std::path::Path::new(&platform.path).join(phone_state_store::STAGING_FILE_NAME);
+            let canary = b"synthetic test-owned staging blocker";
+            std::fs::write(&blocker, canary).unwrap();
+            assert!(matches!(
+                controller.begin_approval(approval_selection()),
+                Err(BridgeError::StorageUnavailable)
+            ));
+            assert!(!controller.approval_alive.load(Ordering::Acquire));
+            assert!(controller.state.lock().unwrap().is_none());
+            assert_eq!(platform.cleared.load(Ordering::Acquire), 1);
+            assert_eq!(std::fs::read(blocker).unwrap(), canary);
+        });
+    }
+
+    #[test]
+    fn approval_native_clock_callback_can_reenter_only_as_busy() {
+        with_model(|controller, platform| {
+            *platform.reenter.lock().unwrap() = Some(Arc::downgrade(controller));
+            assert!(matches!(
+                controller.begin_approval(approval_selection()),
+                Err(BridgeError::ApprovalRejected)
+            ));
+            assert!(platform.saw_busy.load(Ordering::Acquire));
+            assert!(controller.notification_policy_json().is_ok());
+        });
     }
 
     #[test]

@@ -14,6 +14,16 @@ pub struct NativeLocalKeySet {
     pub denial_spki: Vec<u8>,
     pub transport_spki: Vec<u8>,
 }
+impl NativeLocalKeySet {
+    pub(crate) fn from_descriptor(key: &android_controller::LocalKeySetDescriptor) -> Self {
+        Self {
+            handle: key.handle().as_bytes().to_vec(),
+            approval_spki: key.approval_key().as_spki_der().to_vec(),
+            denial_spki: key.denial_key().as_spki_der().to_vec(),
+            transport_spki: key.transport_key().as_spki_der().to_vec(),
+        }
+    }
+}
 impl fmt::Debug for NativeLocalKeySet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("NativeLocalKeySet([redacted], unverified)")

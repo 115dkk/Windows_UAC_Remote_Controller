@@ -9,7 +9,7 @@ Application plugin. Windows retains its existing runtime. Native arm64 Rust,
 generated Kotlin/Application code, Gradle/APK and device evidence are separate
 gates; compilation is not a native key or authentication result.
 
-ABI version 4 exposes openOrInitialize and recovery-only openExisting, not an
+ABI version 5 retains openOrInitialize and recovery-only openExisting, not an
 unguarded fresh constructor. Application startup adopts existing state; fresh
 initialization requires an empty private directory, no controller key aliases,
 strictly readable old preferences and an exclusive first-attempt marker. A marker
@@ -21,6 +21,16 @@ History read/clear from ABI3 remains. ABI4 adds only outbound native descriptors
 and read-only key reopen/memory-reference release callbacks, not generation or
 enrollment commands. [ADR0008](../../docs/adr/0008-phone-local-key-lifecycle.md)
 describes V2 checkpoint metadata, store-locked preflight and failure ownership.
+
+ABI5 adds opaque original-request approval plans, one-shot signing claims and
+prepared submissions, plus downward exact-request withdrawal. It still exposes
+no generic signer, raw decision wire sender, enrollment setter or working Tauri
+approval action. The existing Application worker and DeviceKeyStore now contain
+the API30+ per-use CryptoObject lifecycle. A prepared submission is NOT sent or
+Windows-approved. The policy-only startup gate remains until real enrolled
+intake, full notification/effect delivery and outgoing transport are connected.
+See [ADR0011](../../docs/adr/0011-native-approval-operation.md) for lifetime,
+cancellation, cleanup and explicitly deferred native acceptance.
 
 The handwritten Rust boundary forbids unsafe code and uses pinned UniFFI0.32
 generation. Generated/dependency ABI machinery is not claimed unsafe-free.
@@ -66,6 +76,7 @@ Source declarations/isolated compiles do not prove packaged loading or OS cleanu
 Build/generate: `node tools/build-android-bindings.mjs --abi arm64-v8a --variant debug`.
 The script uses the installed pinned NDK and host-only generator. Gradle source
 generation and JNA5.19.1 AAR dependency are declared. Earlier ABI3 full APK builds
-passed in hosted CI; ABI4 requires its own exact-source run. Release shrinking,
+passed in hosted CI, as did ABI4 source5747d58. ABI5 requires its own exact-source
+run. Release shrinking,
 Android16KiB-page/device behavior and Kotlin/JNA runtime calls remain separate
 unverified gates. No library-copy/symlink permission workaround is used.

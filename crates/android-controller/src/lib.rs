@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+mod approval;
 mod associated_request;
 mod checkpoint;
 mod local_keys;
@@ -27,6 +28,10 @@ mod peer_associations;
 mod peer_socket;
 mod types;
 
+pub use approval::{
+    ApprovalAttempt, ApprovalClock, ApprovalClockError, ApprovalError, ApprovalPlan,
+    ApprovalPlanOwner, ApprovalSubmission, ApprovalTime, ApprovalTransition,
+};
 pub use associated_request::{
     AssociatedPendingRequest, AssociatedRequestIssue, CommittedAssociatedCheck,
     RequestSourceFailure,

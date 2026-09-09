@@ -2,6 +2,7 @@
 package dev.dkk115.uacremote.background
 
 import android.app.Application
+import android.app.Activity
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -9,6 +10,7 @@ import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.MobileController
 import dev.dkk115.uacremote.nativecore.bridgeVersion
 import dev.dkk115.uacremote.nativecore.uniffiEnsureInitialized
+import dev.dkk115.uacremote.nativecore.NativeRequestSelection
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.RejectedExecutionException
@@ -27,7 +29,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private val main = Handler(Looper.getMainLooper())
     private val pending = ConcurrentHashMap<PendingCall, Unit>()
     private val worker = ThreadPoolExecutor(
-        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(PolicyOwnerBounds.MAX_PENDING),
+        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(PolicyOwnerBounds.MAX_PENDING + 4),
         { action -> Thread(action, "uac-native-policy-owner").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
@@ -36,10 +38,25 @@ internal class ApplicationPolicyActor(private val application: Application) {
     // Retain even if the Rust constructor fails after partially reopening keys.
     // This adapter owns only its own in-process references, never aliases.
     private val platform = AndroidNativePlatform(application)
+    private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval) {
+        failOwner(PolicyStatus.STORAGE_UNAVAILABLE)
+    }
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
     private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
+
+    init { platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests) }
+
+    /** Native selection only; no Tauri/intent ingress is exposed in this slice. */
+    internal fun requestApproval(selection: NativeRequestSelection, host: Activity, callback: (NativeApprovalReply) -> Unit) =
+        approvals.request(selection, host, callback)
+    internal fun leaveApprovalRequest(host: Activity) = approvals.leaveRequest(host)
+
+    private fun enqueueApproval(action: () -> Unit): Boolean = try {
+        worker.execute { try { action() } finally { cleanupIfStopped() } }
+        true
+    } catch (_: RejectedExecutionException) { false }
 
     fun start() {
         if (!lifecycle.start()) return
@@ -67,6 +84,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
     fun shutdown() {
+        approvals.stop()
+        approvals.retryCleanup()
         lifecycle.stop()
         explicitCleanupRetry.set(true)
         main.removeCallbacks(initializationTimeout)
@@ -157,6 +176,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     }
 
     private fun failOwner(status: PolicyStatus) {
+        approvals.stop()
         lifecycle.fail(status)
         main.removeCallbacks(initializationTimeout)
         finishAll(status)
@@ -208,6 +228,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     }
 
     private fun cleanupIfStopped() {
+        approvals.cleanupOnWorker()
         if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
         val explicitRetry = explicitCleanupRetry.getAndSet(false)
         val owner = controller
@@ -230,6 +251,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 owner.close()
                 cleanup.destroyed()
                 controller = null
+                approvals.retryCleanup()
             } catch (failure: Throwable) {
                 rethrowFatal(failure)
                 cleanup.failed()
@@ -249,6 +271,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 return
             }
         }
+        // An OS cancellation request is not a terminal callback. Keep the
+        // already bounded worker available to release the last opaque handles
+        // once native signing/prompt cleanup actually becomes quiescent.
+        if (approvals.hasPendingCleanup()) return
         lifecycle.closed()
         worker.shutdown()
     }

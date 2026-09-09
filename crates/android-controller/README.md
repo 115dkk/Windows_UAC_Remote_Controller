@@ -91,6 +91,19 @@ Authenticated native intake/effect dispatch, key operations and phone
 authentication remain required. Removing an association
 does not itself withdraw existing Android notifications or erase replay guards.
 
+## One-shot native approval plans
+
+`ApprovalPlanOwner` owns one process-local slot tied to this exact DurableInbox
+instance and trusted native phone boot. Begin, claim and finish require the
+original associated request/current key tuple and observe fresh time after each
+blocking check. The transition always carries committed downward checks, even on
+rejection. No plan, attempt or authentication state is checkpointed. Cancellation
+also invalidates a claimed attempt; native cleanup, not cancellation alone,
+retires the slot. Strict DER verification returns a typed prepared submission,
+never a Windows-success history row or delivery receipt. The containing native
+actor still owns actual hardware-key/per-use authentication and current transport
+handoff checks. See [ADR0011](../../docs/adr/0011-native-approval-operation.md).
+
 ## Public interface
 
 Native factories require actual `DirectorySynced` receipts:

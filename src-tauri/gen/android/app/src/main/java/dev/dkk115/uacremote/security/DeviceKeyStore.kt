@@ -4,8 +4,10 @@ package dev.dkk115.uacremote.security
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.hardware.biometrics.BiometricManager
 import android.os.Build
 import android.os.Looper
+import android.os.SystemClock
 import android.os.UserManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
@@ -18,10 +20,12 @@ import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.PublicKey
+import java.security.Signature
 import java.security.UnrecoverableKeyException
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.atomic.AtomicBoolean
+import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
 
 /** Closed, purpose-separated identity roles. These names are not user input. */
 internal enum class DeviceKeyRole { APPROVAL, DENIAL, TRANSPORT }
@@ -162,13 +166,14 @@ internal class UncommittedDeviceKeySet internal constructor(
 }
 
 /**
- * AndroidKeyStore creation, exact existing-key reopening and inspection only.
+ * AndroidKeyStore creation, exact reopening/inspection and Rust-plan-bound approval.
  *
  * Call off the main thread. No constructor/static initializer generates keys.
  * There is no Tauri command, Binder/receiver entry point, sign(bytes), exported
  * Signature/CryptoObject, authentication-success boolean, PIN or auth window.
- * Signing remains deliberately absent until a separate identity-matching,
- * one-shot BiometricPrompt CryptoObject coordinator is implemented and tested.
+ * Approval is only through a retained, exact-identity, one-shot CryptoObject
+ * operation and an opaque Rust attempt. Native authentication remains a device
+ * validation obligation, not a consequence of creating/reopening references.
  *
  * The process-wide lock serializes this module. AndroidKeyStore has no atomic
  * create-if-absent API; this must be the sole writer for its fixed namespace
@@ -183,6 +188,107 @@ internal class UncommittedDeviceKeySet internal constructor(
 internal class DeviceKeyStore(context: Context) {
     private val appContext = context.applicationContext
     private val owner = KeyReferenceOwner()
+    // One process-local operation for THIS owner. No Activity owns a key store.
+    // Even a produced DER keeps this slot until Rust finish and native cleanup.
+    private var approvalOperation: NativeApprovalOperation? = null
+
+    /**
+     * Worker-only. No input key, role, bytes, provider or alias is accepted.
+     * A missing exact registration is an error, never a request-path reopen.
+     */
+    fun prepareApproval(plan: NativeApprovalPlan): ApprovalOperationOutcome<NativeApprovalOperation> {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return ApprovalOperationOutcome.Failure(ApprovalOperationError.WRONG_THREAD)
+        }
+        val result = synchronized(OWNER_LOCK) {
+            if (approvalOperation != null) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.BUSY)
+            val inspection = InspectionAttempt()
+            try {
+                registryValue(REFERENCES.requireOpen(owner))
+                if (plan.isCancelled()) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.CANCELLED)
+                val deadline = plan.deadlineNanos()
+                if (deadline > Long.MAX_VALUE.toULong()) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.INVALID_PLAN)
+                val started = SystemClock.elapsedRealtimeNanos()
+                if (started < 0) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.CLOCK_UNAVAILABLE)
+                if (deadline.toLong() <= started) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.EXPIRED)
+                val keys = plan.localKeys()
+                val descriptor = registryValue(ReopenKeySetDescriptor.fromTrustedStorage(
+                    keys.handle, keys.approvalSpki, keys.denialSpki, keys.transportSpki,
+                ))
+                val registration = registryValue(REFERENCES.findExact(owner, descriptor))
+                    ?: fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                inspection.matched = registration
+                val reference = registration.reference(DeviceKeyRole.APPROVAL)
+                if (registryValue(REFERENCES.resolve(owner, reference)) !== registration) fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                requireDeviceSecure()
+                val available = appContext.getSystemService(BiometricManager::class.java)
+                    ?.canAuthenticate(NativeApprovalOperation.ALLOWED_AUTHENTICATORS)
+                // A combined OR query accepts a credential-only/PIN-only phone.
+                // Never require biometric enrollment/sensor availability separately.
+                if (!ApprovalOperationBounds.authenticationAvailable(available)) {
+                    return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.AUTHENTICATION_UNAVAILABLE)
+                }
+                val inspected = inspectNativeKey(openStore(), existingRecord(descriptor, DeviceKeyRole.APPROVAL))
+                // Standard delayed JCA selection uses this verified, nonexportable
+                // AndroidKeyStore key. No other key/provider retry or fallback.
+                val signature = Signature.getInstance("SHA256withECDSA")
+                signature.initSign(inspected.privateKey)
+                requireDeviceSecure()
+                val preparedAt = SystemClock.elapsedRealtimeNanos()
+                if (preparedAt < 0) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.CLOCK_UNAVAILABLE)
+                if (preparedAt < started) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.CLOCK_REGRESSED)
+                if (preparedAt >= deadline.toLong()) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.EXPIRED)
+                if (plan.isCancelled()) return@synchronized ApprovalOperationOutcome.Failure(ApprovalOperationError.CANCELLED)
+                val operation = NativeApprovalOperation(
+                    appContext, plan, signature, deadline.toLong(), preparedAt,
+                    recheckKey = { recheckApprovalRegistration(registration, reference) },
+                    releaseSlot = { completed -> synchronized(OWNER_LOCK) {
+                        if (approvalOperation === completed) approvalOperation = null
+                    } },
+                )
+                approvalOperation = operation
+                ApprovalOperationOutcome.Value(operation)
+            } catch (failure: OwnerFailure) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
+                ApprovalOperationOutcome.Failure(ApprovalOperationError.KEYS_UNAVAILABLE, failure.error)
+            } catch (failure: Exception) {
+                inspection.matched?.let { REFERENCES.release(owner, it) }
+                ApprovalOperationOutcome.Failure(ApprovalOperationError.KEYS_UNAVAILABLE,
+                    nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
+            }
+        }
+        // Do not cancel the active plan on a duplicate prepare/BUSY call. Other
+        // failed preparations cannot become a usable operation later.
+        if (result is ApprovalOperationOutcome.Failure && result.error != ApprovalOperationError.BUSY) {
+            try { plan.cancel() } catch (_: Exception) {
+                return ApprovalOperationOutcome.Failure(ApprovalOperationError.NATIVE_UNAVAILABLE, result.keyError)
+            }
+        }
+        return result
+    }
+
+    private fun recheckApprovalRegistration(
+        registration: KeySetRegistration,
+        reference: DeviceKeyReference,
+    ): KeyStoreOutcome<Unit> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            try {
+                if (reference.role != DeviceKeyRole.APPROVAL ||
+                    registryValue(REFERENCES.resolve(owner, reference)) !== registration) fail(DeviceKeyError.UNKNOWN_REFERENCE)
+                requireDeviceSecure()
+                inspectKey(openStore(), existingRecord(registration.descriptor, DeviceKeyRole.APPROVAL))
+                requireDeviceSecure()
+                KeyStoreOutcome.Value(Unit)
+            } catch (failure: OwnerFailure) {
+                REFERENCES.release(owner, registration)
+                KeyStoreOutcome.Failure(failure.error)
+            } catch (failure: Exception) {
+                REFERENCES.release(owner, registration)
+                KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEY_UNAVAILABLE))
+            }
+        }
+    }
 
     fun createKeySet(request: KeyCreationRequest): KeyStoreOutcome<UncommittedDeviceKeySet> {
         val input = request.consumeForKeyOwner()
@@ -306,7 +412,11 @@ internal class DeviceKeyStore(context: Context) {
     }
 
     /** Closes only this instance's references permanently; never deletes native keys. */
-    fun closeReferences(): KeyStoreOutcome<Unit> = synchronized(OWNER_LOCK) { REFERENCES.close(owner) }
+    fun closeReferences(): KeyStoreOutcome<Unit> {
+        val closed = synchronized(OWNER_LOCK) { REFERENCES.close(owner) to approvalOperation }
+        closed.second?.cancel()
+        return closed.first
+    }
 
     private fun existingRecord(descriptor: ReopenKeySetDescriptor, role: DeviceKeyRole): OwnedKey {
         val handle = descriptor.copyHandle()
@@ -385,7 +495,10 @@ internal class DeviceKeyStore(context: Context) {
         }
     }
 
-    private fun inspectKey(store: KeyStore, record: OwnedKey): UnverifiedKeyMaterial {
+    private fun inspectKey(store: KeyStore, record: OwnedKey): UnverifiedKeyMaterial = inspectNativeKey(store, record).material
+
+    /** The key inspected here is the SAME key passed to initSign, never refetched. */
+    private fun inspectNativeKey(store: KeyStore, record: OwnedKey): InspectedNativeKey {
         requireDeviceSecure()
         if (!store.containsAlias(record.alias)) fail(DeviceKeyError.KEY_MISSING)
         val privateKey = store.getKey(record.alias, null) as? PrivateKey ?: fail(DeviceKeyError.KEY_UNAVAILABLE)
@@ -430,7 +543,7 @@ internal class DeviceKeyStore(context: Context) {
         }
         DeviceKeyPolicy.attestationBounds(chain.map { it.size })?.let { fail(it) }
         requireDeviceSecure()
-        return UnverifiedKeyMaterial(record.role, hardware, spki, chain)
+        return InspectedNativeKey(privateKey, UnverifiedKeyMaterial(record.role, hardware, spki, chain))
     }
 
     private fun requireDeviceSecure() {
@@ -547,6 +660,10 @@ internal class DeviceKeyStore(context: Context) {
 private class OwnedKey(val alias: String, val role: DeviceKeyRole, spki: ByteArray) {
     val expectedSpki = spki.copyOf()
     override fun toString(): String = "OwnedKey([redacted])"
+}
+
+private class InspectedNativeKey(val privateKey: PrivateKey, val material: UnverifiedKeyMaterial) {
+    override fun toString(): String = "InspectedNativeKey([redacted])"
 }
 
 private class GenerationAttempt {

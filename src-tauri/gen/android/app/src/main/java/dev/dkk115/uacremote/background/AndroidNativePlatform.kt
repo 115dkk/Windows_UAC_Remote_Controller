@@ -9,6 +9,8 @@ import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.NativeClock
 import dev.dkk115.uacremote.nativecore.NativePlatform
 import dev.dkk115.uacremote.nativecore.NativeLocalKeySet
+import dev.dkk115.uacremote.nativecore.NativeApprovalPlan
+import dev.dkk115.uacremote.nativecore.NativeRequestSelection
 import dev.dkk115.uacremote.security.DeviceKeyStore
 import dev.dkk115.uacremote.security.KeyStoreOutcome
 import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
@@ -23,6 +25,27 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val environment = NativeEnvironment(application)
     private val legacy = LegacyPolicyObservation(application)
     private val keyStore = DeviceKeyStore(application)
+    private var withdrawal: ((NativeRequestSelection) -> Unit)? = null
+    private var clearHeldApprovals: (() -> Unit)? = null
+
+    internal fun bindWithdrawal(receiver: (NativeRequestSelection) -> Unit, clear: () -> Unit) {
+        check(withdrawal == null)
+        withdrawal = receiver
+        clearHeldApprovals = clear
+    }
+    internal fun prepareApproval(plan: NativeApprovalPlan) = keyStore.prepareApproval(plan)
+
+    override fun withdrawRequests(requests: List<NativeRequestSelection>) {
+        if (Looper.myLooper() == Looper.getMainLooper() || requests.size > 1024) throw BridgeException.NativeUnavailable()
+        val manager = application.getSystemService(NotificationManager::class.java) ?: throw BridgeException.NativeUnavailable()
+        try {
+            for (request in requests) {
+                // Invalidate any held auth attempt before the OS notification IO.
+                withdrawal?.invoke(request)
+                manager.cancel(NativeRequestIdentity.notificationTag(request), 1)
+            }
+        } catch (_: Exception) { throw BridgeException.NativeUnavailable() }
+    }
 
     override fun legacyPolicyDocument(): String? = legacy.legacyPolicyDocument()
     override fun hasDeviceKeys(): Boolean = legacy.hasDeviceKeys()
@@ -97,6 +120,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     override fun clearRequestNotifications() {
         if (Looper.myLooper() == Looper.getMainLooper()) throw BridgeException.NativeUnavailable()
         try {
+            clearHeldApprovals?.invoke()
             val manager = application.getSystemService(NotificationManager::class.java)
                 ?: throw BridgeException.NativeUnavailable()
             for (notification in manager.activeNotifications) {
