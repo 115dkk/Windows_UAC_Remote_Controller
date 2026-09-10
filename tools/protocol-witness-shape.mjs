@@ -28,8 +28,8 @@ export const SHAPED = `lemma honest_approve_trace:
     & SnapshotCaptured(pc, device, revision, binding) @c
     & ApprovalSigned(device, binding) @s
     & e < c & c < o & u < s & s < a
-    & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> x = c)
-    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> x = e)"`;
+    & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"`;
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const expected = { honest_approve_trace: { trace: 'exists-trace', verdict: 'verified' } };
 

@@ -9,8 +9,8 @@ test('only the original existential witness is strengthened; rules and all-trace
   const { normalized, candidate } = shapeWitness(source);
   assert.equal(candidate.replace(SHAPED, ORIGINAL), normalized);
   assert.ok(candidate.includes("& o < u & u < a\n"));
-  assert.ok(candidate.includes("& (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> x = c)"));
-  assert.ok(candidate.includes("& (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> x = e)"));
+  assert.ok(candidate.includes("& (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)"));
+  assert.ok(candidate.includes("& (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"));
   assert.equal(candidate.split('lemma ').length, normalized.split('lemma ').length);
 });
 test('different rules, properties, duplicate witnesses and oversized inputs are rejected', () => {
