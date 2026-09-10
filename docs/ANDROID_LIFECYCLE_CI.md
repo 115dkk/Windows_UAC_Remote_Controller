@@ -19,6 +19,16 @@ recreation and close/relaunch; an actor READY observation or blank window cannot
 satisfy this check. Window recreation and plugin host rebinding are still under
 investigation, and the next actual CI run must establish their observed behavior.
 
+The pending dependency patch now provides explicit original-Activity leases and
+physical WebView origin propagation. The initial native test additionally uses
+the same real current STOP envelope with retired/current JNI WebView objects,
+requiring rejection versus actual STOP/CLOSED and restart. A separate parameterless
+READ pair exercises the native custom-protocol entry with the same current
+headers and retired/current objects; it is not a framework-generated fetch test.
+Payloads and invocation keys remain test-process memory only. Any native-entry
+timeout records unconfirmed device work and stops the host's operation sequence.
+Tracked vendor source is part of the immutable prebuild/after-build snapshot.
+
 ## Fixed scope
 
 The workflow builds the genuine debuggable `dev.dkk115.uacremote` APK, including Tauri and the real Rust controller/JNA libraries, for API36 `google_apis` x86_64. Its separate AndroidJUnitRunner APK targets that product. No substitute actor, authentication result, key, enrollment, incoming request or signing bridge is installed. The disposable emulator is initially unlocked without a configured credential; locked-first-boot/FBE and physical authentication remain pending.

@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+#[cfg(target_os = "android")]
+mod android_window;
 mod commands;
 mod lifecycle_policy;
 mod mobile;
@@ -67,16 +69,22 @@ pub fn run() {
             // Android's Application owns the only durable Rust policy store.
             // Never open the old AppRuntime/policy writer from an Activity.
             #[cfg(target_os = "android")]
-            app.manage(commands::ControllerState::android());
-            let config = app
-                .config()
-                .app
-                .windows
-                .first()
-                .ok_or("missing main window configuration")?;
-            tauri::WebviewWindowBuilder::from_config(app, config)?
-                .on_navigation(local_navigation)
-                .build()?;
+            {
+                app.manage(commands::ControllerState::android());
+                android_window::install(app.handle())?;
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let config = app
+                    .config()
+                    .app
+                    .windows
+                    .first()
+                    .ok_or("missing main window configuration")?;
+                tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .on_navigation(local_navigation)
+                    .build()?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -95,6 +103,8 @@ pub fn run() {
         .expect("native application host could not run");
 
     app.run(|_app, event| {
+        #[cfg(target_os = "android")]
+        android_window::on_event(_app, &event);
         if let tauri::RunEvent::ExitRequested { code, api, .. } = event
             && lifecycle_policy::prevent_implicit_exit(cfg!(target_os = "android"), code)
         {

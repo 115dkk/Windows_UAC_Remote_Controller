@@ -360,7 +360,9 @@ mod web_context;
 #[cfg(target_os = "android")]
 pub(crate) mod android;
 #[cfg(target_os = "android")]
-pub use crate::android::android_setup;
+pub use crate::android::{
+  android_activity_origin, android_setup, AndroidActivityOrigin, AndroidWebviewOrigin,
+};
 #[cfg(target_os = "android")]
 pub mod prelude {
   pub use crate::android::{binding::*, dispatch, find_class, Context};
@@ -1840,6 +1842,17 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   with_asset_loader: bool,
   asset_loader_domain: Option<String>,
   https_scheme: bool,
+  android_activity_origin: Option<AndroidActivityOrigin>,
+}
+
+#[cfg(target_os = "android")]
+impl WebViewBuilder<'_> {
+  /// Attach only to this already registered physical Activity; no Activity is
+  /// launched and neither an integer ID nor a class-name fallback is used.
+  pub fn with_android_activity_origin(mut self, origin: AndroidActivityOrigin) -> Self {
+    self.platform_specific.android_activity_origin = Some(origin);
+    self
+  }
 }
 
 #[cfg(target_os = "android")]

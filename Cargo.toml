@@ -68,3 +68,8 @@ debug-assertions = true
 tauri-codegen = { path = "vendor/tauri-codegen" }
 # Android template API compatibility only; see vendor/wry/LOCAL_PATCH.md.
 wry = { path = "vendor/wry" }
+# Exact existing-Activity attachment and physical-view IPC ownership on Android.
+# The pinned upstream sources and patch scope are recorded alongside these crates.
+tao = { path = "vendor/tao-0.35.3" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.11.4" }
+tauri = { path = "vendor/tauri-2.11.5" }

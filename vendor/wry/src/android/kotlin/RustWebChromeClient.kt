@@ -486,6 +486,6 @@ class RustWebChromeClient(appActivity: WryActivity) : WebChromeClient() {
       view: WebView,
       title: String
   ) {
-    Rust.handleReceivedTitle((view as RustWebView).id, title)
+    Rust.handleReceivedTitle(view, (view as RustWebView).id, title)
   }
 }

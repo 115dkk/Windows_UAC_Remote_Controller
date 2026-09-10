@@ -16,21 +16,26 @@ use jni::{
   JNIEnv,
 };
 use ndk::looper::ThreadLooper;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use raw_window_handle::HasWindowHandle;
 use std::{
   borrow::Cow,
   collections::HashMap,
-  sync::{mpsc::channel, Mutex},
+  sync::{
+    mpsc::{channel, Receiver as ResponseReceiver},
+    Mutex,
+  },
   time::Duration,
 };
 
 pub(crate) mod binding;
+mod handlers;
 mod main_pipe;
+mod origin;
 use main_pipe::{
-  activity_id_for_window_manager, first_activity_id, register_activity_proxy, ActivityId,
-  CreateWebViewAttributes, MainPipe, WebViewMessage,
+  register_activity_proxy, ActivityId, CreateWebViewAttributes, MainPipe, WebViewMessage,
 };
+pub use origin::{android_activity_origin, AndroidActivityOrigin, AndroidWebviewOrigin};
 
 use crate::util::Counter;
 
@@ -45,14 +50,9 @@ pub struct Context<'a, 'b> {
 
 type WebviewId = String;
 
-macro_rules! define_static_handlers {
-  ($($key: ident, $var:ident = $type_name:ident);+ $(;)?) => {
-    $(static $var: Lazy<Mutex<HashMap<$key, $type_name>>> = Lazy::new(||Mutex::new(HashMap::new()));)*
-  };
-
-  ($($var:ident = $type_name:ident { $($fields:ident:$types:ty),+ $(,)? });+ $(;)?) => {
+macro_rules! define_handlers {
+  ($($type_name:ident { $($fields:ident:$types:ty),+ $(,)? });+ $(;)?) => {
     $(
-    static $var: Lazy<Mutex<HashMap<WebviewId, $type_name>>> = Lazy::new(||Mutex::new(HashMap::new()));
     pub struct $type_name {
       $($fields: $types,)*
     }
@@ -63,40 +63,53 @@ macro_rules! define_static_handlers {
         }
       }
     }
-    unsafe impl Send for $type_name {}
-    unsafe impl Sync for $type_name {})*
+    // Retain Wry's existing erased callback thread-transfer contract. These
+    // values are NEVER shared directly: one per-registration mutex serializes
+    // invocation, including across configuration restoration.
+    unsafe impl Send for $type_name {})*
   };
 }
 
-define_static_handlers! {
-  IPC = UnsafeIpc { handler: Box<dyn Fn(Request<String>)> };
-  REQUEST_HANDLER = UnsafeRequestHandler { handler:  Box<dyn Fn(&str, Request<Vec<u8>>, bool) -> Option<HttpResponse<Cow<'static, [u8]>>>> };
-  TITLE_CHANGE_HANDLER = UnsafeTitleHandler { handler: Box<dyn Fn(String)> };
-  URL_LOADING_OVERRIDE = UnsafeUrlLoadingOverride { handler: Box<dyn Fn(String) -> bool> };
-  ON_LOAD_HANDLER = UnsafeOnPageLoadHandler { handler: Box<dyn Fn(PageLoadEvent, String)> };
-}
-define_static_handlers! {
-  WebviewId, WITH_ASSET_LOADER = bool;
-  WebviewId, ASSET_LOADER_DOMAIN = String;
-  ActivityId, WEBVIEW_ATTRIBUTES = CreateWebViewAttributes;
+define_handlers! {
+  UnsafeIpc { handler: Box<dyn Fn(Request<String>)> };
+  UnsafeRequestHandler { handler: Box<dyn Fn(&str, Request<Vec<u8>>, bool) -> Option<ResponseReceiver<HttpResponse<Cow<'static, [u8]>>>>> };
+  UnsafeTitleHandler { handler: Box<dyn Fn(String)> };
+  UnsafeUrlLoadingOverride { handler: Box<dyn Fn(String) -> bool> };
+  UnsafeOnPageLoadHandler { handler: Box<dyn Fn(PageLoadEvent, String)> };
 }
 
 pub(crate) static PACKAGE: OnceCell<String> = OnceCell::new();
 
 type EvalCallback = Box<dyn Fn(String) + Send + 'static>;
 
-pub static EVAL_ID_GENERATOR: Counter = Counter::new();
-pub static EVAL_CALLBACKS: OnceCell<Mutex<HashMap<i32, EvalCallback>>> = OnceCell::new();
-
-pub fn destroy_webview(activity_id: ActivityId, webview_id: &WebviewId) {
-  WEBVIEW_ATTRIBUTES.lock().unwrap().remove(&activity_id);
-  IPC.lock().unwrap().remove(webview_id);
-  REQUEST_HANDLER.lock().unwrap().remove(webview_id);
-  TITLE_CHANGE_HANDLER.lock().unwrap().remove(webview_id);
-  URL_LOADING_OVERRIDE.lock().unwrap().remove(webview_id);
-  ON_LOAD_HANDLER.lock().unwrap().remove(webview_id);
-  WITH_ASSET_LOADER.lock().unwrap().remove(webview_id);
-  ASSET_LOADER_DOMAIN.lock().unwrap().remove(webview_id);
+pub(crate) struct PendingEval {
+  pub origin: AndroidWebviewOrigin,
+  pub callback: EvalCallback,
+}
+pub(crate) static EVAL_CALLBACKS: OnceCell<Mutex<HashMap<i32, PendingEval>>> = OnceCell::new();
+pub(crate) fn next_eval_id() -> Option<i32> {
+  use std::sync::atomic::{AtomicI32, Ordering};
+  static NEXT: AtomicI32 = AtomicI32::new(1);
+  NEXT
+    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    .ok()
+}
+pub(crate) fn cancel_evals_for_activity(origin: &AndroidActivityOrigin) {
+  let cancelled = {
+    let mut pending = EVAL_CALLBACKS.get_or_init(Default::default).lock().unwrap();
+    let ids = pending
+      .iter()
+      .filter(|(_, entry)| entry.origin.activity_origin().same(origin))
+      .map(|(id, _)| *id)
+      .collect::<Vec<_>>();
+    ids
+      .into_iter()
+      .filter_map(|id| pending.remove(&id))
+      .collect::<Vec<_>>()
+  };
+  // Drop callback captures outside registry locks. There is no successful
+  // substitute value for a JavaScript evaluation cancelled by destruction.
+  drop(cancelled);
 }
 
 /// Sets up the necessary logic for wry to be able to create the webviews later.
@@ -110,8 +123,6 @@ pub unsafe fn android_setup(
   activity: GlobalRef,
 ) {
   PACKAGE.get_or_init(move || package.to_string());
-
-  let vm = env.get_java_vm().unwrap();
 
   let activity_id = env
     .call_method(activity.as_obj(), "getId", "()I", &[])
@@ -149,13 +160,31 @@ pub unsafe fn android_setup(
 
   let webchrome_client = env.new_global_ref(webchrome_client).unwrap();
 
-  register_activity_proxy(vm, activity_id, activity, window_manager, webchrome_client);
+  let Ok(origin) = AndroidActivityOrigin::new(
+    &mut env,
+    activity_id,
+    activity.clone(),
+    window_manager.clone(),
+  ) else {
+    return;
+  };
+  if !register_activity_proxy(activity_id, activity, webchrome_client, origin.clone()) {
+    return;
+  }
 
-  if let Some(webview_attributes) = WEBVIEW_ATTRIBUTES.lock().unwrap().get(&activity_id) {
-    MainPipe::send(
-      activity_id,
-      WebViewMessage::CreateWebView(webview_attributes.clone()),
-    );
+  if !origin.live_on_main(&mut env).unwrap_or(false) {
+    main_pipe::remove_activity_proxy(&origin);
+    return;
+  }
+  // Publish bootstrap readiness only after this actual original registration.
+  main_pipe::publish_initial_activity(&origin);
+  if let Some((attributes, rollback)) = handlers::prepare_configuration(&origin) {
+    // No registry lock crosses enqueue. A rejected enqueue restores only the
+    // dormant definition/permission; it does not revive an old physical view.
+    if MainPipe::send(activity_id, WebViewMessage::CreateWebView(attributes)).is_err() {
+      handlers::rollback_configuration(rollback);
+      main_pipe::remove_activity_proxy(&origin);
+    }
   }
 }
 
@@ -176,7 +205,7 @@ impl InnerWebView {
   pub fn new(
     window: &impl HasWindowHandle,
     attributes: WebViewAttributes,
-    pl_attrs: super::PlatformSpecificWebViewAttributes,
+    mut pl_attrs: super::PlatformSpecificWebViewAttributes,
   ) -> Result<Self> {
     let window_manager = match window.window_handle()?.as_raw() {
       raw_window_handle::RawWindowHandle::AndroidNdk(window_manager) => {
@@ -185,8 +214,22 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
     let window_manager = unsafe { JObject::from_raw(window_manager.as_ptr().cast()) };
-    let activity_id =
-      activity_id_for_window_manager(window_manager).expect("no available activity");
+    let origin = if let Some(origin) = pl_attrs.android_activity_origin.take() {
+      if !origin.matches_window_manager(&window_manager)? {
+        return Err(Error::ActivityNotFound);
+      }
+      origin
+    } else {
+      main_pipe::activity_origins()
+        .into_iter()
+        .find(|origin| {
+          origin
+            .matches_window_manager(&window_manager)
+            .unwrap_or(false)
+        })
+        .ok_or(Error::ActivityNotFound)?
+    };
+    let activity_id = origin.id();
     let WebViewAttributes {
       url,
       html,
@@ -209,6 +252,7 @@ impl InnerWebView {
       with_asset_loader,
       asset_loader_domain,
       https_scheme,
+      android_activity_origin: _,
     } = pl_attrs;
 
     let http_or_https = if https_scheme { "https" } else { "http" };
@@ -230,92 +274,68 @@ impl InnerWebView {
       .map(|id| id.to_string())
       .unwrap_or_else(|| COUNTER.next().to_string());
 
-    WITH_ASSET_LOADER
-      .lock()
-      .unwrap()
-      .insert(id.clone(), with_asset_loader);
-    if let Some(domain) = asset_loader_domain {
-      ASSET_LOADER_DOMAIN
-        .lock()
-        .unwrap()
-        .insert(id.clone(), domain);
-    }
-
     let initialization_scripts_ = initialization_scripts.clone();
-    REQUEST_HANDLER
-      .lock()
-      .unwrap()
-      .insert(
-        id.clone(),
-        UnsafeRequestHandler::new(Box::new(
-          move |webview_id: &str, mut request, is_document_start_script_enabled| {
-            let uri = request.uri().to_string();
-            if let Some((custom_protocol, custom_protocol_handler)) =
-              custom_protocols.iter().find(|(protocol, _)| {
-                custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol)
-              })
-            {
-              let uri_res = custom_protocol_workaround::revert_uri_work_around(
-                &uri,
-                http_or_https,
-                custom_protocol,
-              )
-              .parse();
+    let request_handler = UnsafeRequestHandler::new(Box::new(
+      move |webview_id: &str, mut request, is_document_start_script_enabled| {
+        let uri = request.uri().to_string();
+        if let Some((custom_protocol, custom_protocol_handler)) =
+          custom_protocols.iter().find(|(protocol, _)| {
+            custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol)
+          })
+        {
+          let uri_res = custom_protocol_workaround::revert_uri_work_around(
+            &uri,
+            http_or_https,
+            custom_protocol,
+          )
+          .parse();
 
-                if let Ok(uri) = uri_res {
-                  *request.uri_mut() = uri;
-                }
+          if let Ok(uri) = uri_res {
+            *request.uri_mut() = uri;
+          }
 
-              let (tx, rx) = channel();
-              let initialization_scripts = initialization_scripts_.clone();
-              let responder: Box<dyn FnOnce(HttpResponse<Cow<'static, [u8]>>)> =
-                Box::new(move |mut response| {
-                  if !is_document_start_script_enabled {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("`addDocumentStartJavaScript` is not supported; injecting initialization scripts via custom protocol handler");
-                    response = inject_scripts_into_html(response, &initialization_scripts);
-                  }
-                  let _ = tx.send(response);
-                });
+          let (tx, rx) = channel();
+          let initialization_scripts = initialization_scripts_.clone();
+          let responder: Box<dyn FnOnce(HttpResponse<Cow<'static, [u8]>>)> = Box::new(
+            move |mut response| {
+              if !is_document_start_script_enabled {
+                #[cfg(feature = "tracing")]
+                tracing::info!("`addDocumentStartJavaScript` is not supported; injecting initialization scripts via custom protocol handler");
+                response = inject_scripts_into_html(response, &initialization_scripts);
+              }
+              let _ = tx.send(response);
+            },
+          );
 
-              (custom_protocol_handler)(webview_id, request, RequestAsyncResponder { responder });
-              // 3x the timeout while we monitor https://github.com/tauri-apps/wry/issues/1551
-              // TODO: Remove timeout
-              return rx.recv_timeout(MAIN_PIPE_TIMEOUT * 3).inspect_err(|e| {eprintln!("custom protocol timed out: {e}");}).ok();
-            }
-            None
-          },
-      )));
-
-    if let Some(i) = ipc_handler {
-      IPC
-        .lock()
-        .unwrap()
-        .insert(id.clone(), UnsafeIpc::new(Box::new(i)));
-    }
-
-    if let Some(i) = attributes.document_title_changed_handler {
-      TITLE_CHANGE_HANDLER
-        .lock()
-        .unwrap()
-        .insert(id.clone(), UnsafeTitleHandler::new(i));
-    }
-
-    if let Some(i) = attributes.navigation_handler {
-      URL_LOADING_OVERRIDE
-        .lock()
-        .unwrap()
-        .insert(id.clone(), UnsafeUrlLoadingOverride::new(i));
-    }
-
-    if let Some(h) = attributes.on_page_load_handler {
-      ON_LOAD_HANDLER
-        .lock()
-        .unwrap()
-        .insert(id.clone(), UnsafeOnPageLoadHandler::new(h));
-    }
+          (custom_protocol_handler)(webview_id, request, RequestAsyncResponder { responder });
+          // The JNI caller releases this callback's serialization guard
+          // BEFORE waiting for its asynchronous response.
+          return Some(rx);
+        }
+        None
+      },
+    ));
+    let handler_set = handlers::HandlerSet {
+      request: Mutex::new(request_handler),
+      ipc: ipc_handler.map(|handler| Mutex::new(UnsafeIpc::new(Box::new(handler)))),
+      title: attributes
+        .document_title_changed_handler
+        .map(|handler| Mutex::new(UnsafeTitleHandler::new(handler))),
+      navigation: attributes
+        .navigation_handler
+        .map(|handler| Mutex::new(UnsafeUrlLoadingOverride::new(handler))),
+      load: attributes
+        .on_page_load_handler
+        .map(|handler| Mutex::new(UnsafeOnPageLoadHandler::new(handler))),
+      asset_loader: with_asset_loader,
+      asset_domain: asset_loader_domain,
+    };
+    let registration = handlers::HandlerRegistration::new(origin.clone(), id.clone());
 
     let attributes = CreateWebViewAttributes {
+      activity_origin: origin,
+      registration: registration.clone(),
+      configuration_recreate: false,
       id: id.clone(),
       url,
       html,
@@ -331,12 +351,11 @@ impl InnerWebView {
       javascript_disabled,
     };
 
-    WEBVIEW_ATTRIBUTES
-      .lock()
-      .unwrap()
-      .insert(activity_id, attributes.clone());
-
-    MainPipe::send(activity_id, WebViewMessage::CreateWebView(attributes));
+    handlers::publish(attributes.clone(), handler_set)?;
+    if let Err(error) = MainPipe::send(activity_id, WebViewMessage::CreateWebView(attributes)) {
+      handlers::rollback(&registration);
+      return Err(error);
+    }
 
     Ok(Self { id, activity_id })
   }
@@ -351,7 +370,7 @@ impl InnerWebView {
 
   pub fn url(&self) -> crate::Result<String> {
     let (tx, rx) = bounded(1);
-    MainPipe::send(self.activity_id, WebViewMessage::GetUrl(tx));
+    MainPipe::send(self.activity_id, WebViewMessage::GetUrl(tx))?;
     rx.recv_timeout(MAIN_PIPE_TIMEOUT).map_err(Into::into)
   }
 
@@ -362,8 +381,7 @@ impl InnerWebView {
         js.into(),
         callback.map(|c| Box::new(c) as Box<dyn Fn(String) + Send + 'static>),
       ),
-    );
-    Ok(())
+    )
   }
 
   #[cfg(any(debug_assertions, feature = "devtools"))]
@@ -385,39 +403,33 @@ impl InnerWebView {
     MainPipe::send(
       self.activity_id,
       WebViewMessage::SetBackgroundColor(background_color),
-    );
-    Ok(())
+    )
   }
 
   pub fn load_url(&self, url: &str) -> Result<()> {
     MainPipe::send(
       self.activity_id,
       WebViewMessage::LoadUrl(url.to_string(), None),
-    );
-    Ok(())
+    )
   }
 
   pub fn load_url_with_headers(&self, url: &str, headers: http::HeaderMap) -> Result<()> {
     MainPipe::send(
       self.activity_id,
       WebViewMessage::LoadUrl(url.to_string(), Some(headers)),
-    );
-    Ok(())
+    )
   }
 
   pub fn load_html(&self, html: &str) -> Result<()> {
-    MainPipe::send(self.activity_id, WebViewMessage::LoadHtml(html.to_string()));
-    Ok(())
+    MainPipe::send(self.activity_id, WebViewMessage::LoadHtml(html.to_string()))
   }
 
   pub fn reload(&self) -> Result<()> {
-    MainPipe::send(self.activity_id, WebViewMessage::Reload);
-    Ok(())
+    MainPipe::send(self.activity_id, WebViewMessage::Reload)
   }
 
   pub fn clear_all_browsing_data(&self) -> Result<()> {
-    MainPipe::send(self.activity_id, WebViewMessage::ClearAllBrowsingData);
-    Ok(())
+    MainPipe::send(self.activity_id, WebViewMessage::ClearAllBrowsingData)
   }
 
   pub fn cookies_for_url(&self, url: &str) -> Result<Vec<cookie::Cookie<'static>>> {
@@ -425,7 +437,7 @@ impl InnerWebView {
     MainPipe::send(
       self.activity_id,
       WebViewMessage::GetCookies(tx, url.to_string()),
-    );
+    )?;
     rx.recv_timeout(MAIN_PIPE_TIMEOUT).map_err(Into::into)
   }
 
@@ -480,21 +492,15 @@ impl JniHandle {
   where
     F: FnOnce(&mut JNIEnv, &JObject, &JObject) + Send + 'static,
   {
-    MainPipe::send(self.activity_id, WebViewMessage::Jni(Box::new(func)));
+    // The legacy void API cancels by dropping captures on enqueue failure.
+    let _ = MainPipe::send(self.activity_id, WebViewMessage::Jni(Box::new(func)));
   }
 }
 
 pub fn platform_webview_version() -> Result<String> {
   let (tx, rx) = bounded(1);
-  let activity_id = loop {
-    match first_activity_id() {
-      Some(id) => break id,
-      None => {
-        std::thread::sleep(Duration::from_millis(100));
-      }
-    }
-  };
-  MainPipe::send(activity_id, WebViewMessage::GetWebViewVersion(tx));
+  let origin = main_pipe::dispatch_activity().ok_or(Error::ActivityNotFound)?;
+  MainPipe::send_to_origin(origin, WebViewMessage::GetWebViewVersion(tx))?;
   rx.recv_timeout(MAIN_PIPE_TIMEOUT)?
 }
 
@@ -523,8 +529,11 @@ pub fn dispatch<F>(func: F)
 where
   F: FnOnce(&mut JNIEnv, &JObject, &JObject) + Send + 'static,
 {
-  MainPipe::send(
-    first_activity_id().expect("no available activity"),
-    WebViewMessage::Jni(Box::new(func)),
-  );
+  if let Some(origin) = main_pipe::dispatch_activity() {
+    let _ = MainPipe::send_to_origin(origin, WebViewMessage::Jni(Box::new(func)));
+  } else {
+    // The process/looper may outlive its last Activity. Complete with absent
+    // context on that looper; never panic or acquire a future replacement.
+    let _ = MainPipe::send_without_activity(WebViewMessage::Jni(Box::new(func)));
+  }
 }

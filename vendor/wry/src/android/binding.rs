@@ -18,9 +18,9 @@ use ndk::looper::{FdEvent, ThreadLooper};
 use std::os::fd::{AsFd, AsRawFd};
 
 use super::{
+  handlers,
   main_pipe::{MainPipe, MAIN_PIPE},
-  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, REQUEST_HANDLER, TITLE_CHANGE_HANDLER,
-  URL_LOADING_OVERRIDE, WITH_ASSET_LOADER,
+  EVAL_CALLBACKS,
 };
 
 use crate::PageLoadEvent;
@@ -49,7 +49,7 @@ macro_rules! android_binding {
       $package,
       Rust,
       handleRequest,
-      [JString, JObject, jboolean],
+      [JObject, JString, JObject, jboolean],
       jobject
     );
     android_fn!(
@@ -57,7 +57,7 @@ macro_rules! android_binding {
       $package,
       Rust,
       withAssetLoader,
-      [JString],
+      [JObject, JString],
       jboolean
     );
     android_fn!(
@@ -65,7 +65,7 @@ macro_rules! android_binding {
       $package,
       Rust,
       assetLoaderDomain,
-      [JString],
+      [JObject, JString],
       jstring
     );
     android_fn!(
@@ -73,38 +73,77 @@ macro_rules! android_binding {
       $package,
       Rust,
       shouldOverride,
-      [JString, JString],
+      [JObject, JString, JString],
       jboolean
     );
-    android_fn!($domain, $package, Rust, onEval, [JString, jint, JString]);
-    android_fn!($domain, $package, Rust, onPageLoading, [JString, JString]);
-    android_fn!($domain, $package, Rust, onPageLoaded, [JString, JString]);
-    android_fn!($domain, $package, Rust, ipc, [JString, JString, JString]);
+    android_fn!(
+      $domain,
+      $package,
+      Rust,
+      onEval,
+      [JObject, JString, jint, JString]
+    );
+    android_fn!(
+      $domain,
+      $package,
+      Rust,
+      onPageLoading,
+      [JObject, JString, JString]
+    );
+    android_fn!(
+      $domain,
+      $package,
+      Rust,
+      onPageLoaded,
+      [JObject, JString, JString]
+    );
+    android_fn!(
+      $domain,
+      $package,
+      Rust,
+      ipc,
+      [JObject, JString, JString, JString]
+    );
+    android_fn!(
+      $domain,
+      $package,
+      Rust,
+      isCurrentWebView,
+      [JObject, JString],
+      jboolean
+    );
     android_fn!(
       $domain,
       $package,
       Rust,
       handleReceivedTitle,
-      [JString, JString],
+      [JObject, JString, JString],
     );
   }};
 }
 
 fn handle_request(
   env: &mut JNIEnv,
+  webview: JObject,
   webview_id: JString,
   request: JObject,
   is_document_start_script_enabled: jboolean,
 ) -> JniResult<jobject> {
   let webview_id = env.get_string(&webview_id)?;
   let webview_id = webview_id.to_str().ok().unwrap_or_default();
+  let Ok(origin) = super::origin::capture_webview_origin(env, &webview) else {
+    return Ok(*JObject::null());
+  };
+  if !origin.matches_id(webview_id) {
+    return Ok(*JObject::null());
+  }
 
-  if let Some(handler) = REQUEST_HANDLER.lock().unwrap().get(webview_id) {
+  if let Some(registered) = handlers::lookup(&origin) {
     #[cfg(feature = "tracing")]
     let span =
       tracing::info_span!(parent: None, "wry::custom_protocol::handle", uri = tracing::field::Empty).entered();
 
-    let mut request_builder = Request::builder();
+    let mut request_builder = Request::builder().extension(origin);
 
     let uri = env
       .call_method(&request, "getUrl", "()Landroid/net/Uri;", &[])?
@@ -159,15 +198,27 @@ fn handle_request(
       }
     };
 
-    let response = {
+    let response_receiver = {
       #[cfg(feature = "tracing")]
       let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
+      let handler = registered.handlers.request.lock().unwrap();
+      if !handlers::current(&registered.registration) {
+        return Ok(*JObject::null());
+      }
       (handler.handler)(
         webview_id,
         final_request,
         is_document_start_script_enabled != 0,
       )
     };
+    // No ownership-registry or callback-cell lock is held while the response
+    // may need Android-main plugin dispatch. Configuration shares the same
+    // serialized callback cell, not a concurrent non-Sync Fn clone.
+    let response = response_receiver
+      .and_then(|receiver| receiver.recv_timeout(super::MAIN_PIPE_TIMEOUT * 3).ok());
+    if !handlers::current(&registered.registration) {
+      return Ok(*JObject::null());
+    }
     if let Some(response) = response {
       let status = response.status();
       let status_code = status.as_u16() as i32;
@@ -252,19 +303,35 @@ fn handle_request(
 
 #[allow(non_snake_case)]
 pub unsafe fn wryCreate(env: JNIEnv, _: JClass) {
+  if !super::main_pipe::initialize_main_thread() {
+    return;
+  }
   let mut main_pipe = MainPipe { env };
 
   let looper = ThreadLooper::for_thread().unwrap();
 
   looper
     .add_fd_with_callback(MAIN_PIPE[0].as_fd(), FdEvent::INPUT, move |fd, _event| {
-      let size = std::mem::size_of::<bool>();
-      let mut wake = false;
-      if libc::read(fd.as_raw_fd(), &mut wake as *mut _ as *mut _, size) == size as libc::ssize_t {
-        // unregister itself on errors
-        main_pipe.recv().is_ok()
+      let mut wakes = [0u8; 8];
+      let count = libc::read(fd.as_raw_fd(), wakes.as_mut_ptr().cast(), wakes.len());
+      if count > 0 {
+        // Bound each looper callback. JNI failure cancels that message, but
+        // cannot unregister the consumer and strand all later pending calls.
+        for _ in 0..8 {
+          if main_pipe.recv().is_err() {
+            let _ = main_pipe.env.exception_clear();
+          }
+        }
+        true
+      } else if count < 0
+        && matches!(
+          std::io::Error::last_os_error().kind(),
+          std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        )
+      {
+        true
       } else {
-        // unregister itself
+        MainPipe::close_queue();
         false
       }
     })
@@ -272,45 +339,40 @@ pub unsafe fn wryCreate(env: JNIEnv, _: JClass) {
 }
 
 #[allow(non_snake_case)]
-pub unsafe fn onWebviewDestroy(mut env: JNIEnv, _: JClass, activity: JObject, webview_id: JString) {
-  let activity_id = env
-    .call_method(&activity, "getId", "()I", &[])
-    .unwrap()
-    .i()
-    .unwrap();
-
-  let webview_id = env
-    .get_string(&webview_id)
-    .unwrap()
-    .to_string_lossy()
-    .to_string();
-
+pub unsafe fn onWebviewDestroy(
+  mut env: JNIEnv,
+  _: JClass,
+  activity: JObject,
+  _webview_id: JString,
+) {
   let is_changing_configurations = env
     .call_method(&activity, "isChangingConfigurations", "()Z", &[])
     .unwrap()
     .z()
     .unwrap();
 
-  super::MainPipe::send(
-    activity_id,
-    super::WebViewMessage::OnDestroy {
-      activity_id,
-      webview_id,
-      is_changing_configurations,
-    },
-  );
+  let Some(origin) = super::main_pipe::retire_activity(&env, &activity) else {
+    return;
+  };
+  super::cancel_evals_for_activity(&origin);
+  // The actual callback owns retirement. It needs neither queue capacity nor
+  // a callback-cell lock, and an old same-label owner cannot erase a new one.
+  handlers::retire_activity(&origin, is_changing_configurations);
+  super::main_pipe::remove_activity_proxy(&origin);
 }
 
 #[allow(non_snake_case)]
 pub unsafe fn handleRequest(
   mut env: JNIEnv,
   _: JClass,
+  webview: JObject,
   webview_id: JString,
   request: JObject,
   is_document_start_script_enabled: jboolean,
 ) -> jobject {
   match handle_request(
     &mut env,
+    webview,
     webview_id,
     request,
     is_document_start_script_enabled,
@@ -328,59 +390,76 @@ pub unsafe fn handleRequest(
 pub unsafe fn shouldOverride(
   mut env: JNIEnv,
   _: JClass,
+  webview: JObject,
   webview_id: JString,
   url: JString,
 ) -> jboolean {
-  match env.get_string(&url) {
-    Ok(url) => {
-      let url = url.to_string_lossy().to_string();
-
-      let Ok(webview_id) = env.get_string(&webview_id) else {
-        return false.into();
-      };
-      let webview_id = webview_id.to_str().ok().unwrap_or_default();
-
-      URL_LOADING_OVERRIDE
-        .lock()
-        .unwrap()
-        .get(webview_id)
-        // We negate the result of the function because the logic for the android
-        // client is different from how the navigation_handler is defined.
-        //
-        // https://developer.android.com/reference/android/webkit/WebViewClient#shouldOverrideUrlLoading(android.webkit.WebView,%20android.webkit.WebResourceRequest)
-        .map(|f| !(f.handler)(url))
-        .unwrap_or_default()
+  let Some(registered) = registered_for_view(&mut env, &webview, &webview_id) else {
+    return true.into();
+  };
+  let Ok(url) = env.get_string(&url) else {
+    return true.into();
+  };
+  if let Some(handler) = &registered.handlers.navigation {
+    let handler = handler.lock().unwrap();
+    if !handlers::current(&registered.registration) {
+      return true.into();
     }
-    Err(_e) => {
-      #[cfg(feature = "tracing")]
-      tracing::warn!("Failed to parse JString: {_e}");
-      false
-    }
+    // Android's true means block; Wry's true means permit navigation.
+    (!(handler.handler)(url.to_string_lossy().to_string())).into()
+  } else {
+    (!handlers::current(&registered.registration)).into()
   }
-  .into()
 }
 
 #[allow(non_snake_case)]
-pub unsafe fn onEval(mut env: JNIEnv, _: JClass, _webview_id: JString, id: jint, result: JString) {
-  match env.get_string(&result) {
-    Ok(result) => {
-      if let Some(cb) = EVAL_CALLBACKS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .get(&id)
-      {
-        cb(result.into());
-      }
+pub unsafe fn onEval(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+  id: jint,
+  result: JString,
+) {
+  let Ok(origin) = super::origin::capture_webview_origin(&mut env, &webview) else {
+    return;
+  };
+  let Ok(logical_id) = env.get_string(&webview_id) else {
+    return;
+  };
+  if !origin.matches_id(logical_id.to_str().ok().unwrap_or_default()) {
+    return;
+  }
+  let pending = {
+    let mut callbacks = EVAL_CALLBACKS.get_or_init(Default::default).lock().unwrap();
+    if !callbacks
+      .get(&id)
+      .is_some_and(|entry| entry.origin.same(&origin))
+    {
+      return;
     }
-    Err(_e) => {
-      #[cfg(feature = "tracing")]
-      tracing::warn!("Failed to parse JString: {_e}");
+    callbacks.remove(&id)
+  };
+  if let Some(pending) = pending {
+    if pending.origin.is_live() {
+      if let Ok(result) = env.get_string(&result) {
+        (pending.callback)(result.into());
+      }
     }
   }
 }
 
-pub unsafe fn ipc(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString, body: JString) {
+pub unsafe fn ipc(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+  url: JString,
+  body: JString,
+) {
+  let Ok(origin) = super::origin::capture_webview_origin(&mut env, &webview) else {
+    return;
+  };
   match (
     env.get_string(&url),
     env.get_string(&body),
@@ -393,8 +472,19 @@ pub unsafe fn ipc(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString,
       let url = url.to_string_lossy().to_string();
       let body = body.to_string_lossy().to_string();
       let webview_id = webview_id.to_string_lossy().to_string();
-      if let Some(ipc) = IPC.lock().unwrap().get(&webview_id) {
-        (ipc.handler)(Request::builder().uri(url).body(body).unwrap())
+      if !origin.matches_id(&webview_id) {
+        return;
+      }
+      if let Some(registered) = handlers::lookup(&origin) {
+        if let Some(ipc) = &registered.handlers.ipc {
+          let ipc = ipc.lock().unwrap();
+          if !handlers::current(&registered.registration) {
+            return;
+          }
+          if let Ok(request) = Request::builder().uri(url).extension(origin).body(body) {
+            (ipc.handler)(request);
+          }
+        }
       }
     }
     (Err(_e), _, _) | (_, Err(_e), _) | (_, _, Err(_e)) => {
@@ -405,79 +495,136 @@ pub unsafe fn ipc(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString,
 }
 
 #[allow(non_snake_case)]
-pub unsafe fn handleReceivedTitle(mut env: JNIEnv, _: JClass, webview_id: JString, title: JString) {
-  match (env.get_string(&title), env.get_string(&webview_id)) {
-    (Ok(title), Ok(webview_id)) => {
-      let title = title.to_string_lossy().to_string();
-      let webview_id = webview_id.to_string_lossy().to_string();
-      if let Some(title_handler) = TITLE_CHANGE_HANDLER.lock().unwrap().get(&webview_id) {
-        (title_handler.handler)(title)
-      }
-    }
-    (Err(_e), _) | (_, Err(_e)) => {
-      #[cfg(feature = "tracing")]
-      tracing::warn!("Failed to parse JString: {_e}")
-    }
-  }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn withAssetLoader(mut env: JNIEnv, _: JClass, webview_id: JString) -> jboolean {
-  let Ok(webview_id) = env.get_string(&webview_id) else {
-    return false.into();
+pub unsafe fn handleReceivedTitle(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+  title: JString,
+) {
+  let Some(registered) = registered_for_view(&mut env, &webview, &webview_id) else {
+    return;
   };
-  let webview_id = webview_id.to_str().ok().unwrap_or_default();
-  (*WITH_ASSET_LOADER
-    .lock()
-    .unwrap()
-    .get(webview_id)
-    .unwrap_or(&false))
-  .into()
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn assetLoaderDomain(mut env: JNIEnv, _: JClass, webview_id: JString) -> jstring {
-  let Ok(webview_id) = env.get_string(&webview_id) else {
-    return env.new_string("wry.assets").unwrap().as_raw();
+  let Ok(title) = env.get_string(&title) else {
+    return;
   };
-  let webview_id = webview_id.to_str().ok().unwrap_or_default();
-  if let Some(domain) = ASSET_LOADER_DOMAIN.lock().unwrap().get(webview_id) {
-    env.new_string(domain).unwrap().as_raw()
-  } else {
-    env.new_string("wry.assets").unwrap().as_raw()
-  }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn onPageLoading(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString) {
-  match (env.get_string(&url), env.get_string(&webview_id)) {
-    (Ok(url), Ok(webview_id)) => {
-      let url = url.to_string_lossy().to_string();
-      let webview_id = webview_id.to_string_lossy().to_string();
-      if let Some(on_load) = ON_LOAD_HANDLER.lock().unwrap().get(&webview_id) {
-        (on_load.handler)(PageLoadEvent::Started, url)
-      }
-    }
-    (Err(_e), _) | (_, Err(_e)) => {
-      #[cfg(feature = "tracing")]
-      tracing::warn!("Failed to parse JString: {_e}")
+  if let Some(handler) = &registered.handlers.title {
+    let handler = handler.lock().unwrap();
+    if handlers::current(&registered.registration) {
+      (handler.handler)(title.to_string_lossy().to_string());
     }
   }
 }
 
 #[allow(non_snake_case)]
-pub unsafe fn onPageLoaded(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString) {
-  match (env.get_string(&url), env.get_string(&webview_id)) {
-    (Ok(url), Ok(webview_id)) => {
-      let url = url.to_string_lossy().to_string();
-      let webview_id = webview_id.to_string_lossy().to_string();
-      if let Some(on_load) = ON_LOAD_HANDLER.lock().unwrap().get(&webview_id) {
-        (on_load.handler)(PageLoadEvent::Finished, url)
-      }
-    }
-    (Err(_e), _) | (_, Err(_e)) => {
-      #[cfg(feature = "tracing")]
-      tracing::warn!("Failed to parse JString: {_e}")
+pub unsafe fn isCurrentWebView(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+) -> jboolean {
+  registered_for_view(&mut env, &webview, &webview_id)
+    .is_some_and(|registered| handlers::current(&registered.registration))
+    .into()
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn withAssetLoader(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+) -> jboolean {
+  registered_for_view(&mut env, &webview, &webview_id)
+    .is_some_and(|registered| {
+      handlers::current(&registered.registration) && registered.handlers.asset_loader
+    })
+    .into()
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn assetLoaderDomain(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+) -> jstring {
+  let registered = registered_for_view(&mut env, &webview, &webview_id);
+  let domain = registered
+    .as_ref()
+    .filter(|entry| handlers::current(&entry.registration))
+    .and_then(|entry| entry.handlers.asset_domain.as_deref())
+    .unwrap_or("wry.assets");
+  env
+    .new_string(domain)
+    .map(|value| value.as_raw())
+    .unwrap_or(std::ptr::null_mut())
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn onPageLoading(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+  url: JString,
+) {
+  on_page_load(
+    &mut env,
+    &webview,
+    &webview_id,
+    &url,
+    PageLoadEvent::Started,
+  );
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn onPageLoaded(
+  mut env: JNIEnv,
+  _: JClass,
+  webview: JObject,
+  webview_id: JString,
+  url: JString,
+) {
+  on_page_load(
+    &mut env,
+    &webview,
+    &webview_id,
+    &url,
+    PageLoadEvent::Finished,
+  );
+}
+
+fn registered_for_view(
+  env: &mut JNIEnv<'_>,
+  webview: &JObject<'_>,
+  webview_id: &JString<'_>,
+) -> Option<handlers::RegisteredHandlers> {
+  let origin = super::origin::capture_webview_origin(env, webview).ok()?;
+  let logical_id = env.get_string(webview_id).ok()?;
+  if !origin.matches_id(logical_id.to_str().ok()?) {
+    return None;
+  }
+  handlers::lookup(&origin)
+}
+
+fn on_page_load(
+  env: &mut JNIEnv<'_>,
+  webview: &JObject<'_>,
+  webview_id: &JString<'_>,
+  url: &JString<'_>,
+  event: PageLoadEvent,
+) {
+  let Some(registered) = registered_for_view(env, webview, webview_id) else {
+    return;
+  };
+  let Ok(url) = env.get_string(url) else {
+    return;
+  };
+  if let Some(handler) = &registered.handlers.load {
+    let handler = handler.lock().unwrap();
+    if handlers::current(&registered.registration) {
+      (handler.handler)(event, url.to_string_lossy().to_string());
     }
   }
 }

@@ -49,28 +49,30 @@ class RustWebView(context: Context, val initScripts: Array<String>, val id: Stri
     }
 
     override fun loadUrl(url: String) {
-        if (!Rust.shouldOverride(id, url)) {
+        if (!Rust.shouldOverride(this, id, url)) {
             super.loadUrl(url);
         }
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: Map<String, String>) {
-        if (!Rust.shouldOverride(id, url)) {
+        if (!Rust.shouldOverride(this, id, url)) {
             super.loadUrl(url, additionalHttpHeaders);
         }
     }
 
     fun loadHTMLMainThread(html: String) {
         post {
-          super.loadData(html, "text/html", null)
+          if (Rust.isCurrentWebView(this, id)) {
+            super.loadData(html, "text/html", null)
+          }
         }
     }
 
     fun evalScript(id: Int, script: String) {
-        post {
-            super.evaluateJavascript(script) { result ->
-                Rust.onEval(this.id, id, result)
-            }
+        // Native MainPipe already dispatches on the UI thread and fences the
+        // original physical view before entry. Do not add an unfenced re-post.
+        super.evaluateJavascript(script) { result ->
+            Rust.onEval(this, this.id, id, result)
         }
     }
 

@@ -2,6 +2,29 @@
 use controller_runtime::AppIssue;
 use tauri::plugin::{Builder, TauriPlugin};
 
+/// Injected native invocation context, not a renderer argument. The Android
+/// origin was captured at physical WebView IPC entry, before command queues.
+pub(crate) struct CommandOrigin {
+    #[cfg(target_os = "android")]
+    native: tauri::ipc::AndroidInvokeOrigin,
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for CommandOrigin {
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        #[cfg(target_os = "android")]
+        {
+            Ok(Self { native: <tauri::ipc::AndroidInvokeOrigin as tauri::ipc::CommandArg<'de, R>>::from_command(command)? })
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = command;
+            Ok(Self {})
+        }
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 mod snapshot;
 
@@ -23,20 +46,23 @@ pub(crate) fn init() -> TauriPlugin<tauri::Wry> {
         .build()
 }
 
-pub(crate) fn open_lock_settings(app: &tauri::AppHandle) -> Result<(), AppIssue> {
+pub(crate) fn open_lock_settings(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<(), AppIssue> {
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
         let _: serde_json::Value = app
             .state::<DeviceState>()
             .0
-            .run_mobile_plugin("openLockSettings", ())
+            .run_mobile_plugin_from_origin(&origin.native, "openLockSettings", ())
             .map_err(|_| mobile_issue())?;
         Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         Err(mobile_issue())
     }
 }
@@ -49,20 +75,23 @@ const fn mobile_issue() -> AppIssue {
     }
 }
 
-pub(crate) fn open_notification_settings(app: &tauri::AppHandle) -> Result<(), AppIssue> {
+pub(crate) fn open_notification_settings(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<(), AppIssue> {
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
         let _: serde_json::Value = app
             .state::<DeviceState>()
             .0
-            .run_mobile_plugin("openNotificationSettings", ())
+            .run_mobile_plugin_from_origin(&origin.native, "openNotificationSettings", ())
             .map_err(|_| mobile_issue())?;
         Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         Err(mobile_issue())
     }
 }
@@ -227,6 +256,7 @@ impl RequestDetailsReply {
 #[cfg(target_os = "android")]
 pub(crate) fn request_details(
     app: &tauri::AppHandle,
+    origin: &CommandOrigin,
     locator: String,
 ) -> Result<controller_runtime::RequestDetailsView, AppIssue> {
     use tauri::Manager;
@@ -238,7 +268,11 @@ pub(crate) fn request_details(
     let reply: RequestDetailsReply = app
         .state::<DeviceState>()
         .0
-        .run_mobile_plugin("controllerRequestDetails", Selection { locator: &locator })
+        .run_mobile_plugin_from_origin(
+            &origin.native,
+            "controllerRequestDetails",
+            Selection { locator: &locator },
+        )
         .map_err(|_| controller_runtime::phone_request_issue())?;
     reply.details(&locator)
 }
@@ -287,25 +321,32 @@ impl HistoryReply {
 #[cfg(target_os = "android")]
 pub(crate) fn policy_snapshot(
     app: &tauri::AppHandle,
+    origin: &CommandOrigin,
     operation: OwnerOperation,
 ) -> Result<controller_runtime::AppSnapshot, AppIssue> {
     use tauri::Manager;
-    snapshot::snapshot(&NativeOwnerPort(&app.state::<DeviceState>().0), operation)
+    snapshot::snapshot(
+        &NativeOwnerPort(&app.state::<DeviceState>().0, origin),
+        operation,
+    )
 }
 
 #[cfg(target_os = "android")]
-struct NativeOwnerPort<'a>(&'a tauri::plugin::PluginHandle<tauri::Wry>);
+struct NativeOwnerPort<'a>(
+    &'a tauri::plugin::PluginHandle<tauri::Wry>,
+    &'a CommandOrigin,
+);
 
 #[cfg(target_os = "android")]
 impl snapshot::OwnerPort for NativeOwnerPort<'_> {
     fn review(&self) -> Result<RequestReviewReply, AppIssue> {
         self.0
-            .run_mobile_plugin("controllerRequestReview", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "controllerRequestReview", ())
             .map_err(|_| controller_runtime::phone_request_issue())
     }
     fn requests(&self) -> Result<RequestsReply, AppIssue> {
         self.0
-            .run_mobile_plugin("controllerRequests", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "controllerRequests", ())
             .map_err(|_| controller_runtime::phone_request_issue())
     }
 
@@ -320,7 +361,8 @@ impl snapshot::OwnerPort for NativeOwnerPort<'_> {
             action: controller_runtime::DecisionIntent,
         }
         self.0
-            .run_mobile_plugin(
+            .run_mobile_plugin_from_origin(
+                &self.1.native,
                 "controllerRequestAction",
                 Action {
                     locator,
@@ -331,19 +373,19 @@ impl snapshot::OwnerPort for NativeOwnerPort<'_> {
     }
     fn service(&self) -> Result<controller_runtime::PhoneServiceView, AppIssue> {
         self.0
-            .run_mobile_plugin("controllerService", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "controllerService", ())
             .map_err(|_| snapshot::service_issue())
     }
 
     fn readiness(&self) -> Result<controller_runtime::MobileReadiness, AppIssue> {
         self.0
-            .run_mobile_plugin("readiness", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "readiness", ())
             .map_err(|_| mobile_issue())
     }
 
     fn policy(&self) -> Result<PolicyReply, AppIssue> {
         self.0
-            .run_mobile_plugin("controllerPolicy", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "controllerPolicy", ())
             .map_err(|_| mobile_issue())
     }
 
@@ -354,19 +396,23 @@ impl snapshot::OwnerPort for NativeOwnerPort<'_> {
             policy_json: String,
         }
         self.0
-            .run_mobile_plugin("saveControllerPolicy", SavePolicy { policy_json })
+            .run_mobile_plugin_from_origin(
+                &self.1.native,
+                "saveControllerPolicy",
+                SavePolicy { policy_json },
+            )
             .map_err(|_| mobile_issue())
     }
 
     fn history(&self) -> Result<HistoryReply, AppIssue> {
         self.0
-            .run_mobile_plugin("controllerHistory", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "controllerHistory", ())
             .map_err(|_| controller_runtime::phone_history_issue())
     }
 
     fn clear_history(&self) -> Result<HistoryReply, AppIssue> {
         self.0
-            .run_mobile_plugin("clearControllerHistory", ())
+            .run_mobile_plugin_from_origin(&self.1.native, "clearControllerHistory", ())
             .map_err(|_| controller_runtime::phone_history_issue())
     }
 
@@ -380,17 +426,350 @@ impl snapshot::OwnerPort for NativeOwnerPort<'_> {
             _ => return Err(controller_runtime::PlatformError::Unsupported.into()),
         };
         self.0
-            .run_mobile_plugin(command, ())
+            .run_mobile_plugin_from_origin(&self.1.native, command, ())
             .map_err(|_| snapshot::service_issue())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ipc_diagnostics_do_not_log_keys_payloads_or_responses() {
+        let webview = include_str!("../../vendor/tauri-2.11.5/src/webview/mod.rs");
+        assert!(!webview.contains("__TAURI_INVOKE_KEY__ expected"));
+        assert!(webview.contains("IPC invoke key rejected"));
+        let ipc = include_str!("../../vendor/tauri-2.11.5/src/ipc/protocol.rs");
+        for forbidden in [
+            "request = request.body()",
+            "response = format!",
+            "response = v,",
+            "ipc.request.error {e}",
+        ] {
+            assert!(!ipc.contains(forbidden));
+        }
+        assert!(ipc.contains("IPC request rejected during parsing"));
+    }
+
     use super::{
         HistoryReply, PolicyReply, RequestActionReply, RequestDetailsReply, RequestReviewReply,
         RequestsReply, ServiceControlReply,
     };
+
+    #[test]
+    fn physical_origin_is_carried_at_both_native_ipc_entries_not_from_json() {
+        // Source-contract regression only; real old/current physical JNI entry
+        // rejection is exercised separately by Android instrumentation.
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let binding = compact(include_str!("../../vendor/wry/src/android/binding.rs"));
+        assert!(binding.contains("capture_webview_origin(env,&webview)"));
+        assert!(binding.contains("capture_webview_origin(&mutenv,&webview)"));
+        assert_eq!(binding.matches(".extension(origin)").count(), 2);
+        let post = compact(include_str!("../../vendor/wry/src/android/kotlin/Ipc.kt"));
+        assert!(post.contains("Rust.ipc(webView,webView.id,webViewClient.currentUrl,m)"));
+        let request = compact(include_str!(
+            "../../vendor/wry/src/android/kotlin/RustWebViewClient.kt"
+        ));
+        assert!(request.contains(
+            "Rust.handleRequest(view,view.id,request,view.isDocumentStartScriptEnabled)"
+        ));
+        let protocol = compact(include_str!(
+            "../../vendor/tauri-2.11.5/src/ipc/protocol.rs"
+        ));
+        assert_eq!(
+            protocol
+                .matches("AndroidInvokeOrigin::from_extensions(request.extensions())")
+                .count(),
+            2
+        );
+        let origin = compact(include_str!(
+            "../../vendor/tauri-2.11.5/src/ipc/android_origin.rs"
+        ));
+        assert!(origin.contains("command.message.android_origin.as_ref()"));
+        assert!(!origin.contains("DeserializeforAndroidInvokeOrigin"));
+        assert!(!origin.contains("SerializeforAndroidInvokeOrigin"));
+        assert!(!origin.contains("getRawArgs"));
+    }
+
+    #[test]
+    fn facade_snapshots_the_native_original_view_and_adapter_fields_stay_immutable() {
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let facade = compact(include_str!(
+            "../gen/android/app/src/main/java/dev/dkk115/uacremote/DeviceStatePlugin.kt"
+        ));
+        assert!(facade.contains("valorigin=invoke.originatingWebView"));
+        assert!(facade.contains("commands?.takeIf{it.matches(origin)}"));
+        assert!(facade.contains("action(captured,invoke)"));
+        assert!(facade.contains("webView.context!==activity"));
+        assert!(facade.contains("Looper.myLooper()!=Looper.getMainLooper()"));
+        let adapter = compact(include_str!(
+            "../gen/android/app/src/main/java/dev/dkk115/uacremote/DeviceStateActivityCommands.kt"
+        ));
+        assert!(adapter.contains("privatevalactivity:MainActivity"));
+        assert!(adapter.contains("privatevalwebView:WebView"));
+        assert!(adapter.contains("privatevalbinding:DeviceStateViewBinding<MainActivity,WebView>"));
+        assert!(!adapter.contains("privatevaractivity"));
+        assert!(!adapter.contains("privatevarhost"));
+        assert!(adapter.contains("binding.matches(activity,webView)"));
+        assert!(adapter.contains("isCurrentForegroundControllerHost(activity)"));
+        let main = compact(include_str!(
+            "../gen/android/app/src/main/java/dev/dkk115/uacremote/MainActivity.kt"
+        ));
+        assert!(main.contains(
+            "super.onWebViewCreate(webView)DeviceStatePlugin.actualWebViewCreated(this,webView)"
+        ));
+    }
+
+    #[test]
+    fn project_mobile_calls_have_no_unbound_current_view_dispatch_fallback() {
+        let source = include_str!("mobile.rs").replace("\r\n", "\n");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(!production.contains(".run_mobile_plugin("));
+        assert!(production.contains("run_mobile_plugin_from_origin"));
+        let production = production
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(production.contains("tauri::ipc::CommandArg<'de,R>forCommandOrigin"));
+        let commands = include_str!("commands.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .replace(",)", ")");
+        assert!(commands.contains("origin:crate::mobile::CommandOrigin"));
+        assert!(commands.contains("policy_snapshot(&app,&origin,operation)"));
+        assert!(commands.contains("request_details(&app,&origin,request_id)"));
+    }
+
+    #[test]
+    fn generic_wry_work_is_generation_fenced_and_missing_context_completes_without_retargeting() {
+        let pipe = include_str!("../../vendor/wry/src/android/main_pipe.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(pipe.contains("Option<AndroidActivityOrigin>"));
+        assert!(pipe.contains("activity_origin_current(&origin)"));
+        assert!(pipe.contains("callback(&mutself.env,&JObject::null(),&JObject::null())"));
+        assert!(pipe.contains("sender.send(Err(Error::ActivityNotFound))"));
+        assert!(pipe.contains("WebViewMessage::GetUrl(sender)=>drop(sender)"));
+        assert!(pipe.contains("WebViewMessage::GetCookies(sender,_)=>drop(sender)"));
+        let android = include_str!("../../vendor/wry/src/android/mod.rs");
+        assert!(android.contains("MainPipe::send_without_activity"));
+        assert!(!android.contains("first_activity_id().expect"));
+        assert!(!android.contains("let activity_id = loop"));
+    }
+
+    #[test]
+    fn eval_callbacks_retain_physical_origin_and_cancel_without_a_substitute_result() {
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let pipe = compact(include_str!("../../vendor/wry/src/android/main_pipe.rs"));
+        assert!(pipe.contains("PendingEval{origin,callback}"));
+        assert!(pipe.contains("pending.len()>=64"));
+        let binding = compact(include_str!("../../vendor/wry/src/android/binding.rs"));
+        assert!(binding.contains("cancel_evals_for_activity(&origin)"));
+        assert!(binding.contains("entry.origin.same(&origin)"));
+        assert!(binding.contains("callbacks.remove(&id)"));
+        let view = compact(include_str!(
+            "../../vendor/wry/src/android/kotlin/RustWebView.kt"
+        ));
+        assert!(view.contains("Rust.onEval(this,this.id,id,result)"));
+        let android = compact(include_str!("../../vendor/wry/src/android/mod.rs"));
+        assert!(android.contains("entry.origin.activity_origin().same(origin)"));
+        assert!(android.contains("drop(cancelled)"));
+        assert!(android.contains("id.checked_add(1)"));
+    }
+
+    #[test]
+    fn wry_handler_publication_and_retirement_share_exact_registration_ownership() {
+        // Passive source contracts, not JNI/concurrency execution evidence.
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let handlers = compact(include_str!("../../vendor/wry/src/android/handlers.rs"));
+        assert!(handlers.contains("structHandlerRegistration(Arc<RegistrationInner>)"));
+        assert!(handlers.contains("entries:HashMap<WebviewId,RegisteredHandlers>"));
+        assert!(handlers.contains("definitions:HashMap<ActivityId,CreateWebViewAttributes>"));
+        assert!(handlers.contains("entry.registration.same(registration)"));
+        assert!(handlers.contains("entry.activity_origin.same(origin)"));
+        assert!(handlers.contains("registry.remove_owned(&definition.registration)"));
+        assert!(handlers.contains("old.registration.is_live()"));
+        assert!(handlers.contains("Arc::clone(&old_handlers.handlers)"));
+        assert!(handlers.contains("registration.retire()"));
+        assert!(handlers.contains("drop(replaced)"));
+        assert!(handlers.contains("drop(removed)"));
+        let binding = compact(include_str!("../../vendor/wry/src/android/binding.rs"));
+        let destroy = binding
+            .split("pubunsafefnonWebviewDestroy")
+            .nth(1)
+            .unwrap()
+            .split("#[allow(non_snake_case)]")
+            .next()
+            .unwrap();
+        assert!(destroy.contains("handlers::retire_activity(&origin,is_changing_configurations)"));
+        assert!(destroy.contains("remove_activity_proxy(&origin)"));
+        assert!(!destroy.contains("MainPipe::send"));
+        assert!(!binding.contains("REQUEST_HANDLER.lock()"));
+        assert!(!binding.contains("IPC.lock()"));
+        let origin = compact(include_str!("../../vendor/wry/src/android/origin.rs"));
+        assert!(origin.contains("registration:HandlerRegistration"));
+        assert!(origin.contains("handlers::current(&self.0.registration)"));
+    }
+
+    #[test]
+    fn wry_erased_callbacks_remain_serialized_but_http_response_wait_does_not_hold_guard() {
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let handlers = compact(include_str!("../../vendor/wry/src/android/handlers.rs"));
+        for cell in [
+            "request:Mutex<UnsafeRequestHandler>",
+            "ipc:Option<Mutex<UnsafeIpc>>",
+            "title:Option<Mutex<UnsafeTitleHandler>>",
+            "navigation:Option<Mutex<UnsafeUrlLoadingOverride>>",
+            "load:Option<Mutex<UnsafeOnPageLoadHandler>>",
+        ] {
+            assert!(handlers.contains(cell));
+        }
+        let android = compact(include_str!("../../vendor/wry/src/android/mod.rs"));
+        assert!(!android.contains("unsafeimplSyncfor$type_name"));
+        assert!(android.contains("returnSome(rx)"));
+        let binding = compact(include_str!("../../vendor/wry/src/android/binding.rs"));
+        let call = binding.find("letresponse_receiver={").unwrap();
+        let guard = binding[call..]
+            .find("registered.handlers.request.lock()")
+            .unwrap()
+            + call;
+        let guard_end = binding[guard..].find("};").unwrap() + guard;
+        let wait = binding
+            .find("letresponse=response_receiver.and_then")
+            .unwrap();
+        assert!(call < guard && guard < guard_end && guard_end < wait);
+        assert!(binding[guard_end..wait].contains("Noownership-registryorcallback-celllock"));
+        assert!(binding[wait..].contains("if!handlers::current(&registered.registration)"));
+        let bridge = compact(include_str!("../../vendor/wry/src/android/kotlin/Rust.kt"));
+        for entry in [
+            "shouldOverride",
+            "withAssetLoader",
+            "assetLoaderDomain",
+            "handleReceivedTitle",
+            "onPageLoading",
+            "onPageLoaded",
+            "isCurrentWebView",
+        ] {
+            assert!(bridge.contains(&format!("fun{entry}(webView:WebView,")));
+        }
+        let view = compact(include_str!(
+            "../../vendor/wry/src/android/kotlin/RustWebView.kt"
+        ));
+        assert!(view.contains("if(Rust.isCurrentWebView(this,id)){super.loadData"));
+    }
+
+    #[test]
+    fn wry_queue_rejection_cancels_exact_work_and_preserves_dormant_configuration() {
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let pipe = compact(include_str!("../../vendor/wry/src/android/main_pipe.rs"));
+        assert!(pipe.contains("constQUEUE_CAPACITY:usize=8"));
+        assert!(pipe.contains("QUEUE.try_lock()"));
+        assert!(pipe.contains("libc::O_NONBLOCK|libc::O_CLOEXEC"));
+        assert!(pipe.contains("letrejected=queue.pop_back();drop(queue);drop(rejected);"));
+        assert!(pipe.contains("QUEUE_CLOSED.store(true,Ordering::Release)"));
+        assert!(pipe.contains("handlers::rollback(&attributes.registration)"));
+        assert!(!pipe.contains("CHANNEL.0.send"));
+        assert!(!pipe.contains("WebViewMessage::OnDestroy"));
+        let android = compact(include_str!("../../vendor/wry/src/android/mod.rs"));
+        assert!(android.contains("handlers::prepare_configuration(&origin)"));
+        assert!(android.contains("handlers::rollback_configuration(rollback)"));
+        assert!(android.contains("handlers::rollback(&registration)"));
+        assert!(!android.contains("WEBVIEW_ATTRIBUTES.lock()"));
+        let handlers = compact(include_str!("../../vendor/wry/src/android/handlers.rs"));
+        assert!(handlers.contains("rollback.candidate.retire()"));
+        assert!(handlers.contains("!registry.entries.contains_key(rollback.candidate.label())"));
+        assert!(
+            handlers.contains(
+                "!registry.definitions.contains_key(&rollback.candidate.activity().id())"
+            )
+        );
+        let origin = compact(include_str!("../../vendor/wry/src/android/origin.rs"));
+        let exec = origin
+            .split("pubfnexec<F>")
+            .nth(1)
+            .unwrap()
+            .split("pubfneval")
+            .next()
+            .unwrap();
+        assert!(exec.contains("MainPipe::send("));
+        assert!(!exec.contains("Ok(())"));
+    }
+
+    #[test]
+    fn wry_initial_bootstrap_wait_is_original_bounded_and_never_used_for_later_gaps() {
+        fn compact(source: &str) -> String {
+            source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .replace(",)", ")")
+        }
+        let activity = compact(include_str!(
+            "../../vendor/wry/src/android/kotlin/WryActivity.kt"
+        ));
+        assert!(
+            activity.find("Rust.wryCreate()").unwrap() < activity.find("Rust.create()").unwrap()
+        );
+        let android = compact(include_str!("../../vendor/wry/src/android/mod.rs"));
+        assert!(
+            android
+                .find("register_activity_proxy(activity_id,")
+                .unwrap()
+                < android.find("publish_initial_activity(&origin)").unwrap()
+        );
+        let pipe = compact(include_str!("../../vendor/wry/src/android/main_pipe.rs"));
+        assert!(
+            pipe.contains("Bootstrap::Registered(WeakActivityOrigin)")
+                || pipe.contains("Registered(WeakActivityOrigin)")
+        );
+        assert!(pipe.contains("if*main_thread==std::thread::current().id(){returnNone;}"));
+        assert!(pipe.contains("wait_timeout_while(bootstrap,super::MAIN_PIPE_TIMEOUT,|state|matches!(state,Bootstrap::Waiting))"));
+        assert!(pipe.contains(
+            "Bootstrap::Registered(original)=>original.upgrade().filter(activity_origin_current)"
+        ));
+        assert!(pipe.contains("*bootstrap=Bootstrap::Failed"));
+        assert!(
+            pipe.contains("Bootstrap::Registered(_)=>{drop(bootstrap);first_activity_origin()")
+        );
+        assert!(pipe.contains("Self::enqueue(origin.id(),Some(origin),message)"));
+    }
 
     #[test]
     fn request_reply_boundaries_have_no_success_or_authority_fallback() {

@@ -2,10 +2,21 @@ package dev.dkk115.uacremote
 
 import android.os.Bundle
 import android.content.Intent
+import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import dev.dkk115.uacremote.background.ControllerForegroundService
 
 class MainActivity : TauriActivity() {
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    DeviceStatePlugin.actualWebViewCreated(this, webView)
+  }
+
+  override fun onDestroy() {
+    DeviceStatePlugin.actualActivityDestroyed(this)
+    super.onDestroy()
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)

@@ -88,13 +88,14 @@ async fn with_runtime<T: Send + 'static>(
 #[cfg(target_os = "android")]
 async fn with_android_owner(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: &ControllerState,
     operation: crate::mobile::OwnerOperation,
 ) -> Result<AppSnapshot, AppIssue> {
     let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
-        crate::mobile::policy_snapshot(&app, operation)
+        crate::mobile::policy_snapshot(&app, &origin, operation)
     })
     .await
     .map_err(|_| worker_issue())?
@@ -103,15 +104,16 @@ async fn with_android_owner(
 #[tauri::command]
 pub(crate) async fn app_snapshot(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
     #[cfg(target_os = "android")]
     {
-        with_android_owner(app, &state, crate::mobile::OwnerOperation::Read).await
+        with_android_owner(app, origin, &state, crate::mobile::OwnerOperation::Read).await
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         with_runtime(&state, |runtime| Ok(runtime.snapshot())).await
     }
 }
@@ -119,6 +121,7 @@ pub(crate) async fn app_snapshot(
 #[tauri::command]
 pub(crate) async fn save_notification_policy(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     policy_json: String,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
@@ -128,6 +131,7 @@ pub(crate) async fn save_notification_policy(
         let canonical = serde_json::to_string(&policy).map_err(|_| worker_issue())?;
         with_android_owner(
             app,
+            origin,
             &state,
             crate::mobile::OwnerOperation::SavePolicy(canonical),
         )
@@ -135,7 +139,7 @@ pub(crate) async fn save_notification_policy(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         with_runtime(&state, move |runtime| runtime.save_policy(policy)).await
     }
 }
@@ -143,18 +147,20 @@ pub(crate) async fn save_notification_policy(
 #[tauri::command]
 pub(crate) async fn control_service(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     action: ServiceAction,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         with_runtime(&state, move |runtime| runtime.control_service(action)).await
     }
     #[cfg(target_os = "android")]
     {
         with_android_owner(
             app,
+            origin,
             &state,
             crate::mobile::OwnerOperation::ControlService(action),
         )
@@ -197,6 +203,7 @@ pub(crate) async fn remove_device(
 #[tauri::command]
 pub(crate) async fn decide_request(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     request_id: String,
     decision: DecisionIntent,
     state: tauri::State<'_, ControllerState>,
@@ -204,7 +211,7 @@ pub(crate) async fn decide_request(
     check_identifier(&request_id)?;
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         with_runtime(&state, move |runtime| runtime.decide(&request_id, decision)).await
     }
     #[cfg(target_os = "android")]
@@ -212,6 +219,7 @@ pub(crate) async fn decide_request(
         controller_runtime::check_request_locator(&request_id)?;
         with_android_owner(
             app,
+            origin,
             &state,
             crate::mobile::OwnerOperation::Decide(request_id, decision),
         )
@@ -222,6 +230,7 @@ pub(crate) async fn decide_request(
 #[tauri::command]
 pub(crate) async fn request_details(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     request_id: String,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<controller_runtime::RequestDetailsView, AppIssue> {
@@ -231,14 +240,14 @@ pub(crate) async fn request_details(
         let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
         tauri::async_runtime::spawn_blocking(move || {
             let _lease = lease;
-            crate::mobile::request_details(&app, request_id)
+            crate::mobile::request_details(&app, &origin, request_id)
         })
         .await
         .map_err(|_| worker_issue())?
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app, state);
+        let _ = (app, state, origin);
         Err(controller_runtime::phone_request_issue())
     }
 }
@@ -246,28 +255,36 @@ pub(crate) async fn request_details(
 #[tauri::command]
 pub(crate) async fn clear_activity(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, origin);
         with_runtime(&state, |runtime| runtime.clear_activity()).await
     }
     #[cfg(target_os = "android")]
     {
-        with_android_owner(app, &state, crate::mobile::OwnerOperation::ClearHistory).await
+        with_android_owner(
+            app,
+            origin,
+            &state,
+            crate::mobile::OwnerOperation::ClearHistory,
+        )
+        .await
     }
 }
 
 #[tauri::command]
 pub(crate) async fn open_lock_settings(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<(), AppIssue> {
     let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
-        crate::mobile::open_lock_settings(&app)
+        crate::mobile::open_lock_settings(&app, &origin)
     })
     .await
     .map_err(|_| worker_issue())?
@@ -276,12 +293,13 @@ pub(crate) async fn open_lock_settings(
 #[tauri::command]
 pub(crate) async fn open_notification_settings(
     app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<(), AppIssue> {
     let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
-        crate::mobile::open_notification_settings(&app)
+        crate::mobile::open_notification_settings(&app, &origin)
     })
     .await
     .map_err(|_| worker_issue())?

@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { AVD, PACKAGE, TEST_PACKAGE, inspectTestManifest, isPassiveReady, parseInstrumentation, parsePassiveDump,
+import { AVD, PACKAGE, TEST_PACKAGE, SOURCE_ROOTS, inspectTestManifest, isPassiveReady, parseInstrumentation, parsePassiveDump,
   requireCi, requireDevice, requireSameSource, servicePresence, requireSameBoot, commandEvidenceComplete,
-  finalizeLifecycleResult } from './android-lifecycle-ci.mjs';
+  finalizeLifecycleResult, nativeOperationUnconfirmed } from './android-lifecycle-ci.mjs';
 
 test('host admission refuses local, non-Linux and external ADB routing', () => {
   const env = { CI: 'true', GITHUB_ACTIONS: 'true', GITHUB_SHA: 'a'.repeat(40), GITHUB_WORKSPACE: '/workspace' };
@@ -47,6 +47,16 @@ test('prebuild source snapshot rejects changed commit, missing or mutated inputs
   }
 });
 
+test('native lifecycle source binding includes the actual vendored Android implementation', () => {
+  assert.ok(Object.isFrozen(SOURCE_ROOTS));
+  for (const input of ['Cargo.toml', 'Cargo.lock', 'crates', 'src-tauri', 'vendor', 'tools']) assert.ok(SOURCE_ROOTS.includes(input));
+  assert.equal(new Set(SOURCE_ROOTS).size, SOURCE_ROOTS.length);
+  assert.throws(() => SOURCE_ROOTS.push('untracked-source'));
+  const source = { version: 1, commit: 'a'.repeat(40), files: { 'vendor/wry/src/android/binding.rs': { bytes: 20, sha256: 'b'.repeat(64) } } };
+  const changed = structuredClone(source); changed.files['vendor/wry/src/android/binding.rs'].sha256 = 'c'.repeat(64);
+  assert.throws(() => requireSameSource(source, changed));
+});
+
 test('reboot and package observations stay bound to the expected kernel boot identity', () => {
   const boot = '12345678-1234-1234-1234-123456789abc';
   assert.doesNotThrow(() => requireSameBoot(boot, boot));
@@ -72,6 +82,12 @@ test('late cancellation or uncertain cleanup clears a previously prepared passin
     [{ deviceOperationMayContinue: true }, false], [{ failure: '' }, false]]) {
     assert.equal(finalizeLifecycleResult({ ...state, ...change }, aborted).passed, false);
   }
+});
+
+test('a timed-out native test operation remains uncertain even after adb instrumentation exits', () => {
+  assert.equal(nativeOperationUnconfirmed('java.lang.AssertionError: Native entry deadline; completion unconfirmed'), true);
+  assert.equal(nativeOperationUnconfirmed('WebView deadline: not ready'), false);
+  assert.equal(nativeOperationUnconfirmed('OK (1 test)'), false);
 });
 
 const fields = {
@@ -116,6 +132,8 @@ const expected = { phase: 'initial', nonce: 'a'.repeat(32), appSha256: 'b'.repea
 const receipt = { ...expected, version: 1, package: PACKAGE, sdk: 36, abi: 'x86_64', bootCount: 1,
   ready: true, stopped: false, component: 'ENABLED', ownerPhase: 'READY', notificationPresent: true,
   checks: { initialWebViewReady: true, finalWebViewReady: true, recreatedWebViewReady: true, relaunchedWebViewReady: true,
+    retiredNativeHttpReadRejected: true, sameCurrentNativeHttpReadSucceeded: true,
+    retiredPostMessagePreservedReadyOwner: true, sameCurrentPostMessageStoppedOwner: true, staleOriginProbeRestartReady: true,
     sameOwnerAfterRecreate: true, sameOwnerAfterRepeatedStart: true, oldOwnerClosed: true,
     manualRelaunchStayedDisabled: true, explicitStartCreatedOwnerAfterClose: true } };
 const output = (value = receipt) => `INSTRUMENTATION_STATUS: uac_lifecycle_receipt=${Buffer.from(JSON.stringify(value)).toString('base64')}\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n`;
@@ -150,6 +168,13 @@ test('native actor readiness cannot replace actual local document readiness afte
         assert.throws(() => parseInstrumentation(output({ ...value, checks: { ...value.checks, [key]: incorrect } }), selected));
       }
     }
+  }
+});
+
+test('initial lifecycle receipt requires real current/retired physical-origin comparisons', () => {
+  for (const key of ['retiredNativeHttpReadRejected', 'sameCurrentNativeHttpReadSucceeded',
+    'retiredPostMessagePreservedReadyOwner', 'sameCurrentPostMessageStoppedOwner', 'staleOriginProbeRestartReady']) {
+    for (const value of [undefined, false, 'true']) assert.throws(() => parseInstrumentation(output({ ...receipt, checks: { ...receipt.checks, [key]: value } }), expected));
   }
 });
 

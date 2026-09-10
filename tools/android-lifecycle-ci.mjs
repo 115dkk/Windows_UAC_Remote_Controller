@@ -21,7 +21,7 @@ export const PHASES = ['initial', 'verify-enabled', 'stop', 'verify-stopped', 's
 const TEST_CLASS = `${PACKAGE}.ControllerLifecycleTest`;
 const RUNNER = `${TEST_PACKAGE}/androidx.test.runner.AndroidJUnitRunner`;
 const MAX_APK = 256 * 1024 * 1024;
-const SOURCE_ROOTS = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'package.json', 'package-lock.json', '.node-version', 'crates', 'src-tauri', 'ui', 'tools', '.github/workflows/android-lifecycle.yml'];
+export const SOURCE_ROOTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'package.json', 'package-lock.json', '.node-version', 'crates', 'src-tauri', 'ui', 'tools', 'vendor', '.github/workflows/android-lifecycle.yml']);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const requireThat = (value, message) => { if (!value) throw new Error(message); };
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -140,11 +140,16 @@ export function parseInstrumentation(text, expected) {
   for (const key of ['initialWebViewReady', 'finalWebViewReady']) {
     requireThat(receipt.checks?.[key] === true, 'Actual local application document readiness missing.');
   }
-  if (receipt.phase === 'initial') for (const key of ['sameOwnerAfterRecreate', 'sameOwnerAfterRepeatedStart', 'oldOwnerClosed', 'manualRelaunchStayedDisabled', 'explicitStartCreatedOwnerAfterClose', 'recreatedWebViewReady', 'relaunchedWebViewReady']) {
+  if (receipt.phase === 'initial') for (const key of ['sameOwnerAfterRecreate', 'sameOwnerAfterRepeatedStart', 'oldOwnerClosed', 'manualRelaunchStayedDisabled', 'explicitStartCreatedOwnerAfterClose', 'recreatedWebViewReady', 'relaunchedWebViewReady',
+    'retiredNativeHttpReadRejected', 'sameCurrentNativeHttpReadSucceeded', 'retiredPostMessagePreservedReadyOwner', 'sameCurrentPostMessageStoppedOwner', 'staleOriginProbeRestartReady']) {
     requireThat(receipt.checks?.[key] === true, 'Initial lifecycle assertion missing.');
   }
   if (receipt.phase === 'stop') requireThat(receipt.checks?.oldOwnerClosed === true && receipt.ownerPhase === 'CLOSED', 'Stop lacks actual owner closure.');
   return receipt;
+}
+
+export function nativeOperationUnconfirmed(output) {
+  return output.includes('Native entry deadline; completion unconfirmed');
 }
 
 function regular(path, limit, allowEmpty = false) {
@@ -281,6 +286,10 @@ export async function main(args = process.argv.slice(2)) {
       const output = await mutate(['shell', 'am', 'instrument', '-w', '-r', '-e', 'class', TEST_CLASS,
         '-e', 'phase', name, '-e', 'nonce', expected.nonce, '-e', 'app_sha256', expected.appSha256,
         '-e', 'test_sha256', expected.testSha256, RUNNER], 180_000, 2 * 1024 * 1024);
+      if (nativeOperationUnconfirmed(output)) {
+        result.deviceOperationMayContinue = true;
+        throw new Error('Native test operation completion remains unconfirmed.');
+      }
       result.phases.push(parseInstrumentation(output, expected));
     }
     async function bootId() {

@@ -31,7 +31,7 @@ description = "Cross-platform WebView rendering library"
 documentation = "https://docs.rs/wry"
 readme = "README.md"
 categories = ["gui"]
-license = "Apache-2.0 OR MIT"
+license = "(Apache-2.0 OR MIT) AND GPL-2.0-or-later"
 repository = "https://github.com/tauri-apps/wry"
 
 [package.metadata.docs.rs]

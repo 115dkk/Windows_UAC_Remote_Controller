@@ -1,11 +1,39 @@
 # Development handoff — 2026-09-10
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Verified implementation baseline: `07b34fd46e2451bc01106445ca09c887980e0d57` on
+Last checked implementation revision: `01ab810b72014eebb57fdc6eb4e2daf3f0d049bf` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 10 evening
+
+At01ab810 the entire Quality run34501026437 passed: protocol6m51, Linux9m17,
+Windows15m48 and Androidcore2m55. All16 original protocol obligations passed,
+including fresh three-witness file-only checks/integrity controls and both
+source-derived attack-existence canaries with original-model no-trace controls.
+ROOT downloaded and reparsed all actual transcripts/derived inputs against
+current bound source and recorded Superloopy G009/C002 passing evidence.
+This proves the stated symbolic models, not native key isolation or UAC/auth.
+Windows package34501026430 passed10m32; Android package34501026469 and renderer
+34501026426 passed. Lifecycle34501026502 still failed11m19; the pending SDK fixes
+are not included in01ab810.
+
+September11 continuation: e5f1cf6 host Rust, Android core/APK/Kotlin, Windows
+package and notification renderer checks passed. Its normal protocol run retained
+all16 obligations and successfully discharged the approve/deny witnesses with
+fresh good/sorry/contradiction checks. Six request-safety properties and channel
+checks passed; two-approver and both request canaries still timed out there.
+Isolated b018f20 experiments subsequently verified the stronger two-approver
+witness, both intentionally broken-model attacks, and absence of those attacks
+in the original models. Remaining normal integration is in progress.
+
+Actual e423727 lifecycle evidence established initial/recreated documents,
+same-owner retention and explicit native STOP/CLOSED with notification removal.
+It then failed because close/relaunch produced no attached WebView. Targeted
+same-version Tao/Tauri/Wry changes now implement exact Activity attachment and
+physical-origin IPC, with immutable Kotlin adapters and actual stale-view/current-
+view test pairs. These dependency changes are not yet compiled or native-verified.
+They must not be confused with the passing e5f1cf6 packaging baseline.
 
 At `4689319d5c503d0fb3391c66c97bcd3eadb5fe7d`, ROOT collected completed native
 CI watchers: Windows package (34487343380), ARM64 APK/Kotlin tests

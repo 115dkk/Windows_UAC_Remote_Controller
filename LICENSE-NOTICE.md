@@ -19,3 +19,8 @@ copyright, license, source-availability, and attribution requirements. Selecting
 GPL-2.0-or-later does not relicense third-party material or automatically make
 every dependency compatible. Record the effective distribution license and
 provide corresponding source and build instructions for each release.
+
+The local Android lifecycle/physical-origin dependency patches add original
+GPL-2.0-or-later material while retaining upstream licenses. Their precise scope
+and composite package metadata are documented in
+[vendor/ANDROID_LIFECYCLE_PATCHES.md](vendor/ANDROID_LIFECYCLE_PATCHES.md).

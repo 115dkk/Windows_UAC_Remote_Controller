@@ -21,8 +21,10 @@ private val ACTIVITY_ID_KEY = "__wryActivityId"
 object WryLifecycleObserver : DefaultLifecycleObserver {
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
-        Rust.create()
         Rust.wryCreate()
+        // Install the original Android-main dispatch endpoint before the Rust
+        // app thread can ask for its bounded initial Activity registration.
+        Rust.create()
     }
 
     override fun onStart(owner: LifecycleOwner) {

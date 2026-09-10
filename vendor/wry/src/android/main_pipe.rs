@@ -7,54 +7,114 @@ use crossbeam_channel::*;
 use jni::{
   errors::Result as JniResult,
   objects::{GlobalRef, JMap, JObject, JString},
-  JNIEnv, JavaVM,
+  JNIEnv,
 };
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use std::{
-  collections::BTreeMap,
-  ffi::c_void,
+  collections::{BTreeMap, VecDeque},
   os::unix::prelude::*,
-  sync::{Arc, Mutex},
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Condvar, Mutex,
+  },
+  thread::ThreadId,
 };
 
-use super::{find_class, EvalCallback, WebviewId, EVAL_CALLBACKS, EVAL_ID_GENERATOR, PACKAGE};
+use super::{
+  find_class,
+  handlers::{self, HandlerRegistration},
+  origin::WeakActivityOrigin,
+  AndroidActivityOrigin, AndroidWebviewOrigin, EvalCallback, PendingEval, EVAL_CALLBACKS, PACKAGE,
+};
 
 pub type ActivityId = i32;
 
-static CHANNEL: Lazy<(
-  Sender<(ActivityId, WebViewMessage)>,
-  Receiver<(ActivityId, WebViewMessage)>,
-)> = Lazy::new(|| bounded(8));
+type Envelope = (ActivityId, Option<AndroidActivityOrigin>, WebViewMessage);
+const QUEUE_CAPACITY: usize = 8;
+static QUEUE: Lazy<Mutex<VecDeque<Envelope>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+static QUEUE_CLOSED: AtomicBool = AtomicBool::new(false);
 pub static MAIN_PIPE: Lazy<[OwnedFd; 2]> = Lazy::new(|| {
-  let mut pipe: [RawFd; 2] = Default::default();
-  unsafe { libc::pipe(pipe.as_mut_ptr()) };
+  let mut pipe: [RawFd; 2] = [-1; 2];
+  // Both queue admission and its wake must be nonblocking on Android main.
+  // No OwnedFd is constructed unless both pipe descriptors were initialized.
+  let result = unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+  assert_eq!(result, 0, "Wry main pipe initialization failed");
   unsafe { pipe.map(|fd| OwnedFd::from_raw_fd(fd)) }
 });
+static MAIN_THREAD: OnceCell<ThreadId> = OnceCell::new();
+enum Bootstrap {
+  Waiting,
+  Registered(WeakActivityOrigin),
+  Failed,
+}
+static BOOTSTRAP: Lazy<(Mutex<Bootstrap>, Condvar)> =
+  Lazy::new(|| (Mutex::new(Bootstrap::Waiting), Condvar::new()));
+
+pub(crate) fn initialize_main_thread() -> bool {
+  MAIN_THREAD.set(std::thread::current().id()).is_ok()
+}
+pub(crate) fn publish_initial_activity(origin: &AndroidActivityOrigin) {
+  let mut bootstrap = BOOTSTRAP.0.lock().unwrap();
+  if matches!(*bootstrap, Bootstrap::Waiting) {
+    *bootstrap = Bootstrap::Registered(origin.downgrade());
+    BOOTSTRAP.1.notify_all();
+  }
+}
+/// Only the initial Rust-thread/bootstrap race may wait. Android main never
+/// waits for itself, and no post-registration gap waits for a future Activity.
+pub(crate) fn dispatch_activity() -> Option<AndroidActivityOrigin> {
+  let bootstrap = BOOTSTRAP.0.lock().unwrap();
+  match &*bootstrap {
+    Bootstrap::Failed => None,
+    Bootstrap::Registered(_) => {
+      drop(bootstrap);
+      first_activity_origin()
+    }
+    Bootstrap::Waiting => {
+      let main_thread = MAIN_THREAD.get()?;
+      if *main_thread == std::thread::current().id() {
+        return None;
+      }
+      let (mut bootstrap, _) = BOOTSTRAP
+        .1
+        .wait_timeout_while(bootstrap, super::MAIN_PIPE_TIMEOUT, |state| {
+          matches!(state, Bootstrap::Waiting)
+        })
+        .unwrap();
+      match &*bootstrap {
+        Bootstrap::Registered(original) => original.upgrade().filter(activity_origin_current),
+        Bootstrap::Waiting => {
+          *bootstrap = Bootstrap::Failed;
+          BOOTSTRAP.1.notify_all();
+          None
+        }
+        Bootstrap::Failed => None,
+      }
+    }
+  }
+}
 
 #[derive(Clone)]
 pub struct ActivityProxy {
+  pub origin: AndroidActivityOrigin,
+  pub view_origin: Option<AndroidWebviewOrigin>,
   pub activity: GlobalRef,
-  pub window_manager: GlobalRef,
   pub webview: Option<GlobalRef>,
   pub webchrome_client: GlobalRef,
-  pub java_vm: *mut c_void,
 }
-
-unsafe impl Send for ActivityProxy {}
 
 impl ActivityProxy {
   pub fn new(
-    vm: JavaVM,
     activity: GlobalRef,
-    window_manager: GlobalRef,
     webchrome_client: GlobalRef,
+    origin: AndroidActivityOrigin,
   ) -> Self {
     Self {
+      origin,
+      view_origin: None,
       activity,
-      window_manager,
       webview: None,
       webchrome_client,
-      java_vm: vm.get_java_vm_pointer() as *mut _,
     }
   }
 }
@@ -65,63 +125,187 @@ static ACTIVITY_PROXY: once_cell::sync::Lazy<Mutex<BTreeMap<ActivityId, Activity
 pub fn activity_proxy(id: ActivityId) -> Option<ActivityProxy> {
   ACTIVITY_PROXY.lock().unwrap().get(&id).cloned()
 }
-
-fn remove_activity_proxy(id: ActivityId) {
-  ACTIVITY_PROXY.lock().unwrap().remove(&id);
-}
-
-pub fn register_activity_proxy(
-  vm: JavaVM,
-  id: ActivityId,
-  activity: GlobalRef,
-  window_manager: GlobalRef,
-  webchrome_client: GlobalRef,
-) {
-  let mut activity_proxy = ACTIVITY_PROXY.lock().unwrap();
-  if let Some(proxy) = activity_proxy.get_mut(&id) {
-    proxy.activity = activity;
-    proxy.window_manager = window_manager;
-    proxy.webchrome_client = webchrome_client;
-    proxy.java_vm = vm.get_java_vm_pointer() as *mut _;
-  } else {
-    let proxy = ActivityProxy::new(vm, activity, window_manager, webchrome_client);
-    activity_proxy.insert(id, proxy.clone());
-  }
-}
-
-pub fn activity_id_for_window_manager(window_manager: JObject) -> Option<ActivityId> {
-  for (activity_id, proxy) in ACTIVITY_PROXY.lock().unwrap().iter() {
-    let vm = unsafe { JavaVM::from_raw(proxy.java_vm.cast()) }.unwrap();
-    let mut env = vm.attach_current_thread_as_daemon().unwrap();
-    let equals = env
-      .call_method(
-        proxy.window_manager.as_obj(),
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        &[(&window_manager).into()],
-      )
-      .and_then(|v| v.z())
-      .unwrap_or_default();
-    if equals {
-      return Some(*activity_id);
-    }
-  }
-  None
-}
-
-pub fn first_activity_id() -> Option<ActivityId> {
-  ACTIVITY_PROXY.lock().unwrap().keys().next().cloned()
-}
-
-pub fn get_webview(activity_id: ActivityId) -> Option<GlobalRef> {
+fn activity_proxy_for_origin(origin: &AndroidActivityOrigin) -> Option<ActivityProxy> {
   ACTIVITY_PROXY
     .lock()
     .unwrap()
-    .get(&activity_id)
-    .unwrap()
-    .webview
-    .as_ref()
+    .get(&origin.id())
+    .filter(|proxy| proxy.origin.same(origin))
     .cloned()
+}
+
+pub(crate) fn remove_activity_proxy(origin: &AndroidActivityOrigin) {
+  let removed = {
+    let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+    if proxies
+      .get(&origin.id())
+      .is_some_and(|proxy| proxy.origin.same(origin))
+    {
+      proxies.remove(&origin.id())
+    } else {
+      None
+    }
+  };
+  if let Some(proxy) = removed {
+    proxy.origin.retire();
+    if let Some(view) = proxy.view_origin {
+      view.retire();
+    }
+  }
+}
+
+pub fn register_activity_proxy(
+  id: ActivityId,
+  activity: GlobalRef,
+  webchrome_client: GlobalRef,
+  origin: AndroidActivityOrigin,
+) -> bool {
+  let mut activity_proxy = ACTIVITY_PROXY.lock().unwrap();
+  if !activity_proxy.contains_key(&id) && activity_proxy.len() >= 32 {
+    origin.retire();
+    return false;
+  }
+  let previous = activity_proxy.remove(&id);
+  if let Some(previous) = &previous {
+    previous.origin.retire();
+    if let Some(view) = &previous.view_origin {
+      view.retire();
+    }
+  }
+  activity_proxy.insert(id, ActivityProxy::new(activity, webchrome_client, origin));
+  drop(activity_proxy);
+  if let Some(previous) = previous {
+    super::cancel_evals_for_activity(&previous.origin);
+  }
+  true
+}
+
+pub(crate) fn activity_origins() -> Vec<AndroidActivityOrigin> {
+  ACTIVITY_PROXY
+    .lock()
+    .unwrap()
+    .values()
+    .map(|proxy| proxy.origin.clone())
+    .collect()
+}
+pub(crate) fn origin_for_activity(
+  env: &JNIEnv<'_>,
+  activity: &JObject<'_>,
+) -> JniResult<Option<AndroidActivityOrigin>> {
+  for proxy in ACTIVITY_PROXY.lock().unwrap().values() {
+    if proxy.origin.matches_activity(env, activity)? {
+      return Ok(Some(proxy.origin.clone()));
+    }
+  }
+  Ok(None)
+}
+pub(crate) fn origin_for_view(
+  env: &JNIEnv<'_>,
+  webview: &JObject<'_>,
+) -> JniResult<Option<AndroidWebviewOrigin>> {
+  for proxy in ACTIVITY_PROXY.lock().unwrap().values() {
+    if let Some(origin) = &proxy.view_origin {
+      if origin.matches(env, webview)? {
+        return Ok(Some(origin.clone()));
+      }
+    }
+  }
+  Ok(None)
+}
+pub(crate) fn view_origin_current(origin: &AndroidWebviewOrigin) -> bool {
+  ACTIVITY_PROXY
+    .lock()
+    .unwrap()
+    .get(&origin.activity_origin().id())
+    .is_some_and(|proxy| {
+      proxy.origin.same(origin.activity_origin())
+        && proxy
+          .view_origin
+          .as_ref()
+          .is_some_and(|view| view.same(origin))
+    })
+}
+fn activity_origin_current(origin: &AndroidActivityOrigin) -> bool {
+  ACTIVITY_PROXY
+    .lock()
+    .unwrap()
+    .get(&origin.id())
+    .is_some_and(|proxy| proxy.origin.same(origin) && proxy.origin.is_live())
+}
+pub(crate) fn retire_activity(
+  env: &JNIEnv<'_>,
+  activity: &JObject<'_>,
+) -> Option<AndroidActivityOrigin> {
+  let proxies = ACTIVITY_PROXY.lock().unwrap();
+  let proxy = proxies.values().find(|proxy| {
+    proxy
+      .origin
+      .matches_activity(env, activity)
+      .unwrap_or(false)
+  })?;
+  proxy.origin.retire();
+  if let Some(view) = &proxy.view_origin {
+    view.retire();
+  }
+  Some(proxy.origin.clone())
+}
+fn register_view(origin: &AndroidWebviewOrigin) -> bool {
+  let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+  let Some(proxy) = proxies.get_mut(&origin.activity_origin().id()) else {
+    return false;
+  };
+  if !proxy.origin.same(origin.activity_origin())
+    || !origin.is_live()
+    || proxy
+      .view_origin
+      .as_ref()
+      .is_some_and(|view| view.is_live())
+  {
+    return false;
+  }
+  proxy.webview = Some(origin.view_reference());
+  proxy.view_origin = Some(origin.clone());
+  true
+}
+
+struct ViewCreation(AndroidWebviewOrigin, bool);
+impl Drop for ViewCreation {
+  fn drop(&mut self) {
+    if !self.1 {
+      self.0.retire();
+    }
+  }
+}
+struct RegistrationCreation(HandlerRegistration, bool);
+impl Drop for RegistrationCreation {
+  fn drop(&mut self) {
+    if !self.1 {
+      handlers::rollback(&self.0);
+    }
+  }
+}
+
+fn first_activity_origin() -> Option<AndroidActivityOrigin> {
+  ACTIVITY_PROXY
+    .lock()
+    .unwrap()
+    .values()
+    .find(|proxy| proxy.origin.is_live())
+    .map(|proxy| proxy.origin.clone())
+}
+
+pub fn get_webview(activity_id: ActivityId) -> Option<GlobalRef> {
+  let proxies = ACTIVITY_PROXY.lock().unwrap();
+  let proxy = proxies.get(&activity_id)?;
+  if !proxy.origin.is_live()
+    || !proxy
+      .view_origin
+      .as_ref()
+      .is_some_and(|origin| origin.is_live())
+  {
+    return None;
+  }
+  proxy.webview.clone()
 }
 
 pub struct MainPipe<'a> {
@@ -129,30 +313,139 @@ pub struct MainPipe<'a> {
 }
 
 impl<'a> MainPipe<'a> {
-  pub(crate) fn send(activity_id: ActivityId, message: WebViewMessage) {
-    let size = std::mem::size_of::<bool>();
-    if CHANNEL.0.send((activity_id, message)).is_ok() {
-      unsafe {
-        libc::write(
-          MAIN_PIPE[1].as_raw_fd(),
-          &true as *const _ as *const _,
-          size,
-        )
-      };
+  pub(crate) fn send(activity_id: ActivityId, message: WebViewMessage) -> crate::Result<()> {
+    // Generic logical operations fence the physical generation at enqueue.
+    // OriginJni/Create carry their stronger explicit original witness.
+    let stamp = if matches!(
+      &message,
+      WebViewMessage::CreateWebView(_) | WebViewMessage::OriginJni(_, _)
+    ) {
+      None // These variants retain their original typed witness already.
+    } else {
+      activity_proxy(activity_id)
+        .map(|proxy| proxy.origin)
+        .filter(|origin| origin.is_live())
+    };
+    Self::enqueue(activity_id, stamp, message)
+  }
+
+  pub(crate) fn send_to_origin(
+    origin: AndroidActivityOrigin,
+    message: WebViewMessage,
+  ) -> crate::Result<()> {
+    Self::enqueue(origin.id(), Some(origin), message)
+  }
+
+  pub(crate) fn send_without_activity(message: WebViewMessage) -> crate::Result<()> {
+    if MAIN_THREAD.get().is_none() || matches!(*BOOTSTRAP.0.lock().unwrap(), Bootstrap::Failed) {
+      return Err(Error::ActivityNotFound);
+    }
+    Self::enqueue(0, None, message)
+  }
+
+  fn enqueue(
+    activity_id: ActivityId,
+    stamp: Option<AndroidActivityOrigin>,
+    message: WebViewMessage,
+  ) -> crate::Result<()> {
+    // Never block the thread which consumes this queue. On every rejection the
+    // captures are dropped outside the lock and can never execute afterwards.
+    let Ok(mut queue) = QUEUE.try_lock() else {
+      return Err(Error::ActivityNotFound);
+    };
+    if QUEUE_CLOSED.load(Ordering::Acquire) || queue.len() >= QUEUE_CAPACITY {
+      drop(queue);
+      return Err(Error::ActivityNotFound);
+    }
+    queue.push_back((activity_id, stamp, message));
+    let wake: u8 = 1;
+    let written =
+      unsafe { libc::write(MAIN_PIPE[1].as_raw_fd(), &wake as *const _ as *const _, 1) };
+    if written != 1 {
+      let error = std::io::Error::last_os_error();
+      if error.kind() != std::io::ErrorKind::WouldBlock {
+        let rejected = queue.pop_back();
+        drop(queue);
+        drop(rejected);
+        return Err(error.into());
+      }
+      // EAGAIN means the nonblocking pipe already has a pending wake. The
+      // receiver drains the bounded queue on that wake.
+    }
+    Ok(())
+  }
+
+  pub(crate) fn close_queue() {
+    let cancelled = {
+      let mut queue = QUEUE.lock().unwrap();
+      QUEUE_CLOSED.store(true, Ordering::Release);
+      std::mem::take(&mut *queue)
+    };
+    for (_, _, message) in cancelled {
+      if let WebViewMessage::CreateWebView(attributes) = &message {
+        handlers::rollback(&attributes.registration);
+      }
+      // Pending command captures cancel their exact SDK entry when dropped.
+      drop(message);
     }
   }
 
   pub fn recv(&mut self) -> JniResult<()> {
-    if let Ok((activity_id, message)) = CHANNEL.1.recv() {
+    let next = QUEUE.lock().unwrap().pop_front();
+    if let Some((activity_id, stamp, message)) = next {
+      let explicit_origin = matches!(
+        &message,
+        WebViewMessage::CreateWebView(_) | WebViewMessage::OriginJni(_, _)
+      );
+      if !explicit_origin {
+        let live = match stamp {
+          Some(origin) => {
+            activity_origin_current(&origin) && origin.live_on_main(&mut self.env).unwrap_or(false)
+          }
+          None => false,
+        };
+        if !live {
+          let _ = self.env.exception_clear();
+          match message {
+            WebViewMessage::Jni(callback) => {
+              callback(&mut self.env, &JObject::null(), &JObject::null())
+            }
+            WebViewMessage::GetWebViewVersion(sender) => {
+              let _ = sender.send(Err(Error::ActivityNotFound));
+            }
+            WebViewMessage::GetUrl(sender) => drop(sender),
+            WebViewMessage::GetCookies(sender, _) => drop(sender),
+            // This callback API has no error value. Cancellation drops its
+            // captures instead of inventing a successful JavaScript result.
+            WebViewMessage::Eval(_, callback) => drop(callback),
+            _ => (),
+          }
+          return Ok(());
+        }
+      }
       match message {
         WebViewMessage::CreateWebView(attrs) => {
+          let mut registered = RegistrationCreation(attrs.registration.clone(), false);
+          if !handlers::current(&attrs.registration) {
+            return Ok(());
+          }
           let Some((activity, web_chrome_client)) =
-            activity_proxy(activity_id).map(|p| (p.activity.clone(), p.webchrome_client.clone()))
+            activity_proxy_for_origin(&attrs.activity_origin).map(|proxy| {
+              (
+                attrs.activity_origin.activity_reference(),
+                proxy.webchrome_client.clone(),
+              )
+            })
           else {
             #[cfg(debug_assertions)]
             eprintln!("no activity found for activity id: {}", activity_id);
             return Ok(());
           };
+          if !attrs.activity_origin.live_on_main(&mut self.env)? {
+            return Ok(());
+          }
+          let activity_origin = attrs.activity_origin.clone();
+          let registration = attrs.registration.clone();
           let CreateWebViewAttributes {
             url,
             html,
@@ -183,6 +476,7 @@ impl<'a> MainPipe<'a> {
               self.env.new_string(init_script.script)?,
             )?;
           }
+          let logical_id = id.clone();
           let id = self.env.new_string(id)?;
           // Create webview
           let rust_webview_class = find_class(
@@ -199,6 +493,19 @@ impl<'a> MainPipe<'a> {
               (&id).into(),
             ],
           )?;
+          let Ok(view_origin) = AndroidWebviewOrigin::new(
+            &mut self.env,
+            activity_origin,
+            registration,
+            &webview,
+            logical_id,
+          ) else {
+            return Ok(());
+          };
+          let mut creation = ViewCreation(view_origin, false);
+          if !register_view(&creation.0) {
+            return Ok(());
+          }
           // get settings
           let web_settings = self
             .env
@@ -238,6 +545,9 @@ impl<'a> MainPipe<'a> {
           }
 
           let webview_class_name = format!("{}/RustWebView", PACKAGE.get().unwrap());
+          if !creation.0.live_on_main(&mut self.env)? {
+            return Ok(());
+          }
           self.env.call_method(
             &activity,
             "setWebView",
@@ -310,6 +620,9 @@ impl<'a> MainPipe<'a> {
           )?;
 
           // Set content view
+          if !creation.0.live_on_main(&mut self.env)? {
+            return Ok(());
+          }
           self.env.call_method(
             &activity,
             "setContentView",
@@ -328,48 +641,68 @@ impl<'a> MainPipe<'a> {
             }
           }
 
-          let webview = self.env.new_global_ref(webview)?;
-
-          ACTIVITY_PROXY
-            .lock()
-            .unwrap()
-            .get_mut(&activity_id)
-            .unwrap()
-            .webview
-            .replace(webview);
+          if !creation.0.live_on_main(&mut self.env)? {
+            return Ok(());
+          }
+          creation.1 = true;
+          registered.1 = true;
         }
         WebViewMessage::Eval(script, callback) => {
           if let Some(webview) = get_webview(activity_id) {
-            let id = EVAL_ID_GENERATOR.next() as i32;
+            let Ok(origin) = super::origin::capture_webview_origin(&mut self.env, webview.as_obj())
+            else {
+              return Ok(());
+            };
+            let Some(callback) = callback else {
+              let s = self.env.new_string(script)?;
+              self.env.call_method(
+                webview.as_obj(),
+                "evaluateJavascript",
+                "(Ljava/lang/String;Landroid/webkit/ValueCallback;)V",
+                &[(&s).into(), (&JObject::null()).into()],
+              )?;
+              return Ok(());
+            };
+            let Some(id) = super::next_eval_id() else {
+              return Ok(());
+            };
 
             #[cfg(feature = "tracing")]
             let span = std::sync::Mutex::new(Some(SendEnteredSpan(
               tracing::debug_span!("wry::eval").entered(),
             )));
 
-            EVAL_CALLBACKS
-              .get_or_init(Default::default)
-              .lock()
-              .unwrap()
-              .insert(
-                id,
-                Box::new(move |result| {
-                  #[cfg(feature = "tracing")]
-                  span.lock().unwrap().take();
-
-                  if let Some(callback) = &callback {
-                    callback(result);
-                  }
-                }),
-              );
-
-            let s = self.env.new_string(script)?;
-            self.env.call_method(
-              webview.as_obj(),
-              "evalScript",
-              "(ILjava/lang/String;)V",
-              &[id.into(), (&s).into()],
-            )?;
+            let callback: EvalCallback = Box::new(move |result: String| {
+              #[cfg(feature = "tracing")]
+              span.lock().unwrap().take();
+              callback(result);
+            });
+            {
+              let mut pending = EVAL_CALLBACKS.get_or_init(Default::default).lock().unwrap();
+              if pending.len() >= 64 || pending.contains_key(&id) {
+                return Ok(());
+              }
+              pending.insert(id, PendingEval { origin, callback });
+            }
+            let evaluated = (|| -> JniResult<()> {
+              let s = self.env.new_string(script)?;
+              self.env.call_method(
+                webview.as_obj(),
+                "evalScript",
+                "(ILjava/lang/String;)V",
+                &[id.into(), (&s).into()],
+              )?;
+              Ok(())
+            })();
+            if evaluated.is_err() {
+              let cancelled = EVAL_CALLBACKS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .remove(&id);
+              drop(cancelled);
+            }
+            evaluated?;
           }
         }
         WebViewMessage::SetBackgroundColor(background_color) => {
@@ -391,12 +724,14 @@ impl<'a> MainPipe<'a> {
                   .map(|v| v.to_string_lossy().to_string())
               }) {
               Ok(version) => {
-                tx.send(Ok(version)).unwrap();
+                let _ = tx.send(Ok(version));
               }
-              Err(e) => tx.send(Err(e.into())).unwrap(),
+              Err(e) => {
+                let _ = tx.send(Err(e.into()));
+              }
             }
           } else {
-            tx.send(Err(Error::ActivityNotFound)).unwrap();
+            let _ = tx.send(Err(Error::ActivityNotFound));
           }
         }
         WebViewMessage::GetUrl(tx) => {
@@ -414,11 +749,22 @@ impl<'a> MainPipe<'a> {
               })
               .unwrap_or_default();
 
-            tx.send(url).unwrap()
+            let _ = tx.send(url);
           }
         }
         WebViewMessage::Jni(f) => {
-          match activity_proxy(activity_id).map(|p| (p.activity.clone(), p.webview.clone())) {
+          match activity_proxy(activity_id).map(|p| {
+            let webview = if p
+              .view_origin
+              .as_ref()
+              .is_some_and(|origin| origin.is_live())
+            {
+              p.webview.clone()
+            } else {
+              None
+            };
+            (p.activity.clone(), webview)
+          }) {
             Some((activity, Some(webview))) => {
               f(&mut self.env, &activity, webview.as_obj());
             }
@@ -428,6 +774,18 @@ impl<'a> MainPipe<'a> {
             _ => {
               f(&mut self.env, &JObject::null(), &JObject::null());
             }
+          }
+        }
+        WebViewMessage::OriginJni(origin, f) => {
+          if origin.live_on_main(&mut self.env).unwrap_or(false) {
+            f(
+              &mut self.env,
+              origin.activity_origin().activity(),
+              origin.webview(),
+            );
+          } else {
+            let _ = self.env.exception_clear();
+            f(&mut self.env, &JObject::null(), &JObject::null());
           }
         }
         WebViewMessage::LoadUrl(url, headers) => {
@@ -475,25 +833,12 @@ impl<'a> MainPipe<'a> {
               })
               .unwrap_or_default();
 
-            tx.send(
+            let _ = tx.send(
               cookies
                 .split("; ")
                 .flat_map(|c| cookie::Cookie::parse(c.to_string()))
                 .collect(),
-            )
-            .unwrap();
-          }
-        }
-        WebViewMessage::OnDestroy {
-          activity_id,
-          webview_id,
-          is_changing_configurations,
-        } => {
-          // keep our webview references (callbacks etc) alive if the activity is going to be recreated due to configuration changes
-          // e.g. rotation, multi-window mode change, etc
-          if !is_changing_configurations {
-            super::destroy_webview(activity_id, &webview_id);
-            remove_activity_proxy(activity_id);
+            );
           }
         }
       }
@@ -570,19 +915,21 @@ pub(crate) enum WebViewMessage {
   GetUrl(Sender<String>),
   GetCookies(Sender<Vec<cookie::Cookie<'static>>>, String),
   Jni(Box<dyn FnOnce(&mut JNIEnv, &JObject, &JObject) + Send>),
+  OriginJni(
+    AndroidWebviewOrigin,
+    Box<dyn FnOnce(&mut JNIEnv, &JObject, &JObject) + Send>,
+  ),
   LoadUrl(String, Option<http::HeaderMap>),
   LoadHtml(String),
   Reload,
   ClearAllBrowsingData,
-  OnDestroy {
-    activity_id: ActivityId,
-    webview_id: WebviewId,
-    is_changing_configurations: bool,
-  },
 }
 
 #[derive(Clone)]
 pub(crate) struct CreateWebViewAttributes {
+  pub activity_origin: AndroidActivityOrigin,
+  pub registration: HandlerRegistration,
+  pub configuration_recreate: bool,
   pub id: String,
   pub url: Option<String>,
   pub html: Option<String>,
