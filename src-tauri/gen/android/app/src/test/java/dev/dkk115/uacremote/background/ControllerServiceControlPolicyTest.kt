@@ -15,6 +15,7 @@ class ControllerServiceControlPolicyTest {
         reportedState = ControllerServiceState.STOPPED,
         wanted = false, attached = false, startPending = false, phase = null,
         constructionUncertain = false, startRejected = false, generationAvailable = true,
+        activation = BootActivationState.ON, activationPending = false, activationUncertain = false,
     )
     private fun ready() = stopped().copy(wanted = true, attached = true,
         phase = PolicyOwnerPhase.READY, reportedState = ControllerServiceState.LOCAL_SETTINGS_READY)
@@ -32,7 +33,7 @@ class ControllerServiceControlPolicyTest {
     }
 
     @Test fun disabledAndFullyStoppedOffersOnlyExplicitStart() {
-        val value = view(stopped().copy(component = BootComponentState.DISABLED))
+        val value = view(stopped().copy(activation = BootActivationState.OFF))
         assertEquals(ControllerServiceState.STOPPED, value.state)
         assertEquals(false, value.bootEnabled)
         assertTrue(value.canStart)
@@ -67,7 +68,7 @@ class ControllerServiceControlPolicyTest {
     }
 
     @Test fun attachedServiceRemainsCleanupPendingEvenAfterActorClosedAndStopAcknowledged() {
-        val afterAck = stopped().copy(component = BootComponentState.DISABLED,
+        val afterAck = stopped().copy(activation = BootActivationState.OFF,
             attached = true, phase = PolicyOwnerPhase.CLOSED)
         assertEquals(ControllerServiceState.CLEANUP_PENDING, view(afterAck).state)
         assertFalse(view(afterAck).canStart)
@@ -150,6 +151,39 @@ class ControllerServiceControlPolicyTest {
         }
         assertFalse(BootServicePolicy.automaticStartAllowed(stopped().copy(attached = true), false, true))
         assertFalse(BootServicePolicy.automaticStartAllowed(stopped().copy(startPending = true), false, true))
+    }
+
+    @Test fun persistedOffOverridesEnabledWakeForEveryAutomaticAndStickyPath() {
+        for (component in listOf(BootComponentState.DEFAULT, BootComponentState.ENABLED)) {
+            val off = stopped().copy(component = component, activation = BootActivationState.OFF)
+            assertEquals(false, BootServicePolicy.effectiveBootEnabled(off))
+            assertFalse(BootServicePolicy.automaticStartAllowed(off, false, true))
+            assertFalse(BootServicePolicy.stickyStartAllowed(off.copy(attached = true), false, true))
+            assertTrue(view(off).canStart)
+            assertFalse(view(off).canStop)
+        }
+    }
+
+    @Test fun pendingUnknownAndLegacyObservationsCannotAuthorizeOrClaimReady() {
+        val blocked = listOf(
+            ready().copy(activation = BootActivationState.LOADING),
+            ready().copy(activation = BootActivationState.UNAVAILABLE),
+            ready().copy(activation = BootActivationState.LEGACY_MISSING),
+            ready().copy(activation = BootActivationState.OFF),
+            ready().copy(activationPending = true), ready().copy(activationUncertain = true),
+        )
+        for (facts in blocked) {
+            assertFalse(BootServicePolicy.automaticStartAllowed(facts, false, true))
+            assertFalse(BootServicePolicy.stickyStartAllowed(facts, false, true))
+            assertFalse(view(facts).policyOwnerReady)
+        }
+        assertTrue(view(stopped().copy(activation = BootActivationState.LEGACY_MISSING)).canStart)
+        for (facts in listOf(stopped().copy(activation = BootActivationState.UNAVAILABLE),
+            stopped().copy(activationPending = true), stopped().copy(activationUncertain = true),
+            stopped().copy(component = BootComponentState.DISABLED))) {
+            assertFalse(view(facts).canStart)
+            assertTrue(view(facts).canStop)
+        }
     }
 
     @Test fun generationExhaustionIsTerminalForNewStartsAndNeverWrapsOrReuses() {

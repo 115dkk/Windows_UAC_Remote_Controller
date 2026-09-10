@@ -5,6 +5,7 @@ import android.content.Intent
 import java.lang.ref.WeakReference
 
 internal enum class BootComponentState { DEFAULT, ENABLED, DISABLED, UNAVAILABLE }
+internal enum class BootActivationState { LOADING, ON, OFF, LEGACY_MISSING, UNAVAILABLE }
 internal enum class UserUnlockObservation { UNLOCKED, LOCKED, UNAVAILABLE }
 internal enum class ServiceControlResult(val wireValue: String) {
     REQUESTED("requested"), DISABLED("not_allowed"), NOT_ALLOWED("not_allowed"), UNAVAILABLE("unavailable"),
@@ -45,6 +46,9 @@ internal data class ControllerServiceFacts(
     val constructionUncertain: Boolean,
     val startRejected: Boolean,
     val generationAvailable: Boolean,
+    val activation: BootActivationState,
+    val activationPending: Boolean,
+    val activationUncertain: Boolean,
 )
 
 internal data class ControllerServiceObservation(
@@ -67,6 +71,14 @@ internal object BootServicePolicy {
     const val SERVICE_COMMAND_TIMEOUT_MILLIS = 5_000L
 
     fun bootEnabled(state: BootComponentState): Boolean = state == BootComponentState.DEFAULT || state == BootComponentState.ENABLED
+
+    /** The stable wake receiver is availability, not the persisted choice. */
+    fun effectiveBootEnabled(facts: ControllerServiceFacts): Boolean? = when {
+        facts.activationPending || facts.activationUncertain -> null
+        facts.activation == BootActivationState.OFF || facts.activation == BootActivationState.LEGACY_MISSING -> false
+        facts.activation != BootActivationState.ON || facts.component == BootComponentState.UNAVAILABLE -> null
+        else -> bootEnabled(facts.component)
+    }
 
     fun acceptsBootAction(action: String?): Boolean = action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
         action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED
@@ -95,7 +107,7 @@ internal object BootServicePolicy {
         started < 0 || now < started || now - started >= SERVICE_COMMAND_TIMEOUT_MILLIS
 
     fun automaticStartAllowed(facts: ControllerServiceFacts, explicitStopRequested: Boolean, mayReplaceClosed: Boolean): Boolean =
-        bootEnabled(facts.component) && facts.generationAvailable && !explicitStopRequested && !facts.startRejected &&
+        effectiveBootEnabled(facts) == true && facts.generationAvailable && !explicitStopRequested && !facts.startRejected &&
         !facts.constructionUncertain && !facts.startPending && !(facts.attached && !facts.wanted) &&
         facts.phase != PolicyOwnerPhase.FAILED && facts.phase != PolicyOwnerPhase.STOPPING &&
         !(facts.phase == PolicyOwnerPhase.CLOSED && !mayReplaceClosed)
@@ -103,7 +115,7 @@ internal object BootServicePolicy {
     /** Called only after a real framework null-intent sticky restart. The caller
      * also checks its exact attached Service token before minting a generation. */
     fun stickyStartAllowed(facts: ControllerServiceFacts, explicitStopRequested: Boolean, mayReplaceClosed: Boolean): Boolean =
-        bootEnabled(facts.component) && facts.generationAvailable && !explicitStopRequested && !facts.startRejected &&
+        effectiveBootEnabled(facts) == true && facts.generationAvailable && !explicitStopRequested && !facts.startRejected &&
         !facts.constructionUncertain && facts.phase != PolicyOwnerPhase.FAILED &&
         facts.phase != PolicyOwnerPhase.STOPPING &&
         !(facts.phase == PolicyOwnerPhase.CLOSED && !mayReplaceClosed) &&
@@ -121,11 +133,7 @@ internal object BootServicePolicy {
         }
 
     fun serviceObservation(facts: ControllerServiceFacts, actualForegroundHost: Boolean): ControllerServiceObservation {
-        val boot = when (facts.component) {
-            BootComponentState.DEFAULT, BootComponentState.ENABLED -> true
-            BootComponentState.DISABLED -> false
-            BootComponentState.UNAVAILABLE -> null
-        }
+        val boot = effectiveBootEnabled(facts)
         val actorMayLive = facts.phase != null && facts.phase != PolicyOwnerPhase.CLOSED
         val fullyStopped = !facts.wanted && !facts.attached && !facts.startPending &&
             !actorMayLive && !facts.constructionUncertain
@@ -146,12 +154,12 @@ internal object BootServicePolicy {
             facts.wanted && (facts.attached || facts.startPending || actorMayLive) -> ControllerServiceState.PREPARING
             else -> ControllerServiceState.UNAVAILABLE
         }
-        val recoverableStart = boot != null && facts.generationAvailable && !facts.wanted && !facts.attached && !facts.startPending &&
+        val recoverableStart = boot != null && bootEnabled(facts.component) && facts.generationAvailable && !facts.wanted && !facts.attached && !facts.startPending &&
             !actorMayLive && !facts.constructionUncertain &&
             (observedState == ControllerServiceState.STOPPED || observedState == ControllerServiceState.UNAVAILABLE)
         // An unknown PackageManager observation never means disabled. An
         // explicit foreground stop may still attempt both downward operations.
-        val stopUseful = boot != false || !fullyStopped
+        val stopUseful = facts.activation != BootActivationState.OFF || facts.activationPending || facts.activationUncertain || !fullyStopped
         return ControllerServiceObservation(observedState, boot,
             actualForegroundHost && recoverableStart, actualForegroundHost && stopUseful, ready)
     }

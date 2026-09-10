@@ -36,9 +36,9 @@ export function frameworkUserState(text) {
 
 export function isPassiveWaitingForUnlock(fields) {
   return ['promoted', 'attached', 'wanted', 'application_attached'].every(key => fields[key] === true) &&
-    ['owner_present', 'destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected'].every(key => fields[key] === false) &&
+    ['owner_present', 'destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected', 'activation_pending', 'activation_uncertain'].every(key => fields[key] === false) &&
     fields.owner_phase === 'NONE' && fields.reported_state === 'WAITING_FOR_UNLOCK' && fields.user_unlock === 'LOCKED' &&
-    ['DEFAULT', 'ENABLED'].includes(fields.boot_component);
+    fields.activation_state === 'ON' && ['DEFAULT', 'ENABLED'].includes(fields.boot_component);
 }
 
 export function hierarchyPath(nonce, index) {
@@ -133,6 +133,7 @@ export function requireFirstUnlockEvidence(evidence, ready) {
     boot.test(evidence.bootId) && evidence.beforeBoot !== evidence.bootId && evidence.setupConfirmed === true,
   'Missing real first-unlock boot/setup evidence.');
   requireThat(evidence.before?.phase === FIRST_UNLOCK_PHASES[0] && evidence.after?.phase === FIRST_UNLOCK_PHASES[1] &&
+    evidence.before.activation === 'ON' && evidence.after.activation === 'ON' &&
     evidence.before.checks?.deviceSecureBefore === false && evidence.before.checks?.deviceSecureAfter === false &&
     evidence.after.checks?.deviceSecureBefore === true && evidence.after.checks?.deviceSecureAfter === true &&
     evidence.before.checks?.userUnlockedAfter === true && evidence.after.checks?.userUnlockedAfter === true &&
@@ -163,8 +164,9 @@ export function requireFirstUnlockEvidence(evidence, ready) {
     ready.beforeActivityOrInstrumentation === true && Number.isSafeInteger(ready.observedAtMonotonicMs) &&
     ready.observedAtMonotonicMs > evidence.ui.at(-1).inputCompletedAtMonotonicMs &&
     ['promoted', 'attached', 'owner_present', 'wanted', 'application_attached'].every(key => ready.native[key] === true) &&
-    ['destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected'].every(key => ready.native[key] === false) &&
+    ['destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected', 'activation_pending', 'activation_uncertain'].every(key => ready.native[key] === false) &&
     ready.native.user_unlock === 'UNLOCKED' && ready.native.owner_phase === 'READY' &&
+    ready.native.activation_state === 'ON' &&
     ready.native.reported_state === 'LOCAL_SETTINGS_READY' && ['DEFAULT', 'ENABLED'].includes(ready.native.boot_component),
   'Missing prelaunch unlocked native READY observation.');
 }

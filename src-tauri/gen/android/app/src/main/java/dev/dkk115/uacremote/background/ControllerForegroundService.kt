@@ -15,7 +15,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.os.UserManager
+import androidx.lifecycle.Lifecycle
 import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.MainActivity
 import java.io.FileDescriptor
@@ -31,6 +33,7 @@ class ControllerForegroundService : Service() {
     private var destroyed = false
     private var unlockReceiverRegistered = false
     private var unlockRegistrationAttempted = false
+    private var activationWaitStartId: Int? = null
     private val unlockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!destroyed && intent.action == Intent.ACTION_USER_UNLOCKED) refreshAfterUnlock()
@@ -80,32 +83,54 @@ class ControllerForegroundService : Service() {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
+        val supplied = if (intent == null) null else try {
+            intent.getLongExtra(EXTRA_GENERATION, 0L).takeIf { it > 0 }
+        } catch (_: Exception) { null }
+        activationWaitStartId = null // A newer callback owns its own continuation.
+        if (retiring || (intent != null && intent.action != ACTION_START && intent.action != ACTION_EXPLICIT_START)) {
+            return rejectStart(owner, supplied, startId)
+        }
+        val sticky = intent == null
+        val explicit = intent?.action == ACTION_EXPLICIT_START
+        if (owner.controllerBootActivationState() == BootActivationState.LOADING) {
+            // A real sticky Service is already foreground-promoted. Wait for DE
+            // observation without touching CE or constructing the Rust actor.
+            val started = SystemClock.elapsedRealtime()
+            activationWaitStartId = startId
+            owner.whenControllerBootActivationObserved { available ->
+                if (destroyed || retiring || !attached || !promoted || activationWaitStartId != startId) return@whenControllerBootActivationObserved
+                activationWaitStartId = null
+                if (!available || BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) rejectStart(owner, supplied, startId)
+                else acceptStart(owner, supplied, sticky, explicit, startId)
+            }
+            return START_STICKY
+        }
+        return acceptStart(owner, supplied, sticky, explicit, startId)
+    }
+
+    private fun acceptStart(owner: ControllerApplication, supplied: Long?, sticky: Boolean, explicit: Boolean, startId: Int): Int {
         val component = componentState(this)
-        if (!BootServicePolicy.bootEnabled(component)) {
-            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.COMPONENT_REJECTED, component = component))
+        if (!BootServicePolicy.bootEnabled(component) || !owner.controllerBootActivationEnabled()) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.COMPONENT_REJECTED,
+                component = component, activation = owner.controllerBootActivationState()))
             owner.controllerServiceStartRejected(activatedGeneration, ownerToken)
             retiring = true
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
-        val supplied = if (intent == null) null else try {
-            intent.getLongExtra(EXTRA_GENERATION, 0L).takeIf { it > 0 }
-        } catch (_: Exception) { null }
-        if (retiring || (intent != null && intent.action != ACTION_START && intent.action != ACTION_EXPLICIT_START)) {
-            return rejectStart(owner, supplied, startId)
-        }
         // Null is accepted only from the actual framework sticky callback, with
         // enabled boot/current token and no stop/cleanup/uncertain construction.
         // The plugin cannot supply null/stale intent data through its no-args API.
-        val generation = if (intent == null) owner.stickyControllerServiceGeneration(ownerToken) else supplied
+        val generation = if (sticky) owner.stickyControllerServiceGeneration(ownerToken) else supplied
         if (generation == null) return rejectStart(owner, supplied, startId)
         registerForUnlockIfNeeded()
-        if (!owner.startControllerServiceOwner(ownerToken, intent?.action == ACTION_EXPLICIT_START, generation)) {
+        if (!owner.startControllerServiceOwner(ownerToken, explicit, generation)) {
             return rejectStart(owner, generation, startId)
         }
         activatedGeneration = generation
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.GENERATION_ACCEPTED,
-            component = component, sticky = intent == null, generationPresent = true, admitted = true))
+            component = component, sticky = sticky, generationPresent = true, admitted = true,
+            activation = owner.controllerBootActivationState()))
         if (observeUnlock(this) == UserUnlockObservation.UNLOCKED) unregisterUnlockReceiver()
         return START_STICKY
     }
@@ -210,6 +235,7 @@ class ControllerForegroundService : Service() {
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.SERVICE_DESTROY,
             generationPresent = activatedGeneration != null, attached = attached, promoted = promoted))
         destroyed = true
+        activationWaitStartId = null
         unregisterUnlockReceiver()
         if (attached) (application as? ControllerApplication)?.detachControllerService(ownerToken, activatedGeneration)
         attached = false
@@ -231,8 +257,13 @@ class ControllerForegroundService : Service() {
             }
         } catch (_: Exception) { UserUnlockObservation.UNAVAILABLE }
 
-        internal fun componentState(context: Context): BootComponentState = try {
-            when (context.packageManager.getComponentEnabledSetting(ComponentName(context, ControllerBootReceiver::class.java))) {
+        internal fun componentState(context: Context): BootComponentState = componentState(context, ControllerBootWakeReceiver::class.java)
+
+        /** Filterless old component is observed only for one-time migration. */
+        internal fun legacyComponentState(context: Context): BootComponentState = componentState(context, ControllerBootReceiver::class.java)
+
+        private fun componentState(context: Context, type: Class<*>): BootComponentState = try {
+            when (context.packageManager.getComponentEnabledSetting(ComponentName(context, type))) {
                 PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> BootComponentState.DEFAULT
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> BootComponentState.ENABLED
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
@@ -241,39 +272,34 @@ class ControllerForegroundService : Service() {
             }
         } catch (_: Exception) { BootComponentState.UNAVAILABLE }
 
-        /** Automatic visible/boot path: NEVER re-enables a stopped boot component. */
-        internal fun startIfEnabled(context: Context): ServiceControlResult = requestStart(context, false)
-
-        /** Actual native start intent only; not the Activity's automatic hook. */
-        internal fun startExplicit(context: Context): ServiceControlResult {
-            if (Looper.myLooper() != Looper.getMainLooper()) return ServiceControlResult.UNAVAILABLE
-            val activity = context as? MainActivity ?: return ServiceControlResult.NOT_ALLOWED
-            val owner = activity.application as? ControllerApplication ?: return ServiceControlResult.UNAVAILABLE
-            if (!owner.isCurrentForegroundControllerHost(activity)) return ServiceControlResult.NOT_ALLOWED
-            val observation = owner.observeControllerService(activity)
-            if (observation.bootEnabled == null) return ServiceControlResult.UNAVAILABLE
-            if (!observation.canStart) return ServiceControlResult.NOT_ALLOWED
-            try {
-                context.packageManager.setComponentEnabledSetting(ComponentName(context, ControllerBootReceiver::class.java),
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
-            } catch (_: Exception) {
-                owner.controllerServiceStartRejected()
-                return ServiceControlResult.UNAVAILABLE
+        /** Automatic paths only wait/read; they never overwrite OFF/unknown. */
+        internal fun startIfEnabled(context: Context, callback: (ServiceControlResult) -> Unit = {}) {
+            if (Looper.myLooper() != Looper.getMainLooper()) { callback(ServiceControlResult.UNAVAILABLE); return }
+            val owner = context.applicationContext as? ControllerApplication
+            if (owner == null) { callback(ServiceControlResult.UNAVAILABLE); return }
+            val started = SystemClock.elapsedRealtime()
+            owner.whenControllerBootActivationObserved { available ->
+                val visible = context !is MainActivity || (!context.isDestroyed && !context.isFinishing &&
+                    context.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+                callback(if (!available || !visible || BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) ServiceControlResult.UNAVAILABLE
+                    else requestStart(context, false, started))
             }
-            if (componentState(context) != BootComponentState.ENABLED) {
-                owner.controllerServiceStartRejected()
-                return ServiceControlResult.UNAVAILABLE
-            }
-            val result = requestStart(context, true)
-            // Persistent enable may already have succeeded before a later
-            // eligibility change. Do not claim an untouched/not-allowed action.
-            return if (result == ServiceControlResult.NOT_ALLOWED || result == ServiceControlResult.DISABLED) {
-                ServiceControlResult.UNAVAILABLE
-            } else result
         }
 
-        private fun requestStart(context: Context, explicit: Boolean): ServiceControlResult {
+        /** Actual native start intent only; not the Activity's automatic hook. */
+        internal fun startExplicit(context: Context, started: Long = SystemClock.elapsedRealtime(), callback: (ServiceControlResult) -> Unit) {
+            if (Looper.myLooper() != Looper.getMainLooper()) { callback(ServiceControlResult.UNAVAILABLE); return }
+            val activity = context as? MainActivity
+            val owner = activity?.application as? ControllerApplication
+            if (activity == null || owner == null) { callback(ServiceControlResult.NOT_ALLOWED); return }
+            owner.startControllerServiceExplicit(activity, started, callback)
+        }
+
+        internal fun startAfterRegistration(activity: MainActivity, started: Long): ServiceControlResult = requestStart(activity, true, started)
+
+        private fun requestStart(context: Context, explicit: Boolean, started: Long): ServiceControlResult {
             if (Looper.myLooper() != Looper.getMainLooper()) return ServiceControlResult.UNAVAILABLE
+            if (BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) return ServiceControlResult.UNAVAILABLE
             val owner = context.applicationContext as? ControllerApplication ?: return ServiceControlResult.UNAVAILABLE
             if (explicit) {
                 val activity = context as? MainActivity ?: return ServiceControlResult.NOT_ALLOWED
@@ -283,12 +309,14 @@ class ControllerForegroundService : Service() {
                 if (!observation.canStart) return ServiceControlResult.NOT_ALLOWED
             } else if (!owner.canRequestAutomaticServiceStart()) return ServiceControlResult.NOT_ALLOWED
             val state = componentState(context)
-            if (!BootServicePolicy.bootEnabled(state)) return if (state == BootComponentState.DISABLED) ServiceControlResult.DISABLED else ServiceControlResult.UNAVAILABLE
+            if (!BootServicePolicy.bootEnabled(state) || !owner.controllerBootActivationEnabled()) return ServiceControlResult.DISABLED
+            if (BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) return ServiceControlResult.UNAVAILABLE
             val generation = owner.controllerServiceStartRequested() ?: return ServiceControlResult.UNAVAILABLE
             return try {
                 val intent = Intent(context, ControllerForegroundService::class.java)
                     .setAction(if (explicit) ACTION_EXPLICIT_START else ACTION_START)
                     .putExtra(EXTRA_GENERATION, generation)
+                if (BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) throw IllegalStateException()
                 if (context.startForegroundService(intent) == null) throw IllegalStateException()
                 BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.START_REQUESTED,
                     component = state, result = ServiceControlResult.REQUESTED))
@@ -302,28 +330,12 @@ class ControllerForegroundService : Service() {
             }
         }
 
-        internal fun stopExplicit(context: Context): ServiceControlResult {
-            if (Looper.myLooper() != Looper.getMainLooper()) return ServiceControlResult.UNAVAILABLE
-            val activity = context as? MainActivity ?: return ServiceControlResult.NOT_ALLOWED
-            val owner = activity.application as? ControllerApplication ?: return ServiceControlResult.UNAVAILABLE
-            if (!owner.isCurrentForegroundControllerHost(activity) || !owner.observeControllerService(activity).canStop) {
-                return ServiceControlResult.NOT_ALLOWED
-            }
-            var succeeded = true
-            try {
-                context.packageManager.setComponentEnabledSetting(ComponentName(context, ControllerBootReceiver::class.java),
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
-            } catch (_: Exception) { succeeded = false }
-            if (componentState(context) != BootComponentState.DISABLED) succeeded = false
-            // Cancellation still proceeds if changing the boot setting failed;
-            // UNAVAILABLE does not claim the persistent setting was updated.
-            owner.shutdownControllerPolicyOwner()
-            try {
-                val matched = context.stopService(Intent(context, ControllerForegroundService::class.java))
-                owner.controllerServiceStopAcknowledged(if (matched) NativeStopObservation.MATCHED_SERVICE else NativeStopObservation.NOT_RUNNING)
-            }
-            catch (_: Exception) { succeeded = false }
-            return if (succeeded) ServiceControlResult.REQUESTED else ServiceControlResult.UNAVAILABLE
+        internal fun stopExplicit(context: Context, started: Long = SystemClock.elapsedRealtime(), callback: (ServiceControlResult) -> Unit) {
+            if (Looper.myLooper() != Looper.getMainLooper()) { callback(ServiceControlResult.UNAVAILABLE); return }
+            val activity = context as? MainActivity
+            val owner = activity?.application as? ControllerApplication
+            if (activity == null || owner == null) { callback(ServiceControlResult.NOT_ALLOWED); return }
+            owner.stopControllerServiceExplicit(activity, started, callback)
         }
     }
 }

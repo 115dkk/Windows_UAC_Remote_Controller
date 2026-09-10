@@ -48,6 +48,12 @@
             android:name=".background.ControllerBootReceiver"
             android:enabled="true"
             android:exported="false"
+            android:directBootAware="true" />
+
+        <receiver
+            android:name=".background.ControllerBootWakeReceiver"
+            android:enabled="true"
+            android:exported="false"
             android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />

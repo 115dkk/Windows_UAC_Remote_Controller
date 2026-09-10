@@ -28,7 +28,9 @@ class BootDiagnosticsTest {
                 result = ServiceControlResult.values().maxByOrNull { it.name.length },
                 failure = BootDiagnosticFailure.values().maxByOrNull { it.name.length },
                 admitted = false, sticky = false, generationPresent = false,
-                attached = false, promoted = false, keptCurrent = false).line()
+                attached = false, promoted = false, keptCurrent = false,
+                activation = BootActivationState.values().maxByOrNull { it.name.length },
+                activationPending = false, activationUncertain = false).line()
             assertTrue(line.length <= BootDiagnostics.MAX_LINE_CHARS)
             assertTrue(line.matches(Regex("[A-Za-z_= ]+")))
             assertFalse(line.contains('\n'))

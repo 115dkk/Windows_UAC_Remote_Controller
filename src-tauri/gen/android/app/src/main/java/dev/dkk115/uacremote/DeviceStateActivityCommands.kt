@@ -57,6 +57,7 @@ internal class DeviceStateActivityCommands(
     private var settingsLaunchPending = false
     private val serviceMain = Handler(Looper.getMainLooper())
     private val serviceCommandPending = AtomicBoolean(false)
+    private val serviceStopPending = AtomicBoolean(false)
     private val requestCommands = HashSet<String>()
     private enum class ServiceCommand { READ, START, STOP }
     private sealed class ServiceReply {
@@ -189,8 +190,9 @@ internal class DeviceStateActivityCommands(
 
     fun stopControllerService(invoke: Invoke) = serviceCommand(invoke, ServiceCommand.STOP)
 
-    /** Fixed operations only. At most one queued/running service command per
-     * plugin; no actor/native owner is constructed to inspect its state. */
+    /** Fixed operations only: one read/start reply and one downward stop reply
+     * per physical plugin. STOP can cancel a busy START; the Application still
+     * owns the sole persistence slot. Reading constructs no actor/native owner. */
     private fun serviceCommand(invoke: Invoke, command: ServiceCommand) {
         val validArguments = try { BootServicePolicy.acceptsServiceArguments(invoke.getRawArgs()) }
             catch (_: Exception) { false }
@@ -198,40 +200,45 @@ internal class DeviceStateActivityCommands(
             rejectServiceCommand(invoke, command, ServiceControlResult.NOT_ALLOWED)
             return
         }
-        if (!serviceCommandPending.compareAndSet(false, true)) {
+        val pendingReply = if (command == ServiceCommand.STOP) serviceStopPending else serviceCommandPending
+        if (!pendingReply.compareAndSet(false, true)) {
             rejectServiceCommand(invoke, command, ServiceControlResult.UNAVAILABLE)
             return
         }
         val started = SystemClock.elapsedRealtime()
+        val replied = AtomicBoolean(false)
+        fun finish(reply: ServiceReply) {
+            if (!replied.compareAndSet(false, true)) return
+            // Release this physical adapter's reply slot, not the Application's
+            // persistence slot. A timed-out writer remains globally owned.
+            pendingReply.set(false)
+            resolveServiceReply(invoke, reply)
+        }
         val work = Runnable {
-            val reply = try {
+            try {
                 if (BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) {
-                    serviceFailure(command, ServiceControlResult.UNAVAILABLE)
+                    finish(serviceFailure(command, ServiceControlResult.UNAVAILABLE))
                 } else {
                     val owner = activity.application as? ControllerApplication
-                    if (owner == null) serviceFailure(command, ServiceControlResult.UNAVAILABLE)
+                    if (owner == null) finish(serviceFailure(command, ServiceControlResult.UNAVAILABLE))
                     else when (command) {
-                        ServiceCommand.READ -> ServiceReply.Observation(owner.observeControllerService(activity))
-                        ServiceCommand.START -> ServiceReply.Mutation(
-                            if (isForeground()) ControllerForegroundService.startExplicit(activity) else ServiceControlResult.NOT_ALLOWED)
-                        ServiceCommand.STOP -> ServiceReply.Mutation(
-                            if (isForeground()) ControllerForegroundService.stopExplicit(activity) else ServiceControlResult.NOT_ALLOWED)
+                        ServiceCommand.READ -> finish(ServiceReply.Observation(owner.observeControllerService(activity)))
+                        ServiceCommand.START -> if (isForeground()) ControllerForegroundService.startExplicit(activity, started) {
+                            finish(ServiceReply.Mutation(it))
+                        } else finish(ServiceReply.Mutation(ServiceControlResult.NOT_ALLOWED))
+                        ServiceCommand.STOP -> if (isForeground()) ControllerForegroundService.stopExplicit(activity, started) {
+                            finish(ServiceReply.Mutation(it))
+                        } else finish(ServiceReply.Mutation(ServiceControlResult.NOT_ALLOWED))
                     }
                 }
             } catch (_: Exception) {
                 // Never retry an accepted operation or log exception/intent data.
-                serviceFailure(command, ServiceControlResult.UNAVAILABLE)
-            } finally {
-                serviceCommandPending.set(false)
+                finish(serviceFailure(command, ServiceControlResult.UNAVAILABLE))
             }
-            // The native operation has finished. Release admission BEFORE the
-            // exactly-once reply can wake Rust's next sequential state read.
-            resolveServiceReply(invoke, reply)
         }
         if (Looper.myLooper() == Looper.getMainLooper()) work.run()
         else if (!serviceMain.post(work)) {
-            serviceCommandPending.set(false)
-            rejectServiceCommand(invoke, command, ServiceControlResult.UNAVAILABLE)
+            finish(serviceFailure(command, ServiceControlResult.UNAVAILABLE))
         }
     }
 

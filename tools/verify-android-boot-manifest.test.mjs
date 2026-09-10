@@ -5,9 +5,10 @@ import { inspectBootManifest } from './verify-android-boot-manifest.mjs';
 const xml = `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.dkk115.uacremote">
 ${['RECEIVE_BOOT_COMPLETED','FOREGROUND_SERVICE','FOREGROUND_SERVICE_CONNECTED_DEVICE','CHANGE_NETWORK_STATE'].map((name) => `<uses-permission android:name="android.permission.${name}"/>`).join('')}
 <application android:name=".ControllerApplication" android:allowBackup="false">
-<receiver android:name=".background.ControllerBootReceiver" android:enabled="true" android:exported="false" android:directBootAware="true"><intent-filter>
+<receiver android:name=".background.ControllerBootWakeReceiver" android:enabled="true" android:exported="false" android:directBootAware="true"><intent-filter>
 ${['LOCKED_BOOT_COMPLETED','BOOT_COMPLETED','MY_PACKAGE_REPLACED'].map((name) => `<action android:name="android.intent.action.${name}"/>`).join('')}
 </intent-filter></receiver>
+<receiver android:name=".background.ControllerBootReceiver" android:enabled="true" android:exported="false" android:directBootAware="true"/>
 <service android:name=".background.ControllerForegroundService" android:exported="false" android:directBootAware="true" android:foregroundServiceType="connectedDevice" android:stopWithTask="false"/>
 </application></manifest>`;
 test('merged manifest enforces default-on private boot and same-process service declarations', () => {
@@ -27,6 +28,15 @@ test('SDK-limited required permissions cannot satisfy the boot/foreground gate',
     assert.throws(() => inspectBootManifest(xml.replace(original, limited)), /Missing unambiguous unbounded/);
     assert.throws(() => inspectBootManifest(xml.replace(original, limited + original)), /Missing unambiguous unbounded/);
     assert.throws(() => inspectBootManifest(xml.replace(original, original + original)), /Missing unambiguous unbounded/);
+  }
+});
+test('stable wake and filterless legacy migration components must remain distinct', () => {
+  const legacy = '<receiver android:name=".background.ControllerBootReceiver" android:enabled="true" android:exported="false" android:directBootAware="true"/>';
+  for (const bad of [xml.replace('ControllerBootWakeReceiver', 'ControllerBootReceiver'),
+    xml.replace(legacy, ''), xml.replace(legacy, legacy + legacy),
+    xml.replace(legacy, legacy.replace('/>', '><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter></receiver>')),
+    xml.replace(legacy, legacy.replace('android:exported="false"', 'android:exported="true"'))]) {
+    assert.throws(() => inspectBootManifest(bad));
   }
 });
 test('malformed/DOCTYPE/oversized input cannot become a declaration pass', () => {

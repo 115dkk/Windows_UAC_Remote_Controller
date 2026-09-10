@@ -40,11 +40,13 @@ export function inspectBootManifest(xml) {
       requireThat(attr(value, 'enabled') === null || attr(value, 'enabled') === 'true', `${suffix} must default enabled.`);
       return value;
     }
-    const receiver = component('receiver', 'ControllerBootReceiver');
+    const receiver = component('receiver', 'ControllerBootWakeReceiver');
     const actions = new Set([...receiver.querySelectorAll('intent-filter > action')].map((action) => attr(action, 'name')));
     for (const action of ['LOCKED_BOOT_COMPLETED', 'BOOT_COMPLETED', 'MY_PACKAGE_REPLACED']) {
       requireThat(actions.has(`android.intent.action.${action}`), `Missing boot/update action ${action}.`);
     }
+    const legacy = component('receiver', 'ControllerBootReceiver');
+    requireThat(!legacy.querySelector('intent-filter'), 'Legacy component must be migration-only without automatic routes.');
     const service = component('service', 'ControllerForegroundService');
     requireThat(['connectedDevice', '16', '0x10', '0x00000010'].includes(attr(service, 'foregroundServiceType')), 'Expected only the connected-device foreground type.');
     requireThat(attr(service, 'stopWithTask') === null || attr(service, 'stopWithTask') === 'false', 'Removing the task must not stop the foreground service.');

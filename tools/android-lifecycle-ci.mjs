@@ -88,9 +88,10 @@ export function parsePassiveDump(text) {
   const matches = [...text.matchAll(/UAC_LIFECYCLE_BEGIN_V1\r?\n([\s\S]*?)UAC_LIFECYCLE_END_V1/g)];
   requireThat(matches.length === 1, 'Expected one exact live service diagnostic.');
   const fields = Object.create(null);
-  const booleanFields = ['promoted', 'attached', 'destroyed', 'retiring', 'owner_present', 'wanted', 'start_pending', 'application_attached', 'construction_uncertain', 'start_rejected'];
+  const booleanFields = ['promoted', 'attached', 'destroyed', 'retiring', 'owner_present', 'wanted', 'start_pending', 'application_attached', 'construction_uncertain', 'start_rejected', 'activation_pending', 'activation_uncertain'];
   const enums = {
     user_unlock: ['UNLOCKED', 'LOCKED', 'UNAVAILABLE'], boot_component: ['DEFAULT', 'ENABLED', 'DISABLED', 'UNAVAILABLE'],
+    activation_state: ['LOADING', 'ON', 'OFF', 'LEGACY_MISSING', 'UNAVAILABLE'],
     owner_phase: ['NONE', 'NEW', 'STARTING', 'READY', 'FAILED', 'STOPPING', 'CLOSED'],
     reported_state: ['WAITING_FOR_UNLOCK', 'PREPARING', 'LOCAL_SETTINGS_READY', 'CLEANUP_PENDING', 'UNAVAILABLE', 'STOPPED'],
   };
@@ -101,15 +102,15 @@ export function parsePassiveDump(text) {
     requireThat(booleanFields.includes(key) ? ['true', 'false'].includes(value) : enums[key]?.includes(value), 'Unknown passive field/value.');
     fields[key] = booleanFields.includes(key) ? value === 'true' : value;
   }
-  requireThat(Object.keys(fields).length === 14, 'Incomplete passive diagnostic.');
+  requireThat(Object.keys(fields).length === 17, 'Incomplete passive diagnostic.');
   return fields;
 }
 
 export function isPassiveReady(fields) {
   return ['promoted', 'attached', 'owner_present', 'wanted', 'application_attached'].every((key) => fields[key] === true) &&
-    ['destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected'].every((key) => fields[key] === false) &&
+    ['destroyed', 'retiring', 'start_pending', 'construction_uncertain', 'start_rejected', 'activation_pending', 'activation_uncertain'].every((key) => fields[key] === false) &&
     fields.owner_phase === 'READY' && fields.reported_state === 'LOCAL_SETTINGS_READY' && fields.user_unlock === 'UNLOCKED' &&
-    ['DEFAULT', 'ENABLED'].includes(fields.boot_component);
+    fields.activation_state === 'ON' && ['DEFAULT', 'ENABLED'].includes(fields.boot_component);
 }
 
 export function servicePresence(text) {
@@ -192,8 +193,9 @@ export function parseInstrumentation(text, expected) {
     Number.isSafeInteger(receipt.bootCount) && receipt.bootCount >= 0, 'Stale/crossed native receipt.');
   const stopped = receipt.phase === 'stop' || receipt.phase === 'verify-stopped';
   requireThat(receipt.ready === !stopped && receipt.stopped === stopped && receipt.notificationPresent === !stopped &&
-    (stopped ? receipt.component === 'DISABLED' && ['NONE', 'CLOSED'].includes(receipt.ownerPhase) :
-      ['DEFAULT', 'ENABLED'].includes(receipt.component) && receipt.ownerPhase === 'READY'), 'Receipt contradicts lifecycle phase.');
+    ['DEFAULT', 'ENABLED'].includes(receipt.component) &&
+    (stopped ? receipt.activation === 'OFF' && ['NONE', 'CLOSED'].includes(receipt.ownerPhase) :
+      receipt.activation === 'ON' && receipt.ownerPhase === 'READY'), 'Receipt contradicts lifecycle phase.');
   for (const key of ['initialWebViewReady', 'finalWebViewReady']) {
     requireThat(receipt.checks?.[key] === true, 'Actual local application document readiness missing.');
   }
@@ -434,6 +436,10 @@ export async function main(args = process.argv.slice(2)) {
     await update('enabled-real-package-replacement-before-launch', true);
     await phase('stop'); await observe('explicit-stop-closed', false, false);
     await normalLaunch(); await observe('manual-reopen-preserves-disabled', false, false);
+    // Preserve pre-reboot component/writer observations for any later lost-choice
+    // diagnosis. Read-only evidence, not a sleep, retry or persistence receipt.
+    await read(['shell', 'dumpsys', 'package', PACKAGE]);
+    await read(['shell', 'logcat', '-d', '-v', 'threadtime', 'UacBoot:I', '*:S']);
     await reboot('disabled-real-reboot-before-launch', false);
     await phase('verify-stopped');
     await update('disabled-real-package-replacement-before-launch', false);

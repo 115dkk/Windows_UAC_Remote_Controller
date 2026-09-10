@@ -14,6 +14,7 @@ internal enum class BootDiagnosticStage {
     PROMOTION_SUCCEEDED, PROMOTION_FAILED, START_COMMAND, COMPONENT_REJECTED,
     GENERATION_ACCEPTED, GENERATION_REJECTED, START_REJECTED_LATCHED,
     UNLOCK_RECEIVER_FAILED, UNLOCK_REFRESH, NOTIFICATION_FAILED, SERVICE_DESTROY,
+    ACTIVATION_OBSERVED, ACTIVATION_MUTATION_STARTED, ACTIVATION_MUTATION_FINISHED,
 }
 
 /** Fixed metadata only. No text, Intent, exception, identifier or body field. */
@@ -30,6 +31,9 @@ internal data class BootDiagnosticRecord(
     val attached: Boolean? = null,
     val promoted: Boolean? = null,
     val keptCurrent: Boolean? = null,
+    val activation: BootActivationState? = null,
+    val activationPending: Boolean? = null,
+    val activationUncertain: Boolean? = null,
 ) {
     fun line(): String = buildString {
         append("stage=").append(stage.name)
@@ -44,6 +48,9 @@ internal data class BootDiagnosticRecord(
         attached?.let { append(" attached=").append(it) }
         promoted?.let { append(" promoted=").append(it) }
         keptCurrent?.let { append(" kept_current=").append(it) }
+        activation?.let { append(" activation=").append(it.name) }
+        activationPending?.let { append(" activation_pending=").append(it) }
+        activationUncertain?.let { append(" activation_uncertain=").append(it) }
     }
 }
 

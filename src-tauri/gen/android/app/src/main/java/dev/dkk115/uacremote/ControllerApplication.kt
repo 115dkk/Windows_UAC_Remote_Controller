@@ -15,6 +15,11 @@ import dev.dkk115.uacremote.background.BootServicePolicy
 import dev.dkk115.uacremote.background.BootDiagnostics
 import dev.dkk115.uacremote.background.BootDiagnosticRecord
 import dev.dkk115.uacremote.background.BootDiagnosticStage
+import dev.dkk115.uacremote.background.BootActivationState
+import dev.dkk115.uacremote.background.BootRegistration
+import dev.dkk115.uacremote.background.BootRegistrationOperation
+import dev.dkk115.uacremote.background.BootStopCompletion
+import dev.dkk115.uacremote.background.ServiceControlResult
 import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.background.ControllerServiceState
 import dev.dkk115.uacremote.background.ControllerServiceFacts
@@ -44,6 +49,7 @@ class ControllerApplication : Application() {
     private var serviceToken: Any? = null
     private var serviceTokenGeneration: Long? = null
     private val serviceGenerations = ServiceStartGenerations()
+    private val bootRegistration = BootRegistration(this, ::isCurrentForegroundControllerHost)
     private var serviceListener: ((ControllerServiceState) -> Unit)? = null
     private var serviceWanted = false
     private var serviceStartPending = false
@@ -73,6 +79,7 @@ class ControllerApplication : Application() {
         override fun onActivityDestroyed(activity: Activity) { clearHost(activity) }
         private fun clearHost(activity: Activity) {
             resumedControllerHost.pausedOrDestroyed(activity)
+            bootRegistration.hostRetired(activity)
             if (routeHost?.get() === activity) { routeHost = null; pendingRoute = null }
             if (activity.isDestroyed && requestWakeOwner?.get() === activity) { requestWakeOwner = null; requestWake = null }
         }
@@ -94,6 +101,7 @@ class ControllerApplication : Application() {
         super.onCreate()
         registerActivityLifecycleCallbacks(controllerHosts)
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.APPLICATION_CREATE))
+        bootRegistration.initialize()
         // Even constructing the actor creates its native-platform/keys wrapper.
         // Only the already-promoted foreground service may request it below.
     }
@@ -113,6 +121,9 @@ class ControllerApplication : Application() {
             "construction_uncertain=$constructionUncertain",
             "start_rejected=$startRejected",
             "reported_state=${state.name}",
+            "activation_state=${bootRegistration.state.name}",
+            "activation_pending=${bootRegistration.pending}",
+            "activation_uncertain=${bootRegistration.uncertain}",
         )
     }
 
@@ -201,15 +212,67 @@ class ControllerApplication : Application() {
         ControllerForegroundService.componentState(this), state, serviceWanted, serviceToken != null,
         serviceStartPending, policyActor?.lifecyclePhase(), constructionUncertain, startRejected,
         serviceGenerations.canReserve() || serviceGenerations.current() != null,
+        bootRegistration.state, bootRegistration.pending, bootRegistration.uncertain,
     )
 
-    /** Automatic starts may not undo an explicit stop, even if its PM write failed. */
+    internal fun controllerBootActivationState(): BootActivationState = bootRegistration.state
+
+    internal fun whenControllerBootActivationObserved(callback: (Boolean) -> Unit) = bootRegistration.whenObserved { available ->
+        // Always leave the current framework callback before evaluating a
+        // visible Activity's STARTED lifecycle or a queued sticky continuation.
+        if (!main.post { callback(available) }) callback(false)
+    }
+
+    internal fun controllerBootActivationEnabled(): Boolean = BootServicePolicy.effectiveBootEnabled(controllerServiceFacts()) == true
+
+    /** The original real Activity admits a fixed mutation. Persistence is owned
+     * by the Application through timeout/rotation; no plugin can replace it. */
+    internal fun startControllerServiceExplicit(activity: MainActivity, started: Long, callback: (ServiceControlResult) -> Unit) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!isCurrentForegroundControllerHost(activity) || !observeControllerService(activity).canStart) {
+            callback(ServiceControlResult.NOT_ALLOWED); return
+        }
+        bootRegistration.mutate(activity, BootRegistrationOperation.START, started) { result ->
+            if (result.failure != null || !isCurrentForegroundControllerHost(activity) ||
+                BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime()) || !controllerBootActivationEnabled()) {
+                controllerServiceStartRejected()
+                callback(ServiceControlResult.UNAVAILABLE)
+            } else {
+                val outcome = ControllerForegroundService.startAfterRegistration(activity, started)
+                callback(if (outcome == ServiceControlResult.REQUESTED) outcome else ServiceControlResult.UNAVAILABLE)
+            }
+        }
+    }
+
+    internal fun stopControllerServiceExplicit(activity: MainActivity, started: Long, callback: (ServiceControlResult) -> Unit) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!isCurrentForegroundControllerHost(activity) || !observeControllerService(activity).canStop ||
+            BootServicePolicy.serviceCommandExpired(started, SystemClock.elapsedRealtime())) {
+            callback(ServiceControlResult.NOT_ALLOWED); return
+        }
+        // Downward actions happen immediately even when the writer is busy or
+        // storage is unavailable. A busy STOP is never a claimed durable OFF.
+        bootRegistration.cancelStart()
+        shutdownControllerPolicyOwner()
+        val completion = BootStopCompletion.attempt {
+            val matched = stopService(Intent(this, ControllerForegroundService::class.java))
+            val observation = if (matched) NativeStopObservation.MATCHED_SERVICE else NativeStopObservation.NOT_RUNNING
+            controllerServiceStopAcknowledged(observation)
+            observation
+        }
+        bootRegistration.mutate(activity, BootRegistrationOperation.STOP, started) { result ->
+            callback(completion.finish(result, started, SystemClock.elapsedRealtime()))
+        }
+    }
+
+    /** Automatic starts may not undo an explicit stop, even if persistence failed. */
     internal fun canRequestAutomaticServiceStart(): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
         val facts = controllerServiceFacts()
         val allowed = BootServicePolicy.automaticStartAllowed(facts, explicitStopRequested, mayReplaceClosed)
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.AUTOMATIC_ADMISSION,
-            component = facts.component, admitted = allowed))
+            component = facts.component, admitted = allowed, activation = facts.activation,
+            activationPending = facts.activationPending, activationUncertain = facts.activationUncertain))
         return allowed
     }
 
@@ -270,7 +333,7 @@ class ControllerApplication : Application() {
 
     internal fun startControllerServiceOwner(token: Any, explicit: Boolean, generation: Long): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (serviceToken !== token || explicitStopRequested ||
+        if (serviceToken !== token || explicitStopRequested || !controllerBootActivationEnabled() ||
             !BootServicePolicy.acceptsStartGeneration(serviceGenerations.current(), generation, serviceTokenGeneration)) return false
         serviceTokenGeneration = generation
         serviceWanted = true
@@ -319,7 +382,7 @@ class ControllerApplication : Application() {
     }
 
     private fun reconcileOwner() {
-        if (!serviceWanted || serviceToken == null) return
+        if (!serviceWanted || serviceToken == null || !controllerBootActivationEnabled()) return
         val unlock = ControllerForegroundService.observeUnlock(this)
         val actor = policyActor
         when (BootServicePolicy.ownerAction(unlock, actor?.lifecyclePhase(), mayReplaceClosed, constructionUncertain)) {
@@ -417,7 +480,7 @@ class ControllerApplication : Application() {
 
     private fun preOwnerMutationStatus(): PolicyStatus =
         if (!startRejected && !constructionUncertain && ControllerForegroundService.observeUnlock(this) == UserUnlockObservation.UNLOCKED &&
-            BootServicePolicy.bootEnabled(ControllerForegroundService.componentState(this))) PolicyStatus.BUSY
+            controllerBootActivationEnabled()) PolicyStatus.BUSY
         else PolicyStatus.UNAVAILABLE
 
     private fun prepareRead(pending: PendingRead) {
@@ -425,7 +488,7 @@ class ControllerApplication : Application() {
         val now = SystemClock.elapsedRealtime()
         val phase = policyActor?.lifecyclePhase()
         if (startRejected || constructionUncertain || ControllerForegroundService.observeUnlock(this) != UserUnlockObservation.UNLOCKED ||
-            !BootServicePolicy.bootEnabled(ControllerForegroundService.componentState(this)) ||
+            !controllerBootActivationEnabled() ||
             (!mayReplaceClosed && (phase == PolicyOwnerPhase.FAILED || phase == PolicyOwnerPhase.CLOSED))) {
             finishRead(pending, PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
         } else if (BootServicePolicy.readExpired(pending.started, now)) {

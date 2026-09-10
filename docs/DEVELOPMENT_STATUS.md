@@ -1,11 +1,34 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `65f9883f417ea8d573e036b97af8e2e0bd7a84ef` on
+Last checked implementation revision: `5534d1683838b8e6072890fe16b4422b3dfda7a2` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
+
+At5534d16, complete Windows/Linux/Android Rust quality, actual Analyzer/canaries,
+both app packages, notification rendering and fixed Google attestation-status
+interoperability passed. The exact Windows tests include ordinary-process
+endpoint rejection, actual fixed-size token queries and the corrected bounded-SID
+fixture. Canonical QR invitation and phone frozen-candidate tests are included.
+
+Actual Android lifecycle failed twice after stop and immediate real reboot:
+d45b6ac and5534d16 each observed a newly running foreground/READY owner with the
+old boot component ENABLED. The latter reached the observation timeout, while
+the earlier run also had a genuine global application-barrier give-up. The
+previous passing65f9883 lifecycle below does not resolve this observed regression.
+ROOT retained/hash-checked223 and306 command logs respectively. First unlock was
+not reached in either failed sequence.
+
+The new repair uses a fixed private device-protected ON/OFF record and one
+Application-owned asynchronous registration operation. A stable manifest-enabled
+wake receiver is never toggled; the old component is filterless for migration.
+The persistence, callback and lifecycle source plus matching host evidence guards
+are authored and statically reviewed; corrected native behavior awaits new CI.
+This is not a published release or a new local UAC/provider experiment.
+
+The following65f9883 checkpoint is historical and retains its original scope.
 
 At65f9883, all five CI workflows passed. Full host/Android quality, both packages,
 notification rendering and the genuine unlocked-emulator lifecycle are green.

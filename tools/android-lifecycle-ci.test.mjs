@@ -98,6 +98,7 @@ const fields = {
   promoted: true, attached: true, destroyed: false, retiring: false, user_unlock: 'UNLOCKED', boot_component: 'ENABLED',
   owner_present: true, owner_phase: 'READY', wanted: true, start_pending: false, application_attached: true,
   construction_uncertain: false, start_rejected: false, reported_state: 'LOCAL_SETTINGS_READY',
+  activation_state: 'ON', activation_pending: false, activation_uncertain: false,
 };
 const dump = (value = fields) => `SERVICE ${PACKAGE}/.background.ControllerForegroundService\n  UAC_LIFECYCLE_BEGIN_V1\n${Object.entries(value).map(([key, v]) => `  ${key}=${v}\n`).join('')}  UAC_LIFECYCLE_END_V1\n`;
 
@@ -105,7 +106,9 @@ test('passive readiness requires all actual owner and FGS facts, not launch acce
   assert.equal(isPassiveReady(parsePassiveDump(dump())), true);
   for (const changes of [{ promoted: false }, { owner_phase: 'STARTING' }, { start_pending: true },
     { owner_present: false }, { application_attached: false }, { user_unlock: 'LOCKED' }, { user_unlock: 'UNAVAILABLE' },
-    { boot_component: 'DISABLED' }, { construction_uncertain: true }, { reported_state: 'CLEANUP_PENDING' }]) {
+    { boot_component: 'DISABLED' }, { construction_uncertain: true }, { reported_state: 'CLEANUP_PENDING' },
+    { activation_state: 'OFF' }, { activation_state: 'LOADING' }, { activation_state: 'LEGACY_MISSING' },
+    { activation_pending: true }, { activation_uncertain: true }]) {
     assert.equal(isPassiveReady(parsePassiveDump(dump({ ...fields, ...changes }))), false);
   }
   assert.throws(() => parsePassiveDump('UAC_LIFECYCLE_UNAVAILABLE_V1'));
@@ -212,7 +215,7 @@ test('OS dump errors and malformed or truncated structure remain fail closed', (
 
 const expected = { phase: 'initial', nonce: 'a'.repeat(32), appSha256: 'b'.repeat(64), testSha256: 'c'.repeat(64) };
 const receipt = { ...expected, version: 1, package: PACKAGE, sdk: 36, abi: 'x86_64', bootCount: 1,
-  ready: true, stopped: false, component: 'ENABLED', ownerPhase: 'READY', notificationPresent: true,
+  ready: true, stopped: false, component: 'ENABLED', activation: 'ON', ownerPhase: 'READY', notificationPresent: true,
   checks: { initialWebViewReady: true, finalWebViewReady: true, recreatedWebViewReady: true, relaunchedWebViewReady: true,
     retiredNativeHttpReadRejected: true, sameCurrentNativeHttpReadSucceeded: true,
     retiredPostMessagePreservedReadyOwner: true, sameCurrentPostMessageStoppedOwner: true, staleOriginProbeRestartReady: true,
@@ -223,7 +226,8 @@ const output = (value = receipt) => `INSTRUMENTATION_STATUS: uac_lifecycle_recei
 test('one passing test and fresh exact APK-bound receipt are both mandatory', () => {
   assert.deepEqual(parseInstrumentation(output(), expected), receipt);
   for (const changes of [{ nonce: 'd'.repeat(32) }, { appSha256: 'e'.repeat(64) }, { testSha256: 'f'.repeat(64) },
-    { phase: 'stop' }, { ready: false }, { ownerPhase: 'STARTING' }, { sdk: 35 }, { checks: {} }, { bootCount: -1 }]) {
+    { phase: 'stop' }, { ready: false }, { ownerPhase: 'STARTING' }, { sdk: 35 }, { checks: {} }, { bootCount: -1 },
+    { activation: undefined }, { activation: 'OFF' }, { activation: 'LOADING' }, { activation: 'LEGACY_MISSING' }]) {
     assert.throws(() => parseInstrumentation(output({ ...receipt, ...changes }), expected));
   }
   for (const text of [output().replace('1 test', '0 tests'), output().replace('1 test', '2 tests'),
@@ -233,10 +237,14 @@ test('one passing test and fresh exact APK-bound receipt are both mandatory', ()
 
 test('STOPPED receipt cannot replace actual CLOSED completion for explicit stop', () => {
   const selected = { ...expected, phase: 'stop' };
-  const stopped = { ...receipt, ...selected, ready: false, stopped: true, component: 'DISABLED', ownerPhase: 'CLOSED', notificationPresent: false };
+  const stopped = { ...receipt, ...selected, ready: false, stopped: true, component: 'DEFAULT', activation: 'OFF', ownerPhase: 'CLOSED', notificationPresent: false };
   assert.deepEqual(parseInstrumentation(output(stopped), selected), stopped);
   assert.throws(() => parseInstrumentation(output({ ...stopped, ownerPhase: 'NONE' }), selected));
   assert.throws(() => parseInstrumentation(output({ ...stopped, notificationPresent: true }), selected));
+  for (const activation of [undefined, 'ON', 'LOADING', 'LEGACY_MISSING', 'UNAVAILABLE']) {
+    assert.throws(() => parseInstrumentation(output({ ...stopped, activation }), selected));
+  }
+  assert.throws(() => parseInstrumentation(output({ ...stopped, component: 'DISABLED' }), selected));
 });
 
 test('native actor readiness cannot replace actual local document readiness after launch or recreation', () => {
@@ -385,6 +393,7 @@ test('first-unlock coverage rejects crossed boots, partial locked observations, 
     value => { value.ui.reverse(); }, value => { value.ui[1].path = value.ui[0].path; },
     value => { value.ui[0].kind = 'unknown'; }, value => { value.after.checks.deviceSecureAfter = false; },
     value => { value.after.appSha256 = 'e'.repeat(64); }, value => { value.after.nonce = value.before.nonce; },
+    value => { value.before.activation = 'OFF'; }, value => { value.after.activation = 'LEGACY_MISSING'; },
     value => { value.after.bootCount += 1; }, value => { value.ready.bootId = value.beforeBoot; },
     value => { value.ready.frameworkUserState = 'RUNNING_UNLOCKING'; }, value => { value.ready.beforeActivityOrInstrumentation = false; }]) {
     const changed = structuredClone(good); change(changed);

@@ -21,6 +21,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
 import dev.dkk115.uacremote.background.BootComponentState
+import dev.dkk115.uacremote.background.BootActivationState
 import dev.dkk115.uacremote.background.BootServicePolicy
 import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.background.ControllerServiceState
@@ -62,6 +63,7 @@ class ControllerLifecycleTest {
         val ready: Boolean, val stopped: Boolean, val component: BootComponentState,
         val actor: ApplicationPolicyActor?, val phase: PolicyOwnerPhase?, val notification: Boolean,
         val state: ControllerServiceState, val diagnostics: List<String>,
+        val activation: BootActivationState,
     )
 
     @Test fun nativeLifecyclePhase() {
@@ -108,7 +110,7 @@ class ControllerLifecycleTest {
                     val recreated = await(scenario, "recreated native READY") { it.ready }
                     assertSame(original.actor, recreated.actor)
                     checks.put("sameOwnerAfterRecreate", true)
-                    onHost(scenario) { assertEquals(ServiceControlResult.REQUESTED, ControllerForegroundService.startIfEnabled(it)) }
+                    serviceCommand(scenario) { activity, reply -> ControllerForegroundService.startIfEnabled(activity, reply) }
                     val repeated = await(scenario, "repeated start native READY") { it.ready }
                     assertSame(original.actor, repeated.actor)
                     checks.put("sameOwnerAfterRepeatedStart", true)
@@ -125,7 +127,7 @@ class ControllerLifecycleTest {
                     start(scenario)
                     val replacement = await(scenario, "explicit replacement READY") { it.ready }
                     assertNotSame(original.actor, replacement.actor)
-                    assertEquals(BootComponentState.ENABLED, replacement.component)
+                    assertTrue(BootServicePolicy.bootEnabled(replacement.component))
                     checks.put("explicitStartCreatedOwnerAfterClose", true)
                     stalePostMessageProbe(scenario, checks)
                 }
@@ -149,6 +151,8 @@ class ControllerLifecycleTest {
             assertEquals(expectsStopped, final.stopped)
             assertEquals(!expectsStopped, final.ready)
             assertEquals(!expectsStopped, final.notification)
+            assertEquals(if (expectsStopped) BootActivationState.OFF else BootActivationState.ON, final.activation)
+            assertTrue(BootServicePolicy.bootEnabled(final.component))
             if (!expectsStopped) assertEquals(PolicyOwnerPhase.READY, final.phase)
             if (checksSecureLock) {
                 val keyguard = context.getSystemService(KeyguardManager::class.java) ?: error("Keyguard observation unavailable")
@@ -166,6 +170,7 @@ class ControllerLifecycleTest {
                 .put("abi", Build.SUPPORTED_ABIS.first()).put("bootCount", bootCount)
                 .put("ready", final.ready).put("stopped", final.stopped)
                 .put("component", final.component.name).put("ownerPhase", final.phase?.name ?: "NONE")
+                .put("activation", final.activation.name)
                 .put("notificationPresent", final.notification).put("checks", checks)
             val bytes = receipt.toString().toByteArray(Charsets.UTF_8)
             assertTrue(bytes.size <= 4096)
@@ -176,28 +181,42 @@ class ControllerLifecycleTest {
     }
 
     private fun start(scenario: ActivityScenario<MainActivity>) {
-        onHost(scenario) { assertEquals(ServiceControlResult.REQUESTED, ControllerForegroundService.startExplicit(it)) }
+        serviceCommand(scenario) { activity, reply -> ControllerForegroundService.startExplicit(activity, callback = reply) }
         // Owner READY and the OS active-notification list are separate
         // observations. Require both in the same snapshot and deadline.
         val observed = await(scenario, "explicit start: native READY and active foreground notification required") { it.ready && it.notification }
-        assertEquals(BootComponentState.ENABLED, observed.component)
+        assertTrue(BootServicePolicy.bootEnabled(observed.component))
+        assertEquals(BootActivationState.ON, observed.activation)
         assertTrue("Explicit start must expose its actual foreground notification", observed.notification)
     }
 
     private fun stop(scenario: ActivityScenario<MainActivity>) {
-        onHost(scenario) { assertEquals(ServiceControlResult.REQUESTED, ControllerForegroundService.stopExplicit(it)) }
+        serviceCommand(scenario) { activity, reply -> ControllerForegroundService.stopExplicit(activity, callback = reply) }
         assertStopped(scenario)
     }
 
+    private fun serviceCommand(scenario: ActivityScenario<MainActivity>, command: (MainActivity, (ServiceControlResult) -> Unit) -> Unit) {
+        val completed = CountDownLatch(1)
+        val result = AtomicReference<ServiceControlResult>()
+        onHost(scenario) { activity -> command(activity) { value -> result.set(value); completed.countDown() } }
+        // Instrumentation thread only. The actual production worker commits and
+        // reopens the fixed DE record; no fake store or injected lifecycle flag.
+        assertTrue("Actual asynchronous lifecycle command did not finish", completed.await(10, TimeUnit.SECONDS))
+        assertEquals(ServiceControlResult.REQUESTED, result.get())
+    }
+
     private fun assertStopped(scenario: ActivityScenario<MainActivity>) {
-        val observed = await(scenario, "STOPPED, closed/absent owner, disabled receiver") {
-            it.stopped && (it.phase == null || it.phase == PolicyOwnerPhase.CLOSED) && !it.notification
+        val observed = await(scenario, "STOPPED, closed/absent owner, committed/reopened OFF") {
+            it.stopped && it.activation == BootActivationState.OFF && (it.phase == null || it.phase == PolicyOwnerPhase.CLOSED) && !it.notification
         }
-        assertEquals(BootComponentState.DISABLED, observed.component)
+        assertTrue(BootServicePolicy.bootEnabled(observed.component)) // Stable wake is never toggled.
+        assertEquals(BootActivationState.OFF, observed.activation)
         // Give already queued onStart/receiver work a bounded chance to contradict the assertion.
         val until = SystemClock.elapsedRealtime() + 500L
         while (SystemClock.elapsedRealtime() < until) {
-            assertTrue(observe(scenario).stopped)
+            val stable = observe(scenario)
+            assertTrue(stable.stopped)
+            assertEquals(BootActivationState.OFF, stable.activation)
             SystemClock.sleep(50L)
         }
     }
@@ -230,7 +249,7 @@ class ControllerLifecycleTest {
                 state.state == ControllerServiceState.LOCAL_SETTINGS_READY && state.policyOwnerReady && actor != null && phase == PolicyOwnerPhase.READY,
                 state.state == ControllerServiceState.STOPPED && !state.policyOwnerReady,
                 ControllerForegroundService.componentState(activity), actor, phase, found != null,
-                state.state, app.controllerLifecycleDiagnosticLines().orEmpty(),
+                state.state, app.controllerLifecycleDiagnosticLines().orEmpty(), app.controllerBootActivationState(),
             )
         }
         return value ?: throw HostNotResumed()
@@ -300,7 +319,8 @@ class ControllerLifecycleTest {
                 val observed = observe(scenario)
                 assertTrue("Retired view changed native readiness", observed.ready && observed.notification)
                 assertSame(before.actor, observed.actor)
-                assertTrue(observed.component == BootComponentState.ENABLED)
+                assertTrue(BootServicePolicy.bootEnabled(observed.component))
+                assertEquals(BootActivationState.ON, observed.activation)
                 SystemClock.sleep(50L)
             } while (SystemClock.elapsedRealtime() < until)
             // A stale reply must not resolve/reject the CURRENT view's callback.
@@ -310,7 +330,8 @@ class ControllerLifecycleTest {
             nativeEntry { Rust.ipc(current.view, current.logicalId, current.url, payload) }
             val closed = await(scenario, "current-view IPC STOP actually CLOSED") { it.stopped && it.phase == PolicyOwnerPhase.CLOSED && !it.notification }
             assertSame(before.actor, closed.actor)
-            assertEquals(BootComponentState.DISABLED, closed.component)
+            assertTrue(BootServicePolicy.bootEnabled(closed.component))
+            assertEquals(BootActivationState.OFF, closed.activation)
             val responseDeadline = SystemClock.elapsedRealtime() + 10_000L
             while (true) {
                 val state = evalProbe(scenario, current, PROBE_STATE_SCRIPT)
@@ -389,7 +410,8 @@ class ControllerLifecycleTest {
             }
             assertTrue("Retired actual view entered the custom protocol handler", rejected)
             val preserved = observe(scenario)
-            assertTrue(preserved.ready && preserved.notification && preserved.component == BootComponentState.ENABLED)
+            assertTrue(preserved.ready && preserved.notification && BootServicePolicy.bootEnabled(preserved.component))
+            assertEquals(BootActivationState.ON, preserved.activation)
             assertSame(expectedOwner, preserved.actor)
 
             // SAME carrier instance/headers, only the original Java view changes.
@@ -420,7 +442,8 @@ class ControllerLifecycleTest {
             }
             assertTrue("Current READ did not return the actual ready Android snapshot", currentRead)
             val afterRead = observe(scenario)
-            assertTrue(afterRead.ready && afterRead.notification && afterRead.component == BootComponentState.ENABLED)
+            assertTrue(afterRead.ready && afterRead.notification && BootServicePolicy.bootEnabled(afterRead.component))
+            assertEquals(BootActivationState.ON, afterRead.activation)
             assertSame(expectedOwner, afterRead.actor)
             checks.put("retiredNativeHttpReadRejected", true)
             checks.put("sameCurrentNativeHttpReadSucceeded", true)
