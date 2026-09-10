@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Authored/unverified application contract. Decisions and complete request
+// bindings are PUBLIC; channel confidentiality cannot prove authorization here.
+theory RequestAuthorization
+begin
+
+// Ranking only: prioritize existing constraints over unbounded previous-state
+// chains. This does not restrict traces or assume any security conclusion.
+heuristic: i
+
+builtins: signing
+
+restriction Equality:
+  "All left right #i. Eq(left, right) @i ==> left = right"
+
+// Different devices share the SAME PC and can sign the SAME published request.
+// No global owner token serializes unrelated operations: this conservatively
+// admits extra registry/request interleavings beyond the atomic Rust owner.
+rule CreatePc:
+  [ Fr(~pc), Fr(~epoch), Fr(~session_id), Fr(~logon_luid) ]
+  -->
+  [ !HostContext(~pc, ~epoch, ~session_id, ~logon_luid),
+    Out(<~pc, ~epoch, ~session_id, ~logon_luid>) ]
+
+// TCB, not a proved ceremony or hardware-authentication fact. This rule may
+// enroll arbitrarily many distinct devices under one existing PC. Fresh
+// revision tokens abstract allocator non-reuse, not u64 arithmetic/storage.
+rule TrustedEnrollment:
+  [ !HostContext(pc, epoch, session_id, logon_luid),
+    Fr(~device), Fr(~approval_sk), Fr(~denial_sk), Fr(~revision) ]
+  --[ Enrolled(pc, ~device, ~revision, pk(~approval_sk), pk(~denial_sk)),
+       ActiveRegistryProduced(pc, ~device, ~revision) ]->
+  [ !PhoneKeys(~device, ~approval_sk, ~denial_sk),
+    !EnrollmentKeys(pc, ~device, pk(~approval_sk), pk(~denial_sk)),
+    RegistrySlot(~device, pc, ~revision, 'active'),
+    Out(<pc, ~device, ~revision,
+      pk(~approval_sk), pk(~denial_sk)>) ]
+
+rule OpenActualRequest:
+  let binding = <pc, epoch, session_id, logon_luid, ~request_id, ~nonce,
+        ~content_digest, ~expiry>
+  in
+  [ !HostContext(pc, epoch, session_id, logon_luid),
+    Fr(~request_id), Fr(~nonce), Fr(~content_digest), Fr(~expiry) ]
+  --[ BuildingProduced(~request_id, pc, binding) ]->
+  [ RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]
+
+// Immutable keys originate ONLY in TrustedEnrollment. The previous theory also
+// kept these keys unchanged across every revision; current membership remains
+// linear and revocable. RequestOrigin links the existing slot ID to its binding
+// ONLY at actual open. Its input [+] changes search priority only; this origin
+// never replaces the request slot, frozen Snapshot or exact registry phase.
+
+// Each capture checks current registration, but registry changes and other
+// requests MAY interleave between captures. This overapproximates atomic Rust
+// snapshot collection. Repeated captures are harmless persistent duplicates;
+// any nonempty subset, including a full serial registry snapshot, is possible.
+rule CaptureEligibleDevice:
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key) ]
+  --[ SnapshotCaptured(pc, device, revision, binding),
+       BuildingProduced(request_id, pc, binding),
+       ActiveRegistryProduced(pc, device, revision) ]->
+  [ RequestSlot(request_id, pc, binding, 'building'),
+    RegistrySlot(device, pc, revision, 'active'),
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
+
+// A nonempty frozen snapshot permits publication. Changing the building phase
+// makes later capture impossible. The pending slot is GLOBAL to the request,
+// never one replay guard per eligible device or key revision.
+rule PublishRequest:
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
+  --[ RequestOpened(pc, binding) ]->
+  [ RequestSlot(request_id, pc, binding, 'pending'), Out(<'opened', pc, binding>) ]
+
+// Models the trusted native per-use authorization event for this exact binding.
+// It is not a network-supplied authenticated=true value. It cannot sign by
+// itself; the linear ticket must be consumed by the exact approval operation.
+rule UserAuthenticatesExactApproval:
+  [ !PhoneKeys(device, approval_sk, denial_sk),
+    In(<'opened', pc, binding>) ]
+  --[ UserAuthenticated(device, binding) ]->
+  [ ApprovalTicket(device, binding, approval_sk) ]
+
+rule SignExactApprovalOnce:
+  let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
+        'v1', device, 'approve', binding>
+  in
+  [ ApprovalTicket(device, binding, approval_sk) ]
+  --[ ApprovalSigned(device, binding) ]->
+  [ Out(<'decision', device, 'approve', binding, sign(approval_message, approval_sk)>) ]
+
+rule SignDenialWithoutApprovalAuthentication:
+  let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
+        'v1', device, 'deny', binding>
+  in
+  [ !PhoneKeys(device, approval_sk, denial_sk),
+    In(<'opened', pc, binding>) ]
+  --[ DenialSigned(device, binding) ]->
+  [ Out(<'decision', device, 'deny', binding, sign(denial_message, denial_sk)>) ]
+
+rule AcceptApproval:
+  let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
+        'v1', device, 'approve', binding>
+  in
+  [ RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding),
+    RequestSlot(request_id, pc, binding, 'pending'),
+    In(<'decision', device, 'approve', binding, signature>) ]
+  --[ Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE
+      RequestAccepted(pc, device, revision, binding, 'approve'),
+       ActiveRegistryProduced(pc, device, revision) ]->
+  [ RegistrySlot(device, pc, revision, 'active')
+    // CANARY_REPLAY_GUARD
+  ]
+
+rule AcceptDenial:
+  let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
+        'v1', device, 'deny', binding>
+  in
+  [ RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding),
+    RequestSlot(request_id, pc, binding, 'pending'),
+    In(<'decision', device, 'deny', binding, signature>) ]
+  --[ Eq(verify(signature, denial_message, denial_key), true),
+      RequestAccepted(pc, device, revision, binding, 'deny'),
+       ActiveRegistryProduced(pc, device, revision) ]->
+  [ RegistrySlot(device, pc, revision, 'active') ]
+
+// Real retirement of the linear active registration. The retired phase permits
+// explicit re-enrollment but never restores the old revision.
+rule RevokeCurrentDevice:
+  [ RegistrySlot(device, pc, revision, 'active') ]
+  --[ RegistryRevoked(pc, device, revision) ]->
+  [ RegistrySlot(device, pc, revision, 'retired') ]
+
+rule TrustedReenrollmentWithSameKeys:
+  [ RegistrySlot(device, pc, old_revision, 'retired'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    Fr(~new_revision) ]
+  --[ Enrolled(pc, device, ~new_revision, approval_key, denial_key),
+       ActiveRegistryProduced(pc, device, ~new_revision) ]->
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
+    Out(~new_revision) ]
+
+// Core replacement likewise invalidates the former revision even with the same
+// keys; no pending snapshot is silently upgraded to the new membership.
+rule TrustedReplacementWithSameKeys:
+  [ RegistrySlot(device, pc, old_revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    Fr(~new_revision) ]
+  --[ RegistryRevoked(pc, device, old_revision),
+      Enrolled(pc, device, ~new_revision, approval_key, denial_key),
+       ActiveRegistryProduced(pc, device, ~new_revision) ]->
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
+    Out(~new_revision) ]
+
+rule CancelExactRequest:
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
+  --[ RequestCancelled(binding) ]->
+  [ ]
+
+// Explicit native expiry transition, not a modeled numerical clock. There is
+// intentionally no claim that this rule executes within a wall-clock duration.
+rule ExpireExactRequest:
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
+  --[ RequestExpired(binding) ]->
+  [ ]
+
+lemma two_approvers_ordered_observed_witness:
+  exists-trace
+  "Ex pc first_device second_device first_revision second_revision binding request_id
+      first_approval_key first_denial_key second_approval_key second_denial_key
+      #e1 #e2 #b #c1 #c2 #o #u1 #u2 #s1 #s2 #a.
+    SnapshotCaptured(pc, first_device, first_revision, binding) @c1
+    & SnapshotCaptured(pc, second_device, second_revision, binding) @c2
+    & RequestOpened(pc, binding) @o
+    & ApprovalSigned(first_device, binding) @s1
+    & ApprovalSigned(second_device, binding) @s2
+    & RequestAccepted(pc, first_device, first_revision, binding, 'approve') @a
+    & not (first_device = second_device)
+    & c1 < o & c2 < o & o < s1 & o < s2 & s1 < a & s2 < a
+    & not (Ex purpose #other.
+      RequestAccepted(pc, second_device, second_revision, binding, purpose) @other)
+    & Enrolled(pc, first_device, first_revision, first_approval_key, first_denial_key) @e1
+    & Enrolled(pc, second_device, second_revision, second_approval_key, second_denial_key) @e2
+    & BuildingProduced(request_id, pc, binding) @b
+    & UserAuthenticated(first_device, binding) @u1
+    & UserAuthenticated(second_device, binding) @u2
+    & e1 < e2 & e2 < b & b < c1 & c1 < c2 & c2 < o
+    & o < u1 & u1 < s1 & s1 < u2 & u2 < s2 & s2 < a
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==>
+      ((d = first_device & r = first_revision & ak = first_approval_key & dk = first_denial_key & #x = #e1)
+       | (d = second_device & r = second_revision & ak = second_approval_key & dk = second_denial_key & #x = #e2)))
+    & (All d r other_binding #x. SnapshotCaptured(pc, d, r, other_binding) @x ==>
+      ((d = first_device & r = first_revision & other_binding = binding & #x = #c1)
+       | (d = second_device & r = second_revision & other_binding = binding & #x = #c2)))
+    & (All rid other_binding #x. BuildingProduced(rid, pc, other_binding) @x ==>
+      (rid = request_id & other_binding = binding & (#x = #b | #x = #c1 | #x = #c2)))
+    & (All d r #x. ActiveRegistryProduced(pc, d, r) @x ==>
+      ((d = first_device & r = first_revision & (#x = #e1 | #x = #c1 | #x = #a))
+       | (d = second_device & r = second_revision & (#x = #e2 | #x = #c2))))
+    & (All other_binding #x. RequestOpened(pc, other_binding) @x ==> (other_binding = binding & #x = #o))
+    & (All d r other_binding purpose #x. RequestAccepted(pc, d, r, other_binding, purpose) @x ==>
+      (d = first_device & r = first_revision & other_binding = binding & purpose = 'approve' & #x = #a))
+    & (All #x. UserAuthenticated(first_device, binding) @x ==> #x = #u1)
+    & (All #x. UserAuthenticated(second_device, binding) @x ==> #x = #u2)
+    & (All #x. ApprovalSigned(first_device, binding) @x ==> #x = #s1)
+    & (All #x. ApprovalSigned(second_device, binding) @x ==> #x = #s2)"
+
+end

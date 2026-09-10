@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { CONTEXTS, SOURCE_PATH, VARIANTS, prepareAttack, selectAttack } from './protocol-attack-witness.mjs';
+import { parseProofSummary } from './protocol-security.mjs';
 const source = readFileSync(new URL(`../${SOURCE_PATH}`, import.meta.url), 'utf8');
 
 test('only exact reviewed current source and fixed attack/context pairs are accepted', () => {
@@ -43,4 +44,22 @@ test('signature attack contains exact negated-auth implication and replay instan
   assert.ok(replay.includes('& a1 < a2'));
   assert.ok(replay.includes('All #x. ApprovalSigned(device, binding) @x ==> #x = #s'));
   assert.ok(replay.includes('All #x. UserAuthenticated(device, binding) @x ==> #x = #u'));
+});
+
+test('absence of an existential attack is distinct from finding a universal counterexample', () => {
+  const input = '/actual/input.spthy';
+  const result = (trace, label) => ({ status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false,
+    stdout: `summary of summaries:\n analyzed: ${input}\n attack (${trace}): ${label} (21 steps)\n`, stderr: '' });
+  for (const trace of ['exists-trace', 'all-traces']) {
+    const correct = trace === 'exists-trace' ? 'falsified - no trace found' : 'falsified - found trace';
+    const wrong = trace === 'exists-trace' ? 'falsified - found trace' : 'falsified - no trace found';
+    const expected = { attack: { trace, verdict: 'falsified' } };
+    assert.equal(parseProofSummary(result(trace, correct), expected, ['attack'], input).ok, true);
+    assert.equal(parseProofSummary(result(trace, wrong), expected, ['attack'], input).ok, false);
+    for (const label of ['analysis incomplete', 'unknown', `${correct} extra`]) assert.equal(parseProofSummary(result(trace, label), expected, ['attack'], input).ok, false);
+    for (const changed of [{ status: 1 }, { signal: 'SIGTERM' }, { cancelled: true }, { cleanupIncomplete: true },
+      { error: new Error('timeout') }, { stdout: result(trace, correct).stdout.replace(input, '/other.spthy') }]) {
+      assert.equal(parseProofSummary({ ...result(trace, correct), ...changed }, expected, ['attack'], input).ok, false);
+    }
+  }
 });

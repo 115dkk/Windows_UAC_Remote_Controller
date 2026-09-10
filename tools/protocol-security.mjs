@@ -35,8 +35,13 @@ export function parseProofSummary(result, expected, knownNames = Object.keys(exp
     const [, name, trace, text] = match;
     if (Object.hasOwn(verdicts, name)) reasons.push(`duplicate lemma ${name}`);
     if (!knownNames.includes(name)) reasons.push(`unregistered lemma ${name}`);
+    // A false universal has a counterexample; a false existential has NO trace.
+    // Preserve the original output and distinguish the two canonical labels.
+    const falsified = trace === 'exists-trace'
+      ? /^falsified(?: - no trace found)? \(\d+ steps\)\s*$/.test(text)
+      : /^falsified(?: - found trace)? \(\d+ steps\)\s*$/.test(text);
     const verdict = /^verified \(\d+ steps\)\s*$/.test(text) ? 'verified'
-      : /^falsified(?: - found trace)? \(\d+ steps\)\s*$/.test(text) ? 'falsified' : 'inconclusive';
+      : falsified ? 'falsified' : 'inconclusive';
     verdicts[name] = { trace, verdict };
   }
   for (const [name, wanted] of Object.entries(expected)) {

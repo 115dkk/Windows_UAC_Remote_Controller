@@ -1,0 +1,57 @@
+name: Two-approver observed witness experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/protocol-witness-shape']
+    paths:
+      - 'tools/protocol-two-approver-witness*'
+      - 'security/tamarin/candidates/CurrentRequestAuthorization42b.spthy'
+      - 'security/tamarin/candidates/TwoApproverObservedWitness.spthy'
+      - '.github/workflows/protocol-two-approver-witness.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-two-approver-witness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  investigate:
+    name: One current-model two-approver witness (not a security gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out exact experiment source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install prover dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends graphviz unzip
+      - name: Install existing pinned Tamarin and supported Maude
+        id: tamarin
+        run: node tools/install-tamarin.mjs
+      - name: Check exact source transformation and process guards
+        run: node --test tools/protocol-two-approver-witness.test.mjs tools/prover-process.test.mjs
+      - name: Search only the fixed ordered witness under unchanged process bounds
+        env:
+          TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
+        run: node tools/protocol-two-approver-witness.mjs
+      - name: Retain exact input, source bindings and complete or failed transcript
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
+        with:
+          name: protocol-two-approver-witness-${{ github.sha }}
+          path: artifacts/protocol-two-approver-witness/
+          if-no-files-found: error
+          retention-days: 14
