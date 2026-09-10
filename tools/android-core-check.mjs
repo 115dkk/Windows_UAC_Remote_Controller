@@ -4,16 +4,29 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_ANDROID_ABI, selectAndroidAbi } from './android-abi.mjs';
 
 export const NDK_REVISION = '28.2.13676358';
 export const ANDROID_API = 30;
-export const RUST_TARGET = 'aarch64-linux-android';
+export const RUST_TARGET = selectAndroidAbi().rustTarget;
 export const CLANG_TARGET_FLAG = `--target=${RUST_TARGET}${ANDROID_API}`;
-export const ANDROID_CORE_ARGS = Object.freeze([
-  'clippy', '--workspace', '--exclude', 'controller-app',
-  '--exclude', 'controller-uniffi-bindgen', '--all-targets',
-  '--all-features', '--locked', '--target', RUST_TARGET, '--', '-D', 'warnings',
-]);
+export const ANDROID_CORE_ARGS = androidCoreArguments();
+
+export function androidCoreArguments(abi = DEFAULT_ANDROID_ABI) {
+  return Object.freeze([
+    'clippy', '--workspace', '--exclude', 'controller-app',
+    '--exclude', 'controller-uniffi-bindgen', '--all-targets',
+    '--all-features', '--locked', '--target', selectAndroidAbi(abi).rustTarget, '--', '-D', 'warnings',
+  ]);
+}
+
+export function parseAndroidCoreArguments(args) {
+  if (Array.isArray(args) && args.length === 0) return DEFAULT_ANDROID_ABI;
+  if (!Array.isArray(args) || args.length !== 2 || args[0] !== '--abi' || typeof args[1] !== 'string') {
+    throw new Error('Usage: node tools/android-core-check.mjs [--abi arm64-v8a|x86_64]');
+  }
+  return selectAndroidAbi(args[1]).abi;
+}
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 
@@ -132,19 +145,21 @@ export function resolveAndroidNdk(environment = process.env, platform = process.
 }
 
 /** Pure child-only compiler environment; all host/general settings stay intact. */
-export function buildAndroidCompilerEnvironment(incoming, tools, platform = 'linux') {
+export function buildAndroidCompilerEnvironment(incoming, tools, platform = 'linux', abi = DEFAULT_ANDROID_ABI) {
+  const { rustTarget } = selectAndroidAbi(abi);
+  const clangTargetFlag = `--target=${rustTarget}${ANDROID_API}`;
   const environment = { ...incoming };
   const set = (name, value) => { environment[environmentKey(incoming, name, platform)] = value; };
-  for (const target of [RUST_TARGET, RUST_TARGET.replaceAll('-', '_')]) {
+  for (const target of [rustTarget, rustTarget.replaceAll('-', '_')]) {
     // cc-rs checks the hyphen form before the underscore form. Both name the
     // same Android target, and both must select the pinned toolchain.
     set(`CC_${target}`, tools.clang);
     set(`AR_${target}`, tools.ar);
   }
-  const appendFlag = (value) => value ? `${value} ${CLANG_TARGET_FLAG}` : CLANG_TARGET_FLAG;
-  const underscore = `CFLAGS_${RUST_TARGET.replaceAll('-', '_')}`;
+  const appendFlag = (value) => value ? `${value} ${clangTargetFlag}` : clangTargetFlag;
+  const underscore = `CFLAGS_${rustTarget.replaceAll('-', '_')}`;
   set(underscore, appendFlag(valueOf(incoming, underscore, platform)));
-  const hyphen = `CFLAGS_${RUST_TARGET}`;
+  const hyphen = `CFLAGS_${rustTarget}`;
   if (valueOf(incoming, hyphen, platform) !== undefined) {
     // cc-rs combines CFLAGS in ascending specificity, with this form last.
     // Preserve it too, while keeping API 30 as the final target selection.
@@ -159,14 +174,17 @@ export function commandExitCode(result) {
 }
 
 export function runAndroidCoreCheck({
+  args = [],
   environment = process.env, platform = process.platform, cwd = repository,
   spawn = spawnSync, stdout = process.stdout, stderr = process.stderr,
 } = {}) {
+  const abi = parseAndroidCoreArguments(args);
+  const argumentsForTarget = androidCoreArguments(abi);
   const ndk = resolveAndroidNdk(environment, platform);
-  const childEnvironment = buildAndroidCompilerEnvironment(environment, ndk, platform);
-  stdout.write(`Android Rust core Clippy: NDK ${ndk.revision}, API ${ANDROID_API}, ${ndk.hostTag}; excludes the Tauri shell and host-only binding generator, not an APK/device check.\n`);
-  stdout.write(`> cargo ${ANDROID_CORE_ARGS.join(' ')}\n`);
-  const result = spawn('cargo', [...ANDROID_CORE_ARGS], {
+  const childEnvironment = buildAndroidCompilerEnvironment(environment, ndk, platform, abi);
+  stdout.write(`Android Rust core Clippy: ${abi}, NDK ${ndk.revision}, API ${ANDROID_API}, ${ndk.hostTag}; excludes the Tauri shell and host-only binding generator, not an APK/device check.\n`);
+  stdout.write(`> cargo ${argumentsForTarget.join(' ')}\n`);
+  const result = spawn('cargo', [...argumentsForTarget], {
     cwd, env: childEnvironment, stdio: 'inherit', timeout: 900_000,
   });
   const code = commandExitCode(result);
@@ -180,8 +198,7 @@ export function runAndroidCoreCheck({
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    if (process.argv.length !== 2) throw new Error('usage: node tools/android-core-check.mjs');
-    process.exitCode = runAndroidCoreCheck();
+    process.exitCode = runAndroidCoreCheck({ args: process.argv.slice(2) });
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : 'Android core toolchain setup failed.'}\n`);
     process.exitCode = 1;

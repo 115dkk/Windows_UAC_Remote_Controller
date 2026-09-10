@@ -9,7 +9,9 @@ import {
   ANDROID_CORE_ARGS, CLANG_TARGET_FLAG, NDK_REVISION, RUST_TARGET,
   buildAndroidCompilerEnvironment, commandExitCode, ndkToolPaths,
   parseNdkRevision, resolveAndroidNdk, runAndroidCoreCheck, selectNdkRoot,
+  androidCoreArguments, parseAndroidCoreArguments,
 } from './android-core-check.mjs';
+import { ANDROID_ABIS, selectAndroidAbi } from './android-abi.mjs';
 
 function fixture(t, { revision = NDK_REVISION, missing = null, toolsAsDirectories = false } = {}) {
   const temporaryRoot = realpathSync(tmpdir());
@@ -174,4 +176,52 @@ test('runner keeps all core coverage and passes only a child environment without
   assert.equal(calls[0].options.env.CFLAGS, '-DHOST_BASE');
   assert.notEqual(calls[0].options.env, incoming);
   assert.equal(Object.hasOwn(incoming, 'CC_aarch64_linux_android'), false);
+});
+
+test('core CLI defaults to arm64 and admits only one explicit closed ABI selection', () => {
+  assert.equal(parseAndroidCoreArguments([]), 'arm64-v8a');
+  assert.deepEqual(androidCoreArguments(), ANDROID_CORE_ARGS);
+  for (const abi of ANDROID_ABIS) assert.equal(parseAndroidCoreArguments(['--abi', abi]), abi);
+  for (const args of [null, ['--abi'], ['--abi', undefined], ['--abi', ''], ['--abi', 'arm64'],
+    ['--abi', 'arm64-v8a,x86_64'], ['--abi', '__proto__'], ['--abi', 'constructor'],
+    ['--abi=x86_64'], ['--abi', 'x86_64', '--abi', 'arm64-v8a'], ['--abi', 'x86_64', '--target', 'other']]) {
+    assert.throws(() => parseAndroidCoreArguments(args));
+  }
+});
+
+test('both Android targets modify only their own compiler environment and preserve other ABI/host settings', () => {
+  for (const platform of ['linux', 'win32']) for (const abi of ANDROID_ABIS) {
+    const { rustTarget } = selectAndroidAbi(abi), underscored = rustTarget.replaceAll('-', '_');
+    const other = selectAndroidAbi(ANDROID_ABIS.find((value) => value !== abi)).rustTarget.replaceAll('-', '_');
+    const tools = ndkToolPaths(platform === 'win32' ? 'C:\\Synthetic NDK' : '/synthetic/ndk', platform);
+    const incoming = Object.freeze({ CC: 'host-cc', AR: 'host-ar', HOST_CC: 'host-only', CFLAGS: '-DHOST', PATH: 'host-path',
+      RUSTFLAGS: '-Dwarnings', CARGO_BUILD_TARGET: 'host-default',
+      [`CC_${other}`]: 'other-cc', [`AR_${other}`]: 'other-ar', [`CFLAGS_${other}`]: '-DOTHER',
+      [`CFLAGS_${underscored}`]: '-DSELECTED', [`CFLAGS_${rustTarget}`]: '--target=wrong -DUSER',
+    });
+    const result = buildAndroidCompilerEnvironment(incoming, tools, platform, abi);
+    for (const key of ['CC', 'AR', 'HOST_CC', 'CFLAGS', 'PATH', 'RUSTFLAGS', 'CARGO_BUILD_TARGET', `CC_${other}`, `AR_${other}`, `CFLAGS_${other}`]) {
+      assert.equal(result[key], incoming[key]);
+    }
+    for (const spelling of [rustTarget, underscored]) {
+      assert.equal(result[`CC_${spelling}`], tools.clang); assert.equal(result[`AR_${spelling}`], tools.ar);
+      assert.ok(result[`CFLAGS_${spelling}`].endsWith(`--target=${rustTarget}30`));
+    }
+    assert.equal(incoming[`CFLAGS_${underscored}`], '-DSELECTED');
+    assert.equal(Object.hasOwn(incoming, `CC_${underscored}`), false);
+    assert.deepEqual(androidCoreArguments(abi), ANDROID_CORE_ARGS.map((value) => value === RUST_TARGET ? rustTarget : value));
+  }
+});
+
+test('x86_64 core runner chooses its real target without host environment contamination', (t) => {
+  const data = fixture(t), calls = [], output = { write() {} };
+  const incoming = Object.freeze({ NDK_HOME: data.root, CC: 'host-cc' });
+  assert.equal(runAndroidCoreCheck({ args: ['--abi', 'x86_64'], environment: incoming, platform: process.platform,
+    stdout: output, stderr: output, spawn(command, args, options) { calls.push({ command, args, options }); return { status: 0 }; } }), 0);
+  assert.deepEqual(calls[0].args, androidCoreArguments('x86_64'));
+  assert.equal(calls[0].options.env.CFLAGS_x86_64_linux_android, '--target=x86_64-linux-android30');
+  assert.equal(calls[0].options.env.CC, 'host-cc');
+  assert.equal(Object.hasOwn(incoming, 'CC_x86_64_linux_android'), false);
+  assert.throws(() => runAndroidCoreCheck({ args: ['--abi', 'unknown'], environment: {},
+    spawn() { throw new Error('must not spawn'); } }), /ABI must be/);
 });

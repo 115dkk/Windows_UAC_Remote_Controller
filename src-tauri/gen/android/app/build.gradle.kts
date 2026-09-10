@@ -15,6 +15,9 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Validated once by the Rust plugin before any flavor/task is configured.
+val controllerSelectedAbi = extensions.getByType<Config>().controllerAbi
+
 android {
     compileSdk = 36
     ndkVersion = "28.2.13676358"
@@ -24,9 +27,9 @@ android {
         applicationId = "dev.dkk115.uacremote"
         minSdk = 30
         targetSdk = 36
-        // The second native component is currently built for this ABI only.
-        // Never package an ABI that would start without its policy owner.
-        ndk { abiFilters += "arm64-v8a" }
+        // Both genuine native components use the same single selected ABI.
+        ndk { abiFilters += controllerSelectedAbi.abi }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
@@ -74,8 +77,9 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.4")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+    androidTestImplementation("androidx.test:core:1.7.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }
 
 kotlin {
@@ -97,26 +101,28 @@ listOf("debug", "release").forEach { variant ->
     val title = variant.replaceFirstChar { it.uppercaseChar() }
     val generateControllerBindings = tasks.register<Exec>("generate${title}ControllerBindings") {
         workingDir(controllerRepository)
-        commandLine("node", "tools/build-android-bindings.mjs", "--abi", "arm64-v8a", "--variant", variant)
+        commandLine("node", "tools/build-android-bindings.mjs", "--abi", controllerSelectedAbi.abi, "--variant", variant)
+        inputs.property("controllerAbi", controllerSelectedAbi.abi)
         inputs.files(fileTree(controllerRepository.resolve("crates")) { include("**/*.rs", "**/Cargo.toml") })
         inputs.dir(controllerRepository.resolve("tools/controller-uniffi-bindgen/src"))
         inputs.files(controllerRepository.resolve("Cargo.toml"), controllerRepository.resolve("Cargo.lock"),
             controllerRepository.resolve("rust-toolchain.toml"),
-            controllerRepository.resolve("tools/build-android-bindings.mjs"), controllerRepository.resolve("tools/android-core-check.mjs"))
-        outputs.dir(layout.buildDirectory.dir("generated/controllerUniffi/$variant/arm64-v8a/kotlin"))
-        outputs.file(controllerCargoTarget.map { it.resolve("aarch64-linux-android/$variant/libuac_android_controller.so") })
+            controllerRepository.resolve("tools/build-android-bindings.mjs"), controllerRepository.resolve("tools/android-core-check.mjs"),
+            controllerRepository.resolve("tools/android-abi.mjs"))
+        outputs.dir(layout.buildDirectory.dir("generated/controllerUniffi/$variant/${controllerSelectedAbi.abi}/kotlin"))
+        outputs.file(controllerCargoTarget.map { it.resolve("${controllerSelectedAbi.rustTarget}/$variant/libuac_android_controller.so") })
     }
     android.sourceSets.getByName(variant).java.srcDir(
-        layout.buildDirectory.dir("generated/controllerUniffi/$variant/arm64-v8a/kotlin"),
+        layout.buildDirectory.dir("generated/controllerUniffi/$variant/${controllerSelectedAbi.abi}/kotlin"),
     )
     tasks.matching { it.name.startsWith("compile") && it.name.endsWith("${title}Kotlin") }
         .configureEach { dependsOn(generateControllerBindings) }
     val stageControllerLibrary = tasks.register<Copy>("stage${title}ControllerLibrary") {
         dependsOn(generateControllerBindings)
-        from(controllerCargoTarget.map { it.resolve("aarch64-linux-android/$variant/libuac_android_controller.so") })
-        into(layout.buildDirectory.dir("generated/controllerNative/$variant/arm64-v8a"))
+        from(controllerCargoTarget.map { it.resolve("${controllerSelectedAbi.rustTarget}/$variant/libuac_android_controller.so") })
+        into(layout.buildDirectory.dir("generated/controllerNative/$variant/${controllerSelectedAbi.abi}"))
         doFirst {
-            check(controllerCargoTarget.get().resolve("aarch64-linux-android/$variant/libuac_android_controller.so").isFile) {
+            check(controllerCargoTarget.get().resolve("${controllerSelectedAbi.rustTarget}/$variant/libuac_android_controller.so").isFile) {
                 "The matching controller library is missing; do not package an incomplete app."
             }
         }

@@ -7,7 +7,24 @@ import org.gradle.kotlin.dsl.get
 
 const val TASK_GROUP = "rust"
 
-open class Config {
+enum class ControllerAbi(val abi: String, val arch: String, val target: String, val rustTarget: String) {
+    ARM64("arm64-v8a", "arm64", "aarch64", "aarch64-linux-android"),
+    X86_64("x86_64", "x86_64", "x86_64", "x86_64-linux-android"),
+}
+
+// One closed tuple feeds both Tauri flavors/tasks and the separate controller.
+fun selectControllerAbi(controllerAbi: String?, abiList: String?, archList: String?, targetList: String?): ControllerAbi {
+    val selected = ControllerAbi.entries.singleOrNull { it.abi == (controllerAbi ?: abiList ?: "arm64-v8a") }
+        ?: error("Select exactly one supported controller ABI: arm64-v8a or x86_64.")
+    require((abiList == null || abiList == selected.abi) &&
+        (archList == null || archList == selected.arch) &&
+        (targetList == null || targetList == selected.target)) {
+        "controllerAbi and Tauri abiList/archList/targetList must describe the same single Android ABI."
+    }
+    return selected
+}
+
+open class Config(val controllerAbi: ControllerAbi) {
     lateinit var rootDirRel: String
 }
 
@@ -15,20 +32,16 @@ open class RustPlugin : Plugin<Project> {
     private lateinit var config: Config
 
     override fun apply(project: Project) = with(project) {
-        config = extensions.create("rust", Config::class.java)
-
-        // Both native components must exist for every installable ABI.
-        // Additional ABIs require extending the headless binding build first.
-        val defaultAbiList = listOf("arm64-v8a")
-        val abiList = (findProperty("abiList") as? String)?.split(',') ?: defaultAbiList
-
-        val defaultArchList = listOf("arm64")
-        val archList = (findProperty("archList") as? String)?.split(',') ?: defaultArchList
-
-        val targetsList = (findProperty("targetList") as? String)?.split(',') ?: listOf("aarch64")
-        require(abiList == defaultAbiList && archList == defaultArchList && targetsList == listOf("aarch64")) {
-            "This application currently packages both Rust components only for arm64-v8a."
+        fun abiProperty(name: String): String? {
+            val value = findProperty(name) ?: return null
+            require(value is String && value.length <= 64) { "Android ABI properties must be bounded strings." }
+            return value
         }
+        val selected = selectControllerAbi(abiProperty("controllerAbi"), abiProperty("abiList"), abiProperty("archList"), abiProperty("targetList"))
+        config = extensions.create("rust", Config::class.java, selected)
+        val abiList = listOf(selected.abi)
+        val archList = listOf(selected.arch)
+        val targetsList = listOf(selected.target)
 
         extensions.configure<ApplicationExtension> {
             @Suppress("UnstableApiUsage")
@@ -40,11 +53,11 @@ open class RustPlugin : Plugin<Project> {
                         abiFilters += abiList
                     }
                 }
-                defaultArchList.forEachIndexed { index, arch ->
+                archList.forEachIndexed { index, arch ->
                     create(arch) {
                         dimension = "abi"
                         ndk {
-                            abiFilters.add(defaultAbiList[index])
+                            abiFilters.add(abiList[index])
                         }
                     }
                 }

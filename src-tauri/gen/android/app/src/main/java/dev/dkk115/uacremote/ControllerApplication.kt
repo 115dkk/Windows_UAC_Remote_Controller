@@ -94,6 +94,24 @@ class ControllerApplication : Application() {
         // Only the already-promoted foreground service may request it below.
     }
 
+    /** Passive, fixed metadata for the framework's permission-gated Service.dump.
+     * No controller/CE/key lookup, creation, callback or worker wait occurs here.
+     * Object identities and request material are deliberately not serialized. */
+    internal fun controllerLifecycleDiagnosticLines(): List<String>? {
+        if (Looper.myLooper() != Looper.getMainLooper()) return null
+        val actor = policyActor
+        return listOf(
+            "owner_present=${actor != null}",
+            "owner_phase=${actor?.lifecyclePhase()?.name ?: "NONE"}",
+            "wanted=$serviceWanted",
+            "start_pending=$serviceStartPending",
+            "application_attached=${serviceToken != null}",
+            "construction_uncertain=$constructionUncertain",
+            "start_rejected=$startRejected",
+            "reported_state=${state.name}",
+        )
+    }
+
     /** Actual framework trace only, never a renderer/authentication boolean. */
     internal fun currentResumedControllerHost(): Activity? {
         if (Looper.myLooper() != Looper.getMainLooper()) return null

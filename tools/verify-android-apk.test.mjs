@@ -3,15 +3,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  EXPECTED_LIBRARIES, LIMITS, ApkInspectionError, apkPathFromArguments,
-  checkElf64Arm64, inspectArchiveListing, readUnzipOutput, unzipEnvironment,
+  EXPECTED_LIBRARIES, LIMITS, ApkInspectionError, apkPathFromArguments, apkSelectionFromArguments,
+  checkElf64Arm64, checkElf64Android, expectedLibrariesForAbi, inspectArchiveListing, readUnzipOutput, unzipEnvironment,
 } from './verify-android-apk.mjs';
+import { ANDROID_ABIS, selectAndroidAbi } from './android-abi.mjs';
 
-function elf() {
+function elf(machine = 183) {
   const bytes = Buffer.alloc(0x8000);
   bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
   bytes.writeUInt16LE(3, 16);
-  bytes.writeUInt16LE(183, 18);
+  bytes.writeUInt16LE(machine, 18);
   bytes.writeUInt32LE(1, 20);
   bytes.writeBigUInt64LE(64n, 32);
   bytes.writeUInt16LE(64, 52);
@@ -164,4 +165,90 @@ test('exit, signal, timeout, missing output and diagnostics cannot become succes
       (error) => error instanceof ApkInspectionError && !error.message.includes('hidden'));
   }
   assert.throws(() => readUnzipOutput('/workspace/app.apk', null, { spawn: () => { throw new Error('synthetic hidden path'); } }), /did not start/);
+});
+
+test('optional ABI CLI is closed and defaults to arm64 without inferring an architecture from APK names', () => {
+  assert.deepEqual(apkSelectionFromArguments(['app-x86_64-debug.apk'], '/workspace', 'linux'), { apk: '/workspace/app-x86_64-debug.apk', abi: 'arm64-v8a' });
+  for (const abi of ANDROID_ABIS) {
+    assert.deepEqual(apkSelectionFromArguments(['app.apk', '--abi', abi], '/workspace', 'linux'), { apk: '/workspace/app.apk', abi });
+    assert.equal(apkPathFromArguments(['app.apk', '--abi', abi], '/workspace', 'linux'), '/workspace/app.apk');
+  }
+  for (const args of [['app.apk', '--abi'], ['app.apk', '--abi', undefined], ['app.apk', '--abi', null],
+    ['app.apk', '--abi', ''], ['app.apk', '--abi', '__proto__'], ['app.apk', '--abi', 'constructor'],
+    ['app.apk', '--abi', 'arm64-v8a,x86_64'], ['app.apk', '--abi', 'arm64'], ['app.apk', '--abi', 'x86'],
+    ['app.apk', '--abi', 'x86_64 '], ['app.apk', '--abi', 'x86_64', '--abi', 'arm64-v8a'],
+    ['--abi', 'x86_64', 'app.apk'], ['app.apk', '--abi=x86_64'], ['app.apk', '--abi', 'x86_64', 'second.apk']]) {
+    assert.throws(() => apkSelectionFromArguments(args, '/workspace', 'linux'), ApkInspectionError);
+  }
+  assert.throws(() => apkSelectionFromArguments(['app.apk', '--abi', 'x86_64'], '/workspace', 'win32'), /Linux/);
+});
+
+test('x86_64 must be explicitly selected and retains every 16KiB ELF range/alignment guard', () => {
+  const bytes = elf(62), before = Buffer.from(bytes);
+  const selected = checkElf64Android(bytes, 'x86_64');
+  assert.equal(selected.machine, 62); assert.equal(selected.architecture, 'x86_64');
+  assert.deepEqual(selected.loadSegments, checkElf64Arm64(elf()).loadSegments);
+  assert.deepEqual(bytes, before);
+  assert.throws(() => checkElf64Arm64(bytes), ApkInspectionError);
+  assert.throws(() => checkElf64Android(bytes), ApkInspectionError);
+  assert.throws(() => checkElf64Android(elf(183), 'x86_64'), ApkInspectionError);
+  for (const abi of ANDROID_ABIS) {
+    const machine = selectAndroidAbi(abi).elfMachine;
+    for (const alignment of [0n, 1n, 4096n, 8192n, 16385n]) {
+      const changed = elf(machine); changed.writeBigUInt64LE(alignment, 64 + 48);
+      assert.throws(() => checkElf64Android(changed, abi), /alignment|congruence/);
+    }
+    const table = elf(machine); table.writeBigUInt64LE((1n << 64n) - 1n, 32);
+    assert.throws(() => checkElf64Android(table, abi), /table/);
+    const overflow = elf(machine); overflow.writeBigUInt64LE((1n << 64n) - 1n, 64 + 16);
+    assert.throws(() => checkElf64Android(overflow, abi), /range/);
+    const truncated = elf(machine).subarray(0, 0x4000);
+    assert.throws(() => checkElf64Android(truncated, abi), /range/);
+    const endian = elf(machine); endian[5] = 2;
+    assert.throws(() => checkElf64Android(endian, abi), ApkInspectionError);
+  }
+  for (const abi of [null, 'constructor', '__proto__', 'all', 'arm64-v8a,x86_64']) assert.throws(() => checkElf64Android(bytes, abi), ApkInspectionError);
+});
+
+test('both APK ABIs require the same three real library names and reject missing, duplicate or mixed-ABI members', () => {
+  assert.deepEqual(expectedLibrariesForAbi(), EXPECTED_LIBRARIES);
+  for (const abi of ANDROID_ABIS) {
+    const required = expectedLibrariesForAbi(abi);
+    assert.ok(Object.isFrozen(required));
+    assert.deepEqual(required, ['libcontroller_app_lib.so', 'libuac_android_controller.so', 'libjnidispatch.so'].map((name) => `lib/${abi}/${name}`));
+    const result = inspectArchiveListing(listing(['AndroidManifest.xml', 'lib/', `lib/${abi}/`, ...required, `lib/${abi}/libc++_shared.so`]), abi);
+    assert.deepEqual(result.advertisedAbis, [abi]);
+    assert.equal(result.nativeLibraryCount, 4); assert.equal(result.additionalSameAbiLibraries, 1);
+    if (abi === 'x86_64') assert.equal(Object.hasOwn(result, 'arm64LibraryCount'), false);
+    assert.throws(() => inspectArchiveListing(listing(required.slice(1)), abi), /missing/);
+    assert.throws(() => inspectArchiveListing(listing([...required, required[0]]), abi), /duplicate/);
+    const other = ANDROID_ABIS.find((value) => value !== abi);
+    assert.throws(() => inspectArchiveListing(listing([...required, ...expectedLibrariesForAbi(other)]), abi), /other than/);
+    assert.throws(() => inspectArchiveListing(listing([...required, `lib/${other}/`]), abi), /other than/);
+    for (const name of [`lib/${abi}/nested/libx.so`, `lib/${abi}/not-a-library`, `lib/${abi}/../libx.so`, 'lib/x86/libx.so']) {
+      assert.throws(() => inspectArchiveListing(listing([...required, name]), abi), ApkInspectionError);
+    }
+  }
+  assert.throws(() => inspectArchiveListing(listing(expectedLibrariesForAbi('x86_64'))), ApkInspectionError, 'default arm64 does not auto-adopt an x86_64 APK');
+});
+
+test('x86_64 unzip streaming stays bounded and cannot select arbitrary or other-ABI libraries', () => {
+  const calls = [];
+  const spawn = (command, args, options) => { calls.push({ command, args, options }); return goodResult(Buffer.from('synthetic fixture only')); };
+  for (const member of expectedLibrariesForAbi('x86_64')) readUnzipOutput('/workspace/app.apk', member, { abi: 'x86_64', spawn });
+  assert.equal(calls.length, 3);
+  for (let index = 0; index < calls.length; index++) {
+    assert.deepEqual(calls[index].args, ['-p', '/workspace/app.apk', expectedLibrariesForAbi('x86_64')[index]]);
+    assert.equal(calls[index].options.maxBuffer, LIMITS.libraryBytes);
+    assert.equal(calls[index].options.timeout, LIMITS.commandMillis);
+    assert.equal(calls[index].options.shell, false);
+    assert.equal(calls[index].options.killSignal, 'SIGKILL');
+  }
+  for (const member of [...EXPECTED_LIBRARIES, 'assets/arbitrary', 'lib/x86_64/libother.so']) {
+    assert.throws(() => readUnzipOutput('/workspace/app.apk', member, { abi: 'x86_64', spawn }), /fixed/);
+  }
+  for (const abi of [null, 'all', 'constructor', '__proto__', 'arm64-v8a,x86_64']) {
+    assert.throws(() => readUnzipOutput('/workspace/app.apk', null, { abi, spawn }), ApkInspectionError);
+  }
+  assert.equal(calls.length, 3, 'rejected selections never invoke unzip');
 });

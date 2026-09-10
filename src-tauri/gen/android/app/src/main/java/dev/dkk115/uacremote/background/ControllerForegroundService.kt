@@ -18,6 +18,8 @@ import android.os.Looper
 import android.os.UserManager
 import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.MainActivity
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 /** Foreground lifetime only; no socket, approval action, key or CE store at boot. */
 class ControllerForegroundService : Service() {
@@ -157,6 +159,31 @@ class ControllerForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Android's existing dumpsys/DUMP-permission path only. ActivityThread
+     * dispatches Service.dump on main; a different thread gets no guessed state.
+     * Ignore all caller arguments. Fixed bounded fields, no body/key/alias/paths,
+     * no Activity, native owner initialization or synchronous worker request. */
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            writer.println("UAC_LIFECYCLE_UNAVAILABLE_V1")
+            return
+        }
+        val owner = (application as? ControllerApplication)?.controllerLifecycleDiagnosticLines()
+        if (owner == null) {
+            writer.println("UAC_LIFECYCLE_UNAVAILABLE_V1")
+            return
+        }
+        writer.println("UAC_LIFECYCLE_BEGIN_V1")
+        writer.println("promoted=$promoted")
+        writer.println("attached=$attached")
+        writer.println("destroyed=$destroyed")
+        writer.println("retiring=$retiring")
+        writer.println("user_unlock=${observeUnlock(this).name}")
+        writer.println("boot_component=${componentState(this).name}")
+        for (line in owner) writer.println(line)
+        writer.println("UAC_LIFECYCLE_END_V1")
+    }
 
     override fun onDestroy() {
         destroyed = true

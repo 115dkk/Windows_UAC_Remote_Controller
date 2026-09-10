@@ -1,11 +1,32 @@
 # Development handoff — 2026-09-10
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Verified implementation baseline: `7b9df1fd3901f5dc2fbca4312d640b8fe5520b2b` on
+Verified implementation baseline: `07b34fd46e2451bc01106445ca09c887980e0d57` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 10 evening
+
+The later07b34fd checks completed: Windows fullRust13m41, Linux9m25,
+Androidcore2m52, actualAPK/Kotlin7m56, Windowspackage11m12 and notificationrenderer
+6m9 passed. Its normal protocol gate proved all six request-safety properties
+with fresh same-invocation helpers and all pinned-channel checks. Three original
+honest request witnesses and two request canaries timed out; the overall protocol
+gate remains failed. Earlier individual runs below retain their own scope.
+
+The isolated one-time Windows context diagnostic is retained on
+`codex/pcp-context-probe` at7545210. Its corrected nativebootstrap passed build and
+PE/payload checks, then the user explicitly authorized one additional immediate
+attempt. That attempt ran22:03:56–22:04:43KST and returnedE500000D/ERROR_INVALID_DATA
+in admission, before creating the diagnostic service or either protected folder.
+ROOT confirmed those objects absent22:06. No provider measurement was obtained.
+The exclusive one-attempt authorization is consumed. Further Windows elevation
+requires a new user request; read-only/source diagnosis can continue.
+
+Android native boot/foreground lifecycle CI is the next implementation slice.
+It needs a genuine x86_64 product build (Tauri plus matching controllerJNI),
+instrumentation and host-observed reboot/update state. Existing policy JVM tests
+and the separate notification renderer provide different, narrower evidence.
 
 - `7b9df1f` Windows/Linux full Rust quality and Android Rust-core jobs passed in
   [Quality34461333180](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34461333180).
@@ -32,8 +53,8 @@ experiments and unmerged protocol experiments. New edits require new ROOT checks
   relaxation, UAC/Secure Desktop or antivirus change was made.
 - Daybreak Blue proposed a separate fixed-function SYSTEM provider diagnostic to
   distinguish restricted-token effects from LocalSystem context. ROOT requested
-  explicit user permission, which the user granted. Source preparation is in
-  progress; the diagnostic service has not been created or executed. The error
+  explicit user permission, which the user granted. The later diagnostic attempt
+  is recorded above. The error
   alone does not prove TPM failure or an access-denied cause.
 - Isolated protocol `65664b8`
   [CI34475391432](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34475391432)
@@ -116,10 +137,9 @@ required formal proofs, final security audit, fresh approved architecture pass,
 release automation and native acceptance remain unfinished. No usable full-product
 prerelease has been published.
 
-The latest user approval window ends22:00KST on2026-09-10; earlier times are
-superseded and the one-time reminder was deleted. The user explicitly authorized
-the separate one-time SYSTEM diagnostic install/run/remove experiment. Execution
-still follows ROOT review and actual build checks. Local screen access remains
+The22:00KST window ended. The subsequently authorized single attempt is also
+consumed. The one-time reminder was deleted; further elevation requires new user
+direction. Local screen access remains
 unavailable; CI galleries and supplied images are the visual evidence paths.
 C/E cleanup waits until actual prerelease publication, not just a
 draft/build. Preserve source, keys, user data and sufficient release/evidence

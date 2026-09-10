@@ -8,15 +8,15 @@ import {
 } from 'node:fs';
 import { posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ANDROID_ABIS, DEFAULT_ANDROID_ABI, androidElfIdentity, selectAndroidAbi } from './android-abi.mjs';
 import {
-  ANDROID_API, CLANG_TARGET_FLAG, NDK_REVISION, RUST_TARGET,
+  ANDROID_API, NDK_REVISION,
   buildAndroidCompilerEnvironment, commandExitCode, ndkToolPaths,
   resolveAndroidNdk, selectNdkRoot,
 } from './android-core-check.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const UNIFFI_VERSION = '0.32.0';
-const ABI = 'arm64-v8a';
 const LIBRARY = 'uac_android_controller';
 const PACKAGE = 'dev.dkk115.uacremote.nativecore';
 const MARKER = '.controller-uniffi.generated.json';
@@ -39,7 +39,7 @@ const FIXED_PREFLIGHT_MESSAGES = new Set([
   'Unsupported Android binding arguments. Use --help.',
   'Duplicate Android binding option. Use --help.',
   'Unsupported Android binding option. Use --help.',
-  'Only the arm64-v8a ABI is implemented; no other ABI was built.',
+  'ABI must be arm64-v8a or x86_64.',
   'Variant must be debug or release.',
   'Rust host metadata is unavailable or oversized.',
   'Rust host metadata must contain one supported host target.',
@@ -67,6 +67,7 @@ const FIXED_PREFLIGHT_MESSAGES = new Set([
   'Generated output contains a linked or nonregular entry.',
   'The successful Android build did not produce the expected regular cdylib.',
   'The built cdylib has an unexpected hard-link relationship.',
+  'The built cdylib ELF header does not match the selected Android ABI.',
   'The generator did not produce the expected Kotlin bindings.',
   `No NDK location is configured. Set NDK_HOME or an Android SDK path containing NDK ${NDK_REVISION}.`,
   `NDK source.properties must specify exactly one Pkg.Revision = ${NDK_REVISION}.`,
@@ -92,7 +93,7 @@ const FIXED_IO_DIAGNOSTICS = new Map([
   ['ENOSPC', 'Build storage has insufficient space.'],
   ['EIO', 'A build filesystem operation failed.'],
 ]);
-const HELP = `Usage: node tools/build-android-bindings.mjs [--abi arm64-v8a] [--variant debug|release] [--dry-run]\n\nBuilds android-bindings with installed NDK ${NDK_REVISION}, API ${ANDROID_API}, then\nruns the matching UniFFI ${UNIFFI_VERSION} host generator on that actual Android .so.\nDefault: arm64-v8a, debug. Other ABIs are not implemented in this slice.\nCARGO_TARGET_DIR is honored; otherwise the workspace target directory is used.\nKotlin output is fixed under app/build/generated/controllerUniffi/<variant>/<abi>.\n--dry-run prints a plan only: no child process, installed-tool validation or writes.\n--help prints this text. No APK build, library copying, installation or deployment.\n`;
+const HELP = `Usage: node tools/build-android-bindings.mjs [--abi arm64-v8a|x86_64] [--variant debug|release] [--dry-run]\n\nBuilds android-bindings with installed NDK ${NDK_REVISION}, API ${ANDROID_API}, then\nruns the matching UniFFI ${UNIFFI_VERSION} host generator on that actual Android .so.\nDefault: arm64-v8a, debug. One explicitly selected ABI is built per invocation.\nCARGO_TARGET_DIR is honored; otherwise the workspace target directory is used.\nKotlin output is fixed under app/build/generated/controllerUniffi/<variant>/<abi>.\n--dry-run prints a plan only: no child process, installed-tool validation or writes.\n--help prints this text. No APK build, library copying, installation or deployment.\n`;
 
 function pathsFor(platform) {
   if (platform === 'win32') return win32;
@@ -136,9 +137,9 @@ export function parseArguments(argv) {
     throw new Error('Unsupported Android binding arguments. Use --help.');
   }
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) {
-    return Object.freeze({ help: true, dryRun: false, abi: ABI, variant: 'debug' });
+    return Object.freeze({ help: true, dryRun: false, abi: DEFAULT_ANDROID_ABI, variant: 'debug' });
   }
-  const options = { help: false, dryRun: false, abi: ABI, variant: 'debug' };
+  const options = { help: false, dryRun: false, abi: DEFAULT_ANDROID_ABI, variant: 'debug' };
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -148,8 +149,8 @@ export function parseArguments(argv) {
     if (flag !== '--abi' && flag !== '--variant') throw new Error('Unsupported Android binding option. Use --help.');
     const value = argv[++index];
     if (flag === '--abi') {
-      if (value !== ABI) throw new Error('Only the arm64-v8a ABI is implemented; no other ABI was built.');
-      options.abi = value;
+      if (!ANDROID_ABIS.includes(value)) throw new Error('ABI must be arm64-v8a or x86_64.');
+      options.abi = selectAndroidAbi(value).abi;
     } else {
       if (!['debug', 'release'].includes(value)) throw new Error('Variant must be debug or release.');
       options.variant = value;
@@ -176,7 +177,9 @@ export function parseRustHost(output, platform) {
 export function createBuildPlan({ options, environment, platform, cwd, ndk, hostTarget = null }) {
   const paths = pathsFor(platform);
   // Revalidate exported-call inputs as well as the CLI path.
-  if (options?.abi !== ABI || !['debug', 'release'].includes(options?.variant)) throw new Error('Unsupported Android binding plan.');
+  if (!ANDROID_ABIS.includes(options?.abi) || !['debug', 'release'].includes(options?.variant)) throw new Error('Unsupported Android binding plan.');
+  const { rustTarget } = selectAndroidAbi(options.abi);
+  const clangTargetFlag = `--target=${rustTarget}${ANDROID_API}`;
   cwd = absoluteLocalPath(cwd, 'Workspace', platform);
   const configured = environmentValue(environment, 'CARGO_TARGET_DIR', platform);
   let targetDirectory;
@@ -202,20 +205,20 @@ export function createBuildPlan({ options, environment, platform, cwd, ndk, host
   if (ndk.clang !== derivedTools.clang || ndk.ar !== derivedTools.ar) throw new Error('NDK tools must match the selected pinned toolchain layout.');
   const rustc = environmentValue(environment, 'RUSTC', platform) || 'rustc';
   if (typeof rustc !== 'string' || rustc.length > 4096 || /[\u0000-\u001f\u007f]/.test(rustc)) throw new Error('Configured RUSTC must be one executable path, without control characters.');
-  const nativeEnvironment = buildAndroidCompilerEnvironment(environment, ndk, platform);
-  const linkerKey = environmentKey(environment, 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER', platform);
+  const nativeEnvironment = buildAndroidCompilerEnvironment(environment, ndk, platform, options.abi);
+  const linkerKey = environmentKey(environment, `CARGO_TARGET_${rustTarget.replaceAll('-', '_').toUpperCase()}_LINKER`, platform);
   nativeEnvironment[linkerKey] = ndk.clang;
   const appDirectory = paths.join(cwd, 'src-tauri', 'gen', 'android', 'app');
   const generatedParent = paths.join(appDirectory, 'build', 'generated', 'controllerUniffi');
   const output = paths.join(generatedParent, options.variant, options.abi);
   if (!contained(generatedParent, output, platform)) throw new Error('Generated output escaped its fixed parent.');
-  const library = paths.join(targetDirectory, RUST_TARGET, options.variant, `lib${LIBRARY}.so`);
+  const library = paths.join(targetDirectory, rustTarget, options.variant, `lib${LIBRARY}.so`);
   const config = paths.join(output, CONFIG);
   const kotlinDirectory = paths.join(output, 'kotlin');
   const markerText = `${JSON.stringify({ schemaVersion: 1, tool: 'controller-uniffi-bindgen', uniffi: UNIFFI_VERSION, library: LIBRARY, package: PACKAGE, abi: options.abi, variant: options.variant })}\n`;
   if (hostTarget !== null) parseRustHost(`host: ${hostTarget}\n`, platform);
   return {
-    abi: options.abi, variant: options.variant, platform, cwd, targetDirectory,
+    abi: options.abi, rustTarget, variant: options.variant, platform, cwd, targetDirectory,
     appDirectory, generatedParent, output, library, config, kotlinDirectory,
     kotlinFile: paths.join(output, ...KOTLIN_RELATIVE.split('/')),
     marker: paths.join(output, MARKER), markerText, configText: CONFIG_TEXT,
@@ -223,10 +226,10 @@ export function createBuildPlan({ options, environment, platform, cwd, ndk, host
     probe: { command: rustc, args: ['-vV'], environment: { ...environment } },
     build: {
       command: 'cargo', environment: nativeEnvironment,
-      args: ['rustc', '--locked', '--package', 'android-bindings', '--lib', '--target', RUST_TARGET,
+      args: ['rustc', '--locked', '--package', 'android-bindings', '--lib', '--target', rustTarget,
         '--manifest-path', paths.join(cwd, 'Cargo.toml'), '--target-dir', targetDirectory,
         '--profile', options.variant === 'debug' ? 'dev' : 'release', '--',
-        '-C', `linker=${ndk.clang}`, '-C', `link-arg=${CLANG_TARGET_FLAG}`],
+        '-C', `linker=${ndk.clang}`, '-C', `link-arg=${clangTargetFlag}`],
     },
     generate: {
       command: 'cargo', environment: { ...environment },
@@ -344,6 +347,11 @@ function prepareOutput(plan) {
   outputEntries(plan);
 }
 
+export function validateBuiltLibraryHeader(bytes, abi = DEFAULT_ANDROID_ABI) {
+  try { androidElfIdentity(bytes, abi); }
+  catch { throw new Error('The built cdylib ELF header does not match the selected Android ABI.'); }
+}
+
 function requireLibrary(plan) {
   const paths = pathsFor(plan.platform);
   safeDirectory(paths.dirname(plan.library), plan.platform);
@@ -366,6 +374,21 @@ function requireLibrary(plan) {
       throw new Error('The built cdylib has an unexpected hard-link relationship.');
     }
   }
+  const fd = openSync(plan.library, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.size !== metadata.size) {
+      throw new Error('The successful Android build did not produce the expected regular cdylib.');
+    }
+    const header = Buffer.alloc(64);
+    let used = 0;
+    while (used < header.length) {
+      const count = readSync(fd, header, used, header.length - used, used);
+      if (count === 0) break;
+      used += count;
+    }
+    validateBuiltLibraryHeader(header.subarray(0, used), plan.abi);
+  } finally { closeSync(fd); }
   // UniFFI parses this exact built library. No host .dll, stale-path fallback,
   // synthetic library, checksum omission, or copying into Tauri is attempted.
 }
@@ -427,7 +450,7 @@ export function runAndroidBindings({
   const generate = invoke(plan.generate, 'generation');
   if (generate.code !== 0) return generate.code;
   files.requireGenerated(plan);
-  stdout.write('Android arm64 cdylib and matching Kotlin generation completed. No APK packaging or device behavior was validated.\n');
+  stdout.write(`Android ${plan.abi} cdylib and matching Kotlin generation completed. No APK packaging or device behavior was validated.\n`);
   return 0;
 }
 
