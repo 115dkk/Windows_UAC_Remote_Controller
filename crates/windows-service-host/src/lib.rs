@@ -49,13 +49,15 @@ pub use contract::{
     ServiceError, ServiceOperation, ServiceSnapshot, ServiceState, SetupFailure,
 };
 
-// Opaque native integration resources, not UI/CLI/network commands. Creation
-// proves the actual fixed SCM service context; no raw handle, path or caller
+// Opaque native integration resources, not UI/CLI/network commands. Server
+// creation proves its fixed SCM context; clients independently authenticate
+// that server and their own fixed installed role. No raw handle, path or caller
 // authority claim is accepted. A peer observation alone cannot enroll a phone.
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use ffi::{
-    PairingPeer, PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe,
-    PairingPipeProgress, PairingServerEndpoint, PairingServerEndpoints,
+    PairingClient, PairingClientError, PairingClientProgress, PairingClientStage, PairingPeer,
+    PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe, PairingPipeProgress,
+    PairingServerEndpoint, PairingServerEndpoints,
 };
 
 pub const SERVICE_NAME: &str = "UacRemoteController";

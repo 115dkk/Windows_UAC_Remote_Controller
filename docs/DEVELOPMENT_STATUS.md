@@ -1,11 +1,37 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `5534d1683838b8e6072890fe16b4422b3dfda7a2` on
+Last checked implementation revision: `a72b0d0b16bc8d15079b08bc7c49f6e7aca0d4d7` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
+
+At a72b0d0, all six triggered workflows passed: complete Windows/Linux Rust
+quality with actual Analyzer/canaries, Android Rust core, real Tamarin, both app
+packages, notification renderer, Windows/Linux UI gallery and actual Android
+product lifecycle. The narrowly awaited focus assertion preserves the same
+heading/presence/focus check; production UI behavior is unchanged. Android's
+directory durability operation now uses the public O_NOFOLLOW/fstat/S_ISDIR API.
+
+[Actual lifecycle34538785548](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34538785548)
+completed all seven native phases and twelve observations with the durable
+activation repair. OFF survived immediate real reboot and package replacement;
+manual reopening stayed stopped. Explicit restart committed ON. The next
+file-encrypted reboot retained ON while locked, with a foreground notification
+and no Rust/native owner. Ordinary System UI entry of the public synthetic test
+PIN produced READY before target Activity/instrumentation on that same boot.
+ROOT retained all582 original hash-checked command logs, reparsed seven native
+receipts and six System UI hierarchies, and checked the first-unlock predicates.
+Physical authentication and request delivery remain unverified. This is an
+emulator lifecycle result, not a completed remote UAC product or release.
+
+The repair resolves the observed OFF-to-ON resurrection in this actual full
+sequence. The previous failures below remain historical evidence; their exact
+OS persistence cause was not established. New native Windows client source being
+authored after a72b0d0 is outside this CI proof.
+
+The following5534d16 checkpoint is historical and retains its original scope.
 
 At5534d16, complete Windows/Linux/Android Rust quality, actual Analyzer/canaries,
 both app packages, notification rendering and fixed Google attestation-status
@@ -25,7 +51,8 @@ The new repair uses a fixed private device-protected ON/OFF record and one
 Application-owned asynchronous registration operation. A stable manifest-enabled
 wake receiver is never toggled; the old component is filterless for migration.
 The persistence, callback and lifecycle source plus matching host evidence guards
-are authored and statically reviewed; corrected native behavior awaits new CI.
+were authored and statically reviewed at that checkpoint. Corrected native
+behavior is now covered by the a72b0d0 result above.
 This is not a published release or a new local UAC/provider experiment.
 
 The following65f9883 checkpoint is historical and retains its original scope.
@@ -66,9 +93,10 @@ code. These changes passed full Windows/Linux quality, including actual Analyzer
 and its canaries. Linux logs explicitly include all14 frozen-codec cases and16
 portable startup-phase cases. They are neither a TPM fix nor completed native
 pairing. New native pipe-peer authentication, bounded server I/O and Android
-frozen-candidate owner integration are separate source slices awaiting fresh CI.
+frozen-candidate owner integration are separate source slices subsequently
+covered by5534d16 and a72b0d0 quality checks.
 
-The checkpoints below are historical; the65f9883 result above is the current
+The checkpoints below are historical; the a72b0d0 result above is the current
 completed lifecycle/first-unlock and quality baseline.
 
 At0713333 the full Quality run34510391762 passed: Windows15m00, Linux8m54,

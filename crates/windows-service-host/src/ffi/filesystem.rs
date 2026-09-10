@@ -204,6 +204,17 @@ impl ValidatedPairingInstallation {
         self.check_image(reported, &self.controller, &self.controller_pin)
     }
 
+    pub(super) fn check_current_client_image(
+        &self,
+        role: super::pairing_peer::PairingPeerRole,
+    ) -> Result<(), ServiceError> {
+        let current = std::env::current_exe().map_err(|_| ServiceError::UntrustedInstallation)?;
+        match role {
+            super::pairing_peer::PairingPeerRole::Starter => self.check_controller_image(&current),
+            super::pairing_peer::PairingPeerRole::Helper => self.check_service_image(&current),
+        }
+    }
+
     fn check_image(
         &self,
         reported: &Path,
@@ -234,7 +245,25 @@ impl ValidatedPairingInstallation {
 #[cfg(target_pointer_width = "64")]
 pub(super) fn validate_pairing_installation() -> Result<ValidatedPairingInstallation, ServiceError>
 {
-    let installation = validate_installation(true)?;
+    pinned_pairing_installation(true)
+}
+
+/// Only the two fixed installed client roles. No caller path or current-image
+/// assertion is imported; the actual current image must match its protected pin.
+#[cfg(target_pointer_width = "64")]
+pub(super) fn validate_pairing_client_installation(
+    role: super::pairing_peer::PairingPeerRole,
+) -> Result<ValidatedPairingInstallation, ServiceError> {
+    let installation = pinned_pairing_installation(false)?;
+    installation.check_current_client_image(role)?;
+    Ok(installation)
+}
+
+#[cfg(target_pointer_width = "64")]
+fn pinned_pairing_installation(
+    require_service_image: bool,
+) -> Result<ValidatedPairingInstallation, ServiceError> {
+    let installation = validate_installation(require_service_image)?;
     let controller = installation
         .executable()
         .parent()

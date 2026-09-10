@@ -66,13 +66,13 @@ use crate::{ServiceError, native};
 mod io;
 pub use io::{PairingPipe, PairingPipeProgress};
 
-const STARTER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingStarter.v1";
-const HELPER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingHelper.v1";
+pub(super) const STARTER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingStarter.v1";
+pub(super) const HELPER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingHelper.v1";
 const PIPE_BUFFER_BYTES: u32 = 4096;
 // Concrete data/EA/attribute read+write, READ_CONTROL and SYNCHRONIZE. Crucially
 // not FILE_APPEND_DATA == FILE_CREATE_PIPE_INSTANCE (0x4). Future clients must
 // request this concrete subset, NOT GENERIC_WRITE/GENERIC_ALL (which include 4).
-const STARTER_ACCESS: u32 = 0x0012_019b;
+pub(super) const STARTER_ACCESS: u32 = 0x0012_019b;
 const MAX_TOKEN_BYTES: usize = 65_536;
 const MAX_GROUPS: usize = 128;
 const GROUP_ENABLED: u32 = 4;
@@ -167,7 +167,7 @@ fn native_error(stage: PairingPeerStage, error: WinError) -> PairingPeerError {
         hresult: error.code().0,
     }
 }
-fn cleanup_state() -> Result<(), PairingPeerError> {
+pub(super) fn cleanup_state() -> Result<(), PairingPeerError> {
     BOUNDARY_HEALTH.check()
 }
 
@@ -497,7 +497,10 @@ fn observe_pipe_open(pipe: HANDLE) -> Result<(), PairingPeerError> {
     unsafe { PeekNamedPipe(pipe, None, 0, None, None, None) }
         .map_err(|e| native_error(PairingPeerStage::QueryPeer, e))
 }
-fn process_identity(process: HANDLE, expected_pid: u32) -> Result<u64, PairingPeerError> {
+pub(super) fn process_identity(
+    process: HANDLE,
+    expected_pid: u32,
+) -> Result<u64, PairingPeerError> {
     // SAFETY: retained process, synchronize/query rights; zero-time nonblocking wait.
     if unsafe { WaitForSingleObject(process, 0) } != WAIT_TIMEOUT
         || unsafe { GetProcessId(process) } != expected_pid
@@ -545,13 +548,13 @@ fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), 
 }
 
 #[derive(Eq, PartialEq)]
-struct SessionEpoch {
+pub(super) struct SessionEpoch {
     id: u32,
     logon: i64,
     connected: i64,
 }
 impl SessionEpoch {
-    fn observe(id: u32) -> Result<Self, PairingPeerError> {
+    pub(super) fn observe(id: u32) -> Result<Self, PairingPeerError> {
         if id == 0 || id == u32::MAX {
             return Err(PairingPeerError::Rejected);
         }
@@ -746,7 +749,7 @@ fn luid(value: LUID) -> u64 {
 }
 
 #[derive(Eq, PartialEq)]
-struct TokenFacts {
+pub(super) struct TokenFacts {
     user: Vec<u8>,
     integrity: Vec<u8>,
     groups: Vec<(Vec<u8>, u32)>,
@@ -759,7 +762,7 @@ struct TokenFacts {
     ui_access: u32,
 }
 impl TokenFacts {
-    fn observe(process: HANDLE) -> Result<Self, PairingPeerError> {
+    pub(super) fn observe(process: HANDLE) -> Result<Self, PairingPeerError> {
         let mut token = HANDLE::default();
         // SAFETY: exact retained client process; query primary token, never
         // impersonate/duplicate it or acquire adjustment rights.
@@ -798,7 +801,11 @@ impl TokenFacts {
             ui_access: token_scalar(token.raw(), TokenUIAccess)?,
         })
     }
-    fn require(&self, role: PairingPeerRole, pipe_session: u32) -> Result<(), PairingPeerError> {
+    pub(super) fn require(
+        &self,
+        role: PairingPeerRole,
+        pipe_session: u32,
+    ) -> Result<(), PairingPeerError> {
         if self.session == 0
             || self.session == u32::MAX
             || self.session != pipe_session

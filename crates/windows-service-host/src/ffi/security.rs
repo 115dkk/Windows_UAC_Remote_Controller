@@ -90,7 +90,7 @@ pub(crate) fn require_elevated() -> Result<(), ServiceError> {
     reject_thread_impersonation()
 }
 
-fn reject_thread_impersonation() -> Result<(), ServiceError> {
+pub(super) fn reject_thread_impersonation() -> Result<(), ServiceError> {
     let mut token = HANDLE::default();
     // SAFETY: borrowed current-thread pseudo-handle, initialized aligned output,
     // QUERY only. OpenAsSelf controls access checking, not effective identity.

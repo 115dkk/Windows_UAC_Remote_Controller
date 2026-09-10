@@ -166,6 +166,59 @@ pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, Se
     Ok(service)
 }
 
+/// A CLIENT retains/query-checks the fixed service, never substitutes its own
+/// PID. Medium callers already have these two query rights; no READ_CONTROL or
+/// control/mutation right is added. The client separately authenticates its real
+/// pipe's SYSTEM owner/DACL and retained server process before protocol I/O.
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn pairing_service_for_client(
+    executable: &Path,
+) -> Result<(Service, u32), ServiceError> {
+    let service = open(
+        &manager(false)?,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
+    )?
+    .ok_or(ServiceError::NotInstalled)?;
+    let pid = pairing_client_service_pid(&service, executable)?;
+    Ok((service, pid))
+}
+
+#[cfg(target_pointer_width = "64")]
+fn pairing_client_service_pid(service: &Service, executable: &Path) -> Result<u32, ServiceError> {
+    verify_config(service, executable, false)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
+        != ServiceSidType::Restricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    let observed = status(service)?;
+    if !initialization_complete(&observed) {
+        return Err(ServiceError::UnexpectedState);
+    }
+    observed
+        .process_id
+        .filter(|pid| *pid != 0)
+        .ok_or(ServiceError::UnexpectedState)
+}
+
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn recheck_pairing_service_for_client(
+    original: &Service,
+    executable: &Path,
+    expected_pid: u32,
+) -> Result<(), ServiceError> {
+    if expected_pid == 0 || pairing_client_service_pid(original, executable)? != expected_pid {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    let (_current, pid) = pairing_service_for_client(executable)?;
+    if pid != expected_pid {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(())
+}
+
 pub(crate) fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     let manager = manager(false)?;
     let Some(service) = open(
