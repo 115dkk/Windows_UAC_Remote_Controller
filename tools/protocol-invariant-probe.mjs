@@ -24,6 +24,7 @@ export const DEPENDENT_PROFILE = 'request-opened-with-building';
 export const REQUEST_SECURITY_PROFILE = 'request-security-with-helpers';
 export const REQUEST_SECURITY_HELPERS_ONLY_PROFILE = 'request-security-helpers-only';
 export const REQUEST_SECURITY_ONE_PROPERTY_PROFILE = 'request-security-one-property';
+export const REQUEST_SECURITY_CANARY_BFS_PROFILE = 'request-security-canary-bfs';
 export const ACTIVE_REGISTRY_LINEAGE_PROFILE = 'active-registry-lineage';
 export const ACTIVE_REGISTRY_HELPER = 'active_registry_production_precedes_revocation';
 export const ACTIVE_REGISTRY_PROPERTY = 'no_accept_after_revision_revoked';
@@ -175,11 +176,11 @@ function helper(name) {
 }
 
 function requestSecurityCandidate(selected) {
-  return selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
+  return selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE || selected === REQUEST_SECURITY_CANARY_BFS_PROFILE;
 }
 
 function pinnedSecurityCandidate(selected) {
-  return selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
+  return selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE || selected === REQUEST_SECURITY_CANARY_BFS_PROFILE;
 }
 
 export function invariantProfile(selected, context = 'baseline', property) {
@@ -187,6 +188,7 @@ export function invariantProfile(selected, context = 'baseline', property) {
   if (selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE) {
     if (!ONE_PROPERTY_CASES.some((entry) => entry.context === context && entry.property === property)) reject();
   } else if (property !== undefined) reject();
+  if (selected === REQUEST_SECURITY_CANARY_BFS_PROFILE && context === 'baseline') reject();
   if (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) {
     if (context !== 'baseline') reject();
     return {
@@ -332,7 +334,7 @@ export function selectInvariantRunArguments(args) {
     invariantProfile(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
     return { selected: REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property };
   }
-  if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, ACTIVE_REGISTRY_LINEAGE_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
+  if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, ACTIVE_REGISTRY_LINEAGE_PROFILE, REQUEST_SECURITY_CANARY_BFS_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
       typeof args[1] === 'string' && args[1].startsWith('--context=')) {
     const selected = args[0].slice('--profile='.length);
     const context = args[1].slice('--context='.length);
@@ -358,7 +360,7 @@ function directoryPrefix(selected, context, property) {
 export function requiredInvariantVerdicts(selected, context = 'baseline', property) {
   const profile = invariantProfile(selected, context, property);
   return Object.fromEntries(profile.requiredLemmas.map((name) => [name, { trace: 'all-traces',
-    verdict: (selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE) && context !== 'baseline' && name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified' : 'verified',
+    verdict: (selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE || selected === REQUEST_SECURITY_CANARY_BFS_PROFILE) && context !== 'baseline' && name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified' : 'verified',
   }]));
 }
 
@@ -366,7 +368,16 @@ export function invariantArguments(input, selected, context = 'baseline', proper
   const expected = requiredInvariantVerdicts(selected, context, property);
   if (typeof input !== 'string' || !isAbsolute(input) || resolve(input) !== input || basename(input) !== 'request.input.spthy') reject();
   if ((selected === DEPENDENT_PROFILE || requestSecurityCandidate(selected) || selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context, property))) reject();
-  return proofArguments(input, expected);
+  const argv = proofArguments(input, expected);
+  if (selected === REQUEST_SECURITY_CANARY_BFS_PROFILE) {
+    // Fixed search-order-only experiment on the SAME pinned three-helper
+    // candidate. No depth bound, formula, assumption, resource or cleanup change.
+    // Tamarin 1.12.0 Main/TheoryLoader.hs stopOnTrace maps "bfs" to CutBFS:
+    // https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/src/Main/TheoryLoader.hs#L338
+    same(argv.filter((argument) => argument.startsWith('--stop-on-trace=')), ['--stop-on-trace=DFS']);
+    return argv.map((argument) => argument === '--stop-on-trace=DFS' ? '--stop-on-trace=BFS' : argument);
+  }
+  return argv;
 }
 
 export function selectedInvariantSummary(result, selected, input, context = 'baseline', property) {
@@ -503,6 +514,7 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   const helpersOnlyProfile = selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE;
   const onePropertyProfile = selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
   const lineageProfile = selected === ACTIVE_REGISTRY_LINEAGE_PROFILE;
+  const canaryBfsProfile = selected === REQUEST_SECURITY_CANARY_BFS_PROFILE;
   root = realpathSync(root);
   const directory = freshDirectory(root, selected, context, property);
   const cancellation = new AbortController();
@@ -511,24 +523,26 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   // completed its bounded cleanup; cancellation itself is irreversible.
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = {
-    classification: lineageProfile ? 'BASELINE_ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY'
+    classification: canaryBfsProfile ? 'MUTANT_REQUEST_SECURITY_CANARY_BFS_PROBE_ONLY'
+      : lineageProfile ? 'BASELINE_ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY'
       : onePropertyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_ONE_PROPERTY_PROBE' : 'MUTANT_REQUEST_SECURITY_ONE_PROPERTY_PROBE')
       : helpersOnlyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_HELPERS_ONLY_PROBE' : 'MUTANT_REQUEST_SECURITY_HELPERS_ONLY_PROBE')
       : securityProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_PROBE_ONLY' : 'MUTANT_REQUEST_SECURITY_PROBE_ONLY')
       : context === 'baseline' ? CLASSIFICATION : 'MUTANT_INVARIANT_PROBE_ONLY', eligibleAsNormalGate: false, baselineOnly: context === 'baseline',
     normalGateStatus: 'not-run', ...profile,
-    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
-    selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : null,
+    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile || canaryBfsProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
+    selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : canaryBfsProfile ? REQUIRED_COUNTEREXAMPLES[context] : null,
     candidateReference: pinnedSecurityCandidate(selected) ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
       sha256: REQUEST_SECURITY_CANDIDATE_HASHES[context], proofAuthority: 'none-source-identity-only' } : null,
     lineageReference: lineageProfile ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
       sha256: REQUEST_SECURITY_CANDIDATE_HASHES.baseline, relationship: 'exact-after-erasing-six-lineage-actions-and-new-helper', proofAuthority: 'none-source-identity-only' } : null,
-    selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
+    selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile || canaryBfsProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
+    searchStrategy: canaryBfsProfile ? { method: 'BFS', change: 'search-order-only', depthBound: null } : null,
     requiredExpected: requiredInvariantVerdicts(selected, context, property),
     helperProofScope: 'same-invocation-same-context-only', importedProofs: false,
     unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' })),
     negativeControls: CONTEXT_NAMES.slice(1).map((name) => ({ name,
-      status: name === context ? (securityProfile || onePropertyProfile ? 'required-counterexample-selected' : 'mutated-context-only-counterexample-not-selected') : 'not-selected' })),
+      status: name === context ? (securityProfile || onePropertyProfile || canaryBfsProfile ? 'required-counterexample-selected' : 'mutated-context-only-counterexample-not-selected') : 'not-selected' })),
     bounds: { proofInvocations: 1, timeoutMs: PROBE_TIMEOUT_MS, combinedOutputBytes: PROBE_OUTPUT_BYTES, heapGiB: 2, runtimeThreads: 2 },
     attempted: false, completed: false, inputsUnchanged: false, selectedProof: null, status: 'not-started',
   };
@@ -589,7 +603,9 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       manifestSha256: manifestFile.sha256, sourceBindings: bindings,
       sources, binary, binaryMetadata: tool, arguments: argv,
       toolchainAuthority: 'fixed workflow install-tamarin.mjs validates pinned Tamarin and Maude distributions; this run retains the binary digest',
-      scope: lineageProfile
+      scope: canaryBfsProfile
+        ? 'Only the exact manifest canary counterexample in this mutant, conditional on ALL THREE reused helpers verifying in this SAME invocation/context. The candidate is byte-identical to its pinned 8629bac input, without lineage additions. Fixed BFS changes search order only, with no depth bound or imported assumptions/proofs. All other original eight obligations and the other mutant remain unselected; no baseline, normal-gate or aggregate security pass is claimed.'
+        : lineageProfile
         ? 'Only baseline no_accept_after_revision_revoked, conditional on ALL FOUR reused helpers verifying in this SAME invocation. All other original eight obligations and both mutant counterexamples remain unselected. The prior candidate hash supplies no proof authority; no normal-gate or aggregate security pass is claimed.'
         : onePropertyProfile
         ? 'Only ONE closed selected original property in this exact context, and ALL THREE reused helpers verified in this SAME invocation. All other original obligations remain unselected; no baseline/previous helper proof is imported, no normal-gate or aggregate security pass is claimed.'

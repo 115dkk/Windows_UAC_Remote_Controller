@@ -10,7 +10,7 @@ import {
   DEPENDENT_PROFILE, CONTEXT_NAMES, CONTEXT_MUTATIONS, DEPENDENT_HELPER_INSERTION, REUSED_BUILDING_INSERTION,
   REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS,
   REQUEST_SECURITY_HELPERS_ONLY_PROFILE, REQUEST_SECURITY_REFERENCE_COMMIT, REQUEST_SECURITY_CANDIDATE_HASHES,
-  REQUEST_SECURITY_ONE_PROPERTY_PROFILE, ONE_PROPERTY_CASES,
+  REQUEST_SECURITY_ONE_PROPERTY_PROFILE, ONE_PROPERTY_CASES, REQUEST_SECURITY_CANARY_BFS_PROFILE,
   ACTIVE_REGISTRY_LINEAGE_PROFILE, ACTIVE_REGISTRY_HELPER, ACTIVE_REGISTRY_PROPERTY, ACTIVE_REGISTRY_HELPERS,
   ACTIVE_REGISTRY_HELPER_INSERTION, ACTIVE_REGISTRY_ACTION_EDITS, eraseActiveRegistryLineage,
   REQUEST_SECURITY_HELPER_INSERTION, REQUIRED_COUNTEREXAMPLES, requiredInvariantVerdicts,
@@ -312,24 +312,28 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY one fixed baseline lineage diagnostic, not legacy profiles or the normal gate', () => {
+test('CI runs ONLY two fixed mutant BFS diagnostics, not baseline, legacy profiles or the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
   }
   assert.ok(workflow.includes('workflow_dispatch:'));
-  assert.doesNotMatch(workflow, /--helper=|--property=|matrix:|matrix\.|missing-approval-signature|missing-replay-consumption/u);
+  assert.doesNotMatch(workflow, /--helper=|--property=|--context=baseline|context: baseline|property:/u);
+  assert.ok(workflow.includes('fail-fast: false'));
+  assert.deepEqual([...workflow.matchAll(/- context: ([a-z-]+)/gu)].map((match) => match[1]), CONTEXT_NAMES.slice(1));
+  assert.doesNotMatch(workflow, /^\s+context:\s*\[/mu);
   assert.deepEqual([...workflow.matchAll(/run: node tools\/protocol-invariant-probe\.mjs ([^\r\n]+)/gu)].map((match) => match[1]), [
-    '--profile=active-registry-lineage --context=baseline',
+    '--profile=request-security-canary-bfs "--context=${{ matrix.context }}"',
   ]);
   assert.equal((workflow.match(/runs-on: ubuntu-24\.04/gu) ?? []).length, 1);
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
+  assert.ok(workflow.includes('node --test tools/protocol-invariant-probe.test.mjs tools/prover-process.test.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-active-registry-lineage-baseline-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-canary-bfs-${{ matrix.context }}-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
-  assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=|--stop-on-trace=|--profile=request-/u);
+  assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=|--stop-on-trace=|--profile=active-registry-lineage|--profile=request-security-one-property/u);
   for (const action of workflow.matchAll(/uses: ([^\s]+)@([^\s]+)/gu)) assert.match(action[2], /^[a-f0-9]{40}$/u);
 });
 
@@ -534,7 +538,7 @@ test('security evidence remains explicitly isolated, context-attributed and hone
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
   assert.ok(probeSource.includes("'required-counterexample-selected'"));
-  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile ? null'));
+  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile || canaryBfsProfile ? null'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes("'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs'"));
@@ -648,7 +652,7 @@ test('helpers-only report never attributes original obligations or prior candida
   assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected'));
-  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile ?'));
+  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile || canaryBfsProfile ?'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes('hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]'));
@@ -918,7 +922,7 @@ for (const { context, property } of ONE_PROPERTY_CASES) {
 }
 
 test('one-property attribution is explicit and cannot become a cached-helper or aggregate normal-gate claim', () => {
-  assert.ok(probeSource.includes('selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : null'));
+  assert.ok(probeSource.includes('selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : canaryBfsProfile ? REQUIRED_COUNTEREXAMPLES[context] : null'));
   assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
   assert.ok(probeSource.includes('invariantRunSummary(result, selected, input, inputsUnchanged, context, property)'));
   assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
@@ -970,6 +974,7 @@ test('lineage CLI is exactly one baseline-only profile with no property, helper,
 test('lineage adds exactly six active-production actions and one required helper, with two exact inverse stages', () => {
   const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE;
   const { normalized, candidate } = insertInvariantHelpers(source, selected, 'baseline', manifest);
+  assert.equal(digest(candidate), '42b467b376c93d3e237021e420798a67549a1aedd17ccde6a001eb73c3d7385d', '65664b lineage candidate remains unchanged');
   const previous = insertInvariantHelpers(source, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, 'baseline', manifest);
   assert.ok(Object.isFrozen(ACTIVE_REGISTRY_ACTION_EDITS) && Object.isFrozen(ACTIVE_REGISTRY_HELPERS));
   assert.deepEqual(ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => edit.rule), [
@@ -1175,5 +1180,207 @@ test('lineage report distinguishes its changed candidate from the prior hash and
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
-  assert.doesNotMatch(probeSource, /--stop-on-trace=BFS|--bound=|no_duplicate_captures|CaptureOnce/u);
+  assert.doesNotMatch(probeSource, /--bound=|no_duplicate_captures|CaptureOnce/u);
+  assert.doesNotMatch(invariantArguments(lineageInput(), ACTIVE_REGISTRY_LINEAGE_PROFILE, 'baseline').join('\n'), /--stop-on-trace=BFS/u);
+});
+
+function canaryBfsInput(context, invocation = 'fixture') {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${REQUEST_SECURITY_CANARY_BFS_PROFILE}-${context}-${invocation}`, 'request.input.spthy');
+}
+
+function canaryBfsOutput(context, overrides = {}, invocation = 'fixture') {
+  const profile = invariantProfile(REQUEST_SECURITY_CANARY_BFS_PROFILE, context);
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${canaryBfsInput(context, invocation)}\n${profile.candidateLemmas.map((name) => {
+      const trace = REQUEST_WITNESS_NAMES.includes(name) ? 'exists-trace' : 'all-traces';
+      const value = overrides[name] ?? (REQUEST_SECURITY_HELPERS.includes(name) ? 'verified (14 steps)'
+        : name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified - found trace (17 steps)' : 'analysis incomplete (0 steps)');
+      return ` ${name} (${trace}): ${value}`;
+    }).join('\n')}\n` };
+}
+
+test('canary BFS CLI permits exactly two mutant contexts and no baseline, third argument or strategy override', () => {
+  const selected = REQUEST_SECURITY_CANARY_BFS_PROFILE;
+  assert.equal(selected, 'request-security-canary-bfs');
+  assert.deepEqual(CONTEXT_NAMES.slice(1), ['missing-approval-signature', 'missing-replay-consumption']);
+  for (const context of CONTEXT_NAMES.slice(1)) {
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${selected}`, `--context=${context}`]), { selected, context });
+    const env = { CI: 'true', GITHUB_ACTIONS: 'true', TAMARIN_BIN: resolve('SYNTHETIC-tamarin-prover'), GITHUB_SHA: 'a'.repeat(40) };
+    assert.deepEqual(admitInvariantEnvironment([`--profile=${selected}`, `--context=${context}`], env, 'linux'), {
+      selected, context, binary: env.TAMARIN_BIN, commit: env.GITHUB_SHA,
+    });
+    assert.throws(() => admitInvariantEnvironment([`--profile=${selected}`, `--context=${context}`], env, 'win32'));
+    assert.throws(() => invariantProfile(selected, context, REQUIRED_COUNTEREXAMPLES[context]));
+    for (const extra of [`--property=${REQUIRED_COUNTEREXAMPLES[context]}`, '--prove=all', '--stop-on-trace=BFS', '--stop-on-trace=DFS', '--reuse', '--bound=1', `--context=${context}`]) {
+      assert.throws(() => selectInvariantRunArguments([`--profile=${selected}`, `--context=${context}`, extra]));
+    }
+  }
+  for (const args of [[], [`--profile=${selected}`], [`--helper=${selected}`],
+    [`--profile=${selected}`, '--context=baseline'], [`--profile=${selected}`, '--context=__proto__'],
+    [`--profile=${selected}`, '--context=constructor'], [`--profile=${selected}`, '--context=other'],
+    [`--profile=${selected}`, '--context=missing-approval-signature '],
+    ['--context=missing-approval-signature', `--profile=${selected}`],
+    [`--profile=${selected} --context=missing-approval-signature`],
+    [`--profile=${selected}`, '--context=missing-approval-signature', '--context=missing-replay-consumption'],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+  assert.throws(() => invariantProfile(selected));
+  assert.throws(() => insertInvariantHelpers(source, selected, 'baseline', manifest));
+  assert.throws(() => requiredInvariantVerdicts(selected, 'baseline'));
+});
+
+for (const context of CONTEXT_NAMES.slice(1)) {
+  test(`${context} BFS uses the exact pinned three-helper candidate, original formulas and exact manifest mutation`, () => {
+    const selected = REQUEST_SECURITY_CANARY_BFS_PROFILE, property = REQUIRED_COUNTEREXAMPLES[context];
+    const old = insertInvariantHelpers(source, REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, manifest, property);
+    const observed = insertInvariantHelpers(source, selected, context, manifest);
+    assert.deepEqual(observed, old);
+    assert.equal(digest(observed.candidate), REQUEST_SECURITY_CANDIDATE_HASHES[context]);
+    assert.equal(eraseInvariantCandidate(observed.candidate, selected, context, manifest), observed.normalized);
+    assert.equal(digest(observed.normalized), ORIGIN_HASH);
+    assert.deepEqual(admitInvariantCandidate(source, observed.candidate, selected, context, manifest), observed);
+    assert.deepEqual(insertInvariantHelpers(source.replace(/\r?\n/g, '\r\n'), selected, context, manifest), observed);
+    const anchor = '\nlemma honest_approve_trace:\n';
+    assert.equal(observed.candidate.slice(observed.candidate.indexOf(anchor)), observed.normalized.slice(observed.normalized.indexOf(anchor)), 'all original nine formulas are unchanged');
+    assert.doesNotMatch(observed.candidate, /ActiveRegistryProduced|active_registry_production_precedes_revocation/u);
+    assert.equal((observed.candidate.match(/\bBuildingProduced\(/gu) ?? []).length, 3);
+    const canary = manifest.models.find((model) => model.id === 'request-authorization').canaries.find((entry) => entry.id === context);
+    assert.deepEqual(canary.mutation, CONTEXT_MUTATIONS[context]);
+    assert.deepEqual(canary.expected, { [property]: { trace: 'all-traces', verdict: 'falsified' } });
+    assert.equal(invariantContextSource(source, selected, context, manifest), observed.normalized.replace(canary.mutation.from, canary.mutation.to));
+    for (const changed of [
+      observed.candidate + '\n',
+      observed.candidate.replace(REUSED_BUILDING_INSERTION, ''),
+      observed.candidate.replace('lemma enrolled_revision_unique [reuse]:', 'lemma enrolled_revision_unique:'),
+      observed.candidate.replace('lemma request_opened_unique [reuse]:', 'lemma request_opened_unique:'),
+      observed.candidate.replace('[use_induction,reuse]', '[sources]'),
+      observed.candidate.replace(BUILDING_ACTION_EDITS[0].to, BUILDING_ACTION_EDITS[0].from),
+      observed.candidate.replace(BUILDING_ACTION_EDITS[1].to, BUILDING_ACTION_EDITS[1].from),
+      observed.candidate.replace(`lemma ${property}:`, `lemma ${property} [reuse]:`),
+      observed.candidate.replace('left = right', 'left = left'),
+      observed.candidate + '\nrestriction unreviewed: "All #i. False()@i ==> F"\n',
+      insertInvariantHelpers(source, ACTIVE_REGISTRY_LINEAGE_PROFILE, 'baseline', manifest).candidate,
+    ]) {
+      assert.notEqual(changed, observed.candidate);
+      assert.throws(() => admitInvariantCandidate(source, changed, selected, context, manifest));
+      assert.throws(() => eraseInvariantCandidate(changed, selected, context, manifest));
+    }
+    for (const other of CONTEXT_NAMES.filter((entry) => entry !== context)) {
+      assert.throws(() => admitInvariantCandidate(source, observed.candidate, selected, other, manifest));
+    }
+    assert.throws(() => insertInvariantHelpers(source, selected, context));
+    const alteredManifest = structuredClone(manifest);
+    alteredManifest.models.find((model) => model.id === 'request-authorization').canaries.find((entry) => entry.id === context).mutation.to += '\n// extra mutation';
+    assert.throws(() => insertInvariantHelpers(source, selected, context, alteredManifest));
+  });
+
+  test(`${context} BFS requires three verified helpers and the exact falsified canary with only search order changed`, () => {
+    const selected = REQUEST_SECURITY_CANARY_BFS_PROFILE, property = REQUIRED_COUNTEREXAMPLES[context], path = canaryBfsInput(context);
+    const profile = invariantProfile(selected, context);
+    assert.deepEqual(profile, {
+      observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], helperReuse: true,
+      requiredLemmas: [...REQUEST_SECURITY_HELPERS, property], reusedHelpers: [...REQUEST_SECURITY_HELPERS],
+      candidateLemmas: [...REQUEST_SECURITY_HELPERS, ...ORIGINAL_NAMES],
+    });
+    const expected = Object.fromEntries([...REQUEST_SECURITY_HELPERS, property].map((name) => [name, {
+      trace: 'all-traces', verdict: name === property ? 'falsified' : 'verified',
+    }]));
+    assert.deepEqual(requiredInvariantVerdicts(selected, context), expected);
+    assert.equal(Object.keys(expected).length, 4);
+    const unselected = profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name));
+    assert.deepEqual(unselected, ORIGINAL_NAMES.filter((name) => name !== property));
+    assert.equal(unselected.length, 8);
+    const argv = invariantArguments(path, selected, context);
+    assert.deepEqual(argv, [path, '--quit-on-warning', ...Object.keys(expected).map((name) => `--prove=${name}`), '--stop-on-trace=BFS', '+RTS', '-N2', '-M2G', '-RTS']);
+    const prior = invariantArguments(onePropertyInput(context, property), REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
+    assert.deepEqual(argv.slice(1), prior.slice(1).map((argument) => argument === '--stop-on-trace=DFS' ? '--stop-on-trace=BFS' : argument));
+    assert.equal(prior.filter((argument) => argument === '--stop-on-trace=DFS').length, 1, 'the old mixed helper/canary profile stays DFS');
+    assert.equal(PROBE_TIMEOUT_MS, 120_000);
+    assert.equal(PROBE_OUTPUT_BYTES, 4 * 1024 * 1024);
+    for (const other of [input, lineageInput(), securityInput(context), helpersOnlyInput(context), onePropertyInput(context, property),
+      ...CONTEXT_NAMES.filter((entry) => entry !== context).map((entry) => canaryBfsInput(entry))]) {
+      assert.throws(() => invariantArguments(other, selected, context));
+    }
+  });
+
+  test(`${context} BFS never counts a counterexample with a falsified, absent or unproved reused helper`, () => {
+    const selected = REQUEST_SECURITY_CANARY_BFS_PROFILE, property = REQUIRED_COUNTEREXAMPLES[context], path = canaryBfsInput(context), valid = canaryBfsOutput(context);
+    const expected = requiredInvariantVerdicts(selected, context);
+    const accepted = selectedInvariantSummary(valid, selected, path, context);
+    assert.equal(accepted.ok, true);
+    assert.deepEqual(accepted.requiredVerdicts, expected);
+    assert.deepEqual(accepted.verdict, { trace: 'all-traces', verdict: 'falsified' });
+    assert.equal(Object.hasOwn(accepted, 'verdicts'), false);
+    for (const name of Object.keys(expected)) {
+      for (const verdict of ['analysis incomplete (0 steps)', 'verified', 'verified (14 steps) trailing',
+        name === property ? 'verified (14 steps)' : 'falsified - found trace (17 steps)']) {
+        const observed = selectedInvariantSummary(canaryBfsOutput(context, { [name]: verdict }), selected, path, context);
+        assert.equal(observed.ok, false);
+        if (name !== property) assert.deepEqual(observed.verdict, expected[property], 'the correct counterexample row alone is deliberately present');
+      }
+      const row = valid.stdout.split('\n').find((line) => line.startsWith(` ${name} (all-traces):`));
+      assert.ok(row);
+      const missing = valid.stdout.replace(`${row}\n`, '');
+      assert.notEqual(missing, valid.stdout);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: missing, requiredVerdicts: expected,
+        candidateSha256: REQUEST_SECURITY_CANDIDATE_HASHES[context], searchStrategy: 'BFS' }, selected, path, context).ok, false,
+      'reference hashes, attached results or strategy metadata cannot replace a missing in-invocation result');
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + `${row}\n` }, selected, path, context).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${name} (all-traces)`, `${name} (exists-trace)`) }, selected, path, context).ok, false);
+    }
+    const wrong = Object.values(REQUIRED_COUNTEREXAMPLES).find((name) => name !== property);
+    assert.equal(selectedInvariantSummary(canaryBfsOutput(context, { [property]: 'analysis incomplete (0 steps)', [wrong]: 'falsified - found trace (17 steps)' }), selected, path, context).ok, false);
+    for (const unselected of ORIGINAL_NAMES.filter((name) => name !== property)) {
+      for (const verdict of ['verified (14 steps)', 'falsified - found trace (17 steps)']) {
+        assert.equal(selectedInvariantSummary(canaryBfsOutput(context, { [unselected]: verdict }), selected, path, context).ok, false);
+      }
+    }
+  });
+
+  test(`${context} BFS rejects crossed summaries, unknown rows, process errors, timeout and changed attribution`, () => {
+    const selected = REQUEST_SECURITY_CANARY_BFS_PROFILE, path = canaryBfsInput(context), valid = canaryBfsOutput(context);
+    assert.equal(selectedInvariantSummary(canaryBfsOutput(context, {}, 'previous-invocation'), selected, path, context).ok, false);
+    const other = CONTEXT_NAMES.slice(1).find((entry) => entry !== context);
+    assert.equal(selectedInvariantSummary(canaryBfsOutput(other), selected, path, context).ok, false);
+    assert.equal(selectedInvariantSummary(onePropertyOutput(context, REQUIRED_COUNTEREXAMPLES[context]), selected, path, context).ok, false);
+    assert.equal(selectedInvariantSummary(securityOutput(context), selected, path, context).ok, false);
+    assert.equal(selectedInvariantSummary(lineageOutput(), selected, path, context).ok, false);
+    const helpersOnly = helpersOnlyOutput(context);
+    assert.equal(selectedInvariantSummary({ ...helpersOnly, stdout: helpersOnly.stdout.replace(helpersOnlyInput(context), path) }, selected, path, context).ok, false, 'helper proofs alone do not establish a counterexample');
+    for (const stdout of ['', 'source saturation finished; no final summary\n', valid.stdout + valid.stdout,
+      valid.stdout.replace('summary of summaries:', 'partial summary:'),
+      valid.stdout + ' unregistered (all-traces): falsified - found trace (1 steps)\n',
+      `\u001b[33mWARNING\u001b[0m: unproved dependency\n${valid.stdout}`,
+    ]) assert.equal(selectedInvariantSummary({ ...valid, stdout }, selected, path, context).ok, false);
+    for (const stderr of ['WARNING: imported assumption', 'returned unsupported version']) {
+      assert.equal(selectedInvariantSummary({ ...valid, stderr }, selected, path, context).ok, false);
+    }
+    for (const delta of [{ status: 1 }, { status: null }, { signal: 'SIGTERM' }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+      const observed = invariantRunSummary({ ...valid, ...delta }, selected, path, true, context);
+      assert.equal(observed.completed, false);
+      assert.equal(observed.selectedProof.ok, false);
+    }
+    for (const unchanged of [false, null, undefined, 'true']) {
+      assert.equal(invariantRunSummary(valid, selected, path, unchanged, context).selectedProof.ok, false);
+    }
+  });
+}
+
+test('canary BFS metadata records only search order, pinned source identity and same-invocation proof authority', () => {
+  assert.ok(probeSource.includes("'MUTANT_REQUEST_SECURITY_CANARY_BFS_PROBE_ONLY'"));
+  assert.ok(probeSource.includes("searchStrategy: canaryBfsProfile ? { method: 'BFS', change: 'search-order-only', depthBound: null } : null"));
+  assert.ok(probeSource.includes("same(argv.filter((argument) => argument.startsWith('--stop-on-trace=')), ['--stop-on-trace=DFS'])"));
+  assert.ok(probeSource.includes('if (selected === REQUEST_SECURITY_CANARY_BFS_PROFILE) {'));
+  assert.ok(probeSource.includes('Fixed BFS changes search order only, with no depth bound or imported assumptions/proofs'));
+  assert.ok(probeSource.includes('All other original eight obligations and the other mutant remain unselected'));
+  assert.ok(probeSource.includes('candidateReference: pinnedSecurityCandidate(selected) ?'));
+  assert.ok(probeSource.includes('sha256: REQUEST_SECURITY_CANDIDATE_HASHES[context]'));
+  assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
+  assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
+  assert.ok(probeSource.includes("securityProfile || onePropertyProfile || canaryBfsProfile ? 'required-counterexample-selected'"));
+  assert.ok(probeSource.includes('sources, binary, binaryMetadata: tool, arguments: argv'));
+  assert.ok(probeSource.includes('maxOutputBytes: PROBE_OUTPUT_BYTES, signal: cancellation.signal'));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
+  assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
+  assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
+  assert.doesNotMatch(probeSource, /--bound=|--no-reuse|--no-restrictions|no_duplicate_captures|CaptureOnce/u);
 });
