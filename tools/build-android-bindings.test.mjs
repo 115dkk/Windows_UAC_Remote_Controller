@@ -396,6 +396,8 @@ test('x86_64 runner generates Kotlin from its exact Android output rather than h
 
 test('Gradle source contract uses the same closed tuples, immutable selection and ABI-specific native/Kotlin outputs', () => {
   const plugin = readFileSync(new URL('../src-tauri/gen/android/buildSrc/src/main/java/dev/dkk115/uacremote/kotlin/RustPlugin.kt', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(plugin, /ControllerAbi\.values\(\)\.singleOrNull/);
+  assert.doesNotMatch(plugin, /ControllerAbi\.entries/);
   const app = readFileSync(new URL('../src-tauri/gen/android/app/build.gradle.kts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const tuples = [...plugin.matchAll(/^\s+(?:ARM64|X86_64)\("([^"]+)", "([^"]+)", "([^"]+)", "([^"]+)"\),$/gm)]
     .map(([, abi, arch, target, rustTarget]) => ({ abi, arch, target, rustTarget }));

@@ -14,7 +14,8 @@ enum class ControllerAbi(val abi: String, val arch: String, val target: String, 
 
 // One closed tuple feeds both Tauri flavors/tasks and the separate controller.
 fun selectControllerAbi(controllerAbi: String?, abiList: String?, archList: String?, targetList: String?): ControllerAbi {
-    val selected = ControllerAbi.entries.singleOrNull { it.abi == (controllerAbi ?: abiList ?: "arm64-v8a") }
+    // Gradle's Kotlin DSL compiles buildSrc with language 1.8; values() is stable there.
+    val selected = ControllerAbi.values().singleOrNull { it.abi == (controllerAbi ?: abiList ?: "arm64-v8a") }
         ?: error("Select exactly one supported controller ABI: arm64-v8a or x86_64.")
     require((abiList == null || abiList == selected.abi) &&
         (archList == null || archList == selected.arch) &&
