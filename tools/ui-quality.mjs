@@ -15,10 +15,12 @@ if (process.argv.length !== 2) {
 // Dependencies must already have been installed from package-lock.json with npm ci.
 const commands = [
   ['Production/QA build boundary', ['--test', 'tools/ui-build-policy.test.mjs']],
+  ['Bundled Korean font contracts', ['--test', 'tools/ui-fonts.test.mjs']],
   ['Strict TypeScript project checks', ['node_modules/typescript/bin/tsc', '-b', '--pretty', 'false']],
   ['ESLint (warnings fail)', ['node_modules/eslint/bin/eslint.js', 'ui', '--max-warnings', '0']],
   ['Vitest client behavior tests', ['node_modules/vitest/vitest.mjs', 'run']],
   ['Production client build (not the QA fixture entry)', ['node_modules/vite/bin/vite.js', 'build', '--mode', 'production']],
+  ['Bundled production font bytes and notices', ['tools/ui-fonts.mjs', '--built=production']],
 ];
 
 for (const [label, args] of commands) {

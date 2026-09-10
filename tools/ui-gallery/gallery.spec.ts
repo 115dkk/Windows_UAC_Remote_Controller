@@ -2,11 +2,12 @@
 import { galleryCases } from './cases';
 import { test, expect } from './session';
 import { registerPhoneServiceGallery } from './phone-service';
+import { recordClientFontProof } from './font-proof';
 
 registerPhoneServiceGallery(test);
 
 for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-service-'))) {
-  test(selected.id, async ({ page, gallery }) => {
+  test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
     if (fixture === 'desktop-empty' || fixture === 'desktop-unavailable') {
@@ -92,6 +93,9 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
       await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toHaveCount(0);
     }
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
+    if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
+      await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
+    }
 
     if (selected.action === 'notification-settings') {
       const settings = page.getByRole('button', { name: '앱 알림 설정', exact: true });

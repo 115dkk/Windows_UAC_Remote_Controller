@@ -45,14 +45,27 @@ contrast after rendering; values above are design intent, not a passed audit.
 
 ## Typography
 
-- Text stack: `"Segoe UI Variable", "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif`.
-- Android may prefer `Roboto, "Noto Sans KR", sans-serif`; preserve CJK fallback.
+- Client text token `--font-ui`: `"IBM Plex Sans KR", "Noto Sans KR", "Malgun Gothic", sans-serif`,
+  used by both the desktop root and phone shell. The Korean family is bundled
+  offline; do not prefer a locally installed copy or a Latin-only system face.
+- Four unmodified complete hinted WOFF2 cuts provide normal 400/500/600/700,
+  with `font-display: swap` and no synthetic weights. Source pin:
+  `IBM/plex@1da12f02587b630c07e92692d21492d722f53614`, package
+  `@ibm/plex-sans-kr@1.1.0`; font-specific OFL and RFN "Plex" remain upstream.
+  `ui/public/fonts/ibm-plex-sans-kr/manifest.json` records byte pins and ROOT's
+  separate coverage inspection; it does not certify browser rendering.
 - Monospace details: `"Cascadia Code", Consolas, "Noto Sans Mono CJK KR", "Malgun Gothic", monospace`.
 - Base 1rem/1.6; desktop body may use 0.9375rem. Headings 1.75rem and 1.25rem,
-  weights 650/600; body 400/500. Small supporting text no smaller than 0.8125rem.
+  weight 600; `--weight-title: 600` also owns program titles and app/launch brands.
+  Body 400/500; existing 600/700 emphasis remains. Small supporting text no
+  smaller than 0.8125rem. Sizes, line heights, tracking and spacing are unchanged.
 - No fixed-height text clipping. Balance short headings, pretty-wrap short
   descriptions, use tabular figures for time, and wrap long paths/commands.
 - Preserve system text scaling/zoom; do not force a minimum browser font size.
+- Native window chrome, Android SystemUI and authentication typography remain
+  OS-owned. A client font change does not replace them. Browser evidence must
+  identify the actual custom font used for visible Hangul and Latin, not merely
+  a declared CSS family or successful `document.fonts.check()` call.
 
 ## Spacing and geometry
 
@@ -118,6 +131,8 @@ layout values introduced by the first client are:
 | --phone-content-max | 42rem | Phone content and bottom-navigation measure |
 | --target-desktop | 44px | Minimum desktop action target |
 | --target-phone | 48px | Minimum phone action/input target |
+| --font-ui | `"IBM Plex Sans KR", "Noto Sans KR", "Malgun Gothic", sans-serif` | Offline Korean/Latin client text on desktop and phone |
+| --weight-title | 600 | Page/program titles and app/launch brand; actual bundled SemiBold |
 | --text-small | 0.8125rem | Supporting text and compact output |
 | --text-caption | 0.875rem | Notice/request secondary text |
 | --text-body | 0.9375rem | Desktop body and small section labels |

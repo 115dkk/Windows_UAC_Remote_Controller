@@ -1,7 +1,37 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Token values are synchronized with /DESIGN.md. OS chrome and auth remain native. */
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-sans-kr/IBMPlexSansKR-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Bold.woff2") format("woff2");
+}
 :root {
   color-scheme: light dark;
+  --font-ui: "IBM Plex Sans KR", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  --weight-title: 600;
   --bg: #f2f6f7;
   --surface: #fbfdfd;
   --surface-subtle: #eaf1f3;
@@ -43,7 +73,7 @@
   --text-title: 1.75rem;
   --shadow-surface: 0 1px 2px rgb(21 44 53 / .04), 0 4px 16px rgb(21 44 53 / .04);
   --overlay-scrim: rgb(21 44 53 / .4);
-  font-family: "Segoe UI Variable", "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  font-family: var(--font-ui);
   font-size: 100%;
   line-height: 1.6;
   font-weight: 400;
@@ -82,7 +112,7 @@ button:disabled, input:disabled { cursor: default; }
 button { -webkit-tap-highlight-color: transparent; }
 h1, h2, h3, p, dl, dd, ul, ol { margin: 0; }
 h1, h2, h3 { text-wrap: balance; overflow-wrap: anywhere; }
-h1 { font-size: var(--text-title); line-height: 1.35; font-weight: 650; }
+h1 { font-size: var(--text-title); line-height: 1.35; font-weight: var(--weight-title); }
 h2 { font-size: var(--text-section); line-height: 1.45; font-weight: 600; }
 h3 { font-size: var(--text-body); font-weight: 600; }
 p { text-wrap: pretty; overflow-wrap: anywhere; }
@@ -99,7 +129,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .app-shell { height: 100%; height: 100dvh; width: 100%; min-width: 0; overflow: hidden; }
 .desktop-shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); font-size: var(--text-body); }
 .navigation-shell { min-width: 0; padding: var(--space-8) var(--space-3); display: flex; flex-direction: column; background: var(--surface-subtle); }
-.app-brand { display: flex; gap: var(--space-3); align-items: center; padding-inline: var(--space-3); margin-bottom: var(--space-10); font-size: var(--text-brand); font-weight: 650; }
+.app-brand { display: flex; gap: var(--space-3); align-items: center; padding-inline: var(--space-3); margin-bottom: var(--space-10); font-size: var(--text-brand); font-weight: var(--weight-title); }
 .brand-symbol { color: var(--accent); display: grid; place-items: center; }
 .brand-symbol .icon { width: 1.5rem; height: 1.5rem; }
 .navigation-shell nav { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -171,7 +201,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .global-feedback.has-feedback { margin-bottom: var(--space-4); }
 .mobile-notices:empty { display: none; }
 .mobile-notices > .supporting-text { margin-bottom: var(--space-4); }
-.phone-shell { display: grid; grid-template-rows: minmax(0, 1fr) auto; font-family: Roboto, "Noto Sans KR", "Malgun Gothic", sans-serif; }
+.phone-shell { display: grid; grid-template-rows: minmax(0, 1fr) auto; font-family: var(--font-ui); }
 .phone-shell .page-content { max-width: var(--phone-content-max); padding: calc(var(--space-6) + env(safe-area-inset-top, 0px)) var(--space-5) var(--space-8); }
 .phone-shell .page-header { margin-bottom: var(--space-6); }
 .phone-shell .page-header .refresh-button { padding-inline: var(--space-2); }
@@ -188,7 +218,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .request-context { display: flex; gap: var(--space-2); align-items: flex-start; color: var(--muted); font-size: var(--text-caption); }
 .request-context .icon { margin-top: var(--space-1); }
 .request-eyebrow { margin-block: var(--space-6) var(--space-2); }
-.program-name { font-size: var(--text-title); font-weight: 650; line-height: 1.4; }
+.program-name { font-size: var(--text-title); font-weight: var(--weight-title); line-height: 1.4; }
 .request-facts { margin-top: var(--space-5); }
 .request-facts dt { color: var(--muted); font-size: var(--text-small); margin-bottom: var(--space-2); }
 .path-output, .command-region pre { font-family: "Cascadia Code", Consolas, "Noto Sans Mono CJK KR", "Malgun Gothic", monospace; font-size: var(--text-small); line-height: 1.7; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; unicode-bidi: plaintext; user-select: text; }
@@ -268,7 +298,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-6); }
 .launch-shell { height: 100%; overflow: auto; display: grid; place-items: center; padding: var(--space-6); }
 .launch-content { max-width: 34rem; width: 100%; }
-.launch-brand { display: flex; align-items: center; justify-content: center; gap: var(--space-3); font-size: var(--text-brand); font-weight: 650; }
+.launch-brand { display: flex; align-items: center; justify-content: center; gap: var(--space-3); font-size: var(--text-brand); font-weight: var(--weight-title); }
 .launch-brand .icon { color: var(--accent); }
 .launch-actions { display: flex; justify-content: center; }
 .qa-frame { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
