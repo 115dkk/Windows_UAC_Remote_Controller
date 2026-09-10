@@ -273,7 +273,7 @@ fn with_fixture_deadlines(
         intake: Arc::new(crate::intake::IntakeOwner::default()),
         approval_alive: Arc::new(AtomicBool::new(true)),
         state: Mutex::new(Some(owner)),
-        creation_slot: Mutex::new(std::sync::Weak::new()),
+        creation_slot: Mutex::new(std::sync::Weak::<crate::pairing::CreationState>::new()),
         active: AtomicBool::new(false),
         cleanup_pending: AtomicBool::new(false),
         notification_cleanup_failed: AtomicBool::new(false),

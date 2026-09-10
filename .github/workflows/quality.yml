@@ -77,6 +77,11 @@ jobs:
         os: [windows-2025, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # Each associated-ingress fixture already owns a two-thread Tokio runtime
+      # and durable flushes. Bound competing test fixtures on hosted runners;
+      # retain every test, their internal concurrency and the same deadlines.
+      RUST_TEST_THREADS: '2'
     steps:
       - name: Check out this revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24

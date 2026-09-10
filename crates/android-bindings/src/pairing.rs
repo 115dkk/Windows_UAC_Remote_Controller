@@ -102,9 +102,9 @@ struct CreationClock {
 }
 impl SocketClock for CreationClock {
     fn now(&self) -> Result<Instant, framed_transport::SocketClockUnavailable> {
-        self.state
-            .upgrade()
-            .ok_or(framed_transport::SocketClockUnavailable)?
+        let state: Arc<CreationState> = Weak::<CreationState>::upgrade(&self.state)
+            .ok_or(framed_transport::SocketClockUnavailable)?;
+        state
             .observe_current()
             .map_err(|_| framed_transport::SocketClockUnavailable)
     }
@@ -350,7 +350,7 @@ impl MobileController {
         state.check_owner(self)?;
         self.with_inbox(|owner| require_unused(owner, &state.original))?;
         let mut slot = self.creation_slot.lock().map_err(|_| BridgeError::Closed)?;
-        if slot.upgrade().is_some() {
+        if Weak::<CreationState>::upgrade(&*slot).is_some() {
             return Err(BridgeError::Busy);
         }
         *slot = Arc::downgrade(&state);

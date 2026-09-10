@@ -329,7 +329,7 @@ impl Fixture {
             projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
             intake: Arc::new(crate::intake::IntakeOwner::default()),
             state: Mutex::new(Some(owner)),
-            creation_slot: Mutex::new(Weak::new()),
+            creation_slot: Mutex::new(Weak::<CreationState>::new()),
             approval_alive: Arc::new(AtomicBool::new(true)),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
