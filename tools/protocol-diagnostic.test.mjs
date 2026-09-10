@@ -6,15 +6,17 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { mutateExactlyOnce, proofArguments } from './protocol-security.mjs';
+import { mutateExactlyOnce, proofArguments, proofRequirements } from './protocol-security.mjs';
 import { admitDiagnostic, diagnosticArguments, diagnosticResult, DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS,
   inspectDiagnosticLog, loadDiagnosticInputs } from './protocol-diagnostic.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const normalDirectory = 'artifacts/protocol-security';
 const property = (trace = 'all-traces', verdict = 'verified') => ({ trace, verdict });
+const helpers = { enrolled_revision_unique: property(), building_precedes_open: property(),
+  request_opened_unique: property(), active_registry_production_precedes_revocation: property() };
 
-function fixture(t) {
+function fixture(t, auxiliary) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-diagnostic-test-'));
   t.after(() => {
     // Only this exact newly-created fixture. Never old diagnostic/proof artifacts.
@@ -34,6 +36,7 @@ function fixture(t) {
       model('request-authorization', 'security/tamarin/RequestAuthorization.spthy', 9)] };
   manifest.models[1].canaries.push({ id: 'request-replay-canary', mutation: { from: 'GUARD_request-authorization', to: 'REPLAY_BROKEN' },
     expected: { property_3: property('all-traces', 'falsified') } });
+  if (auxiliary !== undefined) manifest.models[1].helpers = auxiliary;
   const write = (path, value) => {
     const full = join(root, path);
     mkdirSync(dirname(full), { recursive: true });
@@ -42,7 +45,8 @@ function fixture(t) {
   write('crates/fixture/src/lib.rs', '// SYNTHETIC source binding\r\n');
   write(`${normalDirectory}/tool-version.log`, 'SYNTHETIC FIXTURE ONLY\ntamarin-prover 1.12.0\n');
   for (const value of manifest.models) write(value.path, `// SYNTHETIC MODEL, NEVER EXECUTED\n// GUARD_${value.id}\n` +
-    Object.keys(value.expected).map((name) => `lemma ${name}: "synthetic statement"\n`).join(''));
+    Object.keys(value.helpers ?? {}).map((name) => `lemma ${name} [reuse]: all-traces "synthetic statement"\n`).join('') +
+    Object.entries(value.expected).map(([name, result]) => `lemma ${name}: ${result.trace} "synthetic statement"\n`).join(''));
   let summary;
   const refresh = () => {
     const runs = [];
@@ -51,10 +55,12 @@ function fixture(t) {
       const push = (id, input, selected, mutation) => {
         const content = mutation ? Buffer.from(mutateExactlyOnce(text, mutation)) : bytes;
         const path = join(root, normalDirectory, `${input}.spthy`);
+        const required = proofRequirements(selected, value.helpers);
         write(`${normalDirectory}/${input}.spthy`, content);
         runs.push({ id, model: basename(path), modelSha256: sha256(content), origin: { source: value.path,
-          sha256: sha256(bytes), ...(mutation ? { mutation } : {}) }, selectedLemmas: Object.keys(selected),
-          arguments: proofArguments(path, selected), status: 0, signal: null, cleanupIncomplete: false, cancelled: false,
+          sha256: sha256(bytes), ...(mutation ? { mutation } : {}) }, selectedLemmas: required.selectedLemmas,
+          ...(value.helpers === undefined ? {} : { helperLemmas: required.helperLemmas, targetLemmas: required.targetLemmas }),
+          arguments: proofArguments(path, selected, value.helpers), status: 0, signal: null, cleanupIncomplete: false, cancelled: false,
           ok: id !== 'request-authorization-1', reasons: ['synthetic fixture, not a prover result'], verdicts: {} });
       };
       Object.keys(value.expected).forEach((name, index) => push(`${value.id}-${index + 1}`, value.id, { [name]: value.expected[name] }));
@@ -80,6 +86,71 @@ test('complete normal failure selects first request baseline in manifest order',
   const loaded = loadDiagnosticInputs(f.root);
   assert.equal(loaded.selected.row, 'request-authorization-1');
   assert.equal(loaded.selected.inputSha256, sha256(loaded.selected.bytes));
+});
+
+test('helper-aware normal plans keep all sixteen rows and diagnose the original, not helper zero', (t) => {
+  const f = fixture(t, helpers), admitted = admitDiagnostic(f.manifest, f.summary, f.root);
+  assert.equal(admitted.plans.length, 16);
+  assert.deepEqual(admitted.selected.helperLemmas, Object.keys(helpers));
+  assert.deepEqual(admitted.selected.targetLemmas, ['honest_request_authorization_trace']);
+  const loaded = loadDiagnosticInputs(f.root);
+  assert.equal(loaded.selected.lemma, 'honest_request_authorization_trace');
+  assert.deepEqual(loaded.selected.helpers, helpers);
+  const path = join(f.root, 'artifacts/protocol-diagnostic/DIAGNOSTIC_ONLY-fixture/request.input.spthy');
+  const args = diagnosticArguments(path, loaded.selected.lemma, loaded.selected.helpers);
+  assert.deepEqual(args.filter(arg => arg.startsWith('--prove=')),
+    [...Object.keys(helpers), loaded.selected.lemma].map(name => `--prove=${name}`));
+  assert.ok(args.includes('--stop-on-trace=NONE'));
+  assert.ok(args.includes('--bound=12'));
+});
+
+test('missing helper selection, helper-as-target, wrong witness strategy and stale plan reject', (t) => {
+  const f = fixture(t, helpers);
+  for (const change of [
+    row => { row.helperLemmas = []; }, row => { delete row.helperLemmas; }, row => { delete row.targetLemmas; },
+    row => { row.targetLemmas = [Object.keys(helpers)[0]]; },
+    row => { row.selectedLemmas = [...row.targetLemmas]; },
+    row => { row.selectedLemmas.reverse(); },
+    row => { row.arguments = row.arguments.filter(arg => arg !== `--prove=${Object.keys(helpers)[0]}`); },
+    row => { row.arguments = row.arguments.map(arg => arg === '--stop-on-trace=BFS' ? '--stop-on-trace=DFS' : arg); },
+  ]) {
+    const summary = structuredClone(f.summary);
+    change(summary.runs.find(row => row.id === 'request-authorization-1'));
+    assert.throws(() => admitDiagnostic(f.manifest, summary, f.root));
+  }
+  const oldManifest = structuredClone(f.manifest);
+  delete oldManifest.models[1].helpers;
+  assert.throws(() => admitDiagnostic(oldManifest, f.summary, f.root));
+});
+
+test('helper-source drift and mutant/baseline snapshot substitution remain inadmissible', async (t) => {
+  for (const mutation of ['helper-kind', 'imported-proof', 'helper-missing', 'mutant-source']) await t.test(mutation, (t) => {
+    const f = fixture(t, helpers), source = f.manifest.models[1].path;
+    const original = readFileSync(join(f.root, source), 'utf8');
+    if (mutation === 'mutant-source') {
+      f.write(`${normalDirectory}/request-replay-canary.spthy`, original);
+    } else {
+      const altered = mutation === 'helper-kind' ? original.replace('[reuse]: all-traces', '[reuse]: exists-trace')
+        : mutation === 'imported-proof' ? original.replace('"synthetic statement"', '"synthetic statement" by sorry')
+          : original.replace('lemma enrolled_revision_unique', 'lemma missing_helper');
+      f.write(source, altered);
+      f.refresh();
+    }
+    assert.throws(() => loadDiagnosticInputs(f.root));
+    assert.equal(existsSync(join(f.root, 'artifacts/protocol-diagnostic')), false);
+  });
+});
+
+test('legacy no-helper metadata and explicit empty attribution retain exact original admission', (t) => {
+  const f = fixture(t);
+  assert.equal(admitDiagnostic(f.manifest, f.summary, f.root).plans.length, 16);
+  for (const row of f.summary.runs) {
+    row.helperLemmas = [];
+    row.targetLemmas = [...row.selectedLemmas];
+  }
+  assert.equal(admitDiagnostic(f.manifest, f.summary, f.root).selected.id, 'request-authorization-1');
+  f.summary.runs[0].helperLemmas = ['unregistered_helper'];
+  assert.throws(() => admitDiagnostic(f.manifest, f.summary, f.root));
 });
 
 test('failed pin/canary only is not applicable; never substituted for request baseline', (t) => {

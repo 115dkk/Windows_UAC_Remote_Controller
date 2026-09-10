@@ -5,7 +5,7 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, ope
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { mutateExactlyOnce, proofArguments } from './protocol-security.mjs';
+import { mutateExactlyOnce, proofArguments, proofRequirements, validateTheoryRequirements } from './protocol-security.mjs';
 import { runProver } from './prover-process.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
@@ -101,7 +101,12 @@ export function admitDiagnostic(manifest, summary, root) {
     if (!id(model.id) || inputs.has(model.id) || !/^security\/tamarin\/[A-Za-z][A-Za-z0-9_-]*\.spthy$/.test(model.path)) reject();
     inputs.add(model.id);
     const names = expectedNames(model.expected, true);
-    names.forEach((name, index) => add({ id: `${model.id}-${index + 1}`, input: model.id, model, names: [name], expected: { [name]: model.expected[name] } }));
+    proofRequirements(model.expected, model.helpers);
+    names.forEach((name, index) => {
+      const expected = { [name]: model.expected[name] }, required = proofRequirements(expected, model.helpers);
+      add({ id: `${model.id}-${index + 1}`, input: model.id, model, names: required.selectedLemmas,
+        targetLemmas: required.targetLemmas, helperLemmas: required.helperLemmas, expected });
+    });
     if (!Array.isArray(model.canaries) || !model.canaries.length || model.canaries.length > 4) reject();
     for (const canary of model.canaries) {
       if (!id(canary.id) || inputs.has(canary.id) || !canary.mutation ||
@@ -110,7 +115,10 @@ export function admitDiagnostic(manifest, summary, root) {
       inputs.add(canary.id);
       const selected = expectedNames(canary.expected, false);
       if (selected.some((name) => !names.includes(name))) reject();
-      add({ id: canary.id, input: canary.id, model, names: selected, expected: canary.expected, mutation: canary.mutation });
+      const required = proofRequirements(canary.expected, model.helpers);
+      add({ id: canary.id, input: canary.id, model, names: required.selectedLemmas,
+        targetLemmas: required.targetLemmas, helperLemmas: required.helperLemmas,
+        expected: canary.expected, mutation: canary.mutation });
     }
   }
   if (plans.length !== ROWS || !manifest.models.some((model) => model.id === REQUEST_MODEL)) reject();
@@ -127,7 +135,13 @@ export function admitDiagnostic(manifest, summary, root) {
     const snapshot = owned(root, `${NORMAL}/${plan.input}.spthy`);
     same(row.model, basename(snapshot));
     same(row.selectedLemmas, plan.names);
-    same(row.arguments, proofArguments(snapshot, plan.expected));
+    // Legacy no-helper rows may lack the two new attribution fields. A helper
+    // plan always requires both; partial or conflicting metadata never passes.
+    if (plan.helperLemmas.length || Object.hasOwn(row, 'helperLemmas') || Object.hasOwn(row, 'targetLemmas')) {
+      same(row.helperLemmas, plan.helperLemmas);
+      same(row.targetLemmas, plan.targetLemmas);
+    }
+    same(row.arguments, proofArguments(snapshot, plan.expected, plan.model.helpers));
     same(row.origin, { source: plan.model.path, sha256: row.origin.sha256, ...(plan.mutation ? { mutation: plan.mutation } : {}) });
   }
   // Manifest order, not log completion/array order; canaries never substitute.
@@ -142,7 +156,7 @@ export function loadDiagnosticInputs(root) {
   const manifest = JSON.parse(utf8(manifestFile.bytes)), summary = JSON.parse(utf8(normal.bytes));
   const admitted = admitDiagnostic(manifest, summary, root);
   const version = read(`${NORMAL}/tool-version.log`, 1024 * 1024), versionText = utf8(version.bytes);
-  if (!/tamarin[- ]prover\s+1\.12\.0\b/i.test(versionText) || /WARNING:|unsupported/i.test(versionText)) reject();
+  if (!/tamarin[- ]prover\s+1\.12\.0\b/i.test(versionText) || /\bwarn(?:ing|ings)?\b|unsupported/i.test(versionText)) reject();
   const seenSources = new Set();
   for (const binding of manifest.sourceBindings) {
     if (!binding || !hash(binding.sha256) || seenSources.has(binding.path)) reject();
@@ -154,8 +168,7 @@ export function loadDiagnosticInputs(root) {
     let source = sources.get(plan.model.path);
     if (!source) { source = read(plan.model.path); sources.set(plan.model.path, source); }
     const text = utf8(source.bytes);
-    if (/^\s*#include\b/m.test(text)) reject();
-    for (const name of plan.names) if ([...text.matchAll(new RegExp(`^\\s*lemma\\s+${name}\\b`, 'gm'))].length !== 1) reject();
+    validateTheoryRequirements(text, plan.model.expected, plan.model.helpers);
     let snapshot = snapshots.get(plan.input);
     if (!snapshot) { snapshot = read(`${NORMAL}/${plan.input}.spthy`); snapshots.set(plan.input, snapshot); }
     const expected = plan.mutation ? Buffer.from(mutateExactlyOnce(text, plan.mutation)) : source.bytes;
@@ -165,16 +178,18 @@ export function loadDiagnosticInputs(root) {
   const identity = { normalSummarySha256: normal.sha256, manifestSha256: summary.manifestSha256,
     manifestFileSha256: manifestFile.sha256, toolVersionLogSha256: version.sha256 };
   const chosen = admitted.selected;
-  return { root, identity, selected: chosen ? { row: chosen.id, lemma: chosen.names[0], source: chosen.model.path,
+  return { root, identity, selected: chosen ? { row: chosen.id, lemma: chosen.targetLemmas[0], source: chosen.model.path,
+    ...(chosen.model.helpers === undefined ? {} : { helpers: chosen.model.helpers }),
     inputSha256: snapshots.get(chosen.input).sha256, bytes: snapshots.get(chosen.input).bytes } : null };
 }
 
-export function diagnosticArguments(inputPath, selectedLemma) {
+export function diagnosticArguments(inputPath, selectedLemma, helpers) {
   const directory = dirname(inputPath);
   if (!isAbsolute(inputPath) || resolve(inputPath) !== inputPath || !lemma(selectedLemma) || basename(inputPath) !== 'request.input.spthy' ||
       !/^DIAGNOSTIC_ONLY-[A-Za-z0-9_-]+$/.test(basename(directory)) || basename(dirname(directory)) !== 'protocol-diagnostic' ||
       basename(dirname(dirname(directory))) !== 'artifacts') reject();
-  return [inputPath, '--quit-on-warning', `--prove=${selectedLemma}`, '--heuristic=i', `--bound=${DIAGNOSTIC_DEPTH}`, '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS'];
+  const required = proofRequirements({ [selectedLemma]: { trace: 'all-traces', verdict: 'verified' } }, helpers);
+  return [inputPath, '--quit-on-warning', ...required.selectedLemmas.map((name) => `--prove=${name}`), '--heuristic=i', `--bound=${DIAGNOSTIC_DEPTH}`, '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS'];
 }
 
 export function diagnosticResult(result, log) {
@@ -229,12 +244,13 @@ export async function runProtocolDiagnostic(root = repository) {
       const path = join(directory, 'request.input.spthy');
       writeFileSync(path, input.selected.bytes, { flag: 'wx', mode: 0o400 });
       if (regular(path, DIAGNOSTIC_OUTPUT_BYTES, false).sha256 !== input.selected.inputSha256) reject();
-      const args = diagnosticArguments(path, input.selected.lemma);
+      const args = diagnosticArguments(path, input.selected.lemma, input.selected.helpers);
       const before = loadDiagnosticInputs(input.root);
       same(before.identity, input.identity);
       same(before.selected, input.selected);
       writeFileSync(join(directory, 'invocation.json'), JSON.stringify({ ...base, selectedRow: input.selected.row,
         lemma: input.selected.lemma, source: input.selected.source, inputSha256: input.selected.inputSha256, binary, binaryMetadata: tool,
+        helperLemmas: Object.keys(input.selected.helpers ?? {}), targetLemmas: [input.selected.lemma],
         binaryIdentityLimit: 'normal_summary_does_not_record_binary_identity_same_CI_TAMARIN_BIN_required', arguments: args }, null, 2), { flag: 'wx', mode: 0o600 });
       const logPath = join(directory, 'diagnostic.log');
       // Exactly one bounded runner call. It refuses an already-aborted signal.

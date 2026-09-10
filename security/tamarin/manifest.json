@@ -35,6 +35,12 @@
     {
       "id": "request-authorization",
       "path": "security/tamarin/RequestAuthorization.spthy",
+      "helpers": {
+        "enrolled_revision_unique": { "trace": "all-traces", "verdict": "verified" },
+        "building_precedes_open": { "trace": "all-traces", "verdict": "verified" },
+        "request_opened_unique": { "trace": "all-traces", "verdict": "verified" },
+        "active_registry_production_precedes_revocation": { "trace": "all-traces", "verdict": "verified" }
+      },
       "expected": {
         "honest_approve_trace": { "trace": "exists-trace", "verdict": "verified" },
         "honest_deny_without_approval_auth_trace": { "trace": "exists-trace", "verdict": "verified" },

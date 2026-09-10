@@ -6,13 +6,54 @@ Status: **verification_in_progress**. ROOT's first supported-tool CI (`187bdc0`)
 Tamarin was selected for this slice's mutable registration and one-shot state. This is not a universal ranking over Verifpal/ProVerif or a claim that a symbolic proof verifies the product. The intended tool version is the official [Tamarin 1.12 release](https://github.com/tamarin-prover/tamarin-prover/releases/tag/1.12.0); binary provenance/checksums are ROOT-owned.
 
 CI pins both Tamarin1.12.0 and its supported Maude3.5.1 distribution by SHA-256,
-including Maude's sibling prelude/modules. Every positive lemma now runs in its
-own bounded process (120 seconds, 2GiB GHC heap, bounded streamed transcript).
+including Maude's sibling prelude/modules. Every original positive lemma runs in
+its own bounded process, together with all registered helpers for that model
+(120 seconds, 2GiB GHC heap, bounded streamed transcript).
 All13 positive lemmas and all3 broken-model controls remain mandatory. A timeout,
 heap/output limit, missing tool or incomplete result fails; limits never become
 proof bounds. Partial summaries start/retain passed:false and logs are written
 during execution. The request model's `heuristic: i` changes search ranking only,
 as documented for stateful protocols; its effectiveness is not assumed.
+
+### Same-invocation observational helpers
+
+The request theory now includes exactly the retained `65664b8` candidate's two
+`BuildingProduced` and six `ActiveRegistryProduced` action labels, followed by
+four helper declarations before the original nine obligations. They observe
+existing transitions; no premise, state conclusion, restriction, public message,
+signature check or original formula changed. The candidate's normalized SHA-256
+is `42b467b376c93d3e237021e420798a67549a1aedd17ccde6a001eb73c3d7385d`.
+Erasing those eight labels and four declarations recovers original
+`7af08df4610de1d2eeac1f441339df76d5949b9c58be994fc272798559002460`.
+The source-retained `PROBE_ONLY` comments identify that exact candidate's origin,
+not permission to treat an isolated result as a normal gate.
+
+In declaration order the helpers are `enrolled_revision_unique`,
+`building_precedes_open`, `request_opened_unique`, and
+`active_registry_production_precedes_revocation`. All are required all-traces
+verified results. The second and fourth use induction; each uses `[reuse]` only
+after being reproved in the same invocation and same baseline/mutant context.
+No proof body, source lemma, axiom or external proof is imported.
+
+ROOT's retained isolated [lineage receipt](../../.superloopy/evidence/tamarin/lineage-65664b8-root-receipt.md)
+records actual CI `34475391432` proving those four helpers and
+`no_accept_after_revision_revoked` together. The other eight original request
+obligations and both request canaries were unselected there. That result is not
+a passing normal gate, nor a witness or implementation-refinement result. Fresh
+normal integration verdicts remain required, with the main source bindings
+retained; the isolated experiment's older identity binding was not copied.
+
+The manifest keeps all 13 original positives and three canary rows. Helpers are
+an additional bounded dictionary, not replacements or separate successful rows.
+Every request baseline/canary invocation selects all four helpers plus its
+original target(s). Missing, wrong-kind, falsified or incomplete helper results,
+warnings, bad process outcomes and input drift fail the entire row even when its
+original target reports the desired verdict. Evidence records helper names,
+original targets and the full selection separately. Search mode is chosen only
+from original targets: honest/counterexample searches remain BFS despite their
+universal helpers; universal positive searches remain DFS. Existing time, heap
+and output budgets are unchanged. No full protocol or native security claim is
+made by this integration.
 
 ## What the models mean
 
@@ -32,7 +73,7 @@ This is **not exact TLS 1.3 wire modeling**: transcript encoding, HKDF/key sched
 
 ### RequestAuthorization.spthy
 
-Fifteen rules separate `CreatePc` from repeated trusted device enrollment, allowing multiple approvers under the **same PC**. Each device has one linear `RegistrySlot(revision, pc, device, 'active'/'retired')`, while its unchanged public purpose keys reside in persistent `EnrollmentKeys`. A request's `RequestSlot(request_id, pc, binding, 'building')` phase captures immutable per-device `Snapshot` facts containing the exact current revision and purpose keys. Publish changes that slot to `'pending'`. Every eligible device and both decision purposes must consume the same **global pending request slot**; there is no per-device replay guard. The phase alternatives here are notation only: every rule uses one exact quoted phase constant, never a free phase variable.
+Fifteen rules separate `CreatePc` from repeated trusted device enrollment, allowing multiple approvers under the **same PC**. Each device has one linear `RegistrySlot(device, pc, revision, 'active'/'retired')`, while its unchanged public purpose keys reside in persistent `EnrollmentKeys`. A request's `RequestSlot(request_id, pc, binding, 'building')` phase captures immutable per-device `Snapshot` facts containing the exact current revision and purpose keys. Publish changes that slot to `'pending'`. Every eligible device and both decision purposes must consume the same **global pending request slot**; there is no per-device replay guard. The phase alternatives here are notation only: every rule uses one exact quoted phase constant, never a free phase variable.
 
 There is deliberately **no global `PcAvailable` owner token**. Enrollment requires the already-existing persistent HostContext instead. Registry changes and other requests may interleave between snapshot captures, so this model overapproximates the Rust owner's atomic collection/serialization and admits more adversarial schedules. Each capture still requires that device's linear active registration; capture remains impossible after publication because the request slot is no longer `'building'`. The existing serial full-registry enumerations remain possible, alongside nonempty subsets and additional interleavings. Neither atomic collection nor completeness of notification delivery is proved by this abstraction.
 
@@ -90,14 +131,14 @@ This representation-only step retains the already-overapproximating rules and tr
 
 | New linear fact | Previous linear fact |
 | --- | --- |
-| `RegistrySlot(revision, pc, device, 'active')` | `CurrentRegistry(pc, device, revision)` |
-| `RegistrySlot(revision, pc, device, 'retired')` | `RetiredRegistry(pc, device, revision)` |
+| `RegistrySlot(device, pc, revision, 'active')` | `CurrentRegistry(pc, device, revision)` |
+| `RegistrySlot(device, pc, revision, 'retired')` | `RetiredRegistry(pc, device, revision)` |
 | `RequestSlot(request_id, pc, binding, 'building')` | `Building(pc, binding)` |
 | `RequestSlot(request_id, pc, binding, 'pending')` | `Pending(pc, binding)` |
 
 The added request first argument is redundant: it is uniquely the existing fifth component of the binding created by OpenActualRequest, not a second identifier or an attacker-supplied equality assumption. Open uses its existing `Fr(~request_id)`; every later consumer binds `request_id` from that same linear slot. Capture carries the identical slot, publication changes only its phase, and accept/cancel/expire consume its pending phase. Undoing the representation erases that redundant first argument; conversely it can be recovered from each old reachable binding. That phase-only step left `RequestOrigin`, `EnrollmentKeys` and the FULL `Snapshot` unchanged; the later origin-index step below preserves their existing provenance.
 
-The registry first term is likewise the existing fresh revision. Initial enrollment/re-enrollment/replacement use their existing `Fr` revision; reads/captures/acceptance consume and reproduce that exact active slot. Revocation changes only active to retired; re-enrollment consumes the old retired slot and creates a new fresh revision. That phase-only step added no freshness source, restriction, lemma/induction/priority annotation, trust check or phone-input filter. All15 rules and all9 lemma headers/formulas remain the obligations of the same model.
+The registry first term is the existing device, not the revision. Initial enrollment creates the fresh device; re-enrollment/replacement preserve that device while using their existing fresh revision in the third term. Reads/captures/acceptance consume and reproduce that exact active slot. Revocation changes only active to retired; re-enrollment consumes the old retired slot and creates a new fresh revision. That phase-only step added no freshness source, restriction, lemma/induction/priority annotation, trust check or phone-input filter. All15 rules and all9 original lemma headers/formulas remain; the later observational helper insertion is described above.
 
 The [Tamarin1.12 injective-fact detection](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/011_advanced-features.md#reasoning-about-exclusivity-facts-symbols-with-injective-instances) can derive exclusivity from the existing fresh-or-same-tag-consumed first term. This is a prover-derived optimization to expose, not an asserted uniqueness invariant or a promise of convergence. Uniqueness of a live slot is not itself a one-accept theorem: the replay mutant still consumes and restores that same global pending slot and must admit the real two-accept attack. ROOT must check inverse-erasure rule equivalence, unchanged lemmas and all ordinary positive/negative verdicts; no execution/result is claimed by this representation edit.
 
@@ -105,11 +146,11 @@ The [Tamarin1.12 injective-fact detection](https://github.com/tamarin-prover/tam
 
 `RequestOrigin(request_id, pc, binding)` now exposes the slot-ID join explicitly. Its sole producer still uses OpenActualRequest's existing `~request_id`, identical to RequestSlot's first term and the fifth binding component. Every already-existing RequestOrigin premise uses the same `request_id` variable as its RequestSlot. No new origin premise was added to phone authentication, signing or public-input rules.
 
-The redundant `RevisionOrigin(revision, pc, device)` experiment has been removed: all three producer outputs and seven consumer premises, including their priority hints, are gone. The exact active/retired RegistrySlot checks remain. No new helper, rule, bound or abstraction replaces this metadata; full Snapshot and EnrollmentKeys, original slot phases and global pending consumption remain unchanged.
+The redundant `RevisionOrigin(revision, pc, device)` experiment has been removed: all three producer outputs and seven consumer premises, including their priority hints, are gone. The exact active/retired RegistrySlot checks remain. That rollback added no helper, rule, bound or abstraction in place of this metadata; full Snapshot and EnrollmentKeys, original slot phases and global pending consumption remain unchanged. The separately described observational helpers do not restore any RevisionOrigin premise.
 
 This rollback follows actual unsuccessful evidence, not a newly successful proof. ROOT reported that normal source `0c6e7ae` timed out on all nine request baselines and both request controls, including the authentication lemma that had previously completed. Its retained [diagnostic log](../../.superloopy/evidence/tamarin/0c6e7ae/diagnostic/DIAGNOSTIC_ONLY-tBDE4M/diagnostic.log) is58,239bytes and reports the selected honest lemma as **analysis incomplete (251 steps), 53.62s**; the earlier ROOT-observed diagnostic was15steps/about4s. OpenActualRequest/CaptureEligibleDevice case1/2/3 branching is visible, with three revision-origin creator alternatives. This motivates removing our redundant experiment, not a causal performance guarantee or a claim that the remaining model now converges.
 
-The six existing RequestOrigin **input premises** retain `[+]`; its sole output and all other facts remain unannotated. The [pinned fact-annotation manual](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/011_advanced-features.md#sec:fact-annotations) defines the retained hint as local heuristic priority, not a unification change. No `no_precomp`, theorem/assumption, trace restriction, bound, rule action or phone-input condition is introduced.
+The six existing RequestOrigin **input premises** retain `[+]`; its sole output and all other facts remain unannotated. The [pinned fact-annotation manual](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/011_advanced-features.md#sec:fact-annotations) defines the retained hint as local heuristic priority, not a unification change. That origin-index/rollback step introduced no `no_precomp`, theorem/assumption, trace restriction, bound, rule action or phone-input condition.
 
 Erasing just RevisionOrigin facts and their seven annotations from `0c6e7ae` yields the intended current rules. On reachable states every registry slot already descends from the existing fresh-creation rules, so the removed provenance premise was redundant; no exact membership check was removed. The indexed RequestOrigin still joins the same request ID already fixed by its binding. Removing its ID argument and six annotations separately would recover the preceding request-origin representation. These are static correspondences for the **current overapproximating model**, not an implementation proof. ROOT must compare the precise erasure and unchanged all15 rules/all9 lemma headers/formulas, public messages, actions, FULL Snapshot, EnrollmentKeys and signing domains. Manifest/canary text remains untouched: the replay mutant restores the same global pending RequestSlot and must expose the real two-accept attack. Fresh normal verdicts are still required.
 
@@ -178,21 +219,25 @@ tamarin-prover security/tamarin/RequestAuthorization.spthy --quit-on-warning --p
 
 Use the exact selected 1.12 executable and ROOT's bounded process/CI timeout. The documented CLI supports `--prove=lemma_name`; `--quit-on-warning` prevents ignoring model well-formedness warnings. See the [1.12 command-line manual](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/003_example.md#running-tamarin-on-the-command-line).
 
-ROOT must require every listed lemma's actual completed verdict, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished proof or missing lemma is not success. Preserve exact source/artifact identity and prover output. Normal invocations select each registered lemma separately; all are required by the aggregate gate. No assumed source lemmas or hand-written `by sorry` proofs are supplied in the production theories.
+ROOT must require every listed lemma's actual completed verdict, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished proof or missing lemma is not success. Preserve exact source/artifact identity and prover output. Normal invocations select each original lemma separately together with every registered helper for that model; all selected results are required by the aggregate gate. No assumed source lemmas or hand-written `by sorry` proofs are supplied in the production theories.
 
 ### Failure diagnostics are not proof evidence
 
 The CI-only diagnostic helper is separate from the normal runner and its
 artifacts. It admits a completed, failed normal result only after checking the
 full planned run set and its current manifest/model/source bindings. It selects
-at most one failed request baseline, never a replacement acceptance criterion.
+at most one failed request baseline's original target, never helper zero or a
+replacement acceptance criterion. Admission compares helper/target/full
+selections and exact helper-aware normal arguments while retaining all16 rows.
 
-The depth8 / heuristic `i` / stop-on-trace `NONE` invocation is limited to60seconds
+The depth12 / heuristic `i` / stop-on-trace `NONE` invocation is limited to60seconds
 and4MiB combined stdout/stderr. Without an output-file flag, Tamarin prints its
 analyzed theory and proof-method skeleton into that bounded log. Cut leaves are
 unproved; this is not a full dump of unresolved constraint systems or an actual
 honest/attack witness. A timeout can still leave only partial output. Metadata is
 always `eligibleAsProof:false`, even for an unexpectedly completed diagnostic.
+Its single bounded invocation also selects the registered helpers; none of its
+results are parsed as normal proof or reused by a later normal invocation.
 The helper never rewrites a normal summary/model, reruns with increasing bounds,
 or supplies its generated text as a production proof. The normal failed step
 keeps CI red. The [pinned batch implementation](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/src/Main/Mode/Batch.hs)
@@ -240,10 +285,10 @@ Eq('unchecked-signature', 'unchecked-signature'), // CANARY_APPROVAL_SIGNATURE_D
 ```
 
 ```text
-tamarin-prover RequestAuthorization.no-approval-signature.spthy --quit-on-warning --prove=accepted_approval_requires_same_binding_auth
+tamarin-prover RequestAuthorization.no-approval-signature.spthy --quit-on-warning --prove=enrolled_revision_unique --prove=building_precedes_open --prove=request_opened_unique --prove=active_registry_production_precedes_revocation --prove=accepted_approval_requires_same_binding_auth --stop-on-trace=BFS
 ```
 
-The selected lemma must be **falsified**: observe the public opened binding and inject a forged approval/signature without any matching UserAuthenticated event. No secret nonce or encrypted channel is needed for this attack.
+The original selected lemma must be **falsified**, and all four helpers must be **verified in this same mutant invocation**: observe the public opened binding and inject a forged approval/signature without any matching UserAuthenticated event. No secret nonce or encrypted channel is needed for this attack.
 
 ### Consumed-Pending replay-guard omission
 
@@ -260,9 +305,9 @@ with:
 ```
 
 ```text
-tamarin-prover RequestAuthorization.retain-pending.spthy --quit-on-warning --prove=request_accepted_at_most_once
+tamarin-prover RequestAuthorization.retain-pending.spthy --quit-on-warning --prove=enrolled_revision_unique --prove=building_precedes_open --prove=request_opened_unique --prove=active_registry_production_precedes_revocation --prove=request_accepted_at_most_once --stop-on-trace=BFS
 ```
 
-The selected lemma must be **falsified**: obtain one genuine request-bound approval, then replay that same public decision after the first acceptance. Alternatively, two already-eligible devices can both be accepted when this shared guard is wrongly retained. Signature verification remains enabled. The mutation restores the very same global pending RequestSlot, including its consumed `request_id`; it does not create a per-device slot, inject a fake violation event or change the cross-device at-most-once lemma.
+The original selected lemma must be **falsified**, and all four helpers must be **verified in this same mutant invocation**: obtain one genuine request-bound approval, then replay that same public decision after the first acceptance. Alternatively, two already-eligible devices can both be accepted when this shared guard is wrongly retained. Signature verification remains enabled. The mutation restores the very same global pending RequestSlot, including its consumed `request_id`; it does not create a per-device slot, inject a fake violation event or change the cross-device at-most-once lemma.
 
 The canaries test the model/runner's sensitivity to the specified missing mechanisms. They are not vulnerabilities asserted in the secure product. If ROOT's real prover cannot produce the required positive and negative verdicts, keep this work unverified and inspect the model/trace rather than weakening the lemmas or silently skipping a control.

@@ -5,11 +5,19 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { mutateExactlyOnce, parseProofSummary, proofArguments, runProtocolSecurity } from './protocol-security.mjs';
+import { mutateExactlyOnce, parseProofSummary, proofArguments, proofRequirements, runProtocolSecurity, validateTheoryRequirements } from './protocol-security.mjs';
 const expected = { auth: { trace: 'all-traces', verdict: 'verified' }, executable: { trace: 'exists-trace', verdict: 'verified' } };
 const text = 'summary of summaries:\n analyzed: Model.spthy\n auth (all-traces): verified (5 steps)\n executable (exists-trace): verified (3 steps)\n';
 const result = (stdout) => ({ stdout, stderr: '', status: 0, signal: null });
 const parse = (input, expected, known) => parseProofSummary(input, expected, known, 'Model.spthy');
+const helpers = {
+  enrolled_revision_unique: { trace: 'all-traces', verdict: 'verified' },
+  building_precedes_open: { trace: 'all-traces', verdict: 'verified' },
+  request_opened_unique: { trace: 'all-traces', verdict: 'verified' },
+  active_registry_production_precedes_revocation: { trace: 'all-traces', verdict: 'verified' },
+};
+const declarations = (wanted, auxiliary = false) => Object.entries(wanted).map(([name, value]) =>
+  `lemma ${name}${auxiliary ? ' [reuse]' : ''}:\n  ${value.trace}\n  "synthetic statement"\n`).join('\n');
 
 test('breadth-first witness search changes no proof requirements or model bounds', () => {
   for (const wanted of [
@@ -29,6 +37,109 @@ test('breadth-first witness search changes no proof requirements or model bounds
 test('actual summary needs every property and honest executable trace', () => {
   assert.equal(parse(result(text), expected).ok, true);
   assert.equal(parse(result(text.replace('executable (exists-trace): verified (3 steps)', '')), expected).ok, false);
+});
+test('helpers precede every selected target but never change target-driven BFS or DFS', () => {
+  for (const [wanted, strategy] of [
+    [{ honest: { trace: 'exists-trace', verdict: 'verified' } }, 'BFS'],
+    [{ auth: { trace: 'all-traces', verdict: 'falsified' } }, 'BFS'],
+    [{ auth: expected.auth }, 'DFS'],
+    [expected, 'DFS'],
+  ]) {
+    const requirements = proofRequirements(wanted, helpers), args = proofArguments('Model.spthy', wanted, helpers);
+    assert.deepEqual(requirements.helperLemmas, Object.keys(helpers));
+    assert.deepEqual(requirements.targetLemmas, Object.keys(wanted));
+    assert.deepEqual(args.filter(arg => arg.startsWith('--prove=')),
+      [...Object.keys(helpers), ...Object.keys(wanted)].map(name => `--prove=${name}`));
+    assert.ok(args.includes(`--stop-on-trace=${strategy}`));
+    assert.ok(args.includes('--quit-on-warning'));
+    assert.ok(args.every(arg => !arg.startsWith('--bound') && !arg.includes('sorry')));
+  }
+  assert.deepEqual(proofRequirements(expected).selectedLemmas, Object.keys(expected));
+  assert.deepEqual(proofRequirements(expected).helperLemmas, []);
+});
+test('helper manifests reject empty, excessive, colliding, nonuniversal or assumption entries', () => {
+  for (const invalid of [null, [], {}, { auth: expected.auth }, { helper: { trace: 'exists-trace', verdict: 'verified' } },
+    { helper: { trace: 'all-traces', verdict: 'falsified' } }, { helper: { trace: 'all-traces', verdict: 'verified', assumed: true } },
+    { helper: null }, { 'bad-name': expected.auth }, Object.create({ inherited: expected.auth }),
+    Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`helper_${index}`, expected.auth]))]) {
+    assert.throws(() => proofRequirements(expected, invalid));
+  }
+  assert.throws(() => proofRequirements({ auth: { ...expected.auth, ignored: true } }, helpers));
+  assert.throws(() => proofRequirements({}, helpers));
+});
+test('every helper must verify in the same exact successful invocation as its target', () => {
+  const required = proofRequirements({ auth: expected.auth }, helpers).expected;
+  const helperRows = Object.keys(helpers).map(name => ` ${name} (all-traces): verified (1 steps)\n`).join('');
+  const complete = `summary of summaries:\n analyzed: Model.spthy\n${helperRows} auth (all-traces): verified (5 steps)\n`;
+  assert.equal(parse(result(complete), required).ok, true);
+  for (const name of Object.keys(helpers)) {
+    const row = ` ${name} (all-traces): verified (1 steps)\n`;
+    for (const replacement of ['', row.replace('verified', 'falsified - found trace'),
+      row.replace('verified', 'analysis incomplete'), row.replace('all-traces', 'exists-trace')]) {
+      assert.equal(parse(result(complete.replace(row, replacement)), required).ok, false);
+    }
+  }
+  for (const broken of [complete.replace('Model.spthy', 'Mutant.spthy'), complete + complete,
+    `${helperRows}${text}`, `summary of summaries:\n analyzed: Cached.spthy\n${helperRows}\n${text}`]) {
+    assert.equal(parse(result(broken), required, [...Object.keys(helpers), ...Object.keys(expected)]).ok, false);
+  }
+  assert.equal(parse({ ...result(complete), status: 1 }, required).ok, false);
+  assert.equal(parse({ ...result(complete), cancelled: true }, required).ok, false);
+  assert.equal(parse({ ...result(complete), cleanupIncomplete: true }, required).ok, false);
+});
+test('a correct mutant target cannot hide an unproved helper or use a baseline summary', () => {
+  const required = proofRequirements({ auth: { trace: 'all-traces', verdict: 'falsified' } }, helpers).expected;
+  const output = `summary of summaries:\n analyzed: Mutant.spthy\n` +
+    Object.keys(helpers).map(name => ` ${name} (all-traces): verified (1 steps)\n`).join('') +
+    ' auth (all-traces): falsified - found trace (3 steps)\n';
+  assert.equal(parseProofSummary(result(output), required, Object.keys(required), 'Mutant.spthy').ok, true);
+  assert.equal(parseProofSummary(result(output.replace('Mutant.spthy', 'Model.spthy')), required, Object.keys(required), 'Mutant.spthy').ok, false);
+  assert.equal(parseProofSummary(result(output.replace('enrolled_revision_unique (all-traces): verified',
+    'enrolled_revision_unique (all-traces): analysis incomplete')), required, Object.keys(required), 'Mutant.spthy').ok, false);
+});
+test('general prover warnings fail even when process zero and all verdicts verify', () => {
+  for (const warning of ['WARNING: wellformedness', 'Warning (lemma selection)', 'warning: unsupported detail', 'WARN: ignored input', 'Warnings found']) {
+    assert.equal(parse({ ...result(text), stderr: warning }, expected).ok, false);
+  }
+});
+test('authored helper admission rejects missing, reordered, unknown, wrong-kind and retained proofs', () => {
+  const source = declarations(helpers, true) + declarations(expected) + '\nend\n';
+  assert.deepEqual(validateTheoryRequirements(source, expected, helpers).helperLemmas, Object.keys(helpers));
+  assert.doesNotThrow(() => validateTheoryRequirements(declarations(expected) + '\nend\n', expected));
+  for (const changed of [
+    source.replace('lemma enrolled_revision_unique', 'lemma unknown_helper'),
+    source.replace('[reuse]', '[sources,reuse]'), source.replace('[reuse]', '[reuse,reuse]'),
+    source.replace('[reuse]', ''), source.replace('all-traces', 'exists-trace'),
+    source.replace('"synthetic statement"', '"synthetic statement" by sorry'),
+    source.replace('"synthetic statement"', '"synthetic statement"\nsimplify\nqed'),
+    declarations(expected) + declarations(helpers, true) + '\nend\n',
+    source + '\nlemma unregistered [reuse]: all-traces "synthetic"\n',
+    '#include "retained-proof.spthy"\n' + source,
+  ]) assert.throws(() => validateTheoryRequirements(changed, expected, helpers));
+  assert.throws(() => validateTheoryRequirements(source, expected));
+});
+test('production observation-only helper insertion exactly erases to the retained original model', () => {
+  const source = readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  assert.equal(digest(source), '42b467b376c93d3e237021e420798a67549a1aedd17ccde6a001eb73c3d7385d');
+  const beginning = source.indexOf('// REQUEST_SECURITY_PROBE_ONLY:'), ending = source.indexOf('lemma honest_approve_trace:');
+  assert.ok(beginning > 0 && ending > beginning);
+  let erased = source.slice(0, beginning) + source.slice(ending);
+  assert.equal((erased.match(/ActiveRegistryProduced\(/g) ?? []).length, 6);
+  assert.equal((erased.match(/BuildingProduced\(/g) ?? []).length, 2);
+  erased = erased.replace(/,\n       ActiveRegistryProduced\([^\n]*\)/g, '')
+    .replace(',\n       BuildingProduced(request_id, pc, binding)', '')
+    .replace('--[ BuildingProduced(~request_id, pc, binding) ]->', '-->');
+  assert.equal(digest(erased), '7af08df4610de1d2eeac1f441339df76d5949b9c58be994fc272798559002460');
+  const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
+  const request = manifest.models.find(model => model.id === 'request-authorization');
+  assert.deepEqual(request.helpers, helpers);
+  assert.equal(Object.keys(request.expected).length, 9);
+  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 16);
+  assert.equal(manifest.models.filter(model => model.helpers !== undefined).length, 1);
+  assert.equal(manifest.sourceBindings.find(binding => binding.path === 'crates/secure-channel/src/identity.rs').sha256,
+    '76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195');
+  assert.deepEqual(validateTheoryRequirements(source, request.expected, request.helpers).helperLemmas, Object.keys(helpers));
 });
 test('exit zero does not turn falsified/incomplete/unknown into proof', () => {
   for (const status of ['falsified - found trace', 'analysis incomplete', 'unknown']) {
@@ -86,7 +197,7 @@ test('early missing-manifest failure cannot leave a prior passing summary', asyn
 
 // Synthetic runner fixture, NOT Tamarin or evidence of a security proof. The
 // fake process reports controlled verdict text solely to test orchestration.
-function runnerFixture(t) {
+function runnerFixture(t, { auxiliary, omitHelper = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-runner-test-'));
   const directory = join(root, 'artifacts/protocol-security');
   const manifestPath = join(root, 'security/tamarin/manifest.json');
@@ -99,7 +210,9 @@ function runnerFixture(t) {
   const config = { version: 1, toolVersion: '1.12.0',
     sourceBindings: [{ path: 'source.rs', sha256: createHash('sha256').update('synthetic reviewed source\n').digest('hex') }],
     models: [model('alpha'), model('beta')] };
-  for (const value of config.models) writeFileSync(join(root, value.path), 'synthetic GUARD input\n');
+  if (auxiliary !== undefined) config.models[0].helpers = auxiliary;
+  for (const value of config.models) writeFileSync(join(root, value.path), '// synthetic GUARD input\n' +
+    (value.helpers ? declarations(value.helpers, true) : '') + declarations(value.expected) + '\nend\n');
   const save = () => writeFileSync(manifestPath, JSON.stringify(config));
   save();
   const fake = join(root, 'fake-prover');
@@ -109,11 +222,13 @@ function runnerFixture(t) {
     if (process.argv.includes('--version')) { console.log('tamarin-prover 1.12.0'); process.exit(0); }
     const file = process.argv[2];
     const mutant = fs.readFileSync(file, 'utf8').includes('MUTANT');
+    const helpers = new Set(${JSON.stringify(Object.keys(auxiliary ?? {}))});
     console.log('summary of summaries:\\n analyzed: ' + file);
     for (const arg of process.argv.filter(x => x.startsWith('--prove='))) {
       const name = arg.slice(8);
+      if (${omitHelper} && name === ${JSON.stringify(Object.keys(auxiliary ?? {})[0] ?? '')}) continue;
       const kind = name === 'executable' ? 'exists-trace' : 'all-traces';
-      console.log(' ' + name + ' (' + kind + '): ' + (mutant ? 'falsified - found trace' : 'verified') + ' (1 steps)');
+      console.log(' ' + name + ' (' + kind + '): ' + (mutant && !helpers.has(name) ? 'falsified - found trace' : 'verified') + ' (1 steps)');
     }
   `);
   if (process.platform === 'linux') chmodSync(fake, 0o700);
@@ -127,6 +242,44 @@ function runnerFixture(t) {
   });
   return { root, directory, config, save };
 }
+
+test('synthetic orchestration reproves every helper per original and per mutant without adding rows',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { auxiliary: helpers });
+    await runProtocolSecurity(f.root);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, true); // Synthetic orchestration only, not a protocol proof.
+    assert.equal(summary.runs.length, 6);
+    for (const row of summary.runs.filter(row => row.id.startsWith('alpha-'))) {
+      assert.deepEqual(row.helperLemmas, Object.keys(helpers));
+      assert.equal(row.targetLemmas.length, 1);
+      assert.deepEqual(row.selectedLemmas, [...Object.keys(helpers), ...row.targetLemmas]);
+      for (const name of Object.keys(helpers)) assert.deepEqual(row.verdicts[name], helpers[name]);
+      assert.equal(row.arguments.includes('--stop-on-trace=BFS'), row.id !== 'alpha-1');
+    }
+  });
+
+test('synthetic runner fails whole original and mutant rows when a helper is absent',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { auxiliary: helpers, omitHelper: true });
+    await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.runs.length, 6);
+    for (const row of summary.runs.filter(row => row.id.startsWith('alpha-'))) {
+      assert.equal(row.ok, false);
+      assert.ok(row.reasons.some(reason => reason.includes('enrolled_revision_unique')));
+      assert.equal(row.verdicts[row.targetLemmas[0]].verdict, row.id === 'alpha-mutant' ? 'falsified' : 'verified');
+    }
+  });
+
+test('helper collisions with an unselected original reject before any prover invocation', async (t) => {
+  const f = runnerFixture(t);
+  f.config.models[0].helpers = { executable: { trace: 'all-traces', verdict: 'verified' } };
+  f.save();
+  await assert.rejects(() => runProtocolSecurity(f.root), /Helpers must be distinct/);
+  assert.equal(existsSync(join(f.root, 'invocations.log')), false);
+});
 
 test('input identities are reserved before any baseline/canary can overwrite evidence', async (t) => {
   for (const collision of ['own-baseline', 'later-baseline', 'run-id']) {

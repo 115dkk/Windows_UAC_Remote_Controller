@@ -1,9 +1,47 @@
 # Development handoff — 2026-09-10
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Verified implementation baseline: `a8cf6c4155deff4c2ed8ac8faea59f61b9ea595f` on
-`codex/native-runtime`. Updates in the final section are work in progress until
-ROOT records new exact-source validation.
+Verified implementation baseline: `7b9df1fd3901f5dc2fbca4312d640b8fe5520b2b` on
+`codex/native-runtime`. This document separates that baseline, installed native
+experiments and unmerged protocol experiments. New edits require new ROOT checks.
+
+## Latest evidence — September 10 evening
+
+- `7b9df1f` Windows/Linux full Rust quality and Android Rust-core jobs passed in
+  [Quality34461333180](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34461333180).
+  The overall run failed its normal Tamarin job. Actual APK and Windows package
+  runs also passed; this does not establish remote approval or native startup.
+- `ServiceSession` now composes the existing registry, decision engine, original
+  PC key, clock and bounded authenticated peer ownership. Do not build a second
+  coordinator. The real Windows request producer, low-privilege carrier boundary,
+  first-pairing caller and target-bound OS application are still missing.
+- Consumer wording/activation UI is implemented and ROOT reviewed the final
+  Windows/Linux 47-case,73-image galleries plus eight Android shared-renderer
+  cases. Original screenshots are published in
+  [issue1](https://github.com/115dkk/Windows_UAC_Remote_Controller/issues/1#issuecomment-5616495027).
+  Renderer/client evidence is not real boot, phone authentication or UAC evidence.
+- Real user-approved native installation of `7b9df1f` failed at the first
+  `NCryptOpenStorageProvider` call with `0x80090030`; SCM recorded `0xE6070030`.
+  An ordinary medium-user provider-open/close succeeded on the same machine.
+  A fresh native service restart reproduced the failure.
+- The separate `645991e` startup-order experiment moved the provider operation
+  after acknowledged SCM `SERVICE_RUNNING` with no accepted controls. Its real
+  installation at21:02KST still failed at the same provider operation. These
+  experimental binaries are currently installed, with previous real-copy backups;
+  the branch is **not merged**. No TPM/key reset, key deletion, service SID/ACL
+  relaxation, UAC/Secure Desktop or antivirus change was made.
+- Daybreak Blue proposed a separate fixed-function SYSTEM provider diagnostic to
+  distinguish restricted-token effects from LocalSystem context. ROOT requested
+  explicit user permission, which the user granted. Source preparation is in
+  progress; the diagnostic service has not been created or executed. The error
+  alone does not prove TPM failure or an access-denied cause.
+- Isolated protocol `65664b8`
+  [CI34475391432](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34475391432)
+  proved four helpers plus the unchanged revocation property together in19.26s.
+  Its eight other original obligations and both request canaries were unselected.
+  Earlier one-property diagnostics proved five other request-safety properties,
+  but witnesses and required canaries remain incomplete in the normal gate.
+  Integration of same-invocation helper checks is under development, not a pass.
 
 ## Reuse these owners; do not build alternatives
 
@@ -11,7 +49,7 @@ ROOT records new exact-source validation.
 | --- | --- | --- |
 | Approval state and one-shot decisions | `approval-core::ApprovalEngine`; `approval-protocol::SignedDecision` | Actual Windows prompt capture/dispatch owner and target-bound OS application |
 | Encrypted framing/carrier | `secure-channel`, `framed-transport::PeerTransport`/`SocketDriver`, `relay-service::connect_rendezvous` | Windows low-privilege carrier/service boundary and deployed cross-device provisioning |
-| PC identity and registration | `windows-identity::PcIdentityKey`; `windows-service-host::ServiceRegistry` | Same service-owned peer/clock/decision coordinator; protected real enrollment caller |
+| PC identity and registration | `windows-identity::PcIdentityKey`; `windows-service-host::ServiceRegistry` and `ServiceSession` | Resolve native provider initialization; protected real enrollment caller, carrier and prompt/OS integration |
 | Phone hardware-key adjudication | `android-attestation::verify_key_bundle`, fixed-origin status fetch, required `VerifiedKeyBundle` registry input | Production ceremony and app-signer policy; never replace with a trusted boolean |
 | Enrollment confirmation | `service-protocol::pairing`; `android-controller::pairing::PendingPairingAcceptance` | Original real QR ceremony, PC receipt producer and native callers |
 | Android persistence | One `MobileController`/`DurableInbox`, Preparing/CreatedUnverified commits, ABI9 one-shot native creation transaction and existing pending acceptance | Real ceremony/scanner must call the existing owner; no second journal/preference owner |
@@ -60,11 +98,9 @@ bounded work and explicit fail-closed state. Native key generation does not mean
 enrolled; an authorized decision does not mean Windows applied it; SCM Running
 does not mean remote requests are ready.
 
-Next slices (not yet validated): a Windows `ServiceSession` composes that same
-registry/engine/key/clock with bounded authenticated peer ownership, and G010
-reworks consumer-facing purpose/activation wording plus native notification
-presentation. These do not create a production listener, a QR ceremony or a
-Windows prompt producer.
+Those next slices, `ServiceSession` and G010 consumer wording/presentation, are
+now implemented and validated at the scoped7b9df1f baseline above. They do not
+create a production listener, QR ceremony or Windows prompt producer.
 
 The isolated formal branch proved `building_precedes_open` and its dependent
 `request_opened_unique` together in baseline and both fixed negative-control
@@ -80,13 +116,16 @@ required formal proofs, final security audit, fresh approved architecture pass,
 release automation and native acceptance remain unfinished. No usable full-product
 prerelease has been published.
 
-No UAC experiment before19:00 KST on2026-09-10. At/after that time ask the user
-before actual elevation; the clock alone is not approval. No local screen-access
-workaround. C/E cleanup waits until actual prerelease publication, not just a
+The latest user approval window ends22:00KST on2026-09-10; earlier times are
+superseded and the one-time reminder was deleted. The user explicitly authorized
+the separate one-time SYSTEM diagnostic install/run/remove experiment. Execution
+still follows ROOT review and actual build checks. Local screen access remains
+unavailable; CI galleries and supplied images are the visual evidence paths.
+C/E cleanup waits until actual prerelease publication, not just a
 draft/build. Preserve source, keys, user data and sufficient release/evidence
 artifacts. Low disk space is not permission to delete them early.
 
-Current task quota is available. The app goal record still reports an older
-`usageLimited` state; this document does not claim to reset/resume that scheduler
-state. Continue explicit user-requested work without pretending background
-implementation agents remain active after they finish.
+ROOT remains the only validation executor. Child work is source authoring or
+static review, not proof. Preserve the last preauthorized reset credit until the
+user's remaining-usage threshold is met; an available credit is not itself
+permission to consume it early.
