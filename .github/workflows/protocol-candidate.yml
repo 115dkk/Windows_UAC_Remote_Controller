@@ -1,0 +1,54 @@
+name: Protocol candidate investigation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/protocol-witness-investigation']
+    paths:
+      - 'security/tamarin/candidates/**'
+      - 'tools/protocol-candidate*'
+      - '.github/workflows/protocol-candidate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  investigate:
+    name: Candidate-only proof navigation (not a security gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact candidate revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install signed distribution prover dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends graphviz unzip
+      - name: Install the same pinned Tamarin and Maude
+        id: tamarin
+        run: node tools/install-tamarin.mjs
+      - name: Check candidate admission and subprocess controls
+        run: node --test tools/protocol-candidate.test.mjs tools/prover-process.test.mjs
+      - name: Inspect the stored navigation candidate within fixed limits
+        env:
+          TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
+        run: node tools/protocol-candidate.mjs
+      - name: Retain candidate-only output, including incomplete attempts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: protocol-candidate-${{ github.sha }}
+          path: artifacts/protocol-candidate/
+          if-no-files-found: error
+          retention-days: 14
