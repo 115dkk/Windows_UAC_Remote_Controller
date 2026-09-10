@@ -348,7 +348,8 @@ impl PairingRegistry {
         &mut self,
         pending: &PendingPairingAcceptance,
     ) -> Result<(), PairingAcceptanceError> {
-        self.entries.retain(|entry| entry.strong_count() != 0);
+        self.entries
+            .retain(|entry: &Weak<PairingReservation>| entry.strong_count() != 0);
         let candidate = &pending.reservation;
         for existing in self.entries.iter().filter_map(Weak::upgrade) {
             if existing.pc == candidate.pc
