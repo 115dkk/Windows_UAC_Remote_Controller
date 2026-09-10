@@ -226,7 +226,14 @@ solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #o )
                     case SignExactApprovalOnce
                     solve( RegistrySlot( ~device, ~pc, revision, 'active' ) ▶₀ #a )
                       case CaptureEligibleDevice
-                      by sorry /* UNVERIFIED: ROOT must expose this exact subtree */
+                      solve( RequestSlot( ~request_id, ~pc,
+                                          <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                           ~content_digest, ~expiry>,
+                                          'building'
+                             ) ▶₀ #vr.2 )
+                        case OpenActualRequest
+                        by sorry /* UNVERIFIED: ROOT must expose the state after this base open */
+                      qed
                     qed
                   qed
                 qed
