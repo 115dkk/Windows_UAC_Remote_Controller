@@ -2,6 +2,7 @@
 // Synthetic parser/guard contracts only; these never run adb or establish native lifecycle behavior.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { AVD, PACKAGE, TEST_PACKAGE, inspectTestManifest, isPassiveReady, parseInstrumentation, parsePassiveDump,
   requireCi, requireDevice, requireSameSource, servicePresence, requireSameBoot, commandEvidenceComplete,
   finalizeLifecycleResult } from './android-lifecycle-ci.mjs';
@@ -14,6 +15,17 @@ test('host admission refuses local, non-Linux and external ADB routing', () => {
     assert.throws(() => requireCi({ ...env, ...changes }, 'linux', '/workspace'));
   }
   assert.throws(() => requireCi(env, 'win32', '/workspace'));
+});
+
+test('instrumentation reuses only a previously built, APK-matched and unchanged Tauri library', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/android-lifecycle.yml', import.meta.url), 'utf8');
+  assert.ok(workflow.indexOf('Build genuine x86_64 Tauri and controller product APK') < workflow.indexOf('Build instrumentation against that real product flavor'));
+  assert.ok(workflow.includes("before = await inspectApk(apk, 'x86_64')"));
+  assert.ok(workflow.includes("before.libraries.find(item => item.member === 'lib/x86_64/libcontroller_app_lib.so')?.sha256 !== libraryHash"));
+  assert.ok(workflow.includes("'-x', ':app:rustBuildX86_64Debug'"));
+  assert.ok(workflow.includes('hash(apk) !== before.apk.sha256 || hash(library) !== libraryHash'));
+  assert.ok(workflow.includes("throw new Error('Actual instrumentation build failed')"));
+  assert.ok(workflow.includes('instrumentation-prebuilt-binding.json'));
 });
 
 test('only one named API36 x86_64 emulator is admitted before mutation', () => {

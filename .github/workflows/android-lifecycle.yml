@@ -79,7 +79,51 @@ jobs:
           }
           NODE
       - name: Build instrumentation against that real product flavor
-        run: bash src-tauri/gen/android/gradlew -p src-tauri/gen/android :app:assembleUniversalDebugAndroidTest -PabiList=x86_64 -ParchList=x86_64 -PtargetList=x86_64 --no-daemon
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+          import { resolve, join } from 'node:path';
+          import { inspectApk } from './tools/verify-android-apk.mjs';
+          import { runProver } from './tools/prover-process.mjs';
+          const root = process.cwd(), output = resolve(root, 'src-tauri/gen/android/app/build/outputs/apk');
+          const candidates = []; let entries = 0;
+          function walk(path, depth = 0) {
+            if (depth > 8) throw new Error('Excess APK tree depth');
+            for (const item of readdirSync(path, { withFileTypes: true })) {
+              if (++entries > 512 || item.isSymbolicLink()) throw new Error('Unexpected APK output tree');
+              const child = join(path, item.name);
+              if (item.isDirectory()) walk(child, depth + 1);
+              else if (item.isFile() && item.name.endsWith('.apk')) candidates.push(child);
+            }
+          }
+          walk(output);
+          if (candidates.length !== 1) throw new Error('One genuine prebuilt product APK required');
+          const apk = candidates[0], before = await inspectApk(apk, 'x86_64');
+          const library = resolve(root, 'target/x86_64-linux-android/debug/libcontroller_app_lib.so');
+          function hash(path) {
+            const stat = lstatSync(path);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 512 * 1024 * 1024) throw new Error('Unexpected prebuilt input');
+            return createHash('sha256').update(readFileSync(path)).digest('hex');
+          }
+          const libraryHash = hash(library);
+          if (before.libraries.find(item => item.member === 'lib/x86_64/libcontroller_app_lib.so')?.sha256 !== libraryHash) throw new Error('Tauri library differs from the actual built APK');
+          // The preceding mandatory Tauri CLI step already built this exact library.
+          // Only its redundant callback task needs the now-closed CLI WebSocket.
+          const args = ['src-tauri/gen/android/gradlew', '-p', 'src-tauri/gen/android', ':app:assembleUniversalDebugAndroidTest',
+            '-PabiList=x86_64', '-ParchList=x86_64', '-PtargetList=x86_64', '--no-daemon', '-x', ':app:rustBuildX86_64Debug'];
+          const cancellation = new AbortController();
+          for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => cancellation.abort());
+          const result = await runProver('/usr/bin/bash', args, { cwd: root, logPath: 'target/android-lifecycle-ci/instrumentation-build.log',
+            timeoutMs: 600000, maxOutputBytes: 4 * 1024 * 1024, signal: cancellation.signal });
+          if (result.error || result.signal || result.status !== 0 || result.cancelled || result.cleanupIncomplete || cancellation.signal.aborted) throw new Error('Actual instrumentation build failed');
+          if (hash(apk) !== before.apk.sha256 || hash(library) !== libraryHash) throw new Error('Previously built product changed during instrumentation build');
+          writeFileSync('target/android-lifecycle-ci/instrumentation-prebuilt-binding.json', JSON.stringify({
+            commit: process.env.GITHUB_SHA, productApkSha256: before.apk.sha256, tauriLibrarySha256: libraryHash,
+            previouslyBuiltTask: ':app:rustBuildX86_64Debug', actualInstrumentationArguments: args, productUnchanged: true,
+          }, null, 2), { flag: 'wx' });
+          NODE
       - name: Allow disposable CI emulator acceleration
         run: sudo chmod 0666 /dev/kvm
       - name: Test actual foreground owner, reboot and package replacement
