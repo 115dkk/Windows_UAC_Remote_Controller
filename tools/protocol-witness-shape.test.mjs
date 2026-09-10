@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { ORIGINAL, SHAPED, shapeWitness } from './protocol-witness-shape.mjs';
+import { ORIGINAL, SHAPED, admitStoredProof, shapeWitness } from './protocol-witness-shape.mjs';
 
 const source = readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url), 'utf8');
 test('only the original existential witness is strengthened; rules and all-trace properties stay byte-identical', () => {
@@ -23,4 +23,11 @@ test('different rules, properties, duplicate witnesses and oversized inputs are 
 });
 test('CRLF normalization changes no model text beyond line endings', () => {
   assert.deepEqual(shapeWitness(source.replace(/\r?\n/g, '\r\n')), shapeWitness(source));
+});
+test('actual stored proof can add methods only, never rules or property changes', () => {
+  const base = shapeWitness(source).candidate;
+  const stored = readFileSync(new URL('../security/tamarin/candidates/HonestApproveShapedProof.spthy', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => admitStoredProof(base, stored));
+  assert.throws(() => admitStoredProof(base, stored.replace('builtins: signing', 'builtins: signing, hashing')));
+  assert.throws(() => admitStoredProof(base, stored.replace('simplify\n', 'simplify\nrule injected:\n')));
 });

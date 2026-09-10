@@ -43,17 +43,42 @@ export function shapeWitness(source) {
   return { normalized, candidate };
 }
 
+export function admitStoredProof(base, stored) {
+  const normalize = (text) => text.replace(/\r\n/g, '\n').trimEnd() + '\n';
+  base = normalize(base);
+  stored = normalize(stored);
+  assert.ok(Buffer.byteLength(stored) <= 1024 * 1024);
+  const marker = '\nlemma honest_deny_without_approval_auth_trace:';
+  const boundary = base.indexOf(marker);
+  const next = stored.indexOf(marker);
+  assert.ok(boundary > 0 && next > boundary);
+  assert.equal(base.lastIndexOf(marker), boundary);
+  assert.equal(stored.lastIndexOf(marker), next);
+  assert.equal(stored.slice(0, boundary), base.slice(0, boundary));
+  assert.equal(stored.slice(next), base.slice(boundary));
+  const proof = stored.slice(boundary, next).trim();
+  assert.ok(proof.startsWith('simplify\n') && proof.endsWith('qed'));
+  assert.ok(/\bSOLVED\b/u.test(proof), 'The actual prover output must contain a solved witness branch.');
+  assert.doesNotMatch(proof, /\b(?:lemma|rule|restriction|axiom|builtins|functions|equations|heuristic|tactic|configuration|theory|oracle)\b|#\s*(?:include|define|ifdef|endif)\b/iu);
+  return stored;
+}
+
 async function main() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.env.CI, 'true');
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
-  assert.equal(process.argv.length, 2);
+  const replay = process.argv.length === 3 && process.argv[2] === '--replay';
+  assert.ok(process.argv.length === 2 || replay);
   const binary = process.env.TAMARIN_BIN;
   assert.ok(typeof binary === 'string' && isAbsolute(binary));
   assert.ok(lstatSync(binary).isFile() && !lstatSync(binary).isSymbolicLink());
   const origin = resolve(root, 'security/tamarin/RequestAuthorization.spthy');
   assert.ok(lstatSync(origin).isFile() && !lstatSync(origin).isSymbolicLink());
-  const { normalized, candidate } = shapeWitness(readFileSync(origin, 'utf8'));
+  const shaped = shapeWitness(readFileSync(origin, 'utf8'));
+  const normalized = shaped.normalized;
+  const storedPath = resolve(root, 'security/tamarin/candidates/HonestApproveShapedProof.spthy');
+  if (replay) assert.ok(lstatSync(storedPath).isFile() && !lstatSync(storedPath).isSymbolicLink());
+  const candidate = replay ? admitStoredProof(shaped.candidate, readFileSync(storedPath, 'utf8')) : shaped.candidate;
   const base = resolve(root, 'artifacts/protocol-witness-shape');
   mkdirSync(base, { recursive: true });
   const directory = mkdtempSync(resolve(base, 'witness-'));
@@ -66,6 +91,7 @@ async function main() {
   process.once('SIGTERM', stop);
   let report = {
     classification: 'WITNESS_SHAPE_EXPERIMENT_ONLY', eligibleAsNormalGate: false,
+    replayOfActualProverOutput: replay,
     originSha256: hash(normalized), candidateSha256: hash(candidate),
     originalRulesRestrictionsAndOtherLemmasUnchanged: true,
     bounds: { invocations: 1, timeoutMs: 120000, outputBytes: 4 * 1024 * 1024 },
