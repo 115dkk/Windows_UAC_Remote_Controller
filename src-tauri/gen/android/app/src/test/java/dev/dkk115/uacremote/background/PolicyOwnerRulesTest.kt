@@ -9,6 +9,48 @@ import org.junit.Test
 
 /** Pure synthetic state only; no Application, threads, JNA, files, keys or Android calls. */
 class PolicyOwnerRulesTest {
+    @Test fun intakeProgressRoutesToCleanupAfterStopInsteadOfStoppedRequestMaintenance() {
+        val lifecycle = PolicyOwnerLifecycle()
+        assertEquals(PolicyNativeProgressTarget.NONE, lifecycle.nativeProgressTarget())
+        lifecycle.start()
+        assertEquals(PolicyNativeProgressTarget.REQUEST_MAINTENANCE, lifecycle.nativeProgressTarget())
+        lifecycle.initialized(0, 0)
+        assertEquals(PolicyNativeProgressTarget.REQUEST_MAINTENANCE, lifecycle.nativeProgressTarget())
+        lifecycle.stop()
+        assertEquals(PolicyNativeProgressTarget.CLEANUP, lifecycle.nativeProgressTarget())
+        lifecycle.closed()
+        assertEquals(PolicyNativeProgressTarget.NONE, lifecycle.nativeProgressTarget())
+    }
+
+    @Test fun finalIntakeCompletionResumesPendingRustShutdownWithoutGrantingFailedDestroyRetry() {
+        val lifecycle = PolicyOwnerLifecycle()
+        lifecycle.start(); lifecycle.initialized(0, 0); lifecycle.stop()
+        val cleanup = ControllerCleanupState()
+        assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, cleanup.next(true))
+        cleanup.failed() // Actual Rust shutdown can still be waiting for I/O resources.
+        assertEquals(ControllerCleanupAction.NONE, cleanup.next(false))
+        val resumed = lifecycle.nativeProgressTarget() == PolicyNativeProgressTarget.CLEANUP
+        assertTrue(resumed)
+        assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, cleanup.next(false, resumed))
+        cleanup.shutdownSucceeded()
+        assertEquals(ControllerCleanupAction.DESTROY, cleanup.next(false))
+        cleanup.failed() // A generated-wrapper failure still requires explicit retry.
+        assertEquals(ControllerCleanupAction.NONE, cleanup.next(false, resumed))
+        assertEquals(ControllerCleanupAction.DESTROY, cleanup.next(true))
+    }
+
+    @Test fun failedOwnerAlsoReceivesCleanupProgressButCanNeverBecomeReadyAgain() {
+        val lifecycle = PolicyOwnerLifecycle()
+        lifecycle.start(); lifecycle.initialized(0, 0)
+        lifecycle.fail(PolicyStatus.UNAVAILABLE)
+        assertEquals(PolicyNativeProgressTarget.CLEANUP, lifecycle.nativeProgressTarget())
+        assertFalse(lifecycle.start())
+        assertFalse(lifecycle.initialized(0, 0))
+        lifecycle.closed()
+        lifecycle.stop(); lifecycle.fail(PolicyStatus.UNAVAILABLE)
+        assertEquals(PolicyNativeProgressTarget.NONE, lifecycle.nativeProgressTarget())
+    }
+
     @Test fun actualProgressMayContinueRustCleanupButNeverRetryFailedGeneratedDestroy() {
         val state = ControllerCleanupState()
         assertEquals(ControllerCleanupAction.SHUTDOWN_THEN_DESTROY, state.next(false))

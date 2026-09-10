@@ -4,12 +4,16 @@ package dev.dkk115.uacremote
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.pm.ApplicationInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.os.UserManager
 import android.provider.Settings
 import android.util.Base64
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -22,6 +26,10 @@ import dev.dkk115.uacremote.background.PolicyOwnerPhase
 import dev.dkk115.uacremote.background.ServiceControlResult
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -42,6 +50,7 @@ class ControllerLifecycleTest {
     private data class Observed(
         val ready: Boolean, val stopped: Boolean, val component: BootComponentState,
         val actor: ApplicationPolicyActor?, val phase: PolicyOwnerPhase?, val notification: Boolean,
+        val state: ControllerServiceState, val diagnostics: List<String>,
     )
 
     @Test fun nativeLifecyclePhase() {
@@ -66,6 +75,8 @@ class ControllerLifecycleTest {
         val checks = JSONObject()
         var scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
+            awaitWebView(scenario, "initial Activity document")
+            checks.put("initialWebViewReady", true)
             when (phase) {
                 "initial" -> {
                     val original = await(scenario, "initial native READY") { it.ready }
@@ -73,6 +84,8 @@ class ControllerLifecycleTest {
                     assertNotNull(original.actor)
                     assertTrue(original.notification)
                     scenario.recreate()
+                    awaitWebView(scenario, "recreated Activity document")
+                    checks.put("recreatedWebViewReady", true)
                     val recreated = await(scenario, "recreated native READY") { it.ready }
                     assertSame(original.actor, recreated.actor)
                     checks.put("sameOwnerAfterRecreate", true)
@@ -86,6 +99,8 @@ class ControllerLifecycleTest {
                     checks.put("oldOwnerClosed", true)
                     scenario.close()
                     scenario = ActivityScenario.launch(MainActivity::class.java)
+                    awaitWebView(scenario, "relaunched Activity document")
+                    checks.put("relaunchedWebViewReady", true)
                     assertStopped(scenario)
                     checks.put("manualRelaunchStayedDisabled", true)
                     start(scenario)
@@ -104,6 +119,8 @@ class ControllerLifecycleTest {
                 "verify-stopped" -> assertStopped(scenario)
                 "start" -> { assertStopped(scenario); start(scenario) }
             }
+            awaitWebView(scenario, "completed phase document")
+            checks.put("finalWebViewReady", true)
             val final = observe(scenario)
             val expectsStopped = phase == "stop" || phase == "verify-stopped"
             assertEquals(expectsStopped, final.stopped)
@@ -180,6 +197,7 @@ class ControllerLifecycleTest {
                 state.state == ControllerServiceState.LOCAL_SETTINGS_READY && state.policyOwnerReady && actor != null && phase == PolicyOwnerPhase.READY,
                 state.state == ControllerServiceState.STOPPED && !state.policyOwnerReady,
                 ControllerForegroundService.componentState(activity), actor, phase, found != null,
+                state.state, app.controllerLifecycleDiagnosticLines().orEmpty(),
             )
         }
         return value ?: throw HostNotResumed()
@@ -187,15 +205,128 @@ class ControllerLifecycleTest {
 
     private fun await(scenario: ActivityScenario<MainActivity>, label: String, predicate: (Observed) -> Boolean): Observed {
         val until = SystemClock.elapsedRealtime() + 30_000L
+        var last: Observed? = null
         do {
             val value = try { observe(scenario) } catch (_: HostNotResumed) { null }
+            if (value != null) last = value
             if (value != null && predicate(value)) return value
             SystemClock.sleep(50L)
         } while (SystemClock.elapsedRealtime() < until)
-        throw AssertionError("Lifecycle deadline: $label")
+        throw AssertionError("Lifecycle deadline: $label; state=${last?.state}; phase=${last?.phase}; component=${last?.component}; notification=${last?.notification}; ownerPresent=${last?.actor != null}; ${last?.diagnostics?.joinToString(",")}")
     }
 
     private class HostNotResumed : RuntimeException()
+
+    private enum class WebReadiness { HOST_NOT_RESUMED, NO_ATTACHED_WEBVIEW, NONLOCAL_DOCUMENT, DOCUMENT_NOT_READY, CALLBACK_UNAVAILABLE, READY }
+
+    /** Read only the actual current window. No loadUrl, new WebView, mock bridge,
+     * DOM modification or navigation. evaluateJavascript and its callback run on
+     * main; only the instrumentation thread waits, with one outstanding query. */
+    private fun awaitWebView(scenario: ActivityScenario<MainActivity>, label: String) {
+        val until = SystemClock.elapsedRealtime() + 30_000L
+        var last: WebReadiness
+        do {
+            val done = CountDownLatch(1)
+            val active = AtomicBoolean(true)
+            val observed = AtomicReference(WebReadiness.HOST_NOT_RESUMED)
+            scenario.onActivity { activity ->
+                val app = activity.application as ControllerApplication
+                if (!app.isCurrentForegroundControllerHost(activity)) { done.countDown(); return@onActivity }
+                val web = attachedWebView(activity)
+                if (web == null) { observed.set(WebReadiness.NO_ATTACHED_WEBVIEW); done.countDown(); return@onActivity }
+                if (!localDocument(web.url)) { observed.set(WebReadiness.NONLOCAL_DOCUMENT); done.countDown(); return@onActivity }
+                observed.set(WebReadiness.CALLBACK_UNAVAILABLE)
+                try {
+                    web.evaluateJavascript(WEB_READINESS_SCRIPT) { result ->
+                        try {
+                            if (active.get()) {
+                                val current = app.isCurrentForegroundControllerHost(activity) && attachedWebView(activity) === web
+                                observed.set(when {
+                                    !current -> WebReadiness.NO_ATTACHED_WEBVIEW
+                                    !localDocument(web.url) -> WebReadiness.NONLOCAL_DOCUMENT
+                                    result == "true" -> WebReadiness.READY
+                                    else -> WebReadiness.DOCUMENT_NOT_READY
+                                })
+                            }
+                        } catch (_: RuntimeException) {
+                            if (active.get()) observed.set(WebReadiness.CALLBACK_UNAVAILABLE)
+                        } finally { done.countDown() }
+                    }
+                } catch (_: RuntimeException) { done.countDown() }
+            }
+            val remaining = until - SystemClock.elapsedRealtime()
+            if (remaining <= 0 || !done.await(remaining.coerceAtMost(2_000L), TimeUnit.MILLISECONDS)) {
+                active.set(false)
+                throw AssertionError("WebView deadline: $label; callback unavailable")
+            }
+            active.set(false)
+            last = observed.get()
+            if (last == WebReadiness.READY) return
+            SystemClock.sleep(50L)
+        } while (SystemClock.elapsedRealtime() < until)
+        throw AssertionError("WebView deadline: $label; state=$last")
+    }
+
+    private fun attachedWebView(activity: MainActivity): WebView? {
+        val decor = activity.window.decorView
+        val queue = ArrayDeque<Pair<View, Int>>()
+        queue.add(decor to 0)
+        var visited = 0
+        var found: WebView? = null
+        while (queue.isNotEmpty()) {
+            val (view, depth) = queue.removeFirst()
+            check(++visited <= 128 && depth <= 16) { "Bounded Activity view tree exceeded" }
+            if (view is WebView) {
+                if (view.isAttachedToWindow && view.isShown && view.width > 0 && view.height > 0 &&
+                    view.windowToken == decor.windowToken && view.rootView === decor) {
+                    check(found == null) { "Ambiguous attached WebViews" }
+                    found = view
+                }
+            } else if (view is ViewGroup) {
+                check(visited + queue.size + view.childCount <= 128) { "Bounded Activity view tree exceeded" }
+                for (index in 0 until view.childCount) queue.add(view.getChildAt(index) to depth + 1)
+            }
+        }
+        return found
+    }
+
+    private fun localDocument(raw: String?): Boolean {
+        if (raw == null || raw.length !in 1..256) return false
+        val url = Uri.parse(raw)
+        val origin = (url.scheme in listOf("http", "https") && url.encodedAuthority == "tauri.localhost") ||
+            (url.scheme == "tauri" && url.encodedAuthority == "localhost")
+        return origin && url.path in listOf("", "/", "/index.html") && url.encodedQuery == null
+    }
+
+    private companion object {
+        // Selectors come from ui/index.html, main.tsx and App.tsx. Require the
+        // real Android React shell, not an empty mount or launch/error placeholder.
+        // Return one boolean only: never expose document/request text or URLs.
+        val WEB_READINESS_SCRIPT = """
+            (() => {
+              const u = new URL(location.href);
+              const local = ((u.protocol === 'http:' || u.protocol === 'https:') && u.hostname === 'tauri.localhost') ||
+                (u.protocol === 'tauri:' && u.hostname === 'localhost');
+              if (!local || u.port || u.username || u.password || u.search ||
+                  !['', '/', '/index.html'].includes(u.pathname) || document.readyState !== 'complete' ||
+                  document.title !== '휴대폰 승인' || document.documentElement.lang !== 'ko') return false;
+              const visible = e => {
+                if (!e || !e.isConnected) return false;
+                const s = getComputedStyle(e), r = e.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility === 'visible' && Number(s.opacity) > 0 && r.width > 0 && r.height > 0;
+              };
+              const root = document.getElementById('root');
+              const shell = root && root.querySelector(':scope > .app-shell.phone-shell');
+              const main = shell && shell.querySelector('main#main-content.main-scroll');
+              const heading = main && main.querySelector('.page-header h1');
+              const nav = shell && shell.querySelector('.navigation-shell nav');
+              const current = nav && nav.querySelector('button[aria-current="page"]');
+              return [document.body, root, shell, main, heading, nav, current].every(visible) &&
+                heading.textContent.trim().length > 0 && current.textContent.trim().length > 0 &&
+                nav.querySelectorAll('.navigation-item').length === 4;
+            })()
+        """.trimIndent()
+    }
 
     private fun apkHash(path: String): String {
         val file = File(path)

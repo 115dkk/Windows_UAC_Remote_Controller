@@ -115,7 +115,8 @@ test('OS service result requires actual connected-device foreground state and fi
 const expected = { phase: 'initial', nonce: 'a'.repeat(32), appSha256: 'b'.repeat(64), testSha256: 'c'.repeat(64) };
 const receipt = { ...expected, version: 1, package: PACKAGE, sdk: 36, abi: 'x86_64', bootCount: 1,
   ready: true, stopped: false, component: 'ENABLED', ownerPhase: 'READY', notificationPresent: true,
-  checks: { sameOwnerAfterRecreate: true, sameOwnerAfterRepeatedStart: true, oldOwnerClosed: true,
+  checks: { initialWebViewReady: true, finalWebViewReady: true, recreatedWebViewReady: true, relaunchedWebViewReady: true,
+    sameOwnerAfterRecreate: true, sameOwnerAfterRepeatedStart: true, oldOwnerClosed: true,
     manualRelaunchStayedDisabled: true, explicitStartCreatedOwnerAfterClose: true } };
 const output = (value = receipt) => `INSTRUMENTATION_STATUS: uac_lifecycle_receipt=${Buffer.from(JSON.stringify(value)).toString('base64')}\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n`;
 
@@ -136,6 +137,20 @@ test('STOPPED receipt cannot replace actual CLOSED completion for explicit stop'
   assert.deepEqual(parseInstrumentation(output(stopped), selected), stopped);
   assert.throws(() => parseInstrumentation(output({ ...stopped, ownerPhase: 'NONE' }), selected));
   assert.throws(() => parseInstrumentation(output({ ...stopped, notificationPresent: true }), selected));
+});
+
+test('native actor readiness cannot replace actual local document readiness after launch or recreation', () => {
+  for (const phase of ['initial', 'verify-enabled', 'start']) {
+    const selected = { ...expected, phase };
+    const value = { ...receipt, ...selected };
+    assert.deepEqual(parseInstrumentation(output(value), selected), value);
+    const required = ['initialWebViewReady', 'finalWebViewReady', ...(phase === 'initial' ? ['recreatedWebViewReady', 'relaunchedWebViewReady'] : [])];
+    for (const key of required) {
+      for (const incorrect of [undefined, false, 'true', 1]) {
+        assert.throws(() => parseInstrumentation(output({ ...value, checks: { ...value.checks, [key]: incorrect } }), selected));
+      }
+    }
+  }
 });
 
 test('instrumentation manifest must target real product, not renderer or other package', () => {

@@ -137,7 +137,10 @@ export function parseInstrumentation(text, expected) {
   requireThat(receipt.ready === !stopped && receipt.stopped === stopped && receipt.notificationPresent === !stopped &&
     (stopped ? receipt.component === 'DISABLED' && ['NONE', 'CLOSED'].includes(receipt.ownerPhase) :
       ['DEFAULT', 'ENABLED'].includes(receipt.component) && receipt.ownerPhase === 'READY'), 'Receipt contradicts lifecycle phase.');
-  if (receipt.phase === 'initial') for (const key of ['sameOwnerAfterRecreate', 'sameOwnerAfterRepeatedStart', 'oldOwnerClosed', 'manualRelaunchStayedDisabled', 'explicitStartCreatedOwnerAfterClose']) {
+  for (const key of ['initialWebViewReady', 'finalWebViewReady']) {
+    requireThat(receipt.checks?.[key] === true, 'Actual local application document readiness missing.');
+  }
+  if (receipt.phase === 'initial') for (const key of ['sameOwnerAfterRecreate', 'sameOwnerAfterRepeatedStart', 'oldOwnerClosed', 'manualRelaunchStayedDisabled', 'explicitStartCreatedOwnerAfterClose', 'recreatedWebViewReady', 'relaunchedWebViewReady']) {
     requireThat(receipt.checks?.[key] === true, 'Initial lifecycle assertion missing.');
   }
   if (receipt.phase === 'stop') requireThat(receipt.checks?.oldOwnerClosed === true && receipt.ownerPhase === 'CLOSED', 'Stop lacks actual owner closure.');
@@ -183,6 +186,7 @@ export async function main(args = process.argv.slice(2)) {
     firstUnlockVerified: false, physicalAuthenticationVerified: false, requestDeliveryVerified: false,
     phases: [], observations: [], commands: [], cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
   let commandIndex = 0;
+  let readFailureDiagnostics = null;
   async function command(command, argv, timeoutMs = 15_000, mutatesDevice = false, maxOutputBytes = 512 * 1024) {
     requireThat(!controller.signal.aborted && commandIndex < 400 && !result.deviceOperationMayContinue, 'Cancelled/uncertain/bounded command sequence cannot continue.');
     const name = `${String(++commandIndex).padStart(3, '0')}.log`;
@@ -253,6 +257,12 @@ export async function main(args = process.argv.slice(2)) {
     selected[PACKAGE].nativeInspection = await inspectApk(selected[PACKAGE].path, 'x86_64');
     result.apks = selected;
     await guard();
+    readFailureDiagnostics = async () => {
+      await guard();
+      await read(['shell', 'dumpsys', 'activity', 'services', PACKAGE]);
+      await read(['shell', 'dumpsys', 'activity', 'service', SERVICE]);
+      await read(['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '200', 'AndroidRuntime:E', 'System.err:W', '*:S']);
+    };
     for (const packageName of [PACKAGE, TEST_PACKAGE]) {
       const installed = await read(['shell', 'pm', 'list', 'packages', packageName]);
       requireThat(!installed.split(/\r?\n/).includes(`package:${packageName}`), 'Initial run requires a fresh AVD; never clear/repair existing app data.');
@@ -344,6 +354,10 @@ export async function main(args = process.argv.slice(2)) {
     result.passed = true;
   } catch (error) {
     result.failure = error instanceof Error ? error.message : 'Unknown lifecycle failure.';
+    if (readFailureDiagnostics && !controller.signal.aborted && !result.cleanupIncomplete && !result.deviceOperationMayContinue) {
+      try { await readFailureDiagnostics(); result.failureDiagnosticsCaptured = true; }
+      catch { result.failureDiagnosticsCaptured = false; }
+    }
     throw error;
   } finally {
     finalizeLifecycleResult(result, controller.signal.aborted);

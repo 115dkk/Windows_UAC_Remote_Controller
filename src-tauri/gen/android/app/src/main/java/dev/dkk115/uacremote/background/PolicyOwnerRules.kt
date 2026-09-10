@@ -59,6 +59,7 @@ internal object PolicyOwnerBounds {
 }
 
 internal enum class PolicyOwnerPhase { NEW, STARTING, READY, FAILED, STOPPING, CLOSED }
+internal enum class PolicyNativeProgressTarget { NONE, REQUEST_MAINTENANCE, CLEANUP }
 
 internal enum class ControllerCleanupAction { NONE, SHUTDOWN_THEN_DESTROY, DESTROY }
 
@@ -129,6 +130,12 @@ internal class PolicyOwnerLifecycle {
     @Synchronized fun stop() { if (phase != PolicyOwnerPhase.CLOSED) phase = PolicyOwnerPhase.STOPPING }
     @Synchronized fun closed() { phase = PolicyOwnerPhase.CLOSED }
     @Synchronized fun phase(): PolicyOwnerPhase = phase
+    /** A fixed native completion wake is not positive-work or retry authority. */
+    @Synchronized fun nativeProgressTarget(): PolicyNativeProgressTarget = when (phase) {
+        PolicyOwnerPhase.NEW, PolicyOwnerPhase.CLOSED -> PolicyNativeProgressTarget.NONE
+        PolicyOwnerPhase.STARTING, PolicyOwnerPhase.READY -> PolicyNativeProgressTarget.REQUEST_MAINTENANCE
+        PolicyOwnerPhase.FAILED, PolicyOwnerPhase.STOPPING -> PolicyNativeProgressTarget.CLEANUP
+    }
     @Synchronized fun failure(): PolicyStatus = failure
     @Synchronized fun pendingCount(): Int = pending
     override fun toString(): String = "PolicyOwnerLifecycle(bounded_native_owner)"

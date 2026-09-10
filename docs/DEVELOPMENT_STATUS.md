@@ -7,6 +7,30 @@ experiments and unmerged protocol experiments. New edits require new ROOT checks
 
 ## Latest evidence — September 10 evening
 
+At `4689319d5c503d0fb3391c66c97bcd3eadb5fe7d`, ROOT collected completed native
+CI watchers: Windows package (34487343380), ARM64 APK/Kotlin tests
+(34487343330), notification renderer (34487343387), and Windows/Linux/Android
+Rust jobs (34487343352) passed. The overall Quality run still failed its normal
+protocol job: three honest request witnesses and two request canaries timed out.
+
+The genuine x86_64 lifecycle run (34487343364) built and installed both product
+and instrumentation APKs, reached READY and retained the owner across Activity
+recreation/repeated start, then failed waiting for explicit stop to finish. The
+shutdown completion wake routing fix and further Activity-lifetime work are in
+progress. Native reboot/update and close/relaunch acceptance remain unverified.
+
+The corrected isolated Windows context source is now `5137e76`; build and
+ordinary-privilege read-only guard checks passed. The failed admission was traced
+to a fixed-size TokenElevation query incorrectly using variable-length sizing.
+No additional elevated/provider run followed the consumed one-attempt permission.
+
+Isolated file-only Tamarin checking at `f6bf2c0` verified the retained stronger
+approval witness in 43 steps / 6.87 seconds. Replacing its proof with `sorry` or
+`contradiction` produced the required incomplete result. Denial proof checking at
+`f905af3` also passed: 42 steps / 7.10 seconds, with both altered proof bodies
+incomplete. These are checked stronger formulas, not a normal-gate pass; their
+explicit implication/source mapping and normal-gate integration remain pending.
+
 The later07b34fd checks completed: Windows fullRust13m41, Linux9m25,
 Androidcore2m52, actualAPK/Kotlin7m56, Windowspackage11m12 and notificationrenderer
 6m9 passed. Its normal protocol gate proved all six request-safety properties

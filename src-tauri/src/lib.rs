@@ -3,6 +3,7 @@
 
 mod admission;
 mod commands;
+mod lifecycle_policy;
 mod mobile;
 
 #[cfg(not(target_os = "android"))]
@@ -54,7 +55,7 @@ fn local_navigation(url: &tauri::Url) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(mobile::init())
         .setup(|app| {
             // A failed runtime is kept as an explicit error, not replaced by
@@ -90,8 +91,20 @@ pub fn run() {
             commands::open_lock_settings,
             commands::open_notification_settings,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("native application host could not run");
+
+    app.run(|_app, event| {
+        if let tauri::RunEvent::ExitRequested { code, api, .. } = event
+            && lifecycle_policy::prevent_implicit_exit(cfg!(target_os = "android"), code)
+        {
+            // Finishing the last Android Activity must not call process::exit
+            // on the Application-owned foreground service/Rust policy owner.
+            // Android retains process-lifetime authority; explicit Tauri exit
+            // and restart still follow their original path on every platform.
+            api.prevent_exit();
+        }
+    });
 }
 
 #[cfg(test)]

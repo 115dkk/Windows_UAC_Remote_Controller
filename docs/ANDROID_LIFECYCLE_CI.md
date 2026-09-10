@@ -2,6 +2,23 @@
 
 Status: implemented_unverified. Source authored without child execution; ROOT runs the checks and CI. This is not the notification-gallery APK and is not a full G009, enrollment, remote-UAC, first-unlock, or hardware-authentication proof.
 
+The first actual4689319 emulator run reached READY, retained the same owner after
+Activity recreation/repeated start, then timed out waiting for explicit stop to
+reach CLOSED/STOPPED with its notification removed. Source review found the final
+Rust I/O completion wake was routed into an already-stopped request coordinator.
+The fix routes STOPPING/FAILED completion into existing cleanup-only continuation;
+failed native-wrapper destruction still needs explicit retry. Three JVM regression
+cases and bounded timeout/failure diagnostics were added. A fresh native run is
+required to establish the observed shutdown outcome.
+
+Android-only implicit Tauri exit is now prevented so finishing the last Activity
+does not terminate the shared foreground-service process. Explicit exit/restart
+and desktop behavior are unchanged. The native test also requires the actual
+attached WebView to render the local Korean application shell on launch,
+recreation and close/relaunch; an actor READY observation or blank window cannot
+satisfy this check. Window recreation and plugin host rebinding are still under
+investigation, and the next actual CI run must establish their observed behavior.
+
 ## Fixed scope
 
 The workflow builds the genuine debuggable `dev.dkk115.uacremote` APK, including Tauri and the real Rust controller/JNA libraries, for API36 `google_apis` x86_64. Its separate AndroidJUnitRunner APK targets that product. No substitute actor, authentication result, key, enrollment, incoming request or signing bridge is installed. The disposable emulator is initially unlocked without a configured credential; locked-first-boot/FBE and physical authentication remain pending.

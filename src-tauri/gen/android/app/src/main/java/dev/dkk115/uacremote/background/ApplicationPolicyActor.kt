@@ -75,7 +75,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         platform.bindWithdrawal(approvals::withdraw, approvals::invalidateRequests)
         platform.bindDenials(denials)
         denials.bindCapture { job -> approvals.captureDenialDrain(job.selection) }
-        platform.bindRequests(requests::progress, requests::changed, requests::progress, ::nativeCleanupProgress)
+        platform.bindRequests(::nativeIntakeProgress, requests::changed, requests::progress, ::nativeCleanupProgress)
     }
 
     /** Native selection only; public locators first pass the original-handle check. */
@@ -107,6 +107,21 @@ internal class ApplicationPolicyActor(private val application: Application) {
         true
     } catch (_: RejectedExecutionException) { false }
     private fun resumeQueuedWork() { denials.resumeQueued(); requests.resumeQueued() }
+
+    /** Rust publishes finished=true only after its I/O resources are drained,
+     * then sends this fixed wake. A stopped request coordinator cannot consume
+     * it: the retained controller still needs cleanup-only continuation.
+     * STOPPING precedes the worker's first native shutdown. A completion after
+     * that shutdown's pending-I/O check therefore selects CLEANUP; a completion
+     * before STOPPING is already visible to the first Rust cleanup check.
+     * No native callback synchronously re-enters/waits for MobileController. */
+    private fun nativeIntakeProgress() {
+        when (lifecycle.nativeProgressTarget()) {
+            PolicyNativeProgressTarget.NONE -> Unit
+            PolicyNativeProgressTarget.REQUEST_MAINTENANCE -> requests.progress()
+            PolicyNativeProgressTarget.CLEANUP -> nativeCleanupProgress()
+        }
+    }
 
     /** Actual native cleanup progress may resume owner shutdown, not failed scope steps. */
     private fun nativeCleanupProgress() {
