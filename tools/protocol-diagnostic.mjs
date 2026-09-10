@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { mutateExactlyOnce, proofArguments, proofRequirements, validateTheoryRequirements } from './protocol-security.mjs';
 import { runProver } from './prover-process.mjs';
+import { WITNESS_CONTEXTS, deriveWitness, witnessArguments, witnessBindingPaths, witnessCoverage, witnessDischarges } from './protocol-witness-discharge.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const NORMAL = 'artifacts/protocol-security';
@@ -102,7 +103,19 @@ export function admitDiagnostic(manifest, summary, root) {
     inputs.add(model.id);
     const names = expectedNames(model.expected, true);
     proofRequirements(model.expected, model.helpers);
+    const discharges = witnessDischarges(model);
     names.forEach((name, index) => {
+      if (Object.hasOwn(discharges, name)) {
+        const rowId = `${model.id}-${index + 1}`;
+        for (const suffix of [...WITNESS_CONTEXTS, 'proof']) {
+          const inputId = `${rowId}-${suffix}`;
+          if (!id(inputId) || inputs.has(inputId)) reject();
+          inputs.add(inputId);
+        }
+        add({ id: rowId, input: `${rowId}-good`, model, names: [discharges[name].checkedLemma],
+          targetLemmas: [name], helperLemmas: [], expected: { [name]: model.expected[name] }, discharge: discharges[name] });
+        return;
+      }
       const expected = { [name]: model.expected[name] }, required = proofRequirements(expected, model.helpers);
       add({ id: `${model.id}-${index + 1}`, input: model.id, model, names: required.selectedLemmas,
         targetLemmas: required.targetLemmas, helperLemmas: required.helperLemmas, expected });
@@ -141,7 +154,37 @@ export function admitDiagnostic(manifest, summary, root) {
       same(row.helperLemmas, plan.helperLemmas);
       same(row.targetLemmas, plan.targetLemmas);
     }
-    same(row.arguments, proofArguments(snapshot, plan.expected, plan.model.helpers));
+    if (plan.discharge) {
+      same(row.mode, 'checked-strengthening');
+      same(row.arguments, witnessArguments(snapshot));
+      const witness = row.witnessDischarge;
+      if (!witness || !hash(witness.proofSha256) || !Array.isArray(witness.checks) || witness.checks.length !== 3) reject();
+      same(witness.profile, plan.discharge.profile); same(witness.proofSource, plan.discharge.proof);
+      same(witness.proofSnapshot, `${plan.id}-proof.txt`);
+      same(witness.sourceBindings?.map(binding => binding.path), witnessBindingPaths(plan.model, plan.discharge, manifest.sourceBindings));
+      for (const [index, context] of WITNESS_CONTEXTS.entries()) {
+        const check = witness.checks[index], input = owned(root, `${NORMAL}/${plan.id}-${context}.spthy`);
+        if (!check || !hash(check.modelSha256) || typeof check.ok !== 'boolean' || check.cancelled !== false || check.cleanupIncomplete !== false) reject();
+        same(check.context, context); same(check.id, `${plan.id}-${context}`); same(check.model, basename(input));
+        same(check.arguments, witnessArguments(input));
+        if (Object.hasOwn(check.verdicts ?? {}, plan.targetLemmas[0])) reject();
+        same(check.expectedRow, context === 'good' ? 'verified' : 'analysis incomplete');
+        if (check.ok) {
+          if (check.status !== 0 || check.signal || check.processError) reject();
+          same(check.verdicts, { [plan.discharge.checkedLemma]: { trace: 'exists-trace', verdict: context === 'good' ? 'verified' : 'inconclusive' } });
+          const exact = context === 'good' ? /^verified \(\d+ steps\)$/ : /^analysis incomplete \(\d+ steps\)$/;
+          if (!exact.test(check.observedRow ?? '')) reject();
+        }
+      }
+      const good = witness.checks[0];
+      same(row.modelSha256, good.modelSha256); same(row.verdicts, good.verdicts);
+      same(row.status, good.status); same(row.signal, good.signal); same(row.processError, good.processError);
+      same(row.ok, witness.checks.every(check => check.ok));
+      same(witness.coverage?.discharged, row.ok);
+    } else {
+      if (Object.hasOwn(row, 'mode') || Object.hasOwn(row, 'witnessDischarge')) reject();
+      same(row.arguments, proofArguments(snapshot, plan.expected, plan.model.helpers));
+    }
     same(row.origin, { source: plan.model.path, sha256: row.origin.sha256, ...(plan.mutation ? { mutation: plan.mutation } : {}) });
   }
   // Manifest order, not log completion/array order; canaries never substitute.
@@ -169,6 +212,27 @@ export function loadDiagnosticInputs(root) {
     if (!source) { source = read(plan.model.path); sources.set(plan.model.path, source); }
     const text = utf8(source.bytes);
     validateTheoryRequirements(text, plan.model.expected, plan.model.helpers);
+    if (plan.discharge) {
+      const row = summary.runs.find(candidate => candidate.id === plan.id), witness = row.witnessDischarge;
+      const proof = read(plan.discharge.proof, 1024 * 1024), retained = read(`${NORMAL}/${witness.proofSnapshot}`, 1024 * 1024);
+      if (!proof.bytes.equals(retained.bytes) || proof.sha256 !== witness.proofSha256 || source.sha256 !== row.origin.sha256) reject();
+      for (const [index, context] of WITNESS_CONTEXTS.entries()) {
+        const derived = deriveWitness(text, utf8(proof.bytes), plan.targetLemmas[0], context);
+        const inputId = `${plan.id}-${context}`, snapshot = read(`${NORMAL}/${inputId}.spthy`);
+        if (!snapshot.bytes.equals(Buffer.from(derived.input)) || snapshot.sha256 !== witness.checks[index].modelSha256) reject();
+        snapshots.set(inputId, snapshot);
+        if (context === 'good') same(witness.coverage, witnessCoverage(derived.structural, witness.checks));
+      }
+      for (const binding of witness.sourceBindings) {
+        if (!hash(binding.sha256) || !Number.isSafeInteger(binding.size) || binding.size <= 0 || binding.size > 1024 * 1024) reject();
+        const current = read(binding.path, 1024 * 1024);
+        if (current.sha256 !== binding.sha256 || current.size !== binding.size) reject();
+      }
+      if (!isAbsolute(witness.binary) || !hash(witness.binaryMetadata?.sha256) || !Number.isSafeInteger(witness.binaryMetadata?.size)) reject();
+      const binary = regular(witness.binary, 150 * 1024 * 1024, false);
+      if (binary.sha256 !== witness.binaryMetadata.sha256 || binary.size !== witness.binaryMetadata.size) reject();
+      continue;
+    }
     let snapshot = snapshots.get(plan.input);
     if (!snapshot) { snapshot = read(`${NORMAL}/${plan.input}.spthy`); snapshots.set(plan.input, snapshot); }
     const expected = plan.mutation ? Buffer.from(mutateExactlyOnce(text, plan.mutation)) : source.bytes;
@@ -178,8 +242,9 @@ export function loadDiagnosticInputs(root) {
   const identity = { normalSummarySha256: normal.sha256, manifestSha256: summary.manifestSha256,
     manifestFileSha256: manifestFile.sha256, toolVersionLogSha256: version.sha256 };
   const chosen = admitted.selected;
-  return { root, identity, selected: chosen ? { row: chosen.id, lemma: chosen.targetLemmas[0], source: chosen.model.path,
-    ...(chosen.model.helpers === undefined ? {} : { helpers: chosen.model.helpers }),
+  return { root, identity, selected: chosen ? { row: chosen.id, lemma: chosen.discharge?.checkedLemma ?? chosen.targetLemmas[0], source: chosen.model.path,
+    ...(chosen.discharge ? { originalObligation: chosen.targetLemmas[0], inputRole: 'checked-strengthening' } :
+      chosen.model.helpers === undefined ? {} : { helpers: chosen.model.helpers }),
     inputSha256: snapshots.get(chosen.input).sha256, bytes: snapshots.get(chosen.input).bytes } : null };
 }
 

@@ -6,9 +6,10 @@ Status: **verification_in_progress**. ROOT's first supported-tool CI (`187bdc0`)
 Tamarin was selected for this slice's mutable registration and one-shot state. This is not a universal ranking over Verifpal/ProVerif or a claim that a symbolic proof verifies the product. The intended tool version is the official [Tamarin 1.12 release](https://github.com/tamarin-prover/tamarin-prover/releases/tag/1.12.0); binary provenance/checksums are ROOT-owned.
 
 CI pins both Tamarin1.12.0 and its supported Maude3.5.1 distribution by SHA-256,
-including Maude's sibling prelude/modules. Every original positive lemma runs in
-its own bounded process, together with all registered helpers for that model
-(120 seconds, 2GiB GHC heap, bounded streamed transcript).
+including Maude's sibling prelude/modules. Automatic positive-lemma rows run in
+their own bounded process with all registered helpers for that model. The two
+explicit checked-strengthening rows described below instead run three bounded
+file-only checks with no assumed helpers (120 seconds each, 2GiB GHC heap).
 All13 positive lemmas and all3 broken-model controls remain mandatory. A timeout,
 heap/output limit, missing tool or incomplete result fails; limits never become
 proof bounds. Partial summaries start/retain passed:false and logs are written
@@ -45,8 +46,8 @@ retained; the isolated experiment's older identity binding was not copied.
 
 The manifest keeps all 13 original positives and three canary rows. Helpers are
 an additional bounded dictionary, not replacements or separate successful rows.
-Every request baseline/canary invocation selects all four helpers plus its
-original target(s). Missing, wrong-kind, falsified or incomplete helper results,
+Every automatic request baseline/canary invocation selects all four helpers plus
+its original target(s). Missing, wrong-kind, falsified or incomplete helper results,
 warnings, bad process outcomes and input drift fail the entire row even when its
 original target reports the desired verdict. Evidence records helper names,
 original targets and the full selection separately. Search mode is chosen only
@@ -54,6 +55,48 @@ from original targets: honest/counterexample searches remain BFS despite their
 universal helpers; universal positive searches remain DFS. Existing time, heap
 and output budgets are unchanged. No full protocol or native security claim is
 made by this integration.
+
+### Checked-strengthening discharge for two honest existentials
+
+`manifest.json` explicitly selects `approval-conjunction-v1` and
+`denial-be8-conjunction-v1` for the existing approve and deny non-vacuity
+obligations. The original nine request formulas remain unchanged. Each approved
+stronger formula retains every original conjunct and original binder identity,
+adding existential variables and conjuncts; the added nested uniqueness
+quantifiers are conditions on one witness, not new model restrictions. For the
+same transition system, existence of that stronger witness implies the original
+existential by conjunction elimination. It does not establish all honest flows.
+
+The normal runner derives each checker input from the **current** theory's exact
+non-lemma prefix, including every rule, restriction and observation action. All
+lemma declarations are omitted from that independent input, so no `[reuse]` or
+`[sources]` assumption is available. A distinct `checked_approval_witness` or
+`checked_denial_witness` declaration receives only the admitted proof-only
+fixture. The denial template is the exact earlier `be8a31b` shape, not the later
+variant with an additional DenialSigned uniqueness conjunct.
+
+Every row freshly invokes the pinned prover file-only, with no `--prove` or
+automatic completion: good must report the distinct stronger existential as
+verified. Two nested real integrity controls replace only its entire proof body
+with `by sorry` and `by contradiction`; each must exit successfully and report
+the exact `analysis incomplete (N steps)` result. Timeout, warning, unknown
+output, missing control, source/proof/tool/input drift or incomplete process
+cleanup fails the row. These controls do not replace any of the three protocol
+canaries. There are still exactly 16 original obligation rows.
+
+Evidence retains raw stronger-name verdicts separately from the original
+obligation's `existential-conjunction-elimination` coverage receipt. It never
+fabricates a raw original-lemma verdict, and `originalDirectlyVerified` remains
+false. All other safety, two-approver and protocol-canary rows retain their
+existing requirements. Default model/proof injection rejection is unchanged
+outside the two closed profiles; existing experiment success is not imported as
+normal proof authority. The new current-source-derived checks require fresh
+ROOT validation before claiming normal-gate success.
+
+Proof-only fixtures live in `security/tamarin/witnesses/`; they are untrusted
+instructions to the checker, not assumed theorems. Diagnostic admission checks
+the nested contexts and exact derived inputs while continuing to use
+`eligibleAsProof:false`; a diagnostic cannot discharge an obligation.
 
 ## What the models mean
 
@@ -212,6 +255,10 @@ The unchanged PC-pin canary likewise needs only a serial phone session: CreatePc
 
 ROOT commands from repository root:
 
+The canonical gate is `node tools/protocol-security.mjs`; it performs the closed
+discharge routing and every required control. The raw commands below instead
+attempt all formulas directly and do not implement that evidence accounting.
+
 ```text
 tamarin-prover security/tamarin/PinnedTransport.spthy --quit-on-warning --prove
 tamarin-prover security/tamarin/RequestAuthorization.spthy --quit-on-warning --prove
@@ -219,7 +266,7 @@ tamarin-prover security/tamarin/RequestAuthorization.spthy --quit-on-warning --p
 
 Use the exact selected 1.12 executable and ROOT's bounded process/CI timeout. The documented CLI supports `--prove=lemma_name`; `--quit-on-warning` prevents ignoring model well-formedness warnings. See the [1.12 command-line manual](https://github.com/tamarin-prover/tamarin-prover/blob/1.12.0/manual/src/003_example.md#running-tamarin-on-the-command-line).
 
-ROOT must require every listed lemma's actual completed verdict, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished proof or missing lemma is not success. Preserve exact source/artifact identity and prover output. Normal invocations select each original lemma separately together with every registered helper for that model; all selected results are required by the aggregate gate. No assumed source lemmas or hand-written `by sorry` proofs are supplied in the production theories.
+ROOT must require every listed obligation's completed proof evidence, not just process exit zero or a log substring from another model. A parse error, warning, timeout, unfinished positive proof or missing obligation is not success. Preserve exact source/artifact identity and prover output. Automatic normal invocations select each original lemma separately together with every registered helper for that model; the two explicit independent discharge rows follow the stricter good-plus-integrity-controls scheme above. No assumed source lemmas or proof bodies are added to the production theories.
 
 ### Failure diagnostics are not proof evidence
 

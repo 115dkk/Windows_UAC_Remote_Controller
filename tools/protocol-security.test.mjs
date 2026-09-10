@@ -6,6 +6,8 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { mutateExactlyOnce, parseProofSummary, proofArguments, proofRequirements, runProtocolSecurity, validateTheoryRequirements } from './protocol-security.mjs';
+import { WITNESS_CONTEXTS, deriveWitness, exactWitnessResult, requireDerivedWitness, witnessArguments,
+  witnessCoverage, witnessDischarges, witnessExpected, witnessProfile } from './protocol-witness-discharge.mjs';
 const expected = { auth: { trace: 'all-traces', verdict: 'verified' }, executable: { trace: 'exists-trace', verdict: 'verified' } };
 const text = 'summary of summaries:\n analyzed: Model.spthy\n auth (all-traces): verified (5 steps)\n executable (exists-trace): verified (3 steps)\n';
 const result = (stdout) => ({ stdout, stderr: '', status: 0, signal: null });
@@ -18,6 +20,86 @@ const helpers = {
 };
 const declarations = (wanted, auxiliary = false) => Object.entries(wanted).map(([name, value]) =>
   `lemma ${name}${auxiliary ? ' [reuse]' : ''}:\n  ${value.trace}\n  "synthetic statement"\n`).join('\n');
+
+test('closed discharge profiles cover only the two approved existentials and preserve every manifest obligation', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
+  const model = manifest.models.find(model => model.id === 'request-authorization');
+  assert.deepEqual(Object.keys(witnessDischarges(model)), ['honest_approve_trace', 'honest_deny_without_approval_auth_trace']);
+  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 16);
+  assert.deepEqual(witnessDischarges({ expected: {} }), {});
+  for (const changed of [{}, { bogus: {} }, { honest_approve_trace: { profile: 'approval-conjunction-v1', proof: '../outside.proof' } },
+    { honest_approve_trace: { ...model.witnessDischarges.honest_approve_trace, assumed: true } }]) {
+    assert.throws(() => witnessDischarges({ ...model, witnessDischarges: changed }));
+  }
+  assert.throws(() => witnessDischarges({ ...model, id: 'pinned-channel' }));
+  assert.throws(() => witnessDischarges({ ...model, expected: { ...model.expected, honest_approve_trace: { trace: 'all-traces', verdict: 'verified' } } }));
+});
+
+test('current transition bytes remain exact while independent witness input contains no helper declarations', () => {
+  const source = readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url), 'utf8');
+  for (const obligation of ['honest_approve_trace', 'honest_deny_without_approval_auth_trace']) {
+    const profile = witnessProfile(obligation), proof = readFileSync(new URL(`../${profile.proof}`, import.meta.url), 'utf8');
+    const originalConjuncts = profile.original.slice(profile.original.indexOf('.\n') + 2, -1);
+    assert.ok(profile.stronger.includes(originalConjuncts));
+    for (const context of WITNESS_CONTEXTS) {
+      const derived = deriveWitness(source, proof, obligation, context);
+      assert.equal(derived.input.slice(0, derived.transitionSource.length), derived.transitionSource);
+      assert.equal(derived.transitionSource, source.slice(0, /^lemma\s/m.exec(source).index));
+      assert.equal((derived.input.match(/^lemma\s/gm) ?? []).length, 1);
+      assert.doesNotMatch(derived.input, /^lemma[^\n]*\[(?:[^\]]*reuse|[^\]]*sources)/m);
+      assert.deepEqual(derived.structural.assumedHelpers, []);
+      assert.equal(derived.structural.originalDirectlyVerified, false);
+      assert.equal(derived.structural.obligation, obligation);
+      if (context !== 'good') assert.ok(derived.input.includes(`\nby ${context}\n`));
+      assert.deepEqual(witnessArguments('/checked.spthy'), ['/checked.spthy', '--quit-on-warning', '+RTS', '-N2', '-M2G', '-RTS']);
+      for (const changed of [derived.input.replace('builtins: signing', 'builtins: signing, hashing'),
+        derived.input.replace("'approve'", "'deny'"), derived.input.replace(' & o < u', ' | o < u'),
+        `${derived.input}\nrestriction injected: "T"\n`].filter(value => value !== derived.input)) {
+        assert.throws(() => requireDerivedWitness(source, proof, obligation, context, changed));
+      }
+    }
+    const normalized = source.replace(/\r\n/g, '\n');
+    for (const changed of [normalized.replace(profile.original, profile.original.replace('binding #', 'binding binding #')),
+      normalized.replace(profile.original, profile.original.replace(' & o <', ' | o <')),
+      normalized.replace(profile.original, profile.original.replace('exists-trace', 'all-traces')),
+      normalized.replace(profile.original, profile.original.replace(' & o <', ' & a <')) + `\n/*${profile.original}*/\n`]) {
+      assert.throws(() => deriveWitness(changed, proof, obligation));
+    }
+    for (const injection of ['\nrule Injected:\n', '\nlemma fake [reuse]: "T"\n', '\n#include "outside"\n']) {
+      assert.throws(() => deriveWitness(source, proof.replace('simplify\n', `simplify${injection}`), obligation));
+    }
+  }
+  assert.doesNotMatch(witnessProfile('honest_deny_without_approval_auth_trace').stronger, /All #x\. DenialSigned/);
+});
+
+test('raw stronger verdict is distinct from implication coverage and both exact negative controls are mandatory', () => {
+  for (const obligation of ['honest_approve_trace', 'honest_deny_without_approval_auth_trace']) {
+    const name = witnessProfile(obligation).checkedLemma;
+    const result = verdict => ({ status: 0, signal: null, cancelled: false, cleanupIncomplete: false,
+      stdout: `summary of summaries:\n analyzed: Checked.spthy\n ${name} (exists-trace): ${verdict}\n`, stderr: '' });
+    const check = (context, value) => exactWitnessResult(parseProofSummary(value, witnessExpected(obligation, context), [name], 'Checked.spthy'), value, obligation, context);
+    assert.equal(check('good', result('verified (43 steps)')).ok, true);
+    assert.equal(check('good', result('analysis incomplete (1 steps)')).ok, false);
+    for (const context of ['sorry', 'contradiction']) {
+      assert.equal(check(context, result('analysis incomplete (2 steps)')).ok, true);
+      for (const verdict of ['unknown (2 steps)', 'analysis undetermined (2 steps)', 'verified (43 steps)', 'analysis incomplete']) assert.equal(check(context, result(verdict)).ok, false);
+      for (const changed of [{ status: 1 }, { signal: 'SIGTERM' }, { error: new Error('timeout') }, { cancelled: true },
+        { cleanupIncomplete: true }, { stderr: 'Warning: invalid input' }, { stdout: result('analysis incomplete (2 steps)').stdout.replace(name, obligation) }]) {
+        assert.equal(check(context, { ...result('analysis incomplete (2 steps)'), ...changed }).ok, false);
+      }
+    }
+    const raw = check('good', result('verified (43 steps)'));
+    assert.deepEqual(Object.keys(raw.verdicts), [name]);
+    assert.equal(Object.hasOwn(raw.verdicts, obligation), false);
+    const source = readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url), 'utf8');
+    const proof = readFileSync(new URL(`../${witnessProfile(obligation).proof}`, import.meta.url), 'utf8');
+    const structural = deriveWitness(source, proof, obligation).structural;
+    assert.equal(witnessCoverage(structural, WITNESS_CONTEXTS.map(context => ({ context, ok: true }))).discharged, true);
+    assert.equal(witnessCoverage(structural, WITNESS_CONTEXTS.map(context => ({ context, ok: context !== 'contradiction' }))).discharged, false);
+    assert.throws(() => witnessCoverage(structural, [{ context: 'good', ok: true }]));
+    assert.throws(() => witnessCoverage({ ...structural, originalDirectlyVerified: true }, WITNESS_CONTEXTS.map(context => ({ context, ok: true }))));
+  }
+});
 
 test('breadth-first witness search changes no proof requirements or model bounds', () => {
   for (const wanted of [
@@ -197,7 +279,7 @@ test('early missing-manifest failure cannot leave a prior passing summary', asyn
 
 // Synthetic runner fixture, NOT Tamarin or evidence of a security proof. The
 // fake process reports controlled verdict text solely to test orchestration.
-function runnerFixture(t, { auxiliary, omitHelper = false } = {}) {
+function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, badWitnessControl = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-runner-test-'));
   const directory = join(root, 'artifacts/protocol-security');
   const manifestPath = join(root, 'security/tamarin/manifest.json');
@@ -211,8 +293,23 @@ function runnerFixture(t, { auxiliary, omitHelper = false } = {}) {
     sourceBindings: [{ path: 'source.rs', sha256: createHash('sha256').update('synthetic reviewed source\n').digest('hex') }],
     models: [model('alpha'), model('beta')] };
   if (auxiliary !== undefined) config.models[0].helpers = auxiliary;
-  for (const value of config.models) writeFileSync(join(root, value.path), '// synthetic GUARD input\n' +
-    (value.helpers ? declarations(value.helpers, true) : '') + declarations(value.expected) + '\nend\n');
+  if (discharge) {
+    const first = config.models[0]; first.id = 'request-authorization';
+    first.expected = { honest_approve_trace: expected.executable, honest_deny_without_approval_auth_trace: expected.executable, auth: expected.auth };
+    first.witnessDischarges = Object.fromEntries(Object.keys(first.expected).filter(name => name !== 'auth').map(name => {
+      const profile = witnessProfile(name); return [name, { profile: profile.profile, proof: profile.proof }];
+    }));
+    mkdirSync(join(root, 'security/tamarin/witnesses'));
+    for (const spec of Object.values(first.witnessDischarges)) writeFileSync(join(root, spec.proof), readFileSync(new URL(`../${spec.proof}`, import.meta.url)));
+    mkdirSync(join(root, 'tools'));
+    for (const file of ['protocol-security.mjs', 'protocol-witness-discharge.mjs', 'prover-process.mjs']) writeFileSync(join(root, 'tools', file), '// synthetic code snapshot, not executed\n');
+  }
+  for (const value of config.models) {
+    const contents = discharge && value.id === 'request-authorization'
+      ? `theory RequestAuthorization\nbegin\n// synthetic GUARD input\n${witnessProfile('honest_approve_trace').original}\n\n${witnessProfile('honest_deny_without_approval_auth_trace').original}\n\n${declarations({ auth: expected.auth })}\nend\n`
+      : '// synthetic GUARD input\n' + (value.helpers ? declarations(value.helpers, true) : '') + declarations(value.expected) + '\nend\n';
+    writeFileSync(join(root, value.path), contents);
+  }
   const save = () => writeFileSync(manifestPath, JSON.stringify(config));
   save();
   const fake = join(root, 'fake-prover');
@@ -221,14 +318,19 @@ function runnerFixture(t, { auxiliary, omitHelper = false } = {}) {
     fs.appendFileSync('invocations.log', JSON.stringify(process.argv.slice(2)) + '\\n');
     if (process.argv.includes('--version')) { console.log('tamarin-prover 1.12.0'); process.exit(0); }
     const file = process.argv[2];
-    const mutant = fs.readFileSync(file, 'utf8').includes('MUTANT');
+    const source = fs.readFileSync(file, 'utf8');
+    const mutant = source.includes('MUTANT');
     const helpers = new Set(${JSON.stringify(Object.keys(auxiliary ?? {}))});
     console.log('summary of summaries:\\n analyzed: ' + file);
-    for (const arg of process.argv.filter(x => x.startsWith('--prove='))) {
-      const name = arg.slice(8);
+    const selected = process.argv.filter(x => x.startsWith('--prove=')).map(arg => arg.slice(8));
+    const names = selected.length ? selected : [...source.matchAll(/^lemma ([A-Za-z0-9_]+):/gm)].map(match => match[1]);
+    for (const name of names) {
       if (${omitHelper} && name === ${JSON.stringify(Object.keys(auxiliary ?? {})[0] ?? '')}) continue;
-      const kind = name === 'executable' ? 'exists-trace' : 'all-traces';
-      console.log(' ' + name + ' (' + kind + '): ' + (mutant && !helpers.has(name) ? 'falsified - found trace' : 'verified') + ' (1 steps)');
+      const kind = name === 'executable' || name.startsWith('honest_') || name.startsWith('checked_') ? 'exists-trace' : 'all-traces';
+      const negative = /-(sorry|contradiction)\\.spthy$/.test(file);
+      const verdict = !selected.length && negative ? (${badWitnessControl} ? 'unknown' : 'analysis incomplete')
+        : mutant && !helpers.has(name) ? 'falsified - found trace' : 'verified';
+      console.log(' ' + name + ' (' + kind + '): ' + verdict + ' (1 steps)');
     }
   `);
   if (process.platform === 'linux') chmodSync(fake, 0o700);
@@ -242,6 +344,65 @@ function runnerFixture(t, { auxiliary, omitHelper = false } = {}) {
   });
   return { root, directory, config, save };
 }
+
+test('synthetic discharge runner retains original rows but records only genuine stronger-name verdicts and three nested checks',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { discharge: true });
+    await runProtocolSecurity(f.root);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, true); // Controlled orchestration fixture, never real protocol evidence.
+    assert.equal(summary.runs.length, 7);
+    const rows = summary.runs.filter(row => row.mode === 'checked-strengthening');
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
+      const obligation = row.targetLemmas[0], profile = witnessProfile(obligation), witness = row.witnessDischarge;
+      assert.deepEqual(row.helperLemmas, []);
+      assert.deepEqual(Object.keys(row.verdicts), [profile.checkedLemma]);
+      assert.equal(Object.hasOwn(row.verdicts, obligation), false);
+      assert.deepEqual(witness.checks.map(check => check.context), WITNESS_CONTEXTS);
+      assert.ok(witness.checks.every(check => check.ok));
+      assert.equal(witness.coverage.discharged, true);
+      assert.equal(witness.coverage.originalDirectlyVerified, false);
+      assert.deepEqual(witness.coverage.assumedHelpers, []);
+      for (const check of witness.checks) assert.deepEqual(check.arguments.slice(1), ['--quit-on-warning', '+RTS', '-N2', '-M2G', '-RTS']);
+    }
+    assert.ok(summary.runs.some(row => row.id === 'alpha-mutant' && row.ok), 'original protocol canary still runs independently');
+  });
+
+test('synthetic witness control unknown results cannot discharge originals even when both stronger witnesses verify',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { discharge: true, badWitnessControl: true });
+    await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, false); assert.equal(summary.runs.length, 7);
+    for (const row of summary.runs.filter(row => row.mode === 'checked-strengthening')) {
+      assert.equal(row.witnessDischarge.checks[0].ok, true);
+      assert.equal(row.ok, false); assert.equal(row.witnessDischarge.coverage.discharged, false);
+      assert.ok(row.reasons.some(reason => reason.includes('exact required verdict')));
+    }
+  });
+
+test('witness cancellation records incomplete coverage and launches no integrity-control successor',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { discharge: true }), originalWrite = process.stdout.write;
+    const previous = process.listeners('SIGTERM');
+    let cancelled = false;
+    process.stdout.write = function(chunk, ...rest) {
+      if (!cancelled && String(chunk) === 'Protocol security: request-authorization-1-good\n') {
+        cancelled = true;
+        const handlers = process.listeners('SIGTERM').filter(handler => !previous.includes(handler));
+        assert.equal(handlers.length, 1); handlers[0]();
+      }
+      return originalWrite.call(this, chunk, ...rest);
+    };
+    try { await assert.rejects(() => runProtocolSecurity(f.root), /interrupted by SIGTERM/); }
+    finally { process.stdout.write = originalWrite; }
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(cancelled, true); assert.equal(summary.passed, false); assert.equal(summary.runs.length, 1);
+    assert.equal(summary.runs[0].cancelled, true);
+    assert.equal(summary.runs[0].witnessDischarge.coverage.discharged, false);
+    assert.equal(existsSync(join(f.directory, 'request-authorization-1-sorry.log')), false);
+  });
 
 test('synthetic orchestration reproves every helper per original and per mutant without adding rows',
   { skip: process.platform !== 'linux' }, async (t) => {

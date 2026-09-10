@@ -35,6 +35,10 @@
     {
       "id": "request-authorization",
       "path": "security/tamarin/RequestAuthorization.spthy",
+      "witnessDischarges": {
+        "honest_approve_trace": { "profile": "approval-conjunction-v1", "proof": "security/tamarin/witnesses/Approve.proof" },
+        "honest_deny_without_approval_auth_trace": { "profile": "denial-be8-conjunction-v1", "proof": "security/tamarin/witnesses/Deny.proof" }
+      },
       "helpers": {
         "enrolled_revision_unique": { "trace": "all-traces", "verdict": "verified" },
         "building_precedes_open": { "trace": "all-traces", "verdict": "verified" },

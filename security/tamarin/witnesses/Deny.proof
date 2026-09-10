@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+simplify
+solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #c )
+  case OpenActualRequest
+  solve( !RequestOrigin( request_id.1, ~pc,
+                         <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                          ~content_digest, ~expiry>
+         )[+] ▶₁ #o )
+    case OpenActualRequest
+    solve( RequestAccepted( ~pc, device, revision,
+                            <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                             ~content_digest, ~expiry>,
+                            'deny'
+           ) @ #a )
+      case AcceptDenial
+      solve( !RequestOrigin( request_id, ~pc,
+                             <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id.1, ~nonce,
+                              ~content_digest, ~expiry>
+             )[+] ▶₂ #a )
+        case OpenActualRequest
+        solve( Enrolled( ~pc, device, revision, approval_key.3, denial_key.2
+               ) @ #e )
+          case TrustedEnrollment
+          solve( !EnrollmentKeys( ~pc, ~device, approval_key.1, denial_key
+                 ) ▶₃ #c )
+            case TrustedEnrollment
+            solve( RequestSlot( ~request_id, ~pc,
+                                <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                 ~content_digest, ~expiry>,
+                                'building'
+                   ) ▶₀ #o )
+              case CaptureEligibleDevice
+              solve( !Snapshot( ~pc, device.1, revision.1, approval_key.1, denial_key,
+                                <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                 ~content_digest, ~expiry>
+                     ) ▶₂ #o )
+                case CaptureEligibleDevice
+                solve( !PhoneKeys( ~device, approval_sk.1, denial_sk.1 ) ▶₀ #s )
+                  case TrustedEnrollment
+                  solve( !EnrollmentKeys( ~pc, ~device, approval_key, pk(x) ) ▶₁ #a )
+                    case TrustedEnrollment
+                    solve( !Snapshot( ~pc, ~device, ~revision, pk(~approval_sk),
+                                      pk(~denial_sk),
+                                      <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                       ~content_digest, ~expiry>
+                           ) ▶₃ #a )
+                      case CaptureEligibleDevice
+                      solve( RequestSlot( ~request_id, ~pc,
+                                          <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                           ~content_digest, ~expiry>,
+                                          'pending'
+                             ) ▶₄ #a )
+                        case PublishRequest
+                        solve( RequestSlot( ~request_id, ~pc,
+                                            <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                             ~content_digest, ~expiry>,
+                                            'building'
+                               ) ▶₀ #c )
+                          case OpenActualRequest
+                          solve( RegistrySlot( ~device, ~pc, ~revision, 'active' ) ▶₂ #c )
+                            case AcceptDenial
+                            by sorry
+                          next
+                            case CaptureEligibleDevice
+                            by sorry
+                          next
+                            case TrustedEnrollment
+                            solve( RegistrySlot( ~device, ~pc, ~revision, 'active' ) ▶₀ #a )
+                              case AcceptDenial
+                              by sorry
+                            next
+                              case CaptureEligibleDevice
+                              solve( !KU( ~pc ) @ #vk.9 )
+                                case CreatePc
+                                solve( !KU( ~epoch ) @ #vk.11 )
+                                  case CreatePc
+                                  solve( !KU( ~session_id ) @ #vk.13 )
+                                    case CreatePc
+                                    solve( !KU( ~logon_luid ) @ #vk.15 )
+                                      case CreatePc
+                                      solve( !KU( ~request_id ) @ #vk.17 )
+                                        case PublishRequest
+                                        solve( !KU( ~nonce ) @ #vk.19 )
+                                          case PublishRequest
+                                          solve( !KU( ~content_digest ) @ #vk.21 )
+                                            case PublishRequest
+                                            solve( !KU( ~expiry ) @ #vk.22 )
+                                              case PublishRequest
+                                              solve( !KU( ~device ) @ #vk.24 )
+                                                case SignDenialWithoutApprovalAuthentication
+                                                solve( !KU( sign(<'Windows-UAC-Remote-Controller/deny/v1',
+                                                                  'v1', ~device, 'deny', ~pc, ~epoch,
+                                                                  ~session_id, ~logon_luid, ~request_id,
+                                                                  ~nonce, ~content_digest, ~expiry>,
+                                                                 ~denial_sk)
+                                                       ) @ #vk.27 )
+                                                  case SignDenialWithoutApprovalAuthentication
+                                                  SOLVED // trace found
+                                                next
+                                                  case c_sign
+                                                  by sorry
+                                                qed
+                                              next
+                                                case SignExactApprovalOnce
+                                                by sorry
+                                              next
+                                                case TrustedEnrollment
+                                                by sorry
+                                              qed
+                                            qed
+                                          qed
+                                        qed
+                                      qed
+                                    next
+                                      case PublishRequest
+                                      by sorry
+                                    qed
+                                  next
+                                    case PublishRequest
+                                    by sorry
+                                  qed
+                                next
+                                  case PublishRequest
+                                  by sorry
+                                qed
+                              next
+                                case PublishRequest_case_1
+                                by sorry
+                              next
+                                case PublishRequest_case_2
+                                by sorry
+                              next
+                                case TrustedEnrollment
+                                by sorry
+                              qed
+                            qed
+                          qed
+                        qed
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            next
+              case OpenActualRequest
+              by sorry
+            qed
+          qed
+        next
+          case TrustedReenrollmentWithSameKeys
+          by sorry
+        next
+          case TrustedReplacementWithSameKeys
+          by sorry
+        qed
+      qed
+    qed
+  qed
+qed

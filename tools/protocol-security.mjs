@@ -4,6 +4,8 @@ import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProver } from './prover-process.mjs';
+import { WITNESS_CONTEXTS, WITNESS_OUTPUT_LIMIT, deriveWitness, exactWitnessResult, readWitnessFile,
+  witnessArguments, witnessBindingPaths, witnessCoverage, witnessDischarges, witnessExpected } from './protocol-witness-discharge.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -153,7 +155,8 @@ export async function runProtocolSecurity(root = repository) {
 }
 
 async function runProtocolSecurityImpl(root, cancellation) {
-  const config = JSON.parse(readFileSync(resolve(root, 'security/tamarin/manifest.json'), 'utf8'));
+  const configBytes = readFileSync(resolve(root, 'security/tamarin/manifest.json'));
+  const config = JSON.parse(configBytes.toString('utf8'));
   if (config.version !== 1 || config.toolVersion !== '1.12.0' || !Array.isArray(config.models) || config.models.length < 2 || config.models.length > 8) throw new Error('Unsupported security model manifest.');
   if (!Array.isArray(config.sourceBindings) || !config.sourceBindings.length || config.sourceBindings.length > 32) throw new Error('Models need reviewed source bindings.');
   for (const binding of config.sourceBindings) {
@@ -173,9 +176,20 @@ async function runProtocolSecurityImpl(root, cancellation) {
   for (const model of config.models) {
     validateExpected(model.expected, true);
     proofRequirements(model.expected, model.helpers);
+    const discharges = witnessDischarges(model);
     reserve(inputIds, model.id);
     const names = Object.keys(model.expected);
-    for (const [index] of names.entries()) reserve(plannedRuns, `${model.id}-${index + 1}`);
+    for (const [index, name] of names.entries()) {
+      const id = `${model.id}-${index + 1}`;
+      reserve(plannedRuns, id);
+      if (Object.hasOwn(discharges, name)) {
+        reserve(inputIds, `${id}-proof`);
+        for (const context of WITNESS_CONTEXTS) {
+          reserve(inputIds, `${id}-${context}`);
+          reserve(plannedRuns, `${id}-${context}`);
+        }
+      }
+    }
     if (!Array.isArray(model.canaries) || !model.canaries.length || model.canaries.length > 4) throw new Error('Every model needs bounded real negative controls.');
     for (const canary of model.canaries) {
       validateExpected(canary.expected, false);
@@ -196,34 +210,96 @@ async function runProtocolSecurityImpl(root, cancellation) {
   if (version.status !== 0 || version.error || version.signal || /\bwarn(?:ing|ings)?\b|unsupported/i.test(version.stdout + version.stderr) || !/tamarin[- ]prover\s+1\.12\.0\b/i.test(version.stdout + version.stderr)) throw new Error('Pinned Tamarin 1.12.0 and supported Maude are required; missing/unsupported tools never pass.');
   const runs = [];
   const ids = new Set();
-  async function execute(id, path, expected, helpers, knownNames, origin, expectedInputHash) {
+  const saveRuns = () => writeFileSync(resolve(directory, 'summary.json'), JSON.stringify({ toolVersion: config.toolVersion, passed: false, status: 'incomplete', runs }, null, 2));
+  async function invoke(id, path, expected, knownNames, args, expectedInputHash, witness) {
     cancellation.throwIfAborted();
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(id) || ids.has(id)) throw new Error('Invalid/duplicate protocol evidence id.');
     ids.add(id);
     const before = readFileSync(path);
     const inputHash = sha256(before);
     if (inputHash !== expectedInputHash) throw new Error('Immutable prover snapshot changed before invocation.');
-    const required = proofRequirements(expected, helpers);
-    const args = proofArguments(path, expected, helpers);
     process.stdout.write(`Protocol security: ${id}\n`);
-    const result = await runProver(binary, args, { cwd: root, logPath: joinEvidence(id, 'log'), signal: cancellation });
-    const proof = parseProofSummary(result, required.expected, knownNames, path);
+    const result = await runProver(binary, args, { cwd: root, logPath: joinEvidence(id, 'log'), signal: cancellation,
+      ...(witness ? { timeoutMs: 120_000, maxOutputBytes: WITNESS_OUTPUT_LIMIT } : {}) });
+    let proof = parseProofSummary(result, expected, knownNames, path);
+    if (witness) proof = exactWitnessResult(proof, result, witness.obligation, witness.context);
     try {
       if (sha256(readFileSync(path)) !== inputHash) { proof.ok = false; proof.reasons.push('prover input changed during execution'); }
     } catch { proof.ok = false; proof.reasons.push('prover input could not be re-read after execution'); }
-    const row = { id, model: basename(path), modelSha256: inputHash, origin, helperLemmas: required.helperLemmas,
-      targetLemmas: required.targetLemmas, selectedLemmas: required.selectedLemmas, arguments: args, status: result.status, signal: result.signal,
+    return { id, model: basename(path), modelSha256: inputHash, arguments: args, status: result.status, signal: result.signal,
       processError: result.error?.message, cleanupIncomplete: result.cleanupIncomplete, cancelled: result.cancelled, ...proof };
+  }
+  async function execute(id, path, expected, helpers, knownNames, origin, expectedInputHash) {
+    const required = proofRequirements(expected, helpers);
+    const observed = await invoke(id, path, required.expected, knownNames, proofArguments(path, expected, helpers), expectedInputHash);
+    const row = { ...observed, origin, helperLemmas: required.helperLemmas,
+      targetLemmas: required.targetLemmas, selectedLemmas: required.selectedLemmas };
     runs.push(row);
     process.stdout.write(`${JSON.stringify(row)}\n`);
-    writeFileSync(resolve(directory, 'summary.json'), JSON.stringify({ toolVersion: config.toolVersion, passed: false, status: 'incomplete', runs }, null, 2));
+    saveRuns();
     // Record the interrupted/uncertain row first, then stop this invocation.
     // A handled parent signal must not resume the remaining proof queue.
     cancellation.throwIfAborted();
-    if (result.cleanupIncomplete) throw new Error('Prover cleanup is uncertain; no further proof groups may start.');
-    return proof.ok;
+    if (row.cleanupIncomplete) throw new Error('Prover cleanup is uncertain; no further proof groups may start.');
+    return row.ok;
   }
   function joinEvidence(id, extension) { return resolve(directory, `${id}.${extension}`); }
+  async function executeDischarge(id, source, model, obligation, profile, sourceHash) {
+    cancellation.throwIfAborted();
+    if (!isAbsolute(binary)) throw new Error('Checked witness discharge requires the explicitly pinned absolute Tamarin binary.');
+    const proofPath = ownedPath(root, profile.proof), proof = readWitnessFile(proofPath);
+    const proofText = proof.bytes.toString('utf8');
+    if (!Buffer.from(proofText).equals(proof.bytes)) throw new Error('Witness proof must be exact UTF-8.');
+    const proofSnapshot = joinEvidence(`${id}-proof`, 'txt');
+    writeFileSync(proofSnapshot, proof.bytes);
+    const bindings = witnessBindingPaths(model, profile, config.sourceBindings).map(path => {
+      const file = readWitnessFile(ownedPath(root, path));
+      const sourceBinding = config.sourceBindings.find(binding => binding.path === path);
+      if (sourceBinding && sha256(file.bytes.toString('utf8').replace(/\r\n/g, '\n')) !== sourceBinding.sha256) throw new Error('Reviewed protocol binding changed before witness planning.');
+      return { path, size: file.size, sha256: file.sha256 };
+    });
+    if (bindings.find(binding => binding.path === model.path).sha256 !== sourceHash ||
+        bindings.find(binding => binding.path === profile.proof).sha256 !== proof.sha256 ||
+        bindings.find(binding => binding.path === 'security/tamarin/manifest.json').sha256 !== sha256(configBytes)) throw new Error('Witness source changed before planning.');
+    const tool = readWitnessFile(binary, 150 * 1024 * 1024, false);
+    const derived = WITNESS_CONTEXTS.map(context => {
+      const candidate = deriveWitness(source, proofText, obligation, context), path = joinEvidence(`${id}-${context}`, 'spthy');
+      writeFileSync(path, candidate.input);
+      return { context, path, sha256: sha256(candidate.input), ...candidate };
+    });
+    const unchanged = () => {
+      for (const binding of bindings) if (readWitnessFile(ownedPath(root, binding.path), undefined, false).sha256 !== binding.sha256) throw new Error('Witness source/code binding changed.');
+      if (readWitnessFile(proofSnapshot).sha256 !== proof.sha256 || readWitnessFile(binary, 150 * 1024 * 1024, false).sha256 !== tool.sha256) throw new Error('Witness proof/tool binding changed.');
+      for (const candidate of derived) if (readWitnessFile(candidate.path).sha256 !== candidate.sha256) throw new Error('Witness derived input changed.');
+    };
+    const checks = [], good = derived[0];
+    const row = { id, mode: 'checked-strengthening', model: basename(good.path), modelSha256: good.sha256,
+      origin: { source: model.path, sha256: sourceHash }, helperLemmas: [], targetLemmas: [obligation], selectedLemmas: [profile.checkedLemma],
+      arguments: witnessArguments(good.path), status: null, signal: null, cancelled: false, cleanupIncomplete: false,
+      ok: false, reasons: ['witness discharge incomplete'], verdicts: {},
+      witnessDischarge: { profile: profile.profile, proofSource: profile.proof, proofSnapshot: basename(proofSnapshot), proofSha256: proof.sha256,
+        sourceBindings: bindings, binary, binaryMetadata: tool, checks, coverage: { ...good.structural, discharged: false } } };
+    runs.push(row); saveRuns();
+    for (const candidate of derived) {
+      unchanged(); cancellation.throwIfAborted();
+      const check = await invoke(`${id}-${candidate.context}`, candidate.path, witnessExpected(obligation, candidate.context),
+        [profile.checkedLemma], witnessArguments(candidate.path), candidate.sha256, { obligation, context: candidate.context });
+      checks.push({ context: candidate.context, ...check });
+      if (candidate.context === 'good') {
+        row.status = check.status; row.signal = check.signal; row.processError = check.processError; row.verdicts = check.verdicts;
+      }
+      row.cancelled ||= check.cancelled; row.cleanupIncomplete ||= check.cleanupIncomplete;
+      saveRuns(); cancellation.throwIfAborted();
+      if (check.cleanupIncomplete) throw new Error('Prover cleanup is uncertain; no further proof groups may start.');
+      unchanged();
+    }
+    cancellation.throwIfAborted();
+    row.witnessDischarge.coverage = witnessCoverage(good.structural, checks);
+    row.ok = row.witnessDischarge.coverage.discharged;
+    row.reasons = checks.flatMap(check => check.reasons.map(reason => `${check.context}: ${reason}`));
+    process.stdout.write(`${JSON.stringify(row)}\n`); saveRuns();
+    return row.ok;
+  }
   let passed = true;
   for (const model of config.models) {
     validateExpected(model.expected, true);
@@ -231,6 +307,7 @@ async function runProtocolSecurityImpl(root, cancellation) {
     if (!path.endsWith('.spthy') || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error('Expected a regular theory source.');
     const source = readFileSync(path, 'utf8');
     const registered = validateTheoryRequirements(source, model.expected, model.helpers);
+    const discharges = witnessDischarges(model);
     const names = Object.keys(model.expected);
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(model.id)) throw new Error('Invalid model id.');
     const snapshot = joinEvidence(model.id, 'spthy');
@@ -239,7 +316,10 @@ async function runProtocolSecurityImpl(root, cancellation) {
     // Isolate every positive lemma: one divergent search cannot hide the other
     // verdicts or consume their time/memory budget. Every lemma is still required.
     for (const [index, name] of names.entries()) {
-      passed = await execute(`${model.id}-${index + 1}`, snapshot, { [name]: model.expected[name] }, model.helpers, registered.selectedLemmas, { source: model.path, sha256: sourceHash }, sourceHash) && passed;
+      const id = `${model.id}-${index + 1}`;
+      passed = (Object.hasOwn(discharges, name)
+        ? await executeDischarge(id, source, model, name, discharges[name], sourceHash)
+        : await execute(id, snapshot, { [name]: model.expected[name] }, model.helpers, registered.selectedLemmas, { source: model.path, sha256: sourceHash }, sourceHash)) && passed;
     }
     if (!Array.isArray(model.canaries) || !model.canaries.length || model.canaries.length > 4) throw new Error('Every model needs bounded real negative controls.');
     for (const canary of model.canaries) {
@@ -254,6 +334,7 @@ async function runProtocolSecurityImpl(root, cancellation) {
       passed = await execute(canary.id, path, canary.expected, model.helpers, registered.selectedLemmas, { source: model.path, sha256: sourceHash, mutation: canary.mutation }, sha256(modified)) && passed;
     }
   }
+  cancellation.throwIfAborted();
   writeFileSync(resolve(directory, 'summary.json'), JSON.stringify({ toolVersion: config.toolVersion, manifestSha256: sha256(JSON.stringify(config)), passed, runs,
     scope: 'Symbolic models and stated assumptions only; not implementation refinement, native isolation, real boot/authentication or latency.' }, null, 2));
   if (!passed) throw new Error('Required protocol proofs/negative controls failed or were inconclusive.');

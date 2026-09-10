@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, s
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { mutateExactlyOnce, proofArguments, proofRequirements } from './protocol-security.mjs';
+import { WITNESS_CONTEXTS, deriveWitness, witnessArguments, witnessBindingPaths, witnessCoverage, witnessProfile } from './protocol-witness-discharge.mjs';
 import { admitDiagnostic, diagnosticArguments, diagnosticResult, DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS,
   inspectDiagnosticLog, loadDiagnosticInputs } from './protocol-diagnostic.mjs';
 
@@ -16,7 +17,7 @@ const property = (trace = 'all-traces', verdict = 'verified') => ({ trace, verdi
 const helpers = { enrolled_revision_unique: property(), building_precedes_open: property(),
   request_opened_unique: property(), active_registry_production_precedes_revocation: property() };
 
-function fixture(t, auxiliary) {
+function fixture(t, auxiliary, withDischarges = false) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-diagnostic-test-'));
   t.after(() => {
     // Only this exact newly-created fixture. Never old diagnostic/proof artifacts.
@@ -37,6 +38,14 @@ function fixture(t, auxiliary) {
   manifest.models[1].canaries.push({ id: 'request-replay-canary', mutation: { from: 'GUARD_request-authorization', to: 'REPLAY_BROKEN' },
     expected: { property_3: property('all-traces', 'falsified') } });
   if (auxiliary !== undefined) manifest.models[1].helpers = auxiliary;
+  if (withDischarges) {
+    const request = manifest.models[1];
+    request.expected = { honest_approve_trace: property('exists-trace'), honest_deny_without_approval_auth_trace: property('exists-trace'),
+      ...Object.fromEntries(Array.from({ length: 7 }, (_, index) => [`property_${index + 2}`, property()])) };
+    request.witnessDischarges = Object.fromEntries(['honest_approve_trace', 'honest_deny_without_approval_auth_trace'].map(name => {
+      const profile = witnessProfile(name); return [name, { profile: profile.profile, proof: profile.proof }];
+    }));
+  }
   const write = (path, value) => {
     const full = join(root, path);
     mkdirSync(dirname(full), { recursive: true });
@@ -44,15 +53,52 @@ function fixture(t, auxiliary) {
   };
   write('crates/fixture/src/lib.rs', '// SYNTHETIC source binding\r\n');
   write(`${normalDirectory}/tool-version.log`, 'SYNTHETIC FIXTURE ONLY\ntamarin-prover 1.12.0\n');
-  for (const value of manifest.models) write(value.path, `// SYNTHETIC MODEL, NEVER EXECUTED\n// GUARD_${value.id}\n` +
+  if (withDischarges) {
+    write('fake-tamarin', 'SYNTHETIC BINARY IDENTITY, NEVER EXECUTED\n');
+    for (const path of ['tools/protocol-security.mjs', 'tools/protocol-witness-discharge.mjs', 'tools/prover-process.mjs']) write(path, '// synthetic code identity only\n');
+    for (const profile of Object.values(manifest.models[1].witnessDischarges)) write(profile.proof, readFileSync(new URL(`../${profile.proof}`, import.meta.url)));
+  }
+  for (const value of manifest.models) write(value.path, `theory RequestAuthorization\nbegin\n// SYNTHETIC MODEL, NEVER EXECUTED\n// GUARD_${value.id}\n` +
     Object.keys(value.helpers ?? {}).map((name) => `lemma ${name} [reuse]: all-traces "synthetic statement"\n`).join('') +
-    Object.entries(value.expected).map(([name, result]) => `lemma ${name}: ${result.trace} "synthetic statement"\n`).join(''));
+    Object.entries(value.expected).map(([name, result]) => withDischarges && value.witnessDischarges?.[name]
+      ? `${witnessProfile(name).original}\n\n` : `lemma ${name}: ${result.trace} "synthetic statement"\n`).join('') + '\nend\n');
   let summary;
   const refresh = () => {
     const runs = [];
+    write('security/tamarin/manifest.json', JSON.stringify(manifest));
     for (const value of manifest.models) {
       const bytes = readFileSync(join(root, value.path)), text = bytes.toString('utf8');
       const push = (id, input, selected, mutation) => {
+        const obligation = Object.keys(selected)[0];
+        if (!mutation && value.witnessDischarges?.[obligation]) {
+          const profile = witnessProfile(obligation), proofBytes = readFileSync(join(root, profile.proof)), proof = proofBytes.toString('utf8');
+          const proofSnapshot = `${id}-proof.txt`;
+          write(`${normalDirectory}/${proofSnapshot}`, proofBytes);
+          let structural;
+          const checks = WITNESS_CONTEXTS.map(context => {
+            const derived = deriveWitness(text, proof, obligation, context), path = join(root, normalDirectory, `${id}-${context}.spthy`);
+            structural = derived.structural; write(`${normalDirectory}/${id}-${context}.spthy`, derived.input);
+            const ok = !(id === 'request-authorization-1' && context === 'good');
+            const verified = context === 'good' && ok;
+            return { context, id: `${id}-${context}`, model: basename(path), modelSha256: sha256(derived.input),
+              arguments: witnessArguments(path), status: 0, signal: null, cancelled: false, cleanupIncomplete: false, ok,
+              expectedRow: context === 'good' ? 'verified' : 'analysis incomplete',
+              observedRow: verified ? 'verified (43 steps)' : 'analysis incomplete (1 steps)',
+              verdicts: { [profile.checkedLemma]: property('exists-trace', verified ? 'verified' : 'inconclusive') },
+              reasons: ok ? [] : ['synthetic incomplete fixture, not a prover result'] };
+          });
+          const good = checks[0], binary = join(root, 'fake-tamarin'), binaryBytes = readFileSync(binary);
+          runs.push({ id, mode: 'checked-strengthening', model: good.model, modelSha256: good.modelSha256,
+            origin: { source: value.path, sha256: sha256(bytes) }, helperLemmas: [], targetLemmas: [obligation], selectedLemmas: [profile.checkedLemma],
+            arguments: good.arguments, status: good.status, signal: good.signal, cancelled: false, cleanupIncomplete: false,
+            ok: checks.every(check => check.ok), reasons: good.reasons, verdicts: good.verdicts,
+            witnessDischarge: { profile: profile.profile, proofSource: profile.proof, proofSnapshot, proofSha256: sha256(proofBytes), checks,
+              coverage: witnessCoverage(structural, checks), binary, binaryMetadata: { size: binaryBytes.length, sha256: sha256(binaryBytes) },
+              sourceBindings: witnessBindingPaths(value, profile, manifest.sourceBindings).map(path => {
+                const bytes = readFileSync(join(root, path)); return { path, size: bytes.length, sha256: sha256(bytes) };
+              }) } });
+          return;
+        }
         const content = mutation ? Buffer.from(mutateExactlyOnce(text, mutation)) : bytes;
         const path = join(root, normalDirectory, `${input}.spthy`);
         const required = proofRequirements(selected, value.helpers);
@@ -86,6 +132,54 @@ test('complete normal failure selects first request baseline in manifest order',
   const loaded = loadDiagnosticInputs(f.root);
   assert.equal(loaded.selected.row, 'request-authorization-1');
   assert.equal(loaded.selected.inputSha256, sha256(loaded.selected.bytes));
+});
+
+test('discharge diagnostics retain sixteen original rows and select the actual stronger input without claiming original replay', (t) => {
+  const f = fixture(t, helpers, true), admitted = admitDiagnostic(f.manifest, f.summary, f.root);
+  assert.equal(admitted.plans.length, 16);
+  assert.deepEqual(admitted.selected.targetLemmas, ['honest_approve_trace']);
+  assert.deepEqual(admitted.selected.names, ['checked_approval_witness']);
+  const loaded = loadDiagnosticInputs(f.root);
+  assert.equal(loaded.selected.lemma, 'checked_approval_witness');
+  assert.equal(loaded.selected.originalObligation, 'honest_approve_trace');
+  assert.equal(loaded.selected.inputRole, 'checked-strengthening');
+  assert.equal(Object.hasOwn(loaded.selected, 'helpers'), false);
+  assert.match(loaded.selected.bytes.toString('utf8'), /lemma checked_approval_witness:/);
+  assert.doesNotMatch(loaded.selected.bytes.toString('utf8'), /^lemma enrolled_revision_unique/m);
+});
+
+test('discharge admission rejects missing controls, original-name fake verdicts, wrong proof scopes and auto-search substitutions', (t) => {
+  const f = fixture(t, helpers, true);
+  for (const change of [
+    row => { row.witnessDischarge.checks.pop(); },
+    row => { row.witnessDischarge.checks[1].context = 'good'; },
+    row => { row.witnessDischarge.checks[1].observedRow = 'unknown (1 steps)'; },
+    row => { row.witnessDischarge.checks[1].cancelled = true; },
+    row => { row.witnessDischarge.checks[1].status = 1; },
+    row => { row.verdicts.honest_approve_trace = property('exists-trace'); },
+    row => { row.selectedLemmas = ['honest_approve_trace']; },
+    row => { row.arguments.push('--prove=checked_approval_witness'); },
+    row => { row.witnessDischarge.proofSource = 'security/tamarin/witnesses/Deny.proof'; },
+    row => { row.witnessDischarge.coverage.discharged = true; },
+  ]) {
+    const summary = structuredClone(f.summary);
+    change(summary.runs.find(row => row.id === 'request-authorization-1'));
+    assert.throws(() => admitDiagnostic(f.manifest, summary, f.root));
+  }
+});
+
+test('discharge filesystem admission binds every derived control, proof fixture and structural implication receipt', async (t) => {
+  for (const target of ['proof', 'control', 'coverage']) await t.test(target, (t) => {
+    const f = fixture(t, helpers, true), row = f.summary.runs.find(row => row.id === 'request-authorization-1');
+    if (target === 'proof') f.write(row.witnessDischarge.proofSource, 'by sorry\n');
+    if (target === 'control') f.write(`${normalDirectory}/request-authorization-1-contradiction.spthy`, 'different input\n');
+    if (target === 'coverage') {
+      row.witnessDischarge.coverage.originalDirectlyVerified = true;
+      f.write(`${normalDirectory}/summary.json`, JSON.stringify(f.summary));
+    }
+    assert.throws(() => loadDiagnosticInputs(f.root));
+    assert.equal(existsSync(join(f.root, 'artifacts/protocol-diagnostic')), false);
+  });
 });
 
 test('helper-aware normal plans keep all sixteen rows and diagnose the original, not helper zero', (t) => {

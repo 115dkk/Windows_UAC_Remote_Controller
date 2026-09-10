@@ -17,8 +17,9 @@ jobs:
   protocol-security:
     name: Protocol security (Tamarin)
     runs-on: ubuntu-24.04
-    # Leave artifact/diagnostic time after all independently bounded proofs.
-    timeout-minutes: 40
+    # Twenty independently bounded invocations can consume forty minutes;
+    # reserve installation, artifact and failure-diagnostic time as well.
+    timeout-minutes: 50
     steps:
       - name: Check out this revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
