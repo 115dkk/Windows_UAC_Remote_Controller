@@ -96,6 +96,8 @@ export function validateFontCss(source) {
   assert.doesNotMatch(css, /font-weight\s*:\s*650\b/u);
   assert.equal(bodyFor('p').get('word-break'), 'keep-all');
   assert.equal(bodyFor('p').get('overflow-wrap'), 'anywhere');
+  assert.equal(bodyFor('.status-facts dt').get('word-break'), 'keep-all');
+  assert.equal(bodyFor('.status-facts dt').get('overflow-wrap'), 'anywhere');
   assert.equal(bodyFor('.path-output, .command-region pre').get('font-family'), '"Cascadia Code", Consolas, "Noto Sans Mono CJK KR", "Malgun Gothic", monospace');
   assert.equal(bodyFor('.path-output, .command-region pre').get('word-break'), 'break-word');
 }

@@ -64,8 +64,9 @@ test('titles use the real SemiBold token while command/path monospace is preserv
   assert.throws(() => validateFontCss(stylesheet.replace('"Cascadia Code", Consolas, "Noto Sans Mono CJK KR", "Malgun Gothic", monospace', 'var(--font-ui)')));
 });
 
-test('ordinary Korean descriptions keep words while original technical text remains breakable', () => {
+test('ordinary Korean descriptions and status labels keep words while technical text remains breakable', () => {
   assert.throws(() => validateFontCss(stylesheet.replace('word-break: keep-all;', 'word-break: normal;')));
+  assert.throws(() => validateFontCss(stylesheet.replace('.status-facts dt { color: var(--muted); word-break: keep-all;', '.status-facts dt { color: var(--muted); word-break: normal;')));
   assert.throws(() => validateFontCss(stylesheet.replace('word-break: break-word;', 'word-break: keep-all;')));
 });
 
