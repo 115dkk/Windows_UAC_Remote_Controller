@@ -167,7 +167,7 @@ struct PeerSlot {
 
 enum RegistryOwner<'key> {
     #[cfg(windows)]
-    Native(crate::ServiceRegistry<'key>),
+    Native(Box<crate::ServiceRegistry<'key>>),
     #[cfg(test)]
     Fixture(
         std::rc::Rc<std::cell::RefCell<tests::RegistryFixture>>,
@@ -314,7 +314,7 @@ impl<'key> ServiceSession<'key> {
         epoch_start: Instant,
     ) -> Result<Self, PeerRuntimeError> {
         Self::new(
-            RegistryOwner::Native(registry),
+            RegistryOwner::Native(Box::new(registry)),
             SessionKey::Native(key),
             epoch_start,
             Arc::new(ServiceClock),
