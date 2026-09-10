@@ -167,7 +167,17 @@ public static class PcpContextProbe
             return new SecurityIdentifier(data.Pointer).Value;
         }
     }
-    static uint Scalar(IntPtr token, int kind) { using (var data = TokenData(token, kind)) return data.U32(0); }
+    static uint Scalar(IntPtr token, int kind)
+    {
+        if (kind != 8 && kind != 12 && kind != 18 && kind != 20) throw Rejected();
+        using (var data = new Buffer(4))
+        {
+            uint returned;
+            if (!GetTokenInformation(token, kind, data.Pointer, 4, out returned)) NativeError();
+            if (returned != 4) throw Rejected();
+            return data.U32(0);
+        }
+    }
     static Buffer TokenData(IntPtr token, int kind)
     {
         uint size; GetTokenInformation(token, kind, IntPtr.Zero, 0, out size);

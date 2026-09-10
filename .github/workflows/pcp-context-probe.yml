@@ -7,6 +7,7 @@ on:
     paths:
       - 'tools/windows-lab/PcpContextProbe.cs'
       - 'tools/windows-lab/PcpContextProbeBootstrap.cpp'
+      - 'tools/windows-lab/PcpContextProbeGuards.cpp'
       - 'tools/windows-lab/PcpContextProbe.rc'
       - 'tools/windows-lab/PCP_CONTEXT_PROBE.md'
       - '.github/workflows/pcp-context-probe.yml'
@@ -49,6 +50,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Embedded payload resource failed: $LASTEXITCODE" }
             & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /MT /O2 /utf-8 /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /guard:cf /Fe:PcpContextProbe.exe /Fo:PcpContextProbeBootstrap.obj (Join-Path $source 'PcpContextProbeBootstrap.cpp') PcpContextProbe.res /link advapi32.lib /MACHINE:X64 /SUBSYSTEM:CONSOLE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF /DEPENDENTLOADFLAG:0x800 /MANIFEST:EMBED "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
             if ($LASTEXITCODE -ne 0) { throw "Native bootstrap CL/link failed: $LASTEXITCODE" }
+            & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /MT /O2 /utf-8 /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /guard:cf /Fe:PcpContextProbeGuards.exe /Fo:PcpContextProbeGuards.obj (Join-Path $source 'PcpContextProbeGuards.cpp') /link /WX advapi32.lib /MACHINE:X64 /SUBSYSTEM:CONSOLE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF /DEPENDENTLOADFLAG:0x800 /MANIFEST:EMBED "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+            if ($LASTEXITCODE -ne 0) { throw "Read-only guard CL/link failed: $LASTEXITCODE" }
             foreach ($name in @('PcpContextProbe.exe', 'PcpContextProbe.Service.exe')) {
               foreach ($view in @('headers', 'imports', 'loadconfig')) {
                 $dump = & dumpbin.exe /nologo "/$view" $name
@@ -66,9 +69,14 @@ jobs:
             [xml]$manifest = Get-Content -LiteralPath 'PcpContextProbe.manifest.xml' -Raw
             $requested = $manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
             if ($null -eq $requested -or $requested.level -ne 'requireAdministrator' -or $requested.uiAccess -ne 'false') { throw 'Unexpected elevation manifest' }
-            $files = @('PcpContextProbe.exe', 'PcpContextProbe.Service.exe', 'PcpContextProbe.res')
+            & mt.exe -nologo '-inputresource:PcpContextProbeGuards.exe;#1' '-out:PcpContextProbeGuards.manifest.xml'
+            if ($LASTEXITCODE -ne 0) { throw 'Read-only manifest extraction failed' }
+            [xml]$guardManifest = Get-Content -LiteralPath 'PcpContextProbeGuards.manifest.xml' -Raw
+            $guardLevel = $guardManifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
+            if ($guardLevel.level -ne 'asInvoker' -or $guardLevel.uiAccess -ne 'false') { throw 'Read-only manifest mismatch' }
+            $files = @('PcpContextProbe.exe', 'PcpContextProbe.Service.exe', 'PcpContextProbe.res', 'PcpContextProbeGuards.exe')
             $hashes = @($files | ForEach-Object { [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $_).Length } })
-            $sourceHashes = @('PcpContextProbe.cs', 'PcpContextProbeBootstrap.cpp', 'PcpContextProbe.rc', 'PCP_CONTEXT_PROBE.md') | ForEach-Object { [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $source $_) -Algorithm SHA256).Hash.ToLowerInvariant() } }
+            $sourceHashes = @('PcpContextProbe.cs', 'PcpContextProbeBootstrap.cpp', 'PcpContextProbeGuards.cpp', 'PcpContextProbe.rc', 'PCP_CONTEXT_PROBE.md') | ForEach-Object { [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $source $_) -Algorithm SHA256).Hash.ToLowerInvariant() } }
             [ordered]@{ commit = $env:GITHUB_SHA; purpose = 'one-time PCP context diagnostic'; execution = 'compile-and-passive-PE-inspection-only'; installed = $false; providerOpened = $false; files = $hashes; sources = @($sourceHashes); bootstrapImports = $dlls } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath 'build-provenance.json' -Encoding utf8
           } finally { Pop-Location }
       - name: Retain diagnostic binary and passive provenance
