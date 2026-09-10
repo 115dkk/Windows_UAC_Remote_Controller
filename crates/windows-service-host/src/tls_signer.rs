@@ -176,6 +176,13 @@ pub struct ServiceTlsSigner {
 }
 
 impl ServiceTlsSigner {
+    /// Crate-local software fixture seam; absent from every production build.
+    #[cfg(test)]
+    pub(crate) fn for_test_key(
+        key: &dyn tests::SyntheticKey,
+    ) -> Result<(Arc<Self>, ServiceTlsSigningWorker<'_>), TlsSigningBridgeError> {
+        Self::with_owner(KeyOwner::Synthetic(key))
+    }
     /// Called on the existing trusted service worker with its exact live key.
     /// Native public export rechecks service identity, impersonation and key
     /// policy. No software, alternate-key or open/create fallback is present.
@@ -474,4 +481,4 @@ impl fmt::Debug for ServiceTlsSigningWorker<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

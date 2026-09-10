@@ -19,8 +19,18 @@ approval-core = { path = "../approval-core" }
 approval-protocol = { path = "../approval-protocol" }
 android-attestation = { path = "../android-attestation" }
 secure-channel = { path = "../secure-channel" }
+service-protocol = { path = "../service-protocol" }
+framed-transport = { path = "../framed-transport" }
+tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros"] }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
+
+[dev-dependencies]
+android-controller = { path = "../android-controller" }
+notification-policy = { path = "../notification-policy" }
+phone-request-core = { path = "../phone-request-core" }
+phone-state-store = { path = "../phone-state-store" }
+tempfile = "3.23.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }

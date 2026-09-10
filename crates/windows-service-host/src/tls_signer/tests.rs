@@ -16,7 +16,7 @@ use secure_channel::{Channel, MAX_DRAIN_BYTES, TlsIdentity};
 
 use super::*;
 
-pub(super) trait SyntheticKey {
+pub(crate) trait SyntheticKey {
     fn public_key(&self) -> Result<TlsPublicKey, TlsSigningBridgeError>;
     fn sign(&self, input: &OwnedCertificateVerifyInput) -> Response;
 }

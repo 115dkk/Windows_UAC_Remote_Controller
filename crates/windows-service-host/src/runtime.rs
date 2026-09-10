@@ -3,6 +3,7 @@
 //! It contains no listener, pairing endpoint, prompt adapter or fake UAC.
 #![forbid(unsafe_code)]
 
+use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
 use crate::{
     ProbeSupervisorError, ServiceProbeSupervisor,
     diagnostic::{
@@ -176,88 +177,136 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
         }
         Err(error) => return Err(ServiceError::from_identity(error)),
     };
-    let mut registry = match origin {
+    let registry = match origin {
         IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
         IdentityOrigin::CreatedNow => {
             ServiceRegistry::initialize_empty_after_key_creation(&identity, trust_directory)
         }
     }
     .map_err(registry_error)?;
-    // Read from the actual committed owner before service readiness. No engine,
-    // phone handshake or enrollment endpoint is started by this lifecycle host.
-    let _registry_checkpoint = registry.checkpoint_for_engine().map_err(registry_error)?;
-    if cancellation_requested(stop) {
-        registry.close().map_err(registry_error)?;
-        return identity.close().map_err(ServiceError::from_identity);
-    }
-    events
-        .send(WorkerEvent::Progress)
-        .map_err(|_| ServiceError::WorkerFailed)?;
-    append(
-        &mut journal,
-        ActivityEvent::Service(ServiceOutcome::Started),
-    )?;
-    // Explicit fixed-schema diagnostics for the integrations NOT provided by
-    // this lifecycle host. These events do not contain paths or authority state.
-    append(
-        &mut journal,
-        ActivityEvent::Failure(FailureKind::PlatformUnavailable),
-    )?;
-    append(
-        &mut journal,
-        ActivityEvent::Failure(FailureKind::TransportUnavailable),
-    )?;
-    // Passive fixed-slot inspection only, never a startup probe. Failure/full
-    // storage disables this diagnostic without bypassing identity/registry init.
-    PROBE_REQUESTS.prepare(
-        crate::native::probe_control_registration_ready(_installation.executable())
-            .and_then(|()| directory.probe_slot_available()),
-    );
-    events
-        .send(WorkerEvent::Ready)
-        .map_err(|_| ServiceError::WorkerFailed)?;
-    let mut last_purge = Instant::now();
+    // Retain the actual registry, restored engine, original epoch coordinate and
+    // borrowed native key in ONE worker-owned session. No carrier/listener is
+    // activated and SCM readiness still does not mean remote approval readiness.
+    let mut session =
+        ServiceSession::for_service(registry, &identity, Instant::now()).map_err(session_error)?;
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
-    loop {
-        match stop.recv_timeout(Duration::from_millis(200)) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => (),
-        }
-        if let Some(request) = PROBE_REQUESTS.take() {
-            // The guard latches unavailable on storage error/unwind. Supervisor
-            // ownership is retained here across every request and quarantine.
-            let result = run_requested_probe(
-                &directory,
-                &mut supervisor,
-                &mut supervisor_initialization_failed,
-                &request,
-            );
-            match result {
-                Ok(quarantined) => request.finish(directory.probe_slot_available(), quarantined),
-                Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
-                Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
+    // Keep session OUTSIDE this unwind boundary: every returned error or unwind
+    // takes the same staged drain before registry/key release or Finished.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), ServiceError> {
+            if cancellation_requested(stop) {
+                return Ok(());
             }
-        }
-        if last_purge.elapsed() >= Duration::from_secs(3_600) {
-            journal
-                .purge(now()?)
-                .map_err(|_| ServiceError::JournalUnavailable)?;
-            last_purge = Instant::now();
-        }
-    }
-    append(
-        &mut journal,
-        ActivityEvent::Service(ServiceOutcome::Stopping),
-    )?;
+            events
+                .send(WorkerEvent::Progress)
+                .map_err(|_| ServiceError::WorkerFailed)?;
+            append(
+                &mut journal,
+                ActivityEvent::Service(ServiceOutcome::Started),
+            )?;
+            // Explicit fixed-schema diagnostics for the integrations NOT provided by
+            // this lifecycle host. These events do not contain paths or authority state.
+            append(
+                &mut journal,
+                ActivityEvent::Failure(FailureKind::PlatformUnavailable),
+            )?;
+            append(
+                &mut journal,
+                ActivityEvent::Failure(FailureKind::TransportUnavailable),
+            )?;
+            // Passive fixed-slot inspection only, never a startup probe. Failure/full
+            // storage disables this diagnostic without bypassing identity/registry init.
+            PROBE_REQUESTS.prepare(
+                crate::native::probe_control_registration_ready(_installation.executable())
+                    .and_then(|()| directory.probe_slot_available()),
+            );
+            events
+                .send(WorkerEvent::Ready)
+                .map_err(|_| ServiceError::WorkerFailed)?;
+            let mut last_purge = Instant::now();
+            loop {
+                if cancellation_requested(stop) {
+                    break;
+                }
+                if let SessionProgress::AuthorizedButNotApplied(_) =
+                    session.process_one().map_err(session_error)?
+                {
+                    // Authorization consumption is NOT a Windows action/result.
+                    append(
+                        &mut journal,
+                        ActivityEvent::Failure(FailureKind::PlatformUnavailable),
+                    )?;
+                }
+                match stop.recv_timeout(Duration::from_millis(25)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                }
+                if let Some(request) = PROBE_REQUESTS.take() {
+                    // The guard latches unavailable on storage error/unwind. Supervisor
+                    // ownership is retained here across every request and quarantine.
+                    let result = run_requested_probe(
+                        &directory,
+                        &mut supervisor,
+                        &mut supervisor_initialization_failed,
+                        &request,
+                    );
+                    match result {
+                        Ok(quarantined) => {
+                            request.finish(directory.probe_slot_available(), quarantined)
+                        }
+                        Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
+                        Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
+                    }
+                }
+                if last_purge.elapsed() >= Duration::from_secs(3_600) {
+                    journal
+                        .purge(now()?)
+                        .map_err(|_| ServiceError::JournalUnavailable)?;
+                    last_purge = Instant::now();
+                }
+            }
+            append(
+                &mut journal,
+                ActivityEvent::Service(ServiceOutcome::Stopping),
+            )?;
+            Ok(())
+        },
+    ))
+    .unwrap_or(Err(ServiceError::WorkerFailed));
     PROBE_REQUESTS.close();
+    session.begin_shutdown();
+    let io_failed = loop {
+        match session.poll_shutdown() {
+            SessionCleanup::CleanupPending { .. } => {
+                // Retain ownership even beyond an expected cleanup interval.
+                // No timeout is a quiescence receipt and no live join blocks
+                // this key worker. Existing SCM timeout reporting is unchanged.
+                thread::park_timeout(Duration::from_millis(25));
+            }
+            SessionCleanup::Quiescent { io_failed } => break io_failed,
+        }
+    };
     drop(supervisor);
-    registry.close().map_err(registry_error)?;
-    identity.close().map_err(ServiceError::from_identity)?;
+    let closed = session.finish_shutdown().map_err(session_error);
+    drop(session);
+    let identity_closed = identity.close().map_err(ServiceError::from_identity);
     // Journal drops before the directory/installation pins, never the reverse.
     drop(journal);
     drop(directory);
-    Ok(())
+    outcome.and(closed).and(identity_closed).and(if io_failed {
+        Err(ServiceError::WorkerFailed)
+    } else {
+        Ok(())
+    })
+}
+
+fn session_error(error: PeerRuntimeError) -> ServiceError {
+    match error {
+        PeerRuntimeError::Clock => ServiceError::InvalidClock,
+        PeerRuntimeError::Registry => ServiceError::RegistryUnavailable,
+        _ => ServiceError::WorkerFailed,
+    }
 }
 
 fn diagnostic_time() -> Option<u64> {

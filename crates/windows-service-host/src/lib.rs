@@ -11,6 +11,8 @@
 
 mod contract;
 mod diagnostic;
+#[cfg(any(windows, test))]
+pub mod peer_runtime;
 mod probe_supervisor;
 #[cfg(any(windows, test))]
 pub mod tls_signer;
