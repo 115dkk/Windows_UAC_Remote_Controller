@@ -5,11 +5,15 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, ope
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProver } from './prover-process.mjs';
-import { DIAGNOSTIC_DEPTH, DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS } from './protocol-diagnostic.mjs';
+import { DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS } from './protocol-diagnostic.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const ORIGIN = 'security/tamarin/RequestAuthorization.spthy';
 export const CANDIDATE = 'security/tamarin/candidates/HonestApproveNavigation.spthy';
+// Tamarin1.12 replaceSorryProver applies the auto bound to each resumed leaf,
+// not the complete stored prefix. Observe one new level, not12 extra levels.
+// Normal proof/diagnostic bounds are unchanged; this is never proof evidence.
+export const CANDIDATE_DEPTH = 1;
 const MAX_SOURCE_BYTES = 1024 * 1024;
 const HEADER = '\nlemma honest_approve_trace:\n';
 const FORMULA_END = '\n    & o < u & u < a"';
@@ -54,7 +58,7 @@ export function admitCandidateEnvironment(args, env, platform) {
 }
 
 export function candidateArguments(input) {
-  return [input, '--quit-on-warning', '--prove=honest_approve_trace', '--heuristic=i', `--bound=${DIAGNOSTIC_DEPTH}`,
+  return [input, '--quit-on-warning', '--prove=honest_approve_trace', '--heuristic=i', `--bound=${CANDIDATE_DEPTH}`,
     '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS'];
 }
 
@@ -107,7 +111,7 @@ async function main() {
     const args = candidateArguments(input);
     report = { ...report, origin: { path: ORIGIN, sha256: origin.sha256 }, candidate: { path: CANDIDATE, sha256: candidate.sha256 },
       inputSha256: candidate.sha256, binary, arguments: args,
-      bounds: { depth: DIAGNOSTIC_DEPTH, timeoutMs: DIAGNOSTIC_TIMEOUT_MS, outputBytes: DIAGNOSTIC_OUTPUT_BYTES, maxInvocations: 1 } };
+      bounds: { depth: CANDIDATE_DEPTH, timeoutMs: DIAGNOSTIC_TIMEOUT_MS, outputBytes: DIAGNOSTIC_OUTPUT_BYTES, maxInvocations: 1 } };
     cancellation.signal.throwIfAborted();
     report.attempted = true;
     const result = await runProver(binary, args, { cwd: directory, logPath: resolve(directory, 'diagnostic.log'),

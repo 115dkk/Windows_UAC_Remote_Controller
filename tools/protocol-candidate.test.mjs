@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { CANDIDATE, ORIGIN, admitCandidateEnvironment, admitCandidateSource, candidateArguments, candidateProcessResult } from './protocol-candidate.mjs';
+import { CANDIDATE, CANDIDATE_DEPTH, ORIGIN, admitCandidateEnvironment, admitCandidateSource, candidateArguments, candidateProcessResult } from './protocol-candidate.mjs';
 import { DIAGNOSTIC_DEPTH, DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS } from './protocol-diagnostic.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -95,10 +95,11 @@ test('actual runner admission is no-argument Linux GitHub CI with configured abs
   }
 });
 
-test('candidate argv uses the existing fixed diagnostic budgets and no output side file', () => {
+test('candidate argv clips resumed automatic work at one level without changing normal diagnostic bounds', () => {
   assert.deepEqual(candidateArguments('/fixed/candidate/request.input.spthy'), ['/fixed/candidate/request.input.spthy',
-    '--quit-on-warning', '--prove=honest_approve_trace', '--heuristic=i', '--bound=12',
+    '--quit-on-warning', '--prove=honest_approve_trace', '--heuristic=i', '--bound=1',
     '--stop-on-trace=NONE', '+RTS', '-N2', '-M2G', '-RTS']);
+  assert.equal(CANDIDATE_DEPTH, 1);
   assert.equal(DIAGNOSTIC_DEPTH, 12);
   assert.equal(DIAGNOSTIC_TIMEOUT_MS, 60_000);
   assert.equal(DIAGNOSTIC_OUTPUT_BYTES, 4 * 1024 * 1024);
