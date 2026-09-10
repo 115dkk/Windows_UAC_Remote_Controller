@@ -38,8 +38,11 @@ internal class BootRegistration(private val application: Application, private va
         val context = application.createDeviceProtectedStorageContext()
         check(context.isDeviceProtectedStorage)
         val store = BootActivationFile(context.noBackupFilesDir) { directory ->
-            val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY or OsConstants.O_CLOEXEC, 0)
-            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+            val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW, 0)
+            try {
+                check(OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode))
+                Os.fsync(descriptor)
+            } finally { Os.close(descriptor) }
         }
         BootRegistrationIo(store, { ControllerForegroundService.legacyComponentState(context) },
             { ControllerForegroundService.componentState(context) }).also { io = it }

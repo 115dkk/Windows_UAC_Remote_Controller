@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Synthetic client contract checks, not OS notification/authentication evidence.
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -128,7 +128,12 @@ describe('native request presentation integration', () => {
     const user = userEvent.setup();
     const rendered = render(<App bridge={bridge} initialPage="schedule" />);
     const heading = await screen.findByRole('heading', { name: '두 번째 요청' });
-    expect(heading).toHaveFocus();
+    // Presence can precede RequestCard's passive focus effect. Await the exact
+    // selected heading's focus, not an arbitrary delay or only DOM visibility.
+    await waitFor(() => {
+      expect(heading).toBeInTheDocument();
+      expect(heading).toHaveFocus();
+    });
     expect(rendered.container.querySelector('article h2')).toHaveTextContent('두 번째 요청');
     await user.click(screen.getByRole('button', { name: ko.refresh }));
     expect(await screen.findByRole('heading', { name: ko.requestEmpty })).toBeInTheDocument();
