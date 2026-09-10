@@ -60,6 +60,7 @@
   --motion-normal: 200ms;
   --ease-standard: cubic-bezier(.2, 0, 0, 1);
   --sidebar-width: 13.5rem;
+  --sidebar-max-share: 30vw;
   --content-max: 66rem;
   --phone-content-max: 42rem;
   --target-desktop: 44px;
@@ -127,9 +128,10 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .skip-link { position: fixed; top: var(--space-2); left: var(--space-2); z-index: 10; background: var(--surface); color: var(--accent); padding: var(--space-3); transform: translateY(-200%); }
 .skip-link:focus { transform: none; }
 .app-shell { height: 100%; height: 100dvh; width: 100%; min-width: 0; overflow: hidden; }
-.desktop-shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); font-size: var(--text-body); }
+.desktop-shell { display: grid; grid-template-columns: min(var(--sidebar-width), var(--sidebar-max-share)) minmax(0, 1fr); font-size: var(--text-body); }
 .navigation-shell { min-width: 0; padding: var(--space-8) var(--space-3); display: flex; flex-direction: column; background: var(--surface-subtle); }
-.app-brand { display: flex; gap: var(--space-3); align-items: center; padding-inline: var(--space-3); margin-bottom: var(--space-10); font-size: var(--text-brand); font-weight: var(--weight-title); }
+.desktop-shell .navigation-shell { min-height: 0; overflow-y: auto; scroll-padding-block: var(--space-3); }
+.app-brand { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; padding-inline: var(--space-3); margin-bottom: var(--space-10); font-size: var(--text-brand); font-weight: var(--weight-title); }
 .brand-symbol { color: var(--accent); display: grid; place-items: center; }
 .brand-symbol .icon { width: 1.5rem; height: 1.5rem; }
 .navigation-shell nav { display: flex; flex-direction: column; gap: var(--space-2); }

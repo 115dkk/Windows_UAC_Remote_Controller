@@ -76,7 +76,11 @@ contrast after rendering; values above are design intent, not a passed audit.
 --space-4 1rem, --space-5 1.25rem, --space-6 1.5rem, --space-8 2rem,
 --space-10 2.5rem, --space-12 3rem.
 
-- Desktop sidebar 13.5rem; content padding 2rem (1rem at narrow bounds).
+- Desktop sidebar `min(13.5rem, 30vw)` using `--sidebar-width` and
+  `--sidebar-max-share`. Ordinary 980/760px client widths retain the 216px rail
+  at the default 16px root; enlarged text cannot take more than 30% of the window.
+  The rail brand may wrap its icon/text onto separate rows instead of overflowing.
+  Content padding remains 2rem (1rem at narrow bounds).
 - Desktop native window initial 980x740, minimum 760x580. Browser QA additionally
   stresses 390/768/1280 widths; those are not native-platform proof.
 - Phone content max 42rem, margin auto; horizontal padding 1.25rem.
@@ -84,8 +88,11 @@ contrast after rendering; values above are design intent, not a passed audit.
   Closely nested radii use outer = inner + intervening padding.
 - Native buttons are not redrawn in HTML. HTML buttons have at least 44px desktop
   and 48px phone hit areas. Weekday chip targets do not overlap.
-- Main owns page scrolling. Command details may have a separate bounded scroll
-  region with a visible purpose and keyboard access. Bottom navigation must not
+- Main owns page scrolling. Desktop navigation separately owns vertical overflow
+  so every menu remains reachable at enlarged text sizes; keyboard focus scrolls
+  within that rail without moving the main page. Command details may have a
+  separate bounded scroll region with a visible purpose and keyboard access.
+  Bottom navigation must not
   cover text, input or actions; safe-area/keyboard handling belongs to the shell.
 
 ## Components and states
@@ -150,6 +157,7 @@ layout values introduced by the first client are:
 | Token | Value | Role |
 | --- | --- | --- |
 | --sidebar-width | 13.5rem | Desktop navigation rail, as specified above |
+| --sidebar-max-share | 30vw | Upper bound on desktop rail width when root text grows |
 | --content-max | 66rem | Maximum desktop content measure at wide browser QA bounds |
 | --phone-content-max | 42rem | Phone content and bottom-navigation measure |
 | --target-desktop | 44px | Minimum desktop action target |

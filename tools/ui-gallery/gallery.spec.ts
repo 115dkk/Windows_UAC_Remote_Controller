@@ -108,6 +108,43 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     if (selected.id === 'desktop-running-minimum-760' || selected.rootTextSizePercent === 200) {
       if (selected.rootTextSizePercent === 200) {
         await expect(page.locator('html')).toHaveCSS('font-size', '32px');
+        const rail = page.locator('.desktop-shell .navigation-shell');
+        const railBox = await rail.boundingBox();
+        expect(railBox).not.toBeNull();
+        expect(railBox?.width ?? Infinity).toBeLessThanOrEqual(selected.viewport.width * 0.3 + 1);
+        await expect(rail).toHaveCSS('overflow-y', 'auto');
+        const beforeMain = await page.locator('.main-scroll').evaluate((element) => element.scrollTop);
+        const menu = page.getByRole('navigation', { name: '주요 메뉴', exact: true }).getByRole('button');
+        await expect(menu).toHaveCount(3);
+        const lastBefore = await menu.last().boundingBox();
+        expect(lastBefore).not.toBeNull();
+        await menu.first().focus();
+        for (let index = 0; index < 3; index += 1) {
+          if (index > 0) await page.keyboard.press('Tab');
+          const item = menu.nth(index);
+          await expect(item).toBeFocused();
+          await expect(item).toBeInViewport({ ratio: 1 });
+          const bounds = await item.evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            const owner = element.closest('.navigation-shell')?.getBoundingClientRect();
+            return { top: box.top, bottom: box.bottom, width: box.width, height: box.height,
+              ownerTop: owner?.top, ownerBottom: owner?.bottom };
+          });
+          expect(bounds.ownerTop).toBeDefined();
+          expect(bounds.ownerBottom).toBeDefined();
+          expect(bounds.top).toBeGreaterThanOrEqual((bounds.ownerTop ?? Infinity) - 1);
+          expect(bounds.bottom).toBeLessThanOrEqual((bounds.ownerBottom ?? -Infinity) + 1);
+          expect(bounds.width).toBeGreaterThanOrEqual(44);
+          expect(bounds.height).toBeGreaterThanOrEqual(44);
+        }
+        const railScroll = await rail.evaluate((element) => ({ top: element.scrollTop, height: element.clientHeight,
+          scrollHeight: element.scrollHeight, width: element.clientWidth, scrollWidth: element.scrollWidth }));
+        expect(railScroll.scrollWidth).toBeLessThanOrEqual(railScroll.width + 1);
+        if (lastBefore && railBox && lastBefore.y + lastBefore.height > railBox.y + railBox.height + 1) {
+          expect(railScroll.top).toBeGreaterThan(0);
+        }
+        expect(await page.locator('.main-scroll').evaluate((element) => element.scrollTop)).toBe(beforeMain);
+        await gallery.capture('text-size-navigation', 'CLIENT 200% 글자 크기 · 30% 이하 탐색 너비와 Tab 초점·독립 스크롤 접근');
       }
       for (const name of ['휴대폰 승인 다시 켜기', '휴대폰 승인 끄기', 'PC 연결 기능 제거']) {
         const action = page.getByRole('button', { name, exact: true });

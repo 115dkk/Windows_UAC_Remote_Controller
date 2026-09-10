@@ -182,7 +182,7 @@ impl RegistryOwner<'_> {
                 .checkpoint_for_engine()
                 .map_err(|_| PeerRuntimeError::Registry),
             #[cfg(test)]
-            Self::Fixture(owner, _) => Ok(owner.borrow().checkpoint.clone()),
+            Self::Fixture(owner, _) => Ok(owner.borrow().read_checkpoint()),
         }
     }
     fn transport(&mut self, device: DeviceId) -> Result<Option<TlsPublicKey>, PeerRuntimeError> {
@@ -238,7 +238,7 @@ impl<'key> SessionKey<'key> {
         match self {
             #[cfg(windows)]
             Self::Native(key) => {
-                ServiceTlsSigner::for_service_key(*key).map_err(PeerRuntimeError::Signing)
+                ServiceTlsSigner::for_service_key(key).map_err(PeerRuntimeError::Signing)
             }
             #[cfg(test)]
             Self::Fixture(key) => {
@@ -585,8 +585,12 @@ impl<'key> ServiceSession<'key> {
                         state.retire();
                         return Ok(SessionProgress::PeerRejected);
                     }
-                    let now = self.now()?;
                     self.check_peer(&state)?;
+                    let now = self.now()?;
+                    if now < frame.received || now >= deadline {
+                        state.retire();
+                        return Ok(SessionProgress::PeerRejected);
+                    }
                     match self.engine.submit_decision(&decision, now) {
                         Err(error) => {
                             state.retire();
@@ -598,7 +602,9 @@ impl<'key> ServiceSession<'key> {
                             let reason = if current.is_err() {
                                 NotAppliedReason::PeerChangedAfterVerification
                             } else if after.is_err()
-                                || after.is_ok_and(|now| now >= authorized.deadline())
+                                || after.is_ok_and(|now| {
+                                    now >= deadline || now >= authorized.deadline()
+                                })
                             {
                                 NotAppliedReason::ExpiredAfterVerification
                             } else {

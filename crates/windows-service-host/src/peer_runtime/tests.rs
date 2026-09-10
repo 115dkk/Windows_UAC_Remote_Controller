@@ -25,7 +25,7 @@ use secure_channel::{
 };
 use service_protocol::{ClockProbe, VerifiedPcEvent};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     marker::PhantomData,
     net::TcpListener,
@@ -97,6 +97,18 @@ impl crate::tls_signer::tests::SyntheticKey for Identity {
 pub(super) struct RegistryFixture {
     pub(super) checkpoint: RegistryCheckpoint,
     pub(super) transport: BTreeMap<DeviceId, TlsPublicKey>,
+    after_checkpoint: RefCell<Option<Box<dyn FnMut()>>>,
+}
+impl RegistryFixture {
+    pub(super) fn read_checkpoint(&self) -> RegistryCheckpoint {
+        let checkpoint = self.checkpoint.clone();
+        // Test-only time advancement after the actual typed snapshot read. The
+        // hook must not borrow this registry again or manufacture peer evidence.
+        if let Some(hook) = self.after_checkpoint.borrow_mut().as_mut() {
+            hook();
+        }
+        checkpoint
+    }
 }
 fn registry() -> Rc<RefCell<RegistryFixture>> {
     let entries = [
@@ -116,6 +128,7 @@ fn registry() -> Rc<RefCell<RegistryFixture>> {
     Rc::new(RefCell::new(RegistryFixture {
         checkpoint: RegistryCheckpoint::new(32, 3, entries).unwrap(),
         transport: [(device(1), public(5)), (device(2), public(8))].into(),
+        after_checkpoint: RefCell::new(None),
     }))
 }
 fn replace_first(registry: &Rc<RefCell<RegistryFixture>>) {
@@ -259,7 +272,14 @@ fn android_client(client: TcpStream, pc: PcIdentity, server_key: TlsPublicKey) -
     let thread = thread::spawn(move || {
         let temp = tempfile::tempdir().unwrap();
         let base = Instant::now();
-        let (mut owner, _) = DurableInbox::create_fresh_host_model(
+        // Android uses its actual directory-synced factory; the non-Android
+        // fixture explicitly permits host filesystem durability. This is a
+        // compile-time target choice, never a runtime fallback after failure.
+        #[cfg(target_os = "android")]
+        let create_owner = DurableInbox::create_fresh;
+        #[cfg(not(target_os = "android"))]
+        let create_owner = DurableInbox::create_fresh_host_model;
+        let (mut owner, _) = create_owner(
             NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
             NotificationPolicy::default(),
             CapacityLimits::default(),
@@ -673,6 +693,135 @@ impl SocketClock for ControlledClock {
         Ok(self.origin + *self.offset.lock().unwrap())
     }
 }
+
+#[test]
+fn real_queued_decision_expiring_during_peer_validation_does_not_consume_authorization() {
+    let key = Identity::new();
+    let registry = registry();
+    let origin = Instant::now();
+    let clock = Arc::new(ControlledClock {
+        origin,
+        offset: Mutex::new(Duration::ZERO),
+        calls: AtomicU64::new(0),
+    });
+    let mut session = ServiceSession::new(
+        RegistryOwner::Fixture(Rc::clone(&registry), PhantomData),
+        SessionKey::Fixture(&key),
+        origin,
+        clock.clone(),
+    )
+    .unwrap();
+    let mut clients = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Synthetic trusted-host request only. The RECEIVING frame below must
+        // come from the unchanged actual TCP/TLS/Ready/framing path.
+        let challenge = session
+            .engine
+            .open_from_privileged_host(
+                OsSession::new(1, 1),
+                RequestContent::new(
+                    "Synthetic residence-bound request",
+                    "C:\\Synthetic\\fixture.exe",
+                    "synthetic test input",
+                )
+                .unwrap(),
+                RequestTtl::from_millis(30_000).unwrap(),
+                origin,
+            )
+            .unwrap();
+        let wire = decision(&challenge, device(1), 4);
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 5, vec![wire]));
+        drive_until(&mut session, |progress| {
+            progress == SessionProgress::PeerReady
+        });
+
+        // Drain only the real mailbox; never construct PeerFrame/ReceivedFrame
+        // or replace its received timestamp/source/epoch. No wall-clock sleep.
+        let end = Instant::now() + TEST_LIMIT;
+        let event = loop {
+            match session.peers[0].events.try_recv() {
+                Ok(event @ PeerEvent::Frame(_)) => break event,
+                Ok(_) => panic!("unexpected event before the original decision"),
+                Err(async_mpsc::error::TryRecvError::Empty) => {
+                    assert!(Instant::now() < end, "actual TLS decision was not queued");
+                    thread::yield_now();
+                }
+                Err(async_mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("actual TLS owner closed before its decision frame");
+                }
+            }
+        };
+        let PeerEvent::Frame(frame) = &event else {
+            unreachable!();
+        };
+        assert!(session.peers[0].ready);
+        assert!(Arc::ptr_eq(&frame.source, &session.peers[0].state));
+        assert_eq!(frame.received, origin);
+        let deadline = frame.received.checked_add(EVENT_LIFETIME).unwrap();
+        let elapsed_deadline = deadline.duration_since(origin);
+        assert!(elapsed_deadline < Duration::from_secs(30));
+        // Whole seconds avoid depending on the host Instant's sub-tick rounding.
+        *clock.offset.lock().unwrap() = elapsed_deadline - Duration::from_secs(1);
+        assert!(clock.now().unwrap() < deadline);
+
+        let reads = Rc::new(Cell::new(0));
+        let observed_reads = Rc::clone(&reads);
+        let validation_clock = Arc::clone(&clock);
+        *registry.borrow().after_checkpoint.borrow_mut() = Some(Box::new(move || {
+            let count = observed_reads.get() + 1;
+            observed_reads.set(count);
+            // Dispatch's initial peer check reads twice; the THIRD read is
+            // the decision's later peer validation, after initial residence
+            // acceptance. Advance only this original clock to its exact deadline.
+            if count == 3 {
+                *validation_clock.offset.lock().unwrap() = elapsed_deadline;
+            }
+        }));
+
+        assert_eq!(
+            session.dispatch(0, event),
+            Ok(SessionProgress::PeerRejected)
+        );
+        assert_eq!(
+            reads.get(),
+            4,
+            "the later peer validation completed before rejection"
+        );
+        assert_eq!(*clock.offset.lock().unwrap(), elapsed_deadline);
+        assert_eq!(
+            session.engine.pending_count(),
+            1,
+            "the valid decision must not consume its still-live original request"
+        );
+        assert!(!session.peers[0].state.live());
+        assert!(key.last_clock.borrow().is_none());
+    }));
+    // Preserve real ownership on assertion failure; ServiceSession Drop is not
+    // a substitute for cancellation/joining of an actual live I/O owner.
+    registry.borrow().after_checkpoint.borrow_mut().take();
+    drain(&mut session);
+    drop(session);
+    for mut client in clients {
+        let thread = client.thread.take().unwrap();
+        let end = Instant::now() + TEST_LIMIT;
+        while !thread.is_finished() {
+            assert!(Instant::now() < end, "actual client owner did not finish");
+            thread::yield_now();
+        }
+        thread.join().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[test]
 fn native_clock_regression_closes_session_without_resetting_engine_epoch() {
     let key = Identity::new();
