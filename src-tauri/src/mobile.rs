@@ -760,7 +760,10 @@ mod tests {
                 || pipe.contains("Registered(WeakActivityOrigin)")
         );
         assert!(pipe.contains("if*main_thread==std::thread::current().id(){returnNone;}"));
-        assert!(pipe.contains("wait_timeout_while(bootstrap,super::MAIN_PIPE_TIMEOUT,|state|matches!(state,Bootstrap::Waiting))"));
+        assert!(
+            pipe.contains("wait_timeout_while(bootstrap,super::MAIN_PIPE_TIMEOUT,|state|matches!(state,Bootstrap::Waiting))")
+                || pipe.contains("wait_timeout_while(bootstrap,super::MAIN_PIPE_TIMEOUT,|state|{matches!(state,Bootstrap::Waiting)})")
+        );
         assert!(pipe.contains(
             "Bootstrap::Registered(original)=>original.upgrade().filter(activity_origin_current)"
         ));

@@ -8,7 +8,15 @@ import android.content.Intent
 /** System boot/update trigger only. No files, Rust owner, keys, UI or retry loop. */
 class ControllerBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (!BootServicePolicy.acceptsBootAction(intent.action)) return
-        ControllerForegroundService.startIfEnabled(context)
+        val action = intent.action
+        if (!BootServicePolicy.acceptsBootAction(action)) return
+        val category = BootDiagnostics.bootAction(action)
+        // These are diagnostic observations, not cached inputs to admission.
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.RECEIVER_ACCEPTED,
+            action = category, component = ControllerForegroundService.componentState(context),
+            unlock = ControllerForegroundService.observeUnlock(context)))
+        val result = ControllerForegroundService.startIfEnabled(context)
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.RECEIVER_RESULT,
+            action = category, result = result))
     }
 }

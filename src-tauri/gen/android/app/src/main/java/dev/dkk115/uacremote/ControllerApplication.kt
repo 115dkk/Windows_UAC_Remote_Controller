@@ -12,6 +12,9 @@ import androidx.lifecycle.Lifecycle
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
 import dev.dkk115.uacremote.background.BootOwnerAction
 import dev.dkk115.uacremote.background.BootServicePolicy
+import dev.dkk115.uacremote.background.BootDiagnostics
+import dev.dkk115.uacremote.background.BootDiagnosticRecord
+import dev.dkk115.uacremote.background.BootDiagnosticStage
 import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.background.ControllerServiceState
 import dev.dkk115.uacremote.background.ControllerServiceFacts
@@ -90,6 +93,7 @@ class ControllerApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(controllerHosts)
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.APPLICATION_CREATE))
         // Even constructing the actor creates its native-platform/keys wrapper.
         // Only the already-promoted foreground service may request it below.
     }
@@ -202,7 +206,11 @@ class ControllerApplication : Application() {
     /** Automatic starts may not undo an explicit stop, even if its PM write failed. */
     internal fun canRequestAutomaticServiceStart(): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
-        return BootServicePolicy.automaticStartAllowed(controllerServiceFacts(), explicitStopRequested, mayReplaceClosed)
+        val facts = controllerServiceFacts()
+        val allowed = BootServicePolicy.automaticStartAllowed(facts, explicitStopRequested, mayReplaceClosed)
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.AUTOMATIC_ADMISSION,
+            component = facts.component, admitted = allowed))
+        return allowed
     }
 
     internal fun controllerServiceStartRequested(): Long? {
@@ -224,6 +232,8 @@ class ControllerApplication : Application() {
         if (token != null && serviceToken !== token) return@onMain
         if (startRejected) return@onMain
         startRejected = true
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.START_REJECTED_LATCHED,
+            generationPresent = generation != null, attached = serviceToken != null))
         serviceGenerations.invalidate()
         serviceStartPending = false
         serviceWanted = false

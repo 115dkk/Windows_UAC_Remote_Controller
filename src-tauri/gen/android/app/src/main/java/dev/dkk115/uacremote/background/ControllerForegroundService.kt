@@ -39,16 +39,19 @@ class ControllerForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.SERVICE_CREATE))
         val owner = application as? ControllerApplication
         // Track the real Service instance from construction, before promotion
         // or onStartCommand. Stop/start cannot mistake this attached object for
         // an absent service while its onDestroy is still outstanding.
         if (owner == null || !owner.attachControllerService(ownerToken, ::showState)) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.ATTACHMENT_REJECTED))
             stopSelf()
             return
         }
         attached = true
-        val initial = when (observeUnlock(this)) {
+        val unlock = observeUnlock(this)
+        val initial = when (unlock) {
             UserUnlockObservation.LOCKED -> ControllerServiceState.WAITING_FOR_UNLOCK
             UserUnlockObservation.UNLOCKED -> ControllerServiceState.PREPARING
             UserUnlockObservation.UNAVAILABLE -> ControllerServiceState.UNAVAILABLE
@@ -58,7 +61,10 @@ class ControllerForegroundService : Service() {
             // Promote promptly BEFORE any Rust/CE/key-owner construction.
             startForeground(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             promoted = true
-        } catch (_: Exception) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.PROMOTION_SUCCEEDED, unlock = unlock))
+        } catch (failure: Exception) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.PROMOTION_FAILED,
+                unlock = unlock, failure = BootDiagnostics.failureCategory(failure)))
             owner.controllerServiceStartRejected(token = ownerToken)
             stopSelf()
             return
@@ -67,12 +73,16 @@ class ControllerForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.START_COMMAND,
+            sticky = intent == null, attached = attached, promoted = promoted))
         val owner = application as? ControllerApplication
         if (!promoted || owner == null || !attached) {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
-        if (!BootServicePolicy.bootEnabled(componentState(this))) {
+        val component = componentState(this)
+        if (!BootServicePolicy.bootEnabled(component)) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.COMPONENT_REJECTED, component = component))
             owner.controllerServiceStartRejected(activatedGeneration, ownerToken)
             retiring = true
             stopSelfResult(startId)
@@ -94,6 +104,8 @@ class ControllerForegroundService : Service() {
             return rejectStart(owner, generation, startId)
         }
         activatedGeneration = generation
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.GENERATION_ACCEPTED,
+            component = component, sticky = intent == null, generationPresent = true, admitted = true))
         if (observeUnlock(this) == UserUnlockObservation.UNLOCKED) unregisterUnlockReceiver()
         return START_STICKY
     }
@@ -101,7 +113,10 @@ class ControllerForegroundService : Service() {
     private fun rejectStart(owner: ControllerApplication, generation: Long?, startId: Int): Int {
         // A stale start must not stop a newer already-active instance. An old
         // unactivated object is retired instead of hosting a replacement actor.
-        if (owner.isCurrentControllerServiceGeneration(ownerToken, activatedGeneration)) return START_STICKY
+        val current = owner.isCurrentControllerServiceGeneration(ownerToken, activatedGeneration)
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.GENERATION_REJECTED,
+            generationPresent = generation != null, admitted = false, keptCurrent = current))
+        if (current) return START_STICKY
         retiring = true
         owner.controllerServiceStartRejected(generation, ownerToken)
         stopSelfResult(startId)
@@ -119,7 +134,9 @@ class ControllerForegroundService : Service() {
                 registerReceiver(unlockReceiver, filter)
             }
             unlockReceiverRegistered = true
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.UNLOCK_RECEIVER_FAILED,
+                failure = BootDiagnostics.failureCategory(failure)))
             showState(ControllerServiceState.UNAVAILABLE)
         }
         // Register-then-check closes the unlock-between-check-and-registration race.
@@ -127,6 +144,8 @@ class ControllerForegroundService : Service() {
     }
 
     private fun refreshAfterUnlock() {
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.UNLOCK_REFRESH,
+            generationPresent = activatedGeneration != null, attached = attached, promoted = promoted))
         if (!promoted || destroyed || !attached) return
         val generation = activatedGeneration ?: return
         // Broadcast contents never establish storage availability themselves.
@@ -145,7 +164,9 @@ class ControllerForegroundService : Service() {
         try {
             val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
             manager.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(state))
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.NOTIFICATION_FAILED,
+                failure = BootDiagnostics.failureCategory(failure)))
             // No invisible replacement/background worker is started on failure.
             (application as? ControllerApplication)?.controllerServiceStartRejected(activatedGeneration, ownerToken)
             stopSelf()
@@ -186,6 +207,8 @@ class ControllerForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.SERVICE_DESTROY,
+            generationPresent = activatedGeneration != null, attached = attached, promoted = promoted))
         destroyed = true
         unregisterUnlockReceiver()
         if (attached) (application as? ControllerApplication)?.detachControllerService(ownerToken, activatedGeneration)
@@ -267,8 +290,12 @@ class ControllerForegroundService : Service() {
                     .setAction(if (explicit) ACTION_EXPLICIT_START else ACTION_START)
                     .putExtra(EXTRA_GENERATION, generation)
                 if (context.startForegroundService(intent) == null) throw IllegalStateException()
+                BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.START_REQUESTED,
+                    component = state, result = ServiceControlResult.REQUESTED))
                 ServiceControlResult.REQUESTED
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.START_REQUEST_FAILED,
+                    component = state, failure = BootDiagnostics.failureCategory(failure)))
                 // OS denial/force-stop/OEM limits are not bypassed or loop-retried.
                 owner.controllerServiceStartRejected(generation)
                 ServiceControlResult.UNAVAILABLE
