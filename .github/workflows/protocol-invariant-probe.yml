@@ -18,29 +18,9 @@ concurrency:
 
 jobs:
   probe:
-    name: ${{ matrix.context }} ${{ matrix.property }} (isolated one-property probe)
+    name: baseline revocation (isolated active-registry-lineage probe)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - context: baseline
-            property: accepted_approval_requires_same_binding_auth
-          - context: baseline
-            property: accepted_decision_matches_opened_request
-          - context: baseline
-            property: request_accepted_at_most_once
-          - context: baseline
-            property: no_accept_after_revision_revoked
-          - context: baseline
-            property: no_accept_after_request_cancelled
-          - context: baseline
-            property: no_accept_after_request_expired
-          - context: missing-approval-signature
-            property: accepted_approval_requires_same_binding_auth
-          - context: missing-replay-consumption
-            property: request_accepted_at_most_once
     env:
       CI: 'true'
     steps:
@@ -62,15 +42,15 @@ jobs:
         run: node tools/install-tamarin.mjs
       - name: Check exact insertion, selection and existing process controls
         run: node --test tools/protocol-invariant-probe.test.mjs tools/prover-process.test.mjs
-      - name: Require same-invocation helpers and exactly one context-bound property
+      - name: Require all four same-invocation helpers and unchanged baseline revocation
         env:
           TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
-        run: node tools/protocol-invariant-probe.mjs --profile=request-security-one-property "--context=${{ matrix.context }}" "--property=${{ matrix.property }}"
+        run: node tools/protocol-invariant-probe.mjs --profile=active-registry-lineage --context=baseline
       - name: Retain source-mapped experiment evidence even after failed proofs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
         with:
-          name: protocol-invariant-probe-one-property-${{ matrix.context }}-${{ matrix.property }}-${{ github.sha }}
+          name: protocol-invariant-probe-active-registry-lineage-baseline-${{ github.sha }}
           path: artifacts/protocol-invariant-probe/
           if-no-files-found: error
           retention-days: 14

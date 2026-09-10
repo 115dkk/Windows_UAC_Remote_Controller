@@ -11,6 +11,8 @@ import {
   REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS,
   REQUEST_SECURITY_HELPERS_ONLY_PROFILE, REQUEST_SECURITY_REFERENCE_COMMIT, REQUEST_SECURITY_CANDIDATE_HASHES,
   REQUEST_SECURITY_ONE_PROPERTY_PROFILE, ONE_PROPERTY_CASES,
+  ACTIVE_REGISTRY_LINEAGE_PROFILE, ACTIVE_REGISTRY_HELPER, ACTIVE_REGISTRY_PROPERTY, ACTIVE_REGISTRY_HELPERS,
+  ACTIVE_REGISTRY_HELPER_INSERTION, ACTIVE_REGISTRY_ACTION_EDITS, eraseActiveRegistryLineage,
   REQUEST_SECURITY_HELPER_INSERTION, REQUIRED_COUNTEREXAMPLES, requiredInvariantVerdicts,
   ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
@@ -294,7 +296,8 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
   assert.ok(probeSource.includes("eligibleAsNormalGate: false, baselineOnly: context === 'baseline'"));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run', ...profile"));
-  assert.ok(probeSource.includes('observationalEdits: profile.observationalEventsAdded ? BUILDING_ACTION_EDITS.map'));
+  assert.ok(probeSource.includes('observationalEdits: profile.observationalEventsAdded ? ['));
+  assert.ok(probeSource.includes('...BUILDING_ACTION_EDITS.map'));
   assert.ok(probeSource.includes("originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded && context === 'baseline'"));
   assert.ok(probeSource.includes("originalPremisesConclusionsAndPublicMessagesUnchanged: context === 'baseline', originalRestrictionsAndLemmasUnchanged: true"));
   assert.ok(probeSource.includes('regular(contextInput).sha256 === contextHash'));
@@ -309,27 +312,24 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY eight fixed context/property diagnostics, not the normal gate', () => {
+test('CI runs ONLY one fixed baseline lineage diagnostic, not legacy profiles or the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
   }
   assert.ok(workflow.includes('workflow_dispatch:'));
-  assert.doesNotMatch(workflow, /--helper=/u);
-  assert.ok(workflow.includes('fail-fast: false'));
-  const combinations = [...workflow.replace(/\r\n/g, '\n').matchAll(/- context: ([a-z-]+)\n\s+property: ([a-z_]+)/gu)]
-    .map(([, context, property]) => ({ context, property }));
-  assert.deepEqual(combinations, ONE_PROPERTY_CASES);
-  assert.equal(combinations.length, 8);
-  assert.doesNotMatch(workflow, /^\s+(?:context|property):\s*\[/mu);
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-one-property "--context=${{ matrix.context }}" "--property=${{ matrix.property }}"'));
+  assert.doesNotMatch(workflow, /--helper=|--property=|matrix:|matrix\.|missing-approval-signature|missing-replay-consumption/u);
+  assert.deepEqual([...workflow.matchAll(/run: node tools\/protocol-invariant-probe\.mjs ([^\r\n]+)/gu)].map((match) => match[1]), [
+    '--profile=active-registry-lineage --context=baseline',
+  ]);
+  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/gu) ?? []).length, 1);
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-one-property-${{ matrix.context }}-${{ matrix.property }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-active-registry-lineage-baseline-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
-  assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);
+  assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=|--stop-on-trace=|--profile=request-/u);
   for (const action of workflow.matchAll(/uses: ([^\s]+)@([^\s]+)/gu)) assert.match(action[2], /^[a-f0-9]{40}$/u);
 });
 
@@ -534,7 +534,7 @@ test('security evidence remains explicitly isolated, context-attributed and hone
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
   assert.ok(probeSource.includes("'required-counterexample-selected'"));
-  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile ? null'));
+  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile ? null'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes("'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs'"));
@@ -648,7 +648,7 @@ test('helpers-only report never attributes original obligations or prior candida
   assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected'));
-  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile || onePropertyProfile ?'));
+  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile ?'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes('hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]'));
@@ -918,7 +918,7 @@ for (const { context, property } of ONE_PROPERTY_CASES) {
 }
 
 test('one-property attribution is explicit and cannot become a cached-helper or aggregate normal-gate claim', () => {
-  assert.ok(probeSource.includes('selectedProperty: onePropertyProfile ? property : null'));
+  assert.ok(probeSource.includes('selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : null'));
   assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
   assert.ok(probeSource.includes('invariantRunSummary(result, selected, input, inputsUnchanged, context, property)'));
   assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
@@ -928,4 +928,252 @@ test('one-property attribution is explicit and cannot become a cached-helper or 
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
   assert.equal((workflow.match(/run: node tools\/protocol-invariant-probe\.mjs /gu) ?? []).length, 1);
+});
+
+function lineageInput(invocation = 'fixture') {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${ACTIVE_REGISTRY_LINEAGE_PROFILE}-baseline-${invocation}`, 'request.input.spthy');
+}
+
+function lineageOutput(overrides = {}, invocation = 'fixture') {
+  const profile = invariantProfile(ACTIVE_REGISTRY_LINEAGE_PROFILE, 'baseline');
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${lineageInput(invocation)}\n${profile.candidateLemmas.map((name) => {
+      const trace = REQUEST_WITNESS_NAMES.includes(name) ? 'exists-trace' : 'all-traces';
+      return ` ${name} (${trace}): ${overrides[name] ?? (profile.requiredLemmas.includes(name) ? 'verified (14 steps)' : 'analysis incomplete (0 steps)')}`;
+    }).join('\n')}\n` };
+}
+
+test('lineage CLI is exactly one baseline-only profile with no property, helper, mutant or strategy override', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE;
+  assert.equal(selected, 'active-registry-lineage');
+  assert.deepEqual(selectInvariantRunArguments([`--profile=${selected}`, '--context=baseline']), { selected, context: 'baseline' });
+  for (const args of [
+    [`--profile=${selected}`], [`--helper=${selected}`], [`--helper=${ACTIVE_REGISTRY_HELPER}`],
+    [`--profile=${selected}`, '--context=missing-approval-signature'],
+    [`--profile=${selected}`, '--context=missing-replay-consumption'],
+    [`--profile=${selected}`, '--context=__proto__'], [`--profile=${selected}`, '--context=constructor'],
+    [`--profile=${selected}`, '--context=baseline '], ['--context=baseline', `--profile=${selected}`],
+    [`--profile=${selected}`, '--context=baseline', `--property=${ACTIVE_REGISTRY_PROPERTY}`],
+    [`--profile=${selected}`, '--context=baseline', '--prove=all'],
+    [`--profile=${selected}`, '--context=baseline', '--stop-on-trace=BFS'],
+    [`--profile=${selected}`, '--context=baseline', '--context=baseline'],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+  for (const context of CONTEXT_NAMES.slice(1)) {
+    assert.throws(() => invariantProfile(selected, context));
+    assert.throws(() => insertInvariantHelpers(source, selected, context, manifest));
+    assert.throws(() => invariantArguments(lineageInput(), selected, context));
+  }
+  assert.throws(() => invariantProfile(selected, 'baseline', ACTIVE_REGISTRY_PROPERTY));
+  assert.throws(() => invariantProfile(ACTIVE_REGISTRY_HELPER));
+});
+
+test('lineage adds exactly six active-production actions and one required helper, with two exact inverse stages', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE;
+  const { normalized, candidate } = insertInvariantHelpers(source, selected, 'baseline', manifest);
+  const previous = insertInvariantHelpers(source, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, 'baseline', manifest);
+  assert.ok(Object.isFrozen(ACTIVE_REGISTRY_ACTION_EDITS) && Object.isFrozen(ACTIVE_REGISTRY_HELPERS));
+  assert.deepEqual(ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => edit.rule), [
+    'TrustedEnrollment', 'CaptureEligibleDevice', 'AcceptApproval', 'AcceptDenial',
+    'TrustedReenrollmentWithSameKeys', 'TrustedReplacementWithSameKeys',
+  ]);
+  assert.equal(ACTIVE_REGISTRY_ACTION_EDITS.length, 6);
+  assert.equal((candidate.match(/\bActiveRegistryProduced\(/gu) ?? []).length, 7, 'six action observations plus the helper premise');
+  assert.equal((candidate.match(/\bBuildingProduced\(/gu) ?? []).length, 3, 'the existing two observations and helper are preserved');
+  let manuallyErased = candidate.replace(ACTIVE_REGISTRY_HELPER_INSERTION, '');
+  for (const edit of [...ACTIVE_REGISTRY_ACTION_EDITS].reverse()) {
+    assert.ok(Object.isFrozen(edit));
+    assert.equal(candidate.split(edit.to).length, 2, `${edit.rule} has exactly one reviewed addition`);
+    assert.equal(edit.to.replace(`,\n       ${edit.observation}`, ''), edit.from, 'only one action was appended');
+    manuallyErased = manuallyErased.replace(edit.to, edit.from);
+  }
+  assert.equal(manuallyErased, previous.candidate);
+  assert.equal(eraseActiveRegistryLineage(candidate), previous.candidate);
+  assert.equal(digest(eraseActiveRegistryLineage(candidate)), REQUEST_SECURITY_CANDIDATE_HASHES.baseline);
+  assert.equal(eraseInvariantCandidate(candidate, selected, 'baseline', manifest), normalized);
+  assert.equal(digest(normalized), ORIGIN_HASH);
+  assert.deepEqual(admitInvariantCandidate(source, candidate, selected, 'baseline', manifest), { normalized, candidate });
+  assert.deepEqual(insertInvariantHelpers(source.replace(/\r?\n/g, '\r\n'), selected, 'baseline', manifest), { normalized, candidate });
+  const anchor = '\nlemma honest_approve_trace:\n';
+  assert.equal(candidate.slice(candidate.indexOf(anchor)), normalized.slice(normalized.indexOf(anchor)), 'all original nine formulas remain byte-identical');
+  assert.equal(ACTIVE_REGISTRY_HELPER_INSERTION, `
+// ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY: this helper MUST verify in this invocation before revocation counts.
+lemma active_registry_production_precedes_revocation [use_induction,reuse]:
+  all-traces
+  "All pc device revision #p #r.
+     ActiveRegistryProduced(pc, device, revision) @p
+     & RegistryRevoked(pc, device, revision) @r
+     ==> p < r"
+`);
+  const activeProducers = [];
+  for (const [, rule, body] of candidate.matchAll(/^rule (\w+):\n([\s\S]*?)(?=^rule |^lemma |^end\s*$)/gm)) {
+    const conclusions = body.match(/(?:--\[[\s\S]*?\]->|-->)([\s\S]*)$/u)?.[1];
+    assert.ok(conclusions, `${rule} has a transition`);
+    const production = conclusions.match(/\bRegistrySlot\(([^\n]*), 'active'\)/u);
+    const actions = body.match(/--\[([\s\S]*?)\]->/u)?.[1] ?? '';
+    if (production) {
+      activeProducers.push(rule);
+      const edit = ACTIVE_REGISTRY_ACTION_EDITS.find((entry) => entry.rule === rule);
+      assert.ok(edit, `${rule} must have a production observation`);
+      assert.equal(actions.split(edit.observation).length, 2);
+      const [device, pc, revision] = production[1].split(', ');
+      assert.equal(edit.observation, `ActiveRegistryProduced(${pc}, ${device}, ${revision})`, 'observation matches the exact produced tuple, not a retired tuple');
+      if (rule === 'TrustedReplacementWithSameKeys') {
+        assert.ok(actions.includes('RegistryRevoked(pc, device, old_revision)'));
+        assert.equal(edit.observation, 'ActiveRegistryProduced(pc, device, ~new_revision)');
+      }
+    } else assert.doesNotMatch(actions, /\bActiveRegistryProduced\(/u, `${rule} is not an active-slot producer`);
+  }
+  assert.deepEqual(activeProducers, ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => edit.rule));
+  assert.deepEqual([...candidate.matchAll(/^lemma (\w+)(?: \[[^\r\n]*\])?:$/gm)].map((match) => match[1]), [
+    ...ACTIVE_REGISTRY_HELPERS, ...ORIGINAL_NAMES,
+  ]);
+  for (const context of CONTEXT_NAMES) {
+    const legacy = insertInvariantHelpers(source, REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, manifest,
+      context === 'baseline' ? ACTIVE_REGISTRY_PROPERTY : REQUIRED_COUNTEREXAMPLES[context]);
+    assert.equal(digest(legacy.candidate), REQUEST_SECURITY_CANDIDATE_HASHES[context], 'every legacy candidate pin remains unchanged');
+    assert.doesNotMatch(legacy.candidate, /ActiveRegistryProduced|active_registry_production_precedes_revocation/u);
+  }
+});
+
+test('lineage admission rejects omitted/duplicated observations, old revision, wrong order and any unreviewed change', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE;
+  const { candidate } = insertInvariantHelpers(source, selected, 'baseline', manifest);
+  const wrongOrder = candidate.replace(ACTIVE_REGISTRY_HELPER_INSERTION, '').replace('\nlemma no_accept_after_request_cancelled:\n',
+    ACTIVE_REGISTRY_HELPER_INSERTION + '\nlemma no_accept_after_request_cancelled:\n');
+  const changes = [
+    ...ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => candidate.replace(edit.to, edit.from)),
+    ...ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => candidate.replace(edit.to, edit.to.replace(edit.observation, `${edit.observation}, ${edit.observation}`))),
+    ...ACTIVE_REGISTRY_ACTION_EDITS.filter((edit) => edit.rule.startsWith('TrustedRe')).map((edit) =>
+      candidate.replace(edit.to, edit.to.replace(edit.observation, 'ActiveRegistryProduced(pc, device, old_revision)'))),
+    candidate.replace('ActiveRegistryProduced(pc, ~device, ~revision)', 'ActiveRegistryProduced(~device, pc, ~revision)'),
+    candidate.replace(ACTIVE_REGISTRY_HELPER_INSERTION, ''),
+    candidate.replace(ACTIVE_REGISTRY_HELPER_INSERTION, ACTIVE_REGISTRY_HELPER_INSERTION + ACTIVE_REGISTRY_HELPER_INSERTION),
+    candidate.replace(`lemma ${ACTIVE_REGISTRY_HELPER} [use_induction,reuse]:`, `lemma ${ACTIVE_REGISTRY_HELPER} [reuse]:`),
+    candidate.replace(`lemma ${ACTIVE_REGISTRY_HELPER} [use_induction,reuse]:`, `lemma ${ACTIVE_REGISTRY_HELPER} [use_induction]:`),
+    candidate.replace(`lemma ${ACTIVE_REGISTRY_HELPER} [use_induction,reuse]:`, `lemma ${ACTIVE_REGISTRY_HELPER} [sources]:`),
+    candidate.replace('     ==> p < r"', '     ==> r < p"'),
+    candidate.replace('     ==> p < r"', '     ==> not (r < p)"'),
+    wrongOrder,
+    candidate.replace('lemma enrolled_revision_unique [reuse]:', 'lemma enrolled_revision_unique:'),
+    candidate.replace(REUSED_BUILDING_INSERTION, ''),
+    candidate.replace(BUILDING_ACTION_EDITS[0].to, BUILDING_ACTION_EDITS[0].from),
+    candidate.replace('BuildingProduced(request_id, pc, binding)', 'BuildingProduced(request_id, pc, other_binding)'),
+    candidate.replace("RegistrySlot(device, pc, revision, 'active'),", "!RegistrySlot(device, pc, revision, 'active'),"),
+    candidate.replace('Fr(~new_revision)', 'In(~new_revision)'),
+    candidate.replace('Out(~new_revision)', 'Out(old_revision)'),
+    candidate.replace('left = right', 'left = left'),
+    candidate.replace('==> not (r < a)', '==> not (a < r)'),
+    candidate.replace(CONTEXT_MUTATIONS['missing-approval-signature'].from, CONTEXT_MUTATIONS['missing-approval-signature'].to),
+    candidate.replace(CONTEXT_MUTATIONS['missing-replay-consumption'].from, CONTEXT_MUTATIONS['missing-replay-consumption'].to),
+    candidate + '\nrestriction unreviewed: "All #i. False()@i ==> F"\n',
+    candidate + '\n',
+  ];
+  for (const altered of changes) {
+    assert.notEqual(altered, candidate);
+    assert.throws(() => admitInvariantCandidate(source, altered, selected, 'baseline', manifest));
+    assert.throws(() => eraseActiveRegistryLineage(altered));
+    assert.throws(() => eraseInvariantCandidate(altered, selected, 'baseline', manifest));
+  }
+  const old = insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, 'baseline', manifest).candidate;
+  assert.throws(() => admitInvariantCandidate(source, old, selected, 'baseline', manifest));
+  assert.throws(() => admitInvariantCandidate(source, candidate, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, 'baseline', manifest));
+  for (const invalid of [null, '', candidate + '\0', 'x'.repeat(1024 * 1024 + 1)]) assert.throws(() => eraseActiveRegistryLineage(invalid));
+});
+
+test('lineage selects all four same-invocation helpers plus only unchanged revocation with fixed DFS controls', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE, path = lineageInput();
+  const profile = invariantProfile(selected, 'baseline');
+  assert.deepEqual(ACTIVE_REGISTRY_HELPERS, [...REQUEST_SECURITY_HELPERS, ACTIVE_REGISTRY_HELPER]);
+  assert.deepEqual(profile, {
+    observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER, ACTIVE_REGISTRY_HELPER], helperReuse: true,
+    requiredLemmas: [...ACTIVE_REGISTRY_HELPERS, ACTIVE_REGISTRY_PROPERTY], reusedHelpers: [...ACTIVE_REGISTRY_HELPERS],
+    candidateLemmas: [...ACTIVE_REGISTRY_HELPERS, ...ORIGINAL_NAMES],
+  });
+  const expected = Object.fromEntries([...ACTIVE_REGISTRY_HELPERS, ACTIVE_REGISTRY_PROPERTY].map((name) => [name, { trace: 'all-traces', verdict: 'verified' }]));
+  assert.deepEqual(requiredInvariantVerdicts(selected, 'baseline'), expected);
+  assert.equal(Object.keys(expected).length, 5);
+  assert.deepEqual(profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)), ORIGINAL_NAMES.filter((name) => name !== ACTIVE_REGISTRY_PROPERTY));
+  assert.deepEqual(invariantArguments(path, selected, 'baseline'), [
+    path, '--quit-on-warning', ...Object.keys(expected).map((name) => `--prove=${name}`), '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS',
+  ]);
+  assert.equal(PROBE_TIMEOUT_MS, 120_000);
+  assert.equal(PROBE_OUTPUT_BYTES, 4 * 1024 * 1024);
+  for (const other of [input, securityInput('baseline'), helpersOnlyInput('baseline'),
+    onePropertyInput('baseline', ACTIVE_REGISTRY_PROPERTY),
+    resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${selected}-missing-replay-consumption-fixture`, 'request.input.spthy')]) {
+    assert.throws(() => invariantArguments(other, selected, 'baseline'));
+  }
+});
+
+test('lineage counts no correct revocation result without every helper verified in this same invocation', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE, path = lineageInput(), valid = lineageOutput();
+  const expected = requiredInvariantVerdicts(selected, 'baseline');
+  const accepted = selectedInvariantSummary(valid, selected, path, 'baseline');
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(accepted.requiredVerdicts, expected);
+  assert.deepEqual(accepted.verdict, expected[ACTIVE_REGISTRY_PROPERTY]);
+  assert.equal(Object.hasOwn(accepted, 'verdicts'), false);
+  for (const name of Object.keys(expected)) {
+    for (const verdict of ['analysis incomplete (0 steps)', 'falsified - found trace (5 steps)', 'verified', 'verified (14 steps) trailing']) {
+      const observed = selectedInvariantSummary(lineageOutput({ [name]: verdict }), selected, path, 'baseline');
+      assert.equal(observed.ok, false);
+      if (name !== ACTIVE_REGISTRY_PROPERTY) assert.deepEqual(observed.verdict, expected[ACTIVE_REGISTRY_PROPERTY], 'consumer row is deliberately correct');
+    }
+    const row = ` ${name} (all-traces): verified (14 steps)\n`;
+    const missing = valid.stdout.replace(row, '');
+    assert.notEqual(missing, valid.stdout);
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: missing, requiredVerdicts: expected,
+      lineageReference: { sha256: REQUEST_SECURITY_CANDIDATE_HASHES.baseline, importedProofs: true } }, selected, path, 'baseline').ok, false,
+    'prior candidate identity or attached verdict metadata cannot supply a missing helper/property row');
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + row }, selected, path, 'baseline').ok, false);
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${name} (all-traces)`, `${name} (exists-trace)`) }, selected, path, 'baseline').ok, false);
+  }
+  for (const name of ORIGINAL_NAMES.filter((entry) => entry !== ACTIVE_REGISTRY_PROPERTY)) {
+    for (const verdict of ['verified (14 steps)', 'falsified - found trace (5 steps)']) {
+      assert.equal(selectedInvariantSummary(lineageOutput({ [name]: verdict }), selected, path, 'baseline').ok, false, 'unselected original obligations cannot receive attributed verdicts');
+    }
+  }
+});
+
+test('lineage rejects missing final summary, crossed proof scopes, warnings, timeout and attribution drift', () => {
+  const selected = ACTIVE_REGISTRY_LINEAGE_PROFILE, path = lineageInput(), valid = lineageOutput();
+  assert.equal(selectedInvariantSummary(lineageOutput({}, 'old-run'), selected, path, 'baseline').ok, false);
+  const legacy = onePropertyOutput('baseline', ACTIVE_REGISTRY_PROPERTY);
+  assert.equal(selectedInvariantSummary({ ...legacy, stdout: legacy.stdout.replace(onePropertyInput('baseline', ACTIVE_REGISTRY_PROPERTY), path) }, selected, path, 'baseline').ok, false,
+    'the prior same-property diagnostic lacks the required new helper even if relabeled');
+  for (const context of CONTEXT_NAMES) {
+    assert.equal(selectedInvariantSummary(securityOutput(context), selected, path, 'baseline').ok, false);
+    assert.equal(selectedInvariantSummary(helpersOnlyOutput(context), selected, path, 'baseline').ok, false);
+  }
+  for (const stdout of ['', 'source saturation complete; no final summary\n',
+    valid.stdout + valid.stdout, valid.stdout.replace('summary of summaries:', 'partial summary:'),
+    valid.stdout + ' unexpected (all-traces): verified (1 steps)\n',
+    `\u001b[33mWARNING\u001b[0m: unproved helper\n${valid.stdout}`,
+  ]) assert.equal(selectedInvariantSummary({ ...valid, stdout }, selected, path, 'baseline').ok, false);
+  assert.equal(selectedInvariantSummary({ ...valid, stderr: 'WARNING: imported assumption' }, selected, path, 'baseline').ok, false);
+  for (const delta of [{ status: 1 }, { status: null }, { signal: 'SIGTERM' }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+    const observed = invariantRunSummary({ ...valid, ...delta }, selected, path, true, 'baseline');
+    assert.equal(observed.completed, false);
+    assert.equal(observed.selectedProof.ok, false);
+  }
+  for (const unchanged of [false, undefined, null, 'true']) {
+    assert.equal(invariantRunSummary(valid, selected, path, unchanged, 'baseline').selectedProof.ok, false);
+  }
+});
+
+test('lineage report distinguishes its changed candidate from the prior hash and leaves eight obligations unselected', () => {
+  assert.ok(probeSource.includes("'BASELINE_ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY'"));
+  assert.ok(probeSource.includes("relationship: 'exact-after-erasing-six-lineage-actions-and-new-helper'"));
+  assert.ok(probeSource.includes('previousCandidateAfterLineageErasureSha256: lineageProfile ? hash(eraseActiveRegistryLineage(candidate)) : null'));
+  assert.ok(probeSource.includes('return eraseInvariantCandidate(eraseActiveRegistryLineage(candidate), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest)'));
+  assert.ok(probeSource.includes('hash(restored) !== REQUEST_SECURITY_CANDIDATE_HASHES.baseline'));
+  assert.ok(probeSource.includes("event: 'ActiveRegistryProduced', observation: edit.observation"));
+  assert.ok(probeSource.includes('ALL FOUR reused helpers verifying in this SAME invocation'));
+  assert.ok(probeSource.includes('All other original eight obligations and both mutant counterexamples remain unselected'));
+  assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
+  assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
+  assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
+  assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
+  assert.doesNotMatch(probeSource, /--stop-on-trace=BFS|--bound=|no_duplicate_captures|CaptureOnce/u);
 });

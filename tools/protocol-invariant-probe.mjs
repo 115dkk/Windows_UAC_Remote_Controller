@@ -24,6 +24,9 @@ export const DEPENDENT_PROFILE = 'request-opened-with-building';
 export const REQUEST_SECURITY_PROFILE = 'request-security-with-helpers';
 export const REQUEST_SECURITY_HELPERS_ONLY_PROFILE = 'request-security-helpers-only';
 export const REQUEST_SECURITY_ONE_PROPERTY_PROFILE = 'request-security-one-property';
+export const ACTIVE_REGISTRY_LINEAGE_PROFILE = 'active-registry-lineage';
+export const ACTIVE_REGISTRY_HELPER = 'active_registry_production_precedes_revocation';
+export const ACTIVE_REGISTRY_PROPERTY = 'no_accept_after_revision_revoked';
 // Source identities from ROOT's 8629bac invocation artifacts, NOT proof results.
 // All three 8629bac runs timed out; these hashes confer no helper/security verdict.
 export const REQUEST_SECURITY_REFERENCE_COMMIT = '8629bac07c27d86641f9ba2e8f8faaa99726a444';
@@ -53,6 +56,7 @@ export const ORIGINAL_NAMES = Object.freeze([
 export const REQUEST_SECURITY_NAMES = Object.freeze(ORIGINAL_NAMES.slice(3));
 export const REQUEST_WITNESS_NAMES = Object.freeze(ORIGINAL_NAMES.slice(0, 3));
 export const REQUEST_SECURITY_HELPERS = Object.freeze([DIRECT_HELPER_NAMES[0], BUILDING_HELPER, DIRECT_HELPER_NAMES[1]]);
+export const ACTIVE_REGISTRY_HELPERS = Object.freeze([...REQUEST_SECURITY_HELPERS, ACTIVE_REGISTRY_HELPER]);
 export const REQUIRED_COUNTEREXAMPLES = Object.freeze({
   'missing-approval-signature': 'accepted_approval_requires_same_binding_auth',
   'missing-replay-consumption': 'request_accepted_at_most_once',
@@ -100,6 +104,15 @@ export const REQUEST_SECURITY_HELPER_INSERTION = DEPENDENT_HELPER_INSERTION
     '// REQUEST_SECURITY_PROBE_ONLY: ALL reused helpers must verify in this same context/invocation; no imported proof.')
   .replace('lemma enrolled_revision_unique:', 'lemma enrolled_revision_unique [reuse]:')
   .replace('lemma request_opened_unique:', 'lemma request_opened_unique [reuse]:');
+export const ACTIVE_REGISTRY_HELPER_INSERTION = `
+// ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY: this helper MUST verify in this invocation before revocation counts.
+lemma active_registry_production_precedes_revocation [use_induction,reuse]:
+  all-traces
+  "All pc device revision #p #r.
+     ActiveRegistryProduced(pc, device, revision) @p
+     & RegistryRevoked(pc, device, revision) @r
+     ==> p < r"
+`;
 const OPEN_PRODUCER = `rule OpenActualRequest:
   let binding = <pc, epoch, session_id, logon_luid, ~request_id, ~nonce,
         ~content_digest, ~expiry>
@@ -123,6 +136,29 @@ export const BUILDING_ACTION_EDITS = Object.freeze([
     to: CAPTURE_PRODUCER.replace('SnapshotCaptured(pc, device, revision, binding) ]->',
       'SnapshotCaptured(pc, device, revision, binding),\n       BuildingProduced(request_id, pc, binding) ]->') }),
 ]);
+// Closed action-list additions on the existing BuildingProduced candidate.
+// These six rules are ALL producers of an active RegistrySlot. Replacement
+// observes its fresh NEW revision, never the old revision retired in that step.
+export const ACTIVE_REGISTRY_ACTION_EDITS = Object.freeze([
+  { rule: 'TrustedEnrollment',
+    from: '  --[ Enrolled(pc, ~device, ~revision, pk(~approval_sk), pk(~denial_sk)) ]->',
+    observation: 'ActiveRegistryProduced(pc, ~device, ~revision)' },
+  { rule: 'CaptureEligibleDevice',
+    from: '  --[ SnapshotCaptured(pc, device, revision, binding),\n       BuildingProduced(request_id, pc, binding) ]->',
+    observation: 'ActiveRegistryProduced(pc, device, revision)' },
+  { rule: 'AcceptApproval',
+    from: "      RequestAccepted(pc, device, revision, binding, 'approve') ]->",
+    observation: 'ActiveRegistryProduced(pc, device, revision)' },
+  { rule: 'AcceptDenial',
+    from: "      RequestAccepted(pc, device, revision, binding, 'deny') ]->",
+    observation: 'ActiveRegistryProduced(pc, device, revision)' },
+  { rule: 'TrustedReenrollmentWithSameKeys',
+    from: '  --[ Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->',
+    observation: 'ActiveRegistryProduced(pc, device, ~new_revision)' },
+  { rule: 'TrustedReplacementWithSameKeys',
+    from: '  --[ RegistryRevoked(pc, device, old_revision),\n      Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->',
+    observation: 'ActiveRegistryProduced(pc, device, ~new_revision)' },
+].map((edit) => Object.freeze({ ...edit, to: edit.from.replace(' ]->', `,\n       ${edit.observation} ]->`) })));
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const reject = () => { throw new Error('Invariant probe source, selection or evidence admission rejected.'); };
 const same = (left, right) => { if (!isDeepStrictEqual(left, right)) reject(); };
@@ -151,6 +187,15 @@ export function invariantProfile(selected, context = 'baseline', property) {
   if (selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE) {
     if (!ONE_PROPERTY_CASES.some((entry) => entry.context === context && entry.property === property)) reject();
   } else if (property !== undefined) reject();
+  if (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) {
+    if (context !== 'baseline') reject();
+    return {
+      observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER, ACTIVE_REGISTRY_HELPER], helperReuse: true,
+      requiredLemmas: [...ACTIVE_REGISTRY_HELPERS, ACTIVE_REGISTRY_PROPERTY],
+      reusedHelpers: [...ACTIVE_REGISTRY_HELPERS],
+      candidateLemmas: [...ACTIVE_REGISTRY_HELPERS, ...ORIGINAL_NAMES],
+    };
+  }
   if (requestSecurityCandidate(selected)) {
     const properties = selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE ? []
       : selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE ? [property]
@@ -180,6 +225,7 @@ export function invariantProfile(selected, context = 'baseline', property) {
 }
 
 function insertion(selected) {
+  if (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) return REQUEST_SECURITY_HELPER_INSERTION + ACTIVE_REGISTRY_HELPER_INSERTION;
   if (requestSecurityCandidate(selected)) return REQUEST_SECURITY_HELPER_INSERTION;
   if (selected === DEPENDENT_PROFILE) return DEPENDENT_HELPER_INSERTION;
   return HELPER_INSERTION + (helper(selected) === BUILDING_HELPER ? BUILDING_HELPER_INSERTION : '');
@@ -200,10 +246,24 @@ export function invariantContextSource(source, selected, context = 'baseline', m
   return mutation ? mutateExactlyOnce(normalized, mutation) : normalized;
 }
 
+/** Erase only the six lineage labels and new helper to the pinned prior candidate. */
+export function eraseActiveRegistryLineage(candidate) {
+  if (typeof candidate !== 'string' || Buffer.byteLength(candidate) > MAX_SOURCE_BYTES) reject();
+  let restored = mutateExactlyOnce(candidate, { from: ACTIVE_REGISTRY_HELPER_INSERTION + ANCHOR, to: ANCHOR });
+  for (const edit of [...ACTIVE_REGISTRY_ACTION_EDITS].reverse()) {
+    restored = mutateExactlyOnce(restored, { from: edit.to, to: edit.from });
+  }
+  if (hash(restored) !== REQUEST_SECURITY_CANDIDATE_HASHES.baseline) reject();
+  return restored;
+}
+
 /** Erase ONLY this profile's exact additions; any unrelated change rejects. */
 export function eraseInvariantCandidate(candidate, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest, property) {
   const profile = invariantProfile(selected, context, property), mutation = contextMutation(context, manifest);
   if (typeof candidate !== 'string' || Buffer.byteLength(candidate) > MAX_SOURCE_BYTES) reject();
+  if (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) {
+    return eraseInvariantCandidate(eraseActiveRegistryLineage(candidate), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest);
+  }
   if (pinnedSecurityCandidate(selected) && hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]) reject();
   let restored = mutateExactlyOnce(candidate, { from: insertion(selected) + ANCHOR, to: ANCHOR });
   if (profile.observationalEventsAdded) {
@@ -225,17 +285,23 @@ export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0]
   if (profile.observationalEventsAdded) {
     for (const edit of BUILDING_ACTION_EDITS) candidate = mutateExactlyOnce(candidate, edit);
   }
+  if (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) {
+    for (const edit of ACTIVE_REGISTRY_ACTION_EDITS) candidate = mutateExactlyOnce(candidate, edit);
+  }
   candidate = mutateExactlyOnce(candidate, { from: ANCHOR, to: insertion(selected) + ANCHOR });
   if (eraseInvariantCandidate(candidate, selected, context, manifest, property) !== normalized) reject();
   const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*)(?: \[(?:reuse|use_induction(?:,reuse)?)\])?:$/gm)].map((match) => match[1]);
   same(names, profile.candidateLemmas);
   const attributes = [...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]);
-  same(attributes, requestSecurityCandidate(selected) ? [
+  same(attributes, requestSecurityCandidate(selected) || selected === ACTIVE_REGISTRY_LINEAGE_PROFILE ? [
     'lemma enrolled_revision_unique [reuse]:', 'lemma building_precedes_open [use_induction,reuse]:', 'lemma request_opened_unique [reuse]:',
+    ...(selected === ACTIVE_REGISTRY_LINEAGE_PROFILE ? ['lemma active_registry_production_precedes_revocation [use_induction,reuse]:'] : []),
   ] : profile.helperReuse ? ['lemma building_precedes_open [use_induction,reuse]:']
     : profile.observationalEventsAdded ? ['lemma building_precedes_open [use_induction]:'] : []);
   const observations = candidate.match(/\bBuildingProduced\(/g) ?? [];
   if (observations.length !== (profile.observationalEventsAdded ? 3 : 0)) reject(); // two actions + one helper premise
+  const registryObservations = candidate.match(/\bActiveRegistryProduced\(/g) ?? [];
+  if (registryObservations.length !== (selected === ACTIVE_REGISTRY_LINEAGE_PROFILE ? 7 : 0)) reject(); // six actions + one helper premise
   if (/^lemma[^\r\n]*\bsources\b/m.test(candidate)) reject();
   const reused = [...candidate.matchAll(/^lemma\s+(\w+)[^\r\n]*\breuse\b[^\r\n]*:$/gm)].map((match) => match[1]);
   same(reused, profile.reusedHelpers);
@@ -266,7 +332,7 @@ export function selectInvariantRunArguments(args) {
     invariantProfile(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
     return { selected: REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property };
   }
-  if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
+  if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, ACTIVE_REGISTRY_LINEAGE_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
       typeof args[1] === 'string' && args[1].startsWith('--context=')) {
     const selected = args[0].slice('--profile='.length);
     const context = args[1].slice('--context='.length);
@@ -299,7 +365,7 @@ export function requiredInvariantVerdicts(selected, context = 'baseline', proper
 export function invariantArguments(input, selected, context = 'baseline', property) {
   const expected = requiredInvariantVerdicts(selected, context, property);
   if (typeof input !== 'string' || !isAbsolute(input) || resolve(input) !== input || basename(input) !== 'request.input.spthy') reject();
-  if ((selected === DEPENDENT_PROFILE || requestSecurityCandidate(selected)) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context, property))) reject();
+  if ((selected === DEPENDENT_PROFILE || requestSecurityCandidate(selected) || selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context, property))) reject();
   return proofArguments(input, expected);
 }
 
@@ -308,7 +374,7 @@ export function selectedInvariantSummary(result, selected, input, context = 'bas
   const profile = invariantProfile(selected, context, property);
   const expected = requiredInvariantVerdicts(selected, context, property);
   const parsed = parseProofSummary(result, expected, profile.candidateLemmas, input);
-  if (pinnedSecurityCandidate(selected) && ORIGINAL_NAMES.some((name) =>
+  if ((pinnedSecurityCandidate(selected) || selected === ACTIVE_REGISTRY_LINEAGE_PROFILE) && ORIGINAL_NAMES.some((name) =>
     !profile.requiredLemmas.includes(name) && parsed.verdicts[name] && parsed.verdicts[name].verdict !== 'inconclusive')) {
     parsed.ok = false;
     parsed.reasons.push('fixed diagnostic reported a verdict for an unselected original obligation');
@@ -436,6 +502,7 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   const securityProfile = selected === REQUEST_SECURITY_PROFILE;
   const helpersOnlyProfile = selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE;
   const onePropertyProfile = selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
+  const lineageProfile = selected === ACTIVE_REGISTRY_LINEAGE_PROFILE;
   root = realpathSync(root);
   const directory = freshDirectory(root, selected, context, property);
   const cancellation = new AbortController();
@@ -444,16 +511,19 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   // completed its bounded cleanup; cancellation itself is irreversible.
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = {
-    classification: onePropertyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_ONE_PROPERTY_PROBE' : 'MUTANT_REQUEST_SECURITY_ONE_PROPERTY_PROBE')
+    classification: lineageProfile ? 'BASELINE_ACTIVE_REGISTRY_LINEAGE_PROBE_ONLY'
+      : onePropertyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_ONE_PROPERTY_PROBE' : 'MUTANT_REQUEST_SECURITY_ONE_PROPERTY_PROBE')
       : helpersOnlyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_HELPERS_ONLY_PROBE' : 'MUTANT_REQUEST_SECURITY_HELPERS_ONLY_PROBE')
       : securityProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_PROBE_ONLY' : 'MUTANT_REQUEST_SECURITY_PROBE_ONLY')
       : context === 'baseline' ? CLASSIFICATION : 'MUTANT_INVARIANT_PROBE_ONLY', eligibleAsNormalGate: false, baselineOnly: context === 'baseline',
     normalGateStatus: 'not-run', ...profile,
-    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
-    selectedProperty: onePropertyProfile ? property : null,
+    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile || lineageProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
+    selectedProperty: onePropertyProfile ? property : lineageProfile ? ACTIVE_REGISTRY_PROPERTY : null,
     candidateReference: pinnedSecurityCandidate(selected) ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
       sha256: REQUEST_SECURITY_CANDIDATE_HASHES[context], proofAuthority: 'none-source-identity-only' } : null,
-    selectedSecurityProperties: securityProfile || onePropertyProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
+    lineageReference: lineageProfile ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
+      sha256: REQUEST_SECURITY_CANDIDATE_HASHES.baseline, relationship: 'exact-after-erasing-six-lineage-actions-and-new-helper', proofAuthority: 'none-source-identity-only' } : null,
+    selectedSecurityProperties: securityProfile || onePropertyProfile || lineageProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
     requiredExpected: requiredInvariantVerdicts(selected, context, property),
     helperProofScope: 'same-invocation-same-context-only', importedProofs: false,
     unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' })),
@@ -499,20 +569,29 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       sources.every((file) => regular(owned(root, file.path)).sha256 === file.sha256 && regular(join(directory, file.snapshot)).sha256 === file.sha256);
     report = { ...report, origin: { path: ORIGIN_PATH, rawSha256: origin.sha256, normalizedSha256: hash(normalized) },
       candidateSha256: candidateHash, insertionSha256: hash(insertion(selected)), reverseErasureSha256: ORIGIN_HASH,
+      previousCandidateAfterLineageErasureSha256: lineageProfile ? hash(eraseActiveRegistryLineage(candidate)) : null,
       contextSourceSha256: contextHash,
       contextMutation: mutation ? { id: context, ...mutation, beforeSha256: ORIGIN_HASH, afterSha256: contextHash } : null,
-      observationalEdits: profile.observationalEventsAdded ? BUILDING_ACTION_EDITS.map((edit) => ({
-        rule: edit.rule, event: 'BuildingProduced', beforeSha256: hash(edit.from), afterSha256: hash(edit.to),
-      })) : [],
+      observationalEdits: profile.observationalEventsAdded ? [
+        ...BUILDING_ACTION_EDITS.map((edit) => ({
+          rule: edit.rule, event: 'BuildingProduced', beforeSha256: hash(edit.from), afterSha256: hash(edit.to),
+        })),
+        ...(lineageProfile ? ACTIVE_REGISTRY_ACTION_EDITS.map((edit) => ({
+          rule: edit.rule, event: 'ActiveRegistryProduced', observation: edit.observation, beforeSha256: hash(edit.from), afterSha256: hash(edit.to),
+        })) : []),
+      ] : [],
       originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded && context === 'baseline',
       originalPremisesConclusionsAndPublicMessagesUnchanged: context === 'baseline', originalRestrictionsAndLemmasUnchanged: true,
       changesBeyondExactManifestMutationAndObservations: false,
       traceScope: context !== 'baseline' ? 'The exact manifest mutant intentionally changes traces. Undo it and erase BuildingProduced labels to recover the original rules; no baseline security verdict is inferred.'
+        : lineageProfile ? 'Erase six ActiveRegistryProduced labels and the new helper to recover the pinned prior baseline candidate; then erase its BuildingProduced labels and helpers to recover the original. No new restrictions or transition changes.'
         : profile.observationalEventsAdded ? 'Erase only BuildingProduced action labels to recover the original transition traces; no new restrictions.' : 'Original transition/action traces unchanged.',
       manifestSha256: manifestFile.sha256, sourceBindings: bindings,
       sources, binary, binaryMetadata: tool, arguments: argv,
       toolchainAuthority: 'fixed workflow install-tamarin.mjs validates pinned Tamarin and Maude distributions; this run retains the binary digest',
-      scope: onePropertyProfile
+      scope: lineageProfile
+        ? 'Only baseline no_accept_after_revision_revoked, conditional on ALL FOUR reused helpers verifying in this SAME invocation. All other original eight obligations and both mutant counterexamples remain unselected. The prior candidate hash supplies no proof authority; no normal-gate or aggregate security pass is claimed.'
+        : onePropertyProfile
         ? 'Only ONE closed selected original property in this exact context, and ALL THREE reused helpers verified in this SAME invocation. All other original obligations remain unselected; no baseline/previous helper proof is imported, no normal-gate or aggregate security pass is claimed.'
         : helpersOnlyProfile
         ? 'Only ALL THREE reused helpers in this SAME invocation/context, using byte-identical 8629bac candidate input. ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected. Prior runs and source hashes supply NO proof authority; no normal-gate or security-property result.'
