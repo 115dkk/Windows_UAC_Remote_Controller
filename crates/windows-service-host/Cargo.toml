@@ -17,6 +17,7 @@ windows-prompt-probe = { path = "../windows-prompt-probe" }
 getrandom.workspace = true
 approval-core = { path = "../approval-core" }
 approval-protocol = { path = "../approval-protocol" }
+android-attestation = { path = "../android-attestation" }
 secure-channel = { path = "../secure-channel" }
 sha2.workspace = true
 

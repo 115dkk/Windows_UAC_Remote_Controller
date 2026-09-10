@@ -17,6 +17,7 @@ members = [
     "crates/phone-state-store",
     "crates/android-controller",
     "crates/android-bindings",
+    "crates/android-attestation",
     "tools/controller-uniffi-bindgen",
     "crates/relay-service",
     "crates/framed-transport",

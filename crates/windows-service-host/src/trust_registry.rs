@@ -6,6 +6,7 @@
 mod journal;
 mod model;
 
+use android_attestation::{TrustedStatusSnapshot, VerificationPolicy, VerifiedKeyBundle};
 use approval_core::{EnrollmentError, RegistryCheckpoint};
 use approval_protocol::DeviceId;
 use secure_channel::TlsPublicKey;
@@ -21,6 +22,8 @@ use {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RegistryError {
+    #[error("device attestation evidence is unavailable or no longer current")]
+    AttestationUnavailable,
     #[error("device-registry data is invalid")]
     InvalidState,
     #[error("device public keys must be distinct across roles and identities")]
@@ -99,37 +102,64 @@ impl ServiceRegistry<'_> {
         }
     }
 
-    /// Caller has already verified the still-live, owner-approved enrollment
-    /// ceremony and this exact hardware/auth-policy key bundle. Neither this
-    /// method nor its argument constructor establishes that prerequisite.
+    /// Caller must still verify the live owner-approved ceremony, possession,
+    /// exact challenge/device/PC binding and original deadline. A key-property
+    /// proof does not replace those conditions. Current policy/status identity
+    /// and proof freshness are checked before this logical registry mutation.
+    ///
+    /// Shape-only keys cannot enter this service-owned mutation path:
+    /// ```compile_fail
+    /// use windows_service_host::{ServiceRegistry, RegisteredDeviceKeys};
+    /// use approval_protocol::DeviceId;
+    /// use android_attestation::{VerificationPolicy, TrustedStatusSnapshot};
+    /// fn no_unverified_enrollment(owner: &mut ServiceRegistry<'_>, id: DeviceId, keys: RegisteredDeviceKeys, policy: &VerificationPolicy, status: &TrustedStatusSnapshot) {
+    ///     let _ = owner.enroll_from_privileged_owner(id, keys, policy, status);
+    /// }
+    /// ```
     pub fn enroll_from_privileged_owner(
         &mut self,
         device: DeviceId,
-        keys: RegisteredDeviceKeys,
+        proof: VerifiedKeyBundle,
+        current_policy: &VerificationPolicy,
+        current_status: &TrustedStatusSnapshot,
     ) -> Result<CommittedRegistryChange, RegistryError> {
         #[cfg(windows)]
         {
+            let keys = attested_keys(proof, current_policy, current_status)?;
             self.change(device, RegistryChange::Enroll { device, keys })
         }
         #[cfg(not(windows))]
         {
-            let _ = (device, keys);
+            let _ = (device, proof, current_policy, current_status);
             Err(RegistryError::UnsupportedPlatform)
         }
     }
 
+    /// Replacement has the same independent live-ceremony requirements as
+    /// enrollment and cannot accept only syntactically valid public keys.
+    /// ```compile_fail
+    /// use windows_service_host::{ServiceRegistry, RegisteredDeviceKeys};
+    /// use approval_protocol::DeviceId;
+    /// use android_attestation::{VerificationPolicy, TrustedStatusSnapshot};
+    /// fn no_unverified_replacement(owner: &mut ServiceRegistry<'_>, id: DeviceId, keys: RegisteredDeviceKeys, policy: &VerificationPolicy, status: &TrustedStatusSnapshot) {
+    ///     let _ = owner.replace_from_privileged_owner(id, keys, policy, status);
+    /// }
+    /// ```
     pub fn replace_from_privileged_owner(
         &mut self,
         device: DeviceId,
-        keys: RegisteredDeviceKeys,
+        proof: VerifiedKeyBundle,
+        current_policy: &VerificationPolicy,
+        current_status: &TrustedStatusSnapshot,
     ) -> Result<CommittedRegistryChange, RegistryError> {
         #[cfg(windows)]
         {
+            let keys = attested_keys(proof, current_policy, current_status)?;
             self.change(device, RegistryChange::Replace { device, keys })
         }
         #[cfg(not(windows))]
         {
-            let _ = (device, keys);
+            let _ = (device, proof, current_policy, current_status);
             Err(RegistryError::UnsupportedPlatform)
         }
     }
@@ -159,6 +189,25 @@ impl ServiceRegistry<'_> {
             Err(RegistryError::UnsupportedPlatform)
         }
     }
+}
+
+#[cfg(windows)]
+fn attested_keys(
+    proof: VerifiedKeyBundle,
+    policy: &VerificationPolicy,
+    status: &TrustedStatusSnapshot,
+) -> Result<RegisteredDeviceKeys, RegistryError> {
+    let [approval, denial, transport] = proof
+        .into_current_keys(policy, status)
+        .map_err(|_| RegistryError::AttestationUnavailable)?;
+    // All three SPKIs were canonical P-256 before certification; conversion only
+    // changes their typed representation. It never infers trust from raw bytes.
+    let approval =
+        approval_protocol::DecisionPublicKey::from_sec1_bytes(&approval.as_spki_der()[26..])
+            .map_err(|_| RegistryError::InvalidState)?;
+    let denial = approval_protocol::DecisionPublicKey::from_sec1_bytes(&denial.as_spki_der()[26..])
+        .map_err(|_| RegistryError::InvalidState)?;
+    RegisteredDeviceKeys::from_trusted_host(approval, denial, transport)
 }
 
 #[cfg(windows)]
