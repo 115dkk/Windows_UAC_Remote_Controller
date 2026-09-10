@@ -6,6 +6,9 @@ import { readFileSync } from 'node:fs';
 import { AVD, PACKAGE, TEST_PACKAGE, SOURCE_ROOTS, inspectTestManifest, isPassiveReady, parseInstrumentation, parsePassiveDump,
   requireCi, requireDevice, requireSameSource, servicePresence, requireSameBoot, commandEvidenceComplete,
   finalizeLifecycleResult, nativeOperationUnconfirmed } from './android-lifecycle-ci.mjs';
+import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, extensionCommandLimits, requireFirstUnlockDevice,
+  frameworkUserState, isPassiveWaitingForUnlock, hierarchyPath, requireHierarchyCompletion,
+  requireHierarchyFresh, parseSystemUiHierarchy, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
 
 test('host admission refuses local, non-Linux and external ADB routing', () => {
   const env = { CI: 'true', GITHUB_ACTIONS: 'true', GITHUB_SHA: 'a'.repeat(40), GITHUB_WORKSPACE: '/workspace' };
@@ -76,11 +79,12 @@ test('successful command requires its actual retained transcript, including legi
 });
 
 test('late cancellation or uncertain cleanup clears a previously prepared passing result', () => {
-  const state = { passed: true, cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
+  const state = { passed: true, firstUnlockVerified: true, cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
   assert.equal(finalizeLifecycleResult({ ...state }, false).passed, true);
   for (const [change, aborted] of [[{}, true], [{ cancelled: true }, false], [{ cleanupIncomplete: true }, false],
     [{ deviceOperationMayContinue: true }, false], [{ failure: '' }, false]]) {
     assert.equal(finalizeLifecycleResult({ ...state, ...change }, aborted).passed, false);
+    assert.equal(finalizeLifecycleResult({ ...state, ...change }, aborted).firstUnlockVerified, false);
   }
 });
 
@@ -263,4 +267,132 @@ test('instrumentation manifest must target real product, not renderer or other p
   assert.throws(() => inspectTestManifest(xml.replace('AndroidJUnitRunner', 'OtherRunner')));
   assert.throws(() => inspectTestManifest(xml.replace('</manifest>', '<instrumentation/></manifest>')));
   assert.throws(() => inspectTestManifest(`<!DOCTYPE manifest>${xml}`));
+});
+
+test('first-unlock extension preserves the original ceiling and reserves bounded failure diagnostics', () => {
+  assert.deepEqual(extensionCommandLimits(272), { operational: 752, diagnostics: 784 });
+  assert.deepEqual(extensionCommandLimits(400), { operational: 880, diagnostics: 912 });
+  // Source-counted optional reveal, worst bounded boot polling and both
+  // observation retry sets must fit without consuming diagnostic capacity.
+  const maximumNominalOperations = 223 + 180 + (9 * 4 * 2);
+  assert.ok(extensionCommandLimits(272).operational - 272 >= maximumNominalOperations);
+  for (const start of [0, -1, 401, 1.5, NaN]) assert.throws(() => extensionCommandLimits(start));
+  assert.doesNotThrow(() => requireFirstUnlockDevice('0\n', 'file\n'));
+  for (const [user, fbe] of [['10', 'file'], ['current', 'file'], ['0', 'block'], ['0', 'emulated'], ['0', '']]) {
+    assert.throws(() => requireFirstUnlockDevice(user, fbe));
+  }
+});
+
+test('framework user parsing cannot substitute keyguard visibility, another user or unlocking for unlocked', () => {
+  const dump = state => `Users:\n  UserInfo{0:Owner:c13}\n    State: ${state}\n  Started users state: [0=${state}]\n`;
+  assert.equal(frameworkUserState(dump('RUNNING_LOCKED')), 'RUNNING_LOCKED');
+  assert.equal(frameworkUserState(dump('RUNNING_UNLOCKED')), 'RUNNING_UNLOCKED');
+  assert.equal(frameworkUserState(dump('RUNNING_UNLOCKING')), 'RUNNING_UNLOCKING');
+  for (const value of ['', 'isKeyguardLocked=true', dump('UNKNOWN'), dump('RUNNING_LOCKED').replace('[0=', '[10='),
+    dump('RUNNING_LOCKED').replace(']', ', 10=RUNNING_UNLOCKED]'), dump('RUNNING_LOCKED') + dump('RUNNING_UNLOCKED'),
+    `${dump('RUNNING_LOCKED')}Permission Denial`]) assert.throws(() => frameworkUserState(value));
+});
+
+const lockedFields = { ...fields, user_unlock: 'LOCKED', owner_present: false, owner_phase: 'NONE', reported_state: 'WAITING_FOR_UNLOCK' };
+test('locked phase needs the promoted real FGS with no attempted native owner', () => {
+  assert.equal(isPassiveWaitingForUnlock(parsePassiveDump(dump(lockedFields))), true);
+  assert.equal(isPassiveReady(lockedFields), false);
+  for (const [key, value] of Object.entries(lockedFields)) {
+    const bad = typeof value === 'boolean' ? !value : key === 'boot_component' ? 'DISABLED' : 'UNAVAILABLE';
+    assert.equal(isPassiveWaitingForUnlock({ ...lockedFields, [key]: bad }), false, key);
+  }
+});
+
+const uiNode = (id, extra = {}, children = '') => `<node ${Object.entries({
+  'resource-id': `com.android.systemui:id/${id}`, package: 'com.android.systemui', bounds: '[0,0][1080,2400]',
+  enabled: 'true', clickable: 'false', password: 'false', text: '', ...extra,
+}).map(([key, value]) => `${key}="${value}"`).join(' ')}>${children}</node>`;
+const keypad = () => [...'0123456789', 'enter'].map((digit, index) => {
+  const x = 100 + (index % 3) * 200, y = 400 + Math.floor(index / 3) * 150;
+  return uiNode(digit === 'enter' ? 'key_enter' : `key${digit}`, { bounds: `[${x},${y}][${x + 100},${y + 100}]`, clickable: 'true' });
+}).join('');
+const pinXml = () => `<hierarchy rotation="0">${uiNode('root', {}, uiNode('keyguard_pin_view', {},
+  uiNode('pinEntry', { bounds: '[100,200][800,300]', password: 'true' }) + keypad()))}</hierarchy>`;
+const lockXml = () => `<hierarchy rotation="0">${uiNode('root', {}, uiNode('notification_panel', {}, uiNode('keyguard_long_press')))}</hierarchy>`;
+
+test('only the fixed source-defined SystemUI PIN controls and derived bounds may produce input', () => {
+  const screen = parseSystemUiHierarchy(pinXml());
+  assert.equal(screen.kind, 'pin'); assert.equal(screen.empty, true);
+  assert.deepEqual(screen.controls['0'], [150, 450]);
+  assert.deepEqual(parseSystemUiHierarchy(lockXml()).swipe, [540, 1800, 540, 600, 400]);
+  for (const xml of [pinXml().replaceAll('com.android.systemui', 'other.package'),
+    pinXml().replace('keyguard_pin_view', 'unsupported_compose_view'), pinXml().replace('pinEntry', 'passwordEntry'),
+    pinXml().replace('key_enter', 'other_enter'), pinXml().replace('password="true"', 'password="false"'),
+    pinXml().replace('clickable="true"', 'clickable="false"'), pinXml().replace('[100,400][200,500]', '[100,400][100,500]'),
+    pinXml().replace('[100,400][200,500]', '[100,400][9000,9500]'),
+    pinXml().replace('</hierarchy>', `${uiNode('extra')}</hierarchy>`),
+    pinXml().replace('key1"', 'key0"'), `<bad>${pinXml()}</bad>`, `<!DOCTYPE hierarchy>${pinXml()}`,
+    lockXml().replace('keyguard_long_press', 'notification_content'), '', '<hierarchy rotation="0"/>']) {
+    assert.throws(() => parseSystemUiHierarchy(xml));
+  }
+});
+
+test('fresh shell XML completion and <=5s post-guard age are mandatory even with process exit0', () => {
+  const path = hierarchyPath('a'.repeat(32), 0);
+  assert.doesNotThrow(() => requireHierarchyCompletion(`UI hierchary dumped to: ${path}\n`, '', path));
+  for (const [out, err] of [['', 'ERROR: null root node'], ['', ''],
+    [`UI hierchary dumped to: ${path}`, 'ERROR: failed'], ['UI hierchary dumped to: /sdcard/old.xml', '']]) {
+    assert.throws(() => requireHierarchyCompletion(out, err, path));
+  }
+  for (const index of [-1, 7, 0.5]) assert.throws(() => hierarchyPath('a'.repeat(32), index));
+  assert.throws(() => hierarchyPath('../foreign', 0));
+  assert.doesNotThrow(() => requireHierarchyFresh(100, 5100));
+  for (const [before, after] of [[100, 5101], [100, 99], [-1, 0], [NaN, 1], [0, Infinity]]) {
+    assert.throws(() => requireHierarchyFresh(before, after));
+  }
+});
+
+test('secure-lock instrumentation needs actual before/after framework observations', () => {
+  for (const phase of FIRST_UNLOCK_PHASES) {
+    const expectedPhase = { ...expected, phase }, secure = phase === 'verify-first-unlock';
+    const value = { ...receipt, phase, checks: { ...receipt.checks, deviceSecureBefore: secure, deviceSecureAfter: secure, userUnlockedAfter: true } };
+    assert.equal(parseInstrumentation(output(value), expectedPhase).phase, phase);
+    for (const key of ['deviceSecureBefore', 'deviceSecureAfter', 'userUnlockedAfter']) {
+      for (const bad of [undefined, 'true', !value.checks[key]]) {
+        assert.throws(() => parseInstrumentation(output({ ...value, checks: { ...value.checks, [key]: bad } }), expectedPhase));
+      }
+    }
+  }
+});
+
+function unlockEvidence() {
+  const beforeBoot = '12345678-1234-1234-1234-123456789abc', bootId = '22345678-1234-1234-1234-123456789abc', nonce = 'a'.repeat(32);
+  const nativePhase = (phase, secure, bootCount, nonce) => ({ ...receipt, phase, bootCount, nonce,
+    checks: { ...receipt.checks, deviceSecureBefore: secure, deviceSecureAfter: secure, userUnlockedAfter: true } });
+  return { scope: 'DISPOSABLE_API36_X86_64_FIRST_UNLOCK', beforeBoot, bootId, nonce, setupConfirmed: true,
+    before: nativePhase(FIRST_UNLOCK_PHASES[0], false, 2, 'b'.repeat(32)), after: nativePhase(FIRST_UNLOCK_PHASES[1], true, 3, 'c'.repeat(32)),
+    locked: [100, 900, 1700].map(observedAtMonotonicMs => ({ bootId, frameworkUserState: 'RUNNING_LOCKED', presence: 'foreground',
+      beforeActivityOrInstrumentation: true, native: { ...lockedFields }, observedAtMonotonicMs })),
+    ui: [...SYNTHETIC_CI_PIN, 'enter'].map((_, index) => ({ kind: 'pin', bootId, xmlSha256: 'd'.repeat(64),
+      path: hierarchyPath(nonce, index), action: index === SYNTHETIC_CI_PIN.length ? 'enter' : `digit-${index}`,
+      point: [150, 450], inputCompletedAtMonotonicMs: 2000 + index * 500 })),
+    ready: { bootId, frameworkUserState: 'RUNNING_UNLOCKED', presence: 'foreground', beforeActivityOrInstrumentation: true,
+      native: { ...fields }, observedAtMonotonicMs: 5000 } };
+}
+
+test('first-unlock coverage rejects crossed boots, partial locked observations, fake readiness and missing postcheck', () => {
+  const good = unlockEvidence();
+  assert.doesNotThrow(() => requireFirstUnlockEvidence(good, good.ready));
+  for (const change of [value => { value.beforeBoot = value.bootId; }, value => { value.setupConfirmed = false; },
+    value => { value.locked.pop(); }, value => { value.locked[1].native.owner_present = true; },
+    value => { value.locked[1].observedAtMonotonicMs = value.locked[0].observedAtMonotonicMs; },
+    value => { value.locked[1].frameworkUserState = 'RUNNING_UNLOCKED'; }, value => { value.ui.pop(); },
+    value => { value.ui.reverse(); }, value => { value.ui[1].path = value.ui[0].path; },
+    value => { value.ui[0].kind = 'unknown'; }, value => { value.after.checks.deviceSecureAfter = false; },
+    value => { value.after.appSha256 = 'e'.repeat(64); }, value => { value.after.nonce = value.before.nonce; },
+    value => { value.after.bootCount += 1; }, value => { value.ready.bootId = value.beforeBoot; },
+    value => { value.ready.frameworkUserState = 'RUNNING_UNLOCKING'; }, value => { value.ready.beforeActivityOrInstrumentation = false; }]) {
+    const changed = structuredClone(good); change(changed);
+    assert.throws(() => requireFirstUnlockEvidence(changed, changed.ready));
+  }
+  for (const [key, current] of Object.entries(fields)) {
+    const changed = structuredClone(good);
+    changed.ready.native[key] = typeof current === 'boolean' ? !current : key === 'boot_component' ? 'DISABLED' : 'UNAVAILABLE';
+    assert.throws(() => requireFirstUnlockEvidence(changed, changed.ready), key);
+  }
 });

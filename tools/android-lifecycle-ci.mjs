@@ -10,6 +10,9 @@ import { runProver as runBoundedProcess } from './prover-process.mjs';
 import { onlyIsolatedEmulator, requireBroadcastBarrier } from './android-notification-gallery.mjs';
 import { inspectApk } from './verify-android-apk.mjs';
 import { inspectBootManifest } from './verify-android-boot-manifest.mjs';
+import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, FIRST_UNLOCK_XML_LIMIT, MAX_LIFECYCLE_COMMANDS, extensionCommandLimits,
+  requireFirstUnlockDevice, frameworkUserState, isPassiveWaitingForUnlock, hierarchyPath,
+  requireHierarchyCompletion, requireHierarchyFresh, parseSystemUiHierarchy, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
 
 export const PACKAGE = 'dev.dkk115.uacremote';
 export const TEST_PACKAGE = `${PACKAGE}.test`;
@@ -17,7 +20,7 @@ export const SERVICE = `${PACKAGE}/.background.ControllerForegroundService`;
 export const MAIN = `${PACKAGE}/.MainActivity`;
 export const AVD = 'uac-lifecycle-ci-36-x86_64';
 export const SERIAL = 'emulator-5554';
-export const PHASES = ['initial', 'verify-enabled', 'stop', 'verify-stopped', 'start'];
+export const PHASES = ['initial', 'verify-enabled', 'stop', 'verify-stopped', 'start', ...FIRST_UNLOCK_PHASES];
 const TEST_CLASS = `${PACKAGE}.ControllerLifecycleTest`;
 const RUNNER = `${TEST_PACKAGE}/androidx.test.runner.AndroidJUnitRunner`;
 const MAX_APK = 256 * 1024 * 1024;
@@ -62,6 +65,7 @@ export function finalizeLifecycleResult(result, aborted) {
   result.cancelled ||= aborted;
   if (result.cancelled !== false || result.cleanupIncomplete !== false || result.deviceOperationMayContinue !== false ||
       Object.hasOwn(result, 'failure')) result.passed = false;
+  if (result.passed !== true) result.firstUnlockVerified = false;
   return result;
 }
 
@@ -198,6 +202,11 @@ export function parseInstrumentation(text, expected) {
     requireThat(receipt.checks?.[key] === true, 'Initial lifecycle assertion missing.');
   }
   if (receipt.phase === 'stop') requireThat(receipt.checks?.oldOwnerClosed === true && receipt.ownerPhase === 'CLOSED', 'Stop lacks actual owner closure.');
+  if (FIRST_UNLOCK_PHASES.includes(receipt.phase)) {
+    const secure = receipt.phase === 'verify-first-unlock';
+    requireThat(receipt.checks?.deviceSecureBefore === secure && receipt.checks?.deviceSecureAfter === secure &&
+      receipt.checks?.userUnlockedAfter === true, 'Actual native secure-lock checks missing or contradictory.');
+  }
   return receipt;
 }
 
@@ -240,13 +249,15 @@ export async function main(args = process.argv.slice(2)) {
   const controller = new AbortController();
   const abort = () => controller.abort(new Error('CI lifecycle cancelled.'));
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
-  const result = { version: 1, classification: 'REAL_PRODUCT_UNLOCKED_EMULATOR_LIFECYCLE', passed: false,
+  const result = { version: 1, classification: 'REAL_PRODUCT_EMULATOR_LIFECYCLE_AND_FIRST_UNLOCK', passed: false,
     firstUnlockVerified: false, physicalAuthenticationVerified: false, requestDeliveryVerified: false,
     phases: [], observations: [], commands: [], cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
   let commandIndex = 0;
+  let commandLimit = 400, diagnosticCommandLimit = 400;
+  let firstUnlockDeviceRequired = false, protectedBoot = null;
   let readFailureDiagnostics = null;
-  async function command(command, argv, timeoutMs = 15_000, mutatesDevice = false, maxOutputBytes = 512 * 1024) {
-    requireThat(!controller.signal.aborted && commandIndex < 400 && !result.deviceOperationMayContinue, 'Cancelled/uncertain/bounded command sequence cannot continue.');
+  async function command(command, argv, timeoutMs = 15_000, mutatesDevice = false, maxOutputBytes = 512 * 1024, uiDumpPath = null) {
+    requireThat(!controller.signal.aborted && commandIndex < commandLimit && commandLimit <= MAX_LIFECYCLE_COMMANDS && !result.deviceOperationMayContinue, 'Cancelled/uncertain/bounded command sequence cannot continue.');
     const name = `${String(++commandIndex).padStart(3, '0')}.log`;
     const value = await runBoundedProcess(command, argv, { cwd: ROOT, logPath: join(directory, name), timeoutMs, maxOutputBytes, signal: controller.signal });
     const transcript = await hashFile(join(directory, name), maxOutputBytes, true).catch(() => ({ logUnavailable: true }));
@@ -257,6 +268,7 @@ export async function main(args = process.argv.slice(2)) {
     // Terminating the local adb process does NOT terminate/prove completion of its Android operation.
     if (mutatesDevice && (value.error || value.cancelled || value.cleanupIncomplete || value.status !== 0)) result.deviceOperationMayContinue = true;
     requireThat(commandEvidenceComplete(value, transcript), 'Bounded command or its retained transcript failed verification.');
+    if (uiDumpPath !== null) requireHierarchyCompletion(value.stdout, value.stderr, uiDumpPath);
     return value.stdout;
   }
   async function sources() {
@@ -293,9 +305,17 @@ export async function main(args = process.argv.slice(2)) {
       requireDevice({ devices: await command(adb, ['devices']), qemu: await read(['shell', 'getprop', 'ro.kernel.qemu']),
         sdk: await read(['shell', 'getprop', 'ro.build.version.sdk']), abi: await read(['shell', 'getprop', 'ro.product.cpu.abi']),
         avd: await read(['emu', 'avd', 'name']) });
+      if (firstUnlockDeviceRequired) requireFirstUnlockDevice(await read(['shell', 'am', 'get-current-user']), await read(['shell', 'getprop', 'ro.crypto.type']));
+      if (protectedBoot !== null) requireSameBoot(protectedBoot, await bootId());
     }
-    async function mutate(argv, timeout = 30_000, limit) {
-      await guard(); return command(adb, ['-s', SERIAL, ...argv], timeout, true, limit);
+    async function mutate(argv, timeout = 30_000, limit, uiDumpPath = null, deadline = null, uiCapturedAt = null) {
+      await guard();
+      if (deadline !== null) {
+        const remaining = deadline - Date.now(); requireThat(remaining > 0, 'Device input deadline elapsed before dispatch.');
+        timeout = Math.min(timeout, remaining);
+      }
+      if (uiCapturedAt !== null) requireHierarchyFresh(uiCapturedAt, performance.now());
+      return command(adb, ['-s', SERIAL, ...argv], timeout, true, limit, uiDumpPath);
     }
     const selected = {};
     for (const path of apkFiles(join(ROOT, 'src-tauri/gen/android/app/build/outputs/apk'))) {
@@ -347,10 +367,12 @@ export async function main(args = process.argv.slice(2)) {
         result.deviceOperationMayContinue = true;
         throw new Error('Native test operation completion remains unconfirmed.');
       }
-      result.phases.push(parseInstrumentation(output, expected));
+      const receipt = parseInstrumentation(output, expected);
+      result.phases.push(receipt);
+      return receipt;
     }
-    async function bootId() {
-      const value = (await read(['shell', 'cat', '/proc/sys/kernel/random/boot_id'])).trim();
+    async function bootId(timeout = 15_000) {
+      const value = (await read(['shell', 'cat', '/proc/sys/kernel/random/boot_id'], timeout)).trim();
       requireThat(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value), 'Missing actual kernel boot identity.'); return value;
     }
     async function observe(label, ready, beforeLaunch, expectedBoot = null) {
@@ -380,7 +402,7 @@ export async function main(args = process.argv.slice(2)) {
       requireThat(/Status: ok/.test(output) && !/Error:|Exception/.test(output), 'Actual MainActivity launch failed.');
       await mutate(['shell', 'input', 'keyevent', 'KEYCODE_HOME']);
     }
-    async function reboot(label, ready) {
+    async function rebootKernel() {
       const before = await bootId();
       await mutate(['reboot']);
       await read(['wait-for-device'], 90_000);
@@ -391,6 +413,10 @@ export async function main(args = process.argv.slice(2)) {
       }
       await guard();
       const after = await bootId(); requireThat(after !== before, 'Reboot did not change kernel boot identity.');
+      return { before, after };
+    }
+    async function reboot(label, ready) {
+      const { after } = await rebootKernel();
       await barrier(); await observe(label, ready, true, after);
     }
     async function update(label, ready) {
@@ -413,14 +439,129 @@ export async function main(args = process.argv.slice(2)) {
     await update('disabled-real-package-replacement-before-launch', false);
     await phase('verify-stopped');
     await phase('start'); await normalLaunch(); await observe('explicit-restart-ready', true, false);
+    // Only after ALL original scenarios completed may the separately bounded
+    // disposable first-unlock extension configure its public synthetic fixture.
+    const extensionStart = commandIndex, extensionLimits = extensionCommandLimits(extensionStart);
+    commandLimit = extensionLimits.operational; diagnosticCommandLimit = extensionLimits.diagnostics;
+    firstUnlockDeviceRequired = true;
+    const first = { scope: 'DISPOSABLE_API36_X86_64_FIRST_UNLOCK', nonce: randomBytes(16).toString('hex'),
+      syntheticCredentialFixture: true, setupConfirmed: false, locked: [], ui: [],
+      commandBudget: { start: extensionStart, operational: commandLimit, includingDiagnostics: diagnosticCommandLimit } };
+    result.firstUnlock = first;
+    await guard();
+    first.beforeBoot = await bootId(); protectedBoot = first.beforeBoot;
+    first.before = await phase('verify-no-secure-lock');
+    requireSameBoot(first.beforeBoot, await bootId());
+    requireThat((await mutate(['shell', 'locksettings', 'set-pin', '--user', '0', SYNTHETIC_CI_PIN])).trim() ===
+      `Pin set to '${SYNTHETIC_CI_PIN}'`, 'Synthetic CI PIN setup was not confirmed.');
+    first.setupConfirmed = true;
+    protectedBoot = null; // Exactly the following real reboot may change it.
+    const firstBoot = await rebootKernel();
+    requireSameBoot(first.beforeBoot, firstBoot.before);
+    first.bootId = firstBoot.after; protectedBoot = first.bootId;
+    // No broadcast barrier here: unlock-dependent broadcasts may still be held.
+    async function observeFirstUnlock(locked, stable = false) {
+      const deadline = Date.now() + (stable ? 15_000 : 45_000);
+      const boundedRead = async argv => {
+        const remaining = deadline - Date.now(); requireThat(remaining > 0, 'First-unlock observation deadline.');
+        return read(argv, Math.min(15_000, remaining));
+      };
+      const boundedBootId = async () => {
+        const remaining = deadline - Date.now(); requireThat(remaining > 0, 'First-unlock observation deadline.');
+        return bootId(Math.min(15_000, remaining));
+      };
+      for (let attempt = 0; attempt < (stable ? 1 : 10); attempt++) {
+        requireSameBoot(first.bootId, await boundedBootId());
+        const user = frameworkUserState(await boundedRead(['shell', 'dumpsys', 'user']));
+        if (locked) requireThat(user !== 'RUNNING_UNLOCKED' && user !== 'RUNNING_UNLOCKING', 'User unlocked before ordinary credential input.');
+        const presence = servicePresence(await boundedRead(['shell', 'dumpsys', 'activity', 'services', PACKAGE]));
+        let native = null;
+        if (presence === 'foreground') {
+          const raw = await boundedRead(['shell', 'dumpsys', 'activity', 'service', SERVICE]);
+          if (raw.includes('UAC_LIFECYCLE_BEGIN_V1')) native = parsePassiveDump(raw);
+          if (locked && native) requireThat(native.owner_present === false && native.owner_phase === 'NONE' &&
+            native.user_unlock === 'LOCKED' && native.construction_uncertain === false, 'Native owner was attempted before first unlock.');
+        }
+        if (native && user === (locked ? 'RUNNING_LOCKED' : 'RUNNING_UNLOCKED') &&
+            (locked ? isPassiveWaitingForUnlock(native) : isPassiveReady(native))) {
+          const activities = await boundedRead(['shell', 'dumpsys', 'activity', 'activities']);
+          requireThat(!/mResumedActivity:.*dev\.dkk115\.uacremote\//.test(activities), 'Target Activity resumed before first-unlock observation.');
+          requireSameBoot(first.bootId, await boundedBootId());
+          requireThat(Date.now() < deadline, 'First-unlock observation completed after its deadline.');
+          const sample = { label: locked ? 'first-unlock-locked-no-owner' : 'first-unlock-ready-before-launch',
+            presence, frameworkUserState: user, native, bootId: first.bootId, beforeActivityOrInstrumentation: true,
+            observedAtMonotonicMs: Math.floor(performance.now()) };
+          result.observations.push(sample); return sample;
+        }
+        requireThat(!stable, 'Locked foreground state did not remain stable.');
+        const remaining = deadline - Date.now(); requireThat(remaining > 0, 'First-unlock observation deadline.');
+        await delay(Math.min(750, remaining), undefined, { signal: controller.signal });
+      }
+      throw new Error('Bounded first-unlock foreground observation did not complete.');
+    }
+    first.locked.push(await observeFirstUnlock(true));
+    for (let index = 0; index < 2; index++) {
+      await delay(750, undefined, { signal: controller.signal });
+      first.locked.push(await observeFirstUnlock(true, true));
+    }
+    await mutate(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
+    const uiDeadline = Date.now() + 120_000;
+    let hierarchyIndex = 0;
+    async function currentCredentialUi() {
+      requireThat(Date.now() < uiDeadline, 'SystemUI credential interaction deadline.');
+      requireSameBoot(first.bootId, await bootId());
+      requireThat(frameworkUserState(await read(['shell', 'dumpsys', 'user'])) === 'RUNNING_LOCKED', 'Credential input requires actual locked user0.');
+      const path = hierarchyPath(first.nonce, hierarchyIndex++);
+      await read(['shell', 'test', '!', '-e', path]); // Never reuse/overwrite an earlier hierarchy.
+      await guard();
+      const remaining = uiDeadline - Date.now(); requireThat(remaining > 0, 'SystemUI capture deadline elapsed.');
+      // Conservative age begins BEFORE capture, after its device guard. The
+      // later input guard must recheck this age immediately before dispatch.
+      const capturedAt = performance.now();
+      await command(adb, ['-s', SERIAL, 'shell', 'uiautomator', 'dump', path], Math.min(15_000, remaining), true, FIRST_UNLOCK_XML_LIMIT, path);
+      const xml = await read(['shell', 'cat', path]);
+      requireThat(Date.now() < uiDeadline, 'SystemUI hierarchy arrived after its interaction deadline.');
+      const screen = parseSystemUiHierarchy(xml);
+      return { ...screen, path, xmlSha256: sha(xml), bootId: first.bootId, capturedAt };
+    }
+    let screen = await currentCredentialUi();
+    if (screen.kind === 'lockscreen') {
+      await mutate(['shell', 'input', 'swipe', ...screen.swipe.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
+      first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
+        action: 'reveal', inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
+      screen = await currentCredentialUi();
+    }
+    requireThat(screen.kind === 'pin' && screen.empty, 'Expected an empty recognized PIN entry; no credential guessing or clearing.');
+    const rotation = screen.rotation;
+    for (let index = 0; index < SYNTHETIC_CI_PIN.length; index++) {
+      if (index !== 0) screen = await currentCredentialUi();
+      requireThat(screen.kind === 'pin' && screen.rotation === rotation && Date.now() < uiDeadline, 'PIN layout changed during the sole attempt.');
+      const point = screen.controls[SYNTHETIC_CI_PIN[index]];
+      await mutate(['shell', 'input', 'tap', ...point.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
+      first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
+        action: `digit-${index}`, point, inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
+    }
+    screen = await currentCredentialUi();
+    requireThat(screen.kind === 'pin' && screen.rotation === rotation && Date.now() < uiDeadline, 'PIN submit control unavailable.');
+    await mutate(['shell', 'input', 'tap', ...screen.controls.enter.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
+    first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
+      action: 'enter', point: screen.controls.enter, inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
+    first.ready = await observeFirstUnlock(false);
+    // Only now may instrumentation launch the product. It cannot establish the
+    // preceding boot/unlock transition; it verifies the real PIN stayed configured.
+    first.after = await phase('verify-first-unlock');
+    requireSameBoot(first.bootId, await bootId());
+    requireFirstUnlockEvidence(first, first.ready);
     requireSameSource(current, await sources());
     controller.signal.throwIfAborted();
     requireThat(result.cancelled === false && result.cleanupIncomplete === false && result.deviceOperationMayContinue === false,
       'Cancelled or uncertain lifecycle cannot complete.');
+    result.firstUnlockVerified = true;
     result.passed = true;
   } catch (error) {
     result.failure = error instanceof Error ? error.message : 'Unknown lifecycle failure.';
     if (readFailureDiagnostics && !controller.signal.aborted && !result.cleanupIncomplete && !result.deviceOperationMayContinue) {
+      commandLimit = diagnosticCommandLimit; // Reserved bounded read-only failure evidence.
       try { await readFailureDiagnostics(); result.failureDiagnosticsCaptured = true; }
       catch { result.failureDiagnosticsCaptured = false; }
     }

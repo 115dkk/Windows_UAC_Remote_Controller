@@ -1,11 +1,28 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `071333333b8f235b6abdd48683dac564a2ffcc66` on
+Last checked implementation revision: `c4bd81c2788c0bd599fd00cefb675abaf81eba38` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
+
+Atc4bd81c, all five CI workflows passed. Full host/Android quality, both packages,
+notification rendering and the genuine unlocked-emulator lifecycle are green.
+[Actual lifecycle34514602784](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34514602784)
+completed five instrumentation phases and eight host observations: document
+load/recreation/close-relaunch, exact current-versus-retired IPC, enabled reboot
+and package update before app launch, explicit stop, disabled reopen/reboot/update,
+and final explicit restart. ROOT retained and hash-checked all272 command logs.
+
+The earlier cold-plugin initialization and premature notification assertion no
+longer prevent this full sequence. First unlock is a separate pending CI extension;
+physical-phone authentication, provisioning/pairing, real network delivery and
+Windows UAC application remain unverified. A passing build/lifecycle is not a
+release or a finished remote approval product.
+
+The checkpoints below are historical; thec4bd81c result above is the current
+completed unlocked-lifecycle and quality baseline.
 
 At0713333 the full Quality run34510391762 passed: Windows15m00, Linux8m54,
 protocol6m48, Android Rust/core3m22. Both actual Analyzer scans reported zero

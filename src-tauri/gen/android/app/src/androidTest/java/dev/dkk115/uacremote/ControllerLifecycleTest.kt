@@ -3,6 +3,7 @@ package dev.dkk115.uacremote
 
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.KeyguardManager
 import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Build
@@ -75,7 +76,7 @@ class ControllerLifecycleTest {
         assertTrue(context.applicationInfo.splitSourceDirs.isNullOrEmpty())
         assertTrue(instrumentation.context.applicationInfo.splitSourceDirs.isNullOrEmpty())
         val phase = arguments.getString("phase") ?: error("Missing fixed lifecycle phase")
-        assertTrue(phase in setOf("initial", "verify-enabled", "stop", "verify-stopped", "start"))
+        assertTrue(phase in setOf("initial", "verify-enabled", "stop", "verify-stopped", "start", "verify-no-secure-lock", "verify-first-unlock"))
         val nonce = arguments.getString("nonce") ?: error("Missing receipt nonce")
         assertTrue(nonce.matches(Regex("[0-9a-f]{32}")))
         val appHash = apkHash(context.applicationInfo.sourceDir)
@@ -83,6 +84,14 @@ class ControllerLifecycleTest {
         assertEquals(arguments.getString("app_sha256"), appHash)
         assertEquals(arguments.getString("test_sha256"), testHash)
         val checks = JSONObject()
+        val checksSecureLock = phase == "verify-no-secure-lock" || phase == "verify-first-unlock"
+        if (checksSecureLock) {
+            // Actual framework observation, never a host-supplied secure/unlocked flag.
+            val keyguard = context.getSystemService(KeyguardManager::class.java) ?: error("Keyguard observation unavailable")
+            val secure = keyguard.isDeviceSecure
+            assertEquals(phase == "verify-first-unlock", secure)
+            checks.put("deviceSecureBefore", secure)
+        }
         var scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
             awaitWebView(scenario, "initial Activity document")
@@ -121,6 +130,9 @@ class ControllerLifecycleTest {
                     stalePostMessageProbe(scenario, checks)
                 }
                 "verify-enabled" -> assertTrue(await(scenario, "enabled native READY with active foreground notification") { it.ready && it.notification }.notification)
+                "verify-no-secure-lock", "verify-first-unlock" -> {
+                    assertTrue(await(scenario, "native READY for secure-lock observation") { it.ready && it.notification }.notification)
+                }
                 "stop" -> {
                     await(scenario, "native READY before stop") { it.ready }
                     stop(scenario)
@@ -138,6 +150,14 @@ class ControllerLifecycleTest {
             assertEquals(!expectsStopped, final.ready)
             assertEquals(!expectsStopped, final.notification)
             if (!expectsStopped) assertEquals(PolicyOwnerPhase.READY, final.phase)
+            if (checksSecureLock) {
+                val keyguard = context.getSystemService(KeyguardManager::class.java) ?: error("Keyguard observation unavailable")
+                val secure = keyguard.isDeviceSecure
+                val unlocked = context.getSystemService(UserManager::class.java)?.isUserUnlocked == true
+                assertEquals(phase == "verify-first-unlock", secure)
+                assertTrue(unlocked)
+                checks.put("deviceSecureAfter", secure).put("userUnlockedAfter", unlocked)
+            }
             val bootCount = Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT)
             assertTrue(bootCount >= 0)
             val receipt = JSONObject().put("version", 1).put("phase", phase).put("nonce", nonce)
