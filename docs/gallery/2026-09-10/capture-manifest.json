@@ -1,0 +1,40 @@
+{
+  "sourceCommit": "a40ee3b9db56e91a8ccb05599a446cdc5d5b8814",
+  "run": "https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34439778443",
+  "scope": "CLIENT / SYNTHETIC: actual Chromium renders of shared React UI; not installed native shells or real approvals",
+  "runner": "windows-2025",
+  "osRelease": "10.0.26100",
+  "renderer": "Playwright 1.63.0 / Chromium 153.0.8010.12",
+  "artifactId": 10137618642,
+  "imagesModified": false,
+  "images": [
+    {
+      "file": "pc-status-light.png",
+      "case": "desktop-running-980",
+      "stage": "overview",
+      "sha256": "362d2efabd2b4c9b9ab3c420254817cd548cd9ead7666632cfb3d9cc820384ae",
+      "bytes": 41847
+    },
+    {
+      "file": "pc-status-dark.png",
+      "case": "desktop-running-dark-1280",
+      "stage": "overview",
+      "sha256": "2ecff6317e47a7ce8817f721e32c76ef24409399b5b3bffc63b0a2daa623924d",
+      "bytes": 43798
+    },
+    {
+      "file": "phone-terminal.png",
+      "case": "phone-terminal-390",
+      "stage": "overview",
+      "sha256": "d46da7eb296d599e6b71dbd415f9bb6089ba76f8e76df2601f96ea84bbb7acdf",
+      "bytes": 35024
+    },
+    {
+      "file": "phone-schedule.png",
+      "case": "phone-weekly-schedule-390",
+      "stage": "overview",
+      "sha256": "49f95b8fd11250151f835022f405783967e78057852f3fd6354b4fb6785e7a35",
+      "bytes": 47567
+    }
+  ]
+}
