@@ -7,10 +7,11 @@ import { resolve } from 'node:path';
 import test from 'node:test';
 import {
   ORIGIN_PATH, ORIGIN_HASH, HELPER_NAMES, DIRECT_HELPER_NAMES, BUILDING_HELPER,
+  DEPENDENT_PROFILE, CONTEXT_NAMES, CONTEXT_MUTATIONS, DEPENDENT_HELPER_INSERTION, REUSED_BUILDING_INSERTION,
   ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
-  eraseInvariantCandidate, invariantProfile,
-  selectInvariantArguments, admitInvariantEnvironment, invariantArguments,
+  eraseInvariantCandidate, invariantProfile, invariantContextSource,
+  selectInvariantArguments, selectInvariantRunArguments, admitInvariantEnvironment, invariantArguments,
   selectedInvariantSummary, invariantRunSummary, validateInvariantManifest,
 } from './protocol-invariant-probe.mjs';
 
@@ -46,7 +47,8 @@ test('both legacy direct CLI profiles retain the previous exact candidate with n
     assert.deepEqual(insertInvariantHelpers(source, selected), expected);
     assert.equal(eraseInvariantCandidate(expected.candidate, selected), expected.normalized);
     assert.deepEqual(invariantProfile(selected), {
-      observationalEventsAdded: false, inductionHelpers: [], candidateLemmas: [...DIRECT_HELPER_NAMES, ...ORIGINAL_NAMES],
+      observationalEventsAdded: false, inductionHelpers: [], helperReuse: false, requiredLemmas: [selected], reusedHelpers: [],
+      candidateLemmas: [...DIRECT_HELPER_NAMES, ...ORIGINAL_NAMES],
     });
   }
 });
@@ -55,7 +57,8 @@ test('building profile adds exactly two production observations and one independ
   const direct = insertInvariantHelpers(source);
   const observed = insertInvariantHelpers(source, BUILDING_HELPER);
   assert.deepEqual(invariantProfile(BUILDING_HELPER), {
-    observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], candidateLemmas: [...HELPER_NAMES, ...ORIGINAL_NAMES],
+    observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], helperReuse: false, requiredLemmas: [BUILDING_HELPER], reusedHelpers: [],
+    candidateLemmas: [...HELPER_NAMES, ...ORIGINAL_NAMES],
   });
   assert.equal(eraseInvariantCandidate(observed.candidate, BUILDING_HELPER), direct.normalized);
   assert.deepEqual(admitInvariantCandidate(source, observed.candidate, BUILDING_HELPER), observed);
@@ -182,7 +185,7 @@ test('selection requires exactly one fixed helper and refuses overrides, inherit
 test('actual execution admission is Linux GitHub CI only with explicit binary and commit identity', () => {
   const env = { CI: 'true', GITHUB_ACTIONS: 'true', TAMARIN_BIN: resolve('SYNTHETIC-tamarin-prover'), GITHUB_SHA: 'a'.repeat(40) };
   assert.deepEqual(admitInvariantEnvironment(['--helper=request_opened_unique'], env, 'linux'), {
-    selected: 'request_opened_unique', binary: env.TAMARIN_BIN, commit: env.GITHUB_SHA,
+    selected: 'request_opened_unique', context: 'baseline', binary: env.TAMARIN_BIN, commit: env.GITHUB_SHA,
   });
   for (const [changed, platform] of [
     [env, 'win32'], [env, 'darwin'], [{ ...env, CI: 'false' }, 'linux'], [{ ...env, GITHUB_ACTIONS: 'false' }, 'linux'],
@@ -285,11 +288,13 @@ test('manifest source mapping retains the original nine obligations and rejects 
 
 test('probe source preserves independent attribution, observable edit metadata and immutable separate artifacts', () => {
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
-  assert.ok(probeSource.includes("eligibleAsNormalGate: false, baselineOnly: true"));
-  assert.ok(probeSource.includes("normalGateStatus: 'not-run', helperReuse: false, ...profile"));
+  assert.ok(probeSource.includes("eligibleAsNormalGate: false, baselineOnly: context === 'baseline'"));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run', ...profile"));
   assert.ok(probeSource.includes('observationalEdits: profile.observationalEventsAdded ? BUILDING_ACTION_EDITS.map'));
-  assert.ok(probeSource.includes('originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded'));
-  assert.ok(probeSource.includes('originalPremisesConclusionsAndPublicMessagesUnchanged: true, originalRestrictionsAndLemmasUnchanged: true'));
+  assert.ok(probeSource.includes("originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded && context === 'baseline'"));
+  assert.ok(probeSource.includes("originalPremisesConclusionsAndPublicMessagesUnchanged: context === 'baseline', originalRestrictionsAndLemmasUnchanged: true"));
+  assert.ok(probeSource.includes('regular(contextInput).sha256 === contextHash'));
+  assert.ok(probeSource.includes('contextMutation: mutation ? { id: context, ...mutation, beforeSha256: ORIGIN_HASH, afterSha256: contextHash } : null'));
   assert.ok(probeSource.includes("status: 'not-selected'"));
   assert.ok(probeSource.includes("'INVARIANT_PROBE_ONLY") || probeSource.includes('`INVARIANT_PROBE_ONLY-'));
   assert.ok(probeSource.includes("flag: 'wx', mode: 0o400"));
@@ -300,20 +305,162 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY the new building helper, retaining narrow triggers, fixed pins and no normal-gate mutation', () => {
+test('CI runs ONLY the fixed dependent profile in three independent contexts, not the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
   }
   assert.ok(workflow.includes('workflow_dispatch:'));
-  assert.doesNotMatch(workflow, /matrix:|--helper=enrolled_revision_unique|--helper=request_opened_unique/u);
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --helper=building_precedes_open'));
+  assert.doesNotMatch(workflow, /--helper=/u);
+  assert.ok(workflow.includes('fail-fast: false'));
+  assert.ok(workflow.includes('context: [baseline, missing-approval-signature, missing-replay-consumption]'));
+  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-opened-with-building "--context=${{ matrix.context }}"'));
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-building_precedes_open-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-dependent-${{ matrix.context }}-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
   assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);
   for (const action of workflow.matchAll(/uses: ([^\s]+)@([^\s]+)/gu)) assert.match(action[2], /^[a-f0-9]{40}$/u);
+});
+
+function dependentInput(context) {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${DEPENDENT_PROFILE}-${context}-fixture`, 'request.input.spthy');
+}
+
+function dependentOutput(context, verdicts = {}) {
+  const path = dependentInput(context), profile = invariantProfile(DEPENDENT_PROFILE, context);
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${path}\n${profile.candidateLemmas.map((name) =>
+      ` ${name} (${ORIGINAL_NAMES.indexOf(name) >= 0 && ORIGINAL_NAMES.indexOf(name) < 3 ? 'exists-trace' : 'all-traces'}): ${verdicts[name] ?? (profile.requiredLemmas.includes(name) ? 'verified (14 steps)' : 'analysis incomplete (0 steps)')}`).join('\n')}\n` };
+}
+
+test('dependent CLI is a fixed profile with one explicit context; independent helper CLI cannot inherit mutants', () => {
+  assert.ok(Object.isFrozen(CONTEXT_NAMES) && Object.isFrozen(CONTEXT_MUTATIONS));
+  for (const context of CONTEXT_NAMES) {
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${DEPENDENT_PROFILE}`, `--context=${context}`]), { selected: DEPENDENT_PROFILE, context });
+  }
+  for (const name of HELPER_NAMES) assert.deepEqual(selectInvariantRunArguments([`--helper=${name}`]), { selected: name, context: 'baseline' });
+  for (const args of [
+    [`--profile=${DEPENDENT_PROFILE}`], [`--profile=${DEPENDENT_PROFILE}`, '--context=__proto__'],
+    [`--profile=${DEPENDENT_PROFILE}`, '--context=constructor'], [`--profile=${DEPENDENT_PROFILE}`, '--context=unknown'],
+    ['--profile=other', '--context=baseline'], ['--context=baseline', `--profile=${DEPENDENT_PROFILE}`],
+    [`--profile=${DEPENDENT_PROFILE}`, '--context=baseline', '--context=missing-approval-signature'],
+    [`--profile=${DEPENDENT_PROFILE}`, '--context=baseline', '--prove=request_opened_unique'],
+    [`--profile=${DEPENDENT_PROFILE}`, '--context=baseline', '--reuse'],
+    ['--helper=request_opened_unique', '--context=baseline'], ['--helper=building_precedes_open', '--context=missing-replay-consumption'],
+    [`--helper=${DEPENDENT_PROFILE}`], [`--profile=${DEPENDENT_PROFILE} --context=baseline`],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+  for (const name of HELPER_NAMES) for (const context of CONTEXT_NAMES.slice(1)) {
+    assert.throws(() => insertInvariantHelpers(source, name, context, manifest));
+    assert.throws(() => invariantArguments(input, name, context));
+  }
+});
+
+for (const context of CONTEXT_NAMES) {
+  test(`${context} dependent candidate has exact manifest mutation, two observations, required-before-consumer order and inverse-to-origin`, () => {
+    const { normalized, candidate } = insertInvariantHelpers(source, DEPENDENT_PROFILE, context, manifest);
+    assert.equal(digest(normalized), ORIGIN_HASH);
+    assert.equal(eraseInvariantCandidate(candidate, DEPENDENT_PROFILE, context, manifest), normalized);
+    assert.deepEqual(admitInvariantCandidate(source, candidate, DEPENDENT_PROFILE, context, manifest), { normalized, candidate });
+    const profile = invariantProfile(DEPENDENT_PROFILE, context);
+    assert.equal(profile.helperReuse, true);
+    assert.deepEqual(profile.reusedHelpers, [BUILDING_HELPER]);
+    assert.deepEqual(profile.requiredLemmas, [BUILDING_HELPER, 'request_opened_unique']);
+    assert.deepEqual([...candidate.matchAll(/^lemma (\w+)(?: \[use_induction,reuse\])?:$/gm)].map((match) => match[1]), profile.candidateLemmas);
+    assert.ok(candidate.indexOf('lemma building_precedes_open [use_induction,reuse]:') < candidate.indexOf('lemma request_opened_unique:'));
+    assert.deepEqual([...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]), ['lemma building_precedes_open [use_induction,reuse]:']);
+    assert.equal((candidate.match(/\bBuildingProduced\(/gu) ?? []).length, 3);
+    let erased = candidate.replace(DEPENDENT_HELPER_INSERTION, '');
+    for (const edit of [...BUILDING_ACTION_EDITS].reverse()) erased = erased.replace(edit.to, edit.from);
+    const contextual = invariantContextSource(source, DEPENDENT_PROFILE, context, manifest);
+    assert.equal(erased, contextual, 'only observations/helper declarations differ from the exact selected protocol context');
+    if (context === 'baseline') assert.equal(contextual, normalized);
+    else {
+      const declared = manifest.models.find((model) => model.id === 'request-authorization').canaries.find((canary) => canary.id === context).mutation;
+      assert.deepEqual(declared, CONTEXT_MUTATIONS[context]);
+      assert.equal(normalized.split(declared.from).length, 2);
+      assert.equal(contextual, normalized.replace(declared.from, declared.to));
+      assert.equal(contextual.split(declared.to).length, 2);
+      assert.notEqual(digest(contextual), ORIGIN_HASH);
+    }
+    assert.deepEqual(insertInvariantHelpers(source.replace(/\r?\n/g, '\r\n'), DEPENDENT_PROFILE, context, manifest), { normalized, candidate });
+    const path = dependentInput(context);
+    assert.deepEqual(invariantArguments(path, DEPENDENT_PROFILE, context), [
+      path, '--quit-on-warning', '--prove=building_precedes_open', '--prove=request_opened_unique', '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS',
+    ]);
+  });
+
+  test(`${context} counts no dependent proof without the verified required helper in the same exact input summary`, () => {
+    const path = dependentInput(context), valid = dependentOutput(context);
+    const accepted = selectedInvariantSummary(valid, DEPENDENT_PROFILE, path, context);
+    assert.equal(accepted.ok, true);
+    assert.deepEqual(Object.keys(accepted.requiredVerdicts), [BUILDING_HELPER, 'request_opened_unique']);
+    assert.deepEqual(accepted.requiredVerdicts[BUILDING_HELPER], { trace: 'all-traces', verdict: 'verified' });
+    for (const verdict of ['analysis incomplete (0 steps)', 'falsified (3 steps)', 'verified', 'verified (14 steps) extra']) {
+      const rejected = selectedInvariantSummary(dependentOutput(context, { [BUILDING_HELPER]: verdict }), DEPENDENT_PROFILE, path, context);
+      assert.equal(rejected.verdict.verdict, 'verified', 'the dependent row alone is deliberately present');
+      assert.equal(rejected.ok, false, 'an unproved reused helper cannot be accepted');
+    }
+    for (const name of [BUILDING_HELPER, 'request_opened_unique']) {
+      const missing = valid.stdout.replace(` ${name} (all-traces): verified (14 steps)\n`, '');
+      assert.notEqual(missing, valid.stdout);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: missing }, DEPENDENT_PROFILE, path, context).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + ` ${name} (all-traces): verified (14 steps)\n` }, DEPENDENT_PROFILE, path, context).ok, false);
+    }
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.equal(selectedInvariantSummary(dependentOutput(other), DEPENDENT_PROFILE, path, context).ok, false);
+      assert.throws(() => invariantArguments(dependentInput(other), DEPENDENT_PROFILE, context));
+    }
+    assert.equal(invariantRunSummary(valid, DEPENDENT_PROFILE, path, false, context).selectedProof.ok, false);
+    for (const delta of [{ status: 1 }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+      assert.equal(invariantRunSummary({ ...valid, ...delta }, DEPENDENT_PROFILE, path, true, context).selectedProof.ok, false);
+    }
+  });
+}
+
+test('dependent admission rejects consumer-before-helper, unsupported reuse, missing helper and profile/context leakage', () => {
+  for (const context of CONTEXT_NAMES) {
+    const { candidate } = insertInvariantHelpers(source, DEPENDENT_PROFILE, context, manifest);
+    const wrongOrder = candidate.replace(REUSED_BUILDING_INSERTION, '').replace('\nlemma honest_approve_trace:\n', REUSED_BUILDING_INSERTION + '\nlemma honest_approve_trace:\n');
+    for (const altered of [
+      wrongOrder, candidate.replace(REUSED_BUILDING_INSERTION, ''),
+      candidate.replace('[use_induction,reuse]', '[use_induction]'),
+      candidate.replace('[use_induction,reuse]', '[reuse]'),
+      candidate.replace('lemma request_opened_unique:', 'lemma request_opened_unique [reuse]:'),
+      candidate.replace('     ==> b < o"', '     ==> #b = #o"'),
+      candidate + '\n// unreviewed text\n',
+    ]) {
+      assert.notEqual(altered, candidate);
+      assert.throws(() => admitInvariantCandidate(source, altered, DEPENDENT_PROFILE, context, manifest));
+      assert.throws(() => eraseInvariantCandidate(altered, DEPENDENT_PROFILE, context, manifest));
+    }
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.throws(() => admitInvariantCandidate(source, candidate, DEPENDENT_PROFILE, other, manifest));
+      assert.throws(() => eraseInvariantCandidate(candidate, DEPENDENT_PROFILE, other, manifest));
+    }
+    assert.throws(() => admitInvariantCandidate(source, candidate, BUILDING_HELPER));
+    assert.throws(() => admitInvariantCandidate(source, insertInvariantHelpers(source, BUILDING_HELPER).candidate, DEPENDENT_PROFILE, context, manifest));
+  }
+});
+
+test('context mutations are fixed manifest entries, never custom rewrites or inferred disabled mechanisms', () => {
+  const changed = (edit) => { const copy = structuredClone(manifest); edit(copy.models.find((model) => model.id === 'request-authorization')); return copy; };
+  for (const invalid of [
+    changed((model) => { model.canaries[0].mutation.to = "Eq('anything','anything'),"; }),
+    changed((model) => { model.canaries[1].mutation.from = 'RequestSlot'; }),
+    changed((model) => { model.canaries.push(model.canaries[0]); }),
+    changed((model) => { model.canaries[1].id = model.canaries[0].id; }),
+    changed((model) => { model.canaries[0].expected.accepted_approval_requires_same_binding_auth.verdict = 'verified'; }),
+  ]) {
+    assert.throws(() => validateInvariantManifest(invalid));
+    for (const context of CONTEXT_NAMES) assert.throws(() => insertInvariantHelpers(source, DEPENDENT_PROFILE, context, invalid));
+  }
+  for (const context of CONTEXT_NAMES.slice(1)) {
+    assert.throws(() => insertInvariantHelpers(source, DEPENDENT_PROFILE, context));
+    const alreadyMutated = source.replace(CONTEXT_MUTATIONS[context].from, CONTEXT_MUTATIONS[context].to);
+    assert.notEqual(alreadyMutated, source);
+    assert.throws(() => insertInvariantHelpers(alreadyMutated, DEPENDENT_PROFILE, context, manifest));
+  }
 });
