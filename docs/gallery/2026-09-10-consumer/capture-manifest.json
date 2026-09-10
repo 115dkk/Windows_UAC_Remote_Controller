@@ -1,0 +1,57 @@
+{
+  "nativeUacVerified": false,
+  "nativeRendererRun": 34459106258,
+  "hardwareAuthenticationVerified": false,
+  "captures": [
+    {
+      "width": 980,
+      "scope": "CLIENT / SYNTHETIC",
+      "source": "9aeb22a0c38f9c0d6042d8d3b3adfefd2dd4d6a9",
+      "height": 740,
+      "caption": "Windows 기본 화면",
+      "gitBlob": "77de8e817c82b5139b7287360d96ac0b92a6b674",
+      "path": "docs/gallery/2026-09-10-consumer/windows-home.png",
+      "bytes": 52131,
+      "sha256": "1cf3d81655336790f232feba452db59cb32c857c0a02480305b507eb92f40b83"
+    },
+    {
+      "width": 1280,
+      "scope": "CLIENT / SYNTHETIC",
+      "source": "9aeb22a0c38f9c0d6042d8d3b3adfefd2dd4d6a9",
+      "height": 900,
+      "caption": "Windows 어두운 화면",
+      "gitBlob": "c79759ef1aedbe55500e07fcc4849c998ab9da44",
+      "path": "docs/gallery/2026-09-10-consumer/windows-home-dark.png",
+      "bytes": 54673,
+      "sha256": "b82d30d76d7520b6f6384a351f050040c8ab9310cfdf37ea3f89f3e75f623879"
+    },
+    {
+      "width": 390,
+      "scope": "CLIENT / SYNTHETIC",
+      "source": "9aeb22a0c38f9c0d6042d8d3b3adfefd2dd4d6a9",
+      "height": 844,
+      "caption": "휴대폰 실행·알림 설정 화면",
+      "gitBlob": "d78bc716dea6afa3c4f9f840b1a328c28bd02c71",
+      "path": "docs/gallery/2026-09-10-consumer/phone-settings.png",
+      "bytes": 48446,
+      "sha256": "ff735887d47b6c24a9c9c98215209bdb9beee0e1474da1d9aed9e69420740430"
+    },
+    {
+      "width": 1080,
+      "scope": "ACTUAL ANDROID RENDERER / ISOLATED TEST APK",
+      "source": "fec303d44bddb2c42c1263940041e3e450853680",
+      "height": 2400,
+      "caption": "Android 실행 상태 알림",
+      "gitBlob": "d09411a328686badc54edb60e2e57a87f7f8f959",
+      "path": "docs/gallery/2026-09-10-consumer/android-status-notification.png",
+      "bytes": 133509,
+      "sha256": "f6cdcb4395da9dd6a5682bba20016a95298aa4e8098d63614c72cd982af8ea1e"
+    }
+  ],
+  "uiRun": 34460740593,
+  "nativeRendererSource": "fec303d44bddb2c42c1263940041e3e450853680",
+  "unmodifiedOriginalPngs": true,
+  "version": 1,
+  "rootReviewed": true,
+  "uiSource": "9aeb22a0c38f9c0d6042d8d3b3adfefd2dd4d6a9"
+}
