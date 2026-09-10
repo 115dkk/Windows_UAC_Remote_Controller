@@ -245,8 +245,11 @@ solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #o )
                                                  ~content_digest, ~expiry>,
                                                 'building'
                                    ) ▶₀ #vr.5 )
-                              case OpenActualRequest
-                              by sorry /* UNVERIFIED: ROOT must expose this observed base-open subtree */
+                              case CaptureEligibleDevice
+                              solve( RegistrySlot( ~device, ~pc, revision, 'active' ) ▶₂ #vr.5 )
+                                case TrustedEnrollment
+                                by sorry /* UNVERIFIED: ROOT must expose this observed enrollment subtree */
+                              qed
                             qed
                           qed
                         qed
