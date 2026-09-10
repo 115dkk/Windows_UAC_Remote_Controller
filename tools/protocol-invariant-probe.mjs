@@ -21,6 +21,7 @@ export const DIRECT_HELPER_NAMES = Object.freeze(['enrolled_revision_unique', 'r
 export const BUILDING_HELPER = 'building_precedes_open';
 export const HELPER_NAMES = Object.freeze([...DIRECT_HELPER_NAMES, BUILDING_HELPER]);
 export const DEPENDENT_PROFILE = 'request-opened-with-building';
+export const REQUEST_SECURITY_PROFILE = 'request-security-with-helpers';
 export const CONTEXT_NAMES = Object.freeze(['baseline', 'missing-approval-signature', 'missing-replay-consumption']);
 // Closed copies of the EXISTING manifest mutations. Runtime must match the
 // actual manifest entries exactly; no caller-provided mutation is accepted.
@@ -39,6 +40,13 @@ export const ORIGINAL_NAMES = Object.freeze([
   'request_accepted_at_most_once', 'no_accept_after_revision_revoked',
   'no_accept_after_request_cancelled', 'no_accept_after_request_expired',
 ]);
+export const REQUEST_SECURITY_NAMES = Object.freeze(ORIGINAL_NAMES.slice(3));
+export const REQUEST_WITNESS_NAMES = Object.freeze(ORIGINAL_NAMES.slice(0, 3));
+export const REQUEST_SECURITY_HELPERS = Object.freeze([DIRECT_HELPER_NAMES[0], BUILDING_HELPER, DIRECT_HELPER_NAMES[1]]);
+export const REQUIRED_COUNTEREXAMPLES = Object.freeze({
+  'missing-approval-signature': 'accepted_approval_requires_same_binding_auth',
+  'missing-replay-consumption': 'request_accepted_at_most_once',
+});
 export const HELPER_INSERTION = `
 // INVARIANT_PROBE_ONLY: two independent direct helpers, no proof reuse.
 lemma enrolled_revision_unique:
@@ -73,6 +81,11 @@ export const DEPENDENT_HELPER_INSERTION = mutateExactlyOnce(
     '// DEPENDENT_INVARIANT_PROBE_ONLY: required helper precedes its consumer; no imported proof.'),
   { from: '\nlemma request_opened_unique:\n', to: REUSED_BUILDING_INSERTION + '\nlemma request_opened_unique:\n' },
 );
+export const REQUEST_SECURITY_HELPER_INSERTION = DEPENDENT_HELPER_INSERTION
+  .replace('// DEPENDENT_INVARIANT_PROBE_ONLY: required helper precedes its consumer; no imported proof.',
+    '// REQUEST_SECURITY_PROBE_ONLY: ALL reused helpers must verify in this same context/invocation; no imported proof.')
+  .replace('lemma enrolled_revision_unique:', 'lemma enrolled_revision_unique [reuse]:')
+  .replace('lemma request_opened_unique:', 'lemma request_opened_unique [reuse]:');
 const OPEN_PRODUCER = `rule OpenActualRequest:
   let binding = <pc, epoch, session_id, logon_luid, ~request_id, ~nonce,
         ~content_digest, ~expiry>
@@ -113,6 +126,14 @@ function helper(name) {
 
 export function invariantProfile(selected, context = 'baseline') {
   if (typeof context !== 'string' || !CONTEXT_NAMES.includes(context)) reject();
+  if (selected === REQUEST_SECURITY_PROFILE) {
+    return {
+      observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], helperReuse: true,
+      requiredLemmas: [...REQUEST_SECURITY_HELPERS, ...(context === 'baseline' ? REQUEST_SECURITY_NAMES : [REQUIRED_COUNTEREXAMPLES[context]])],
+      reusedHelpers: [...REQUEST_SECURITY_HELPERS],
+      candidateLemmas: [...REQUEST_SECURITY_HELPERS, ...ORIGINAL_NAMES],
+    };
+  }
   const dependent = selected === DEPENDENT_PROFILE;
   if (!dependent) {
     helper(selected);
@@ -131,6 +152,7 @@ export function invariantProfile(selected, context = 'baseline') {
 }
 
 function insertion(selected) {
+  if (selected === REQUEST_SECURITY_PROFILE) return REQUEST_SECURITY_HELPER_INSERTION;
   if (selected === DEPENDENT_PROFILE) return DEPENDENT_HELPER_INSERTION;
   return HELPER_INSERTION + (helper(selected) === BUILDING_HELPER ? BUILDING_HELPER_INSERTION : '');
 }
@@ -176,10 +198,12 @@ export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0]
   }
   candidate = mutateExactlyOnce(candidate, { from: ANCHOR, to: insertion(selected) + ANCHOR });
   if (eraseInvariantCandidate(candidate, selected, context, manifest) !== normalized) reject();
-  const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*)(?: \[use_induction(?:,reuse)?\])?:$/gm)].map((match) => match[1]);
+  const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*)(?: \[(?:reuse|use_induction(?:,reuse)?)\])?:$/gm)].map((match) => match[1]);
   same(names, profile.candidateLemmas);
   const attributes = [...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]);
-  same(attributes, profile.helperReuse ? ['lemma building_precedes_open [use_induction,reuse]:']
+  same(attributes, selected === REQUEST_SECURITY_PROFILE ? [
+    'lemma enrolled_revision_unique [reuse]:', 'lemma building_precedes_open [use_induction,reuse]:', 'lemma request_opened_unique [reuse]:',
+  ] : profile.helperReuse ? ['lemma building_precedes_open [use_induction,reuse]:']
     : profile.observationalEventsAdded ? ['lemma building_precedes_open [use_induction]:'] : []);
   const observations = candidate.match(/\bBuildingProduced\(/g) ?? [];
   if (observations.length !== (profile.observationalEventsAdded ? 3 : 0)) reject(); // two actions + one helper premise
@@ -187,8 +211,9 @@ export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0]
   const reused = [...candidate.matchAll(/^lemma\s+(\w+)[^\r\n]*\breuse\b[^\r\n]*:$/gm)].map((match) => match[1]);
   same(reused, profile.reusedHelpers);
   for (const name of reused) {
-    if (!profile.requiredLemmas.includes(name) || profile.candidateLemmas.indexOf(name) >= profile.candidateLemmas.indexOf('request_opened_unique')) reject();
+    if (!profile.requiredLemmas.includes(name) || profile.candidateLemmas.indexOf(name) >= profile.candidateLemmas.indexOf(ORIGINAL_NAMES[0])) reject();
   }
+  if (profile.helperReuse && profile.candidateLemmas.indexOf(BUILDING_HELPER) >= profile.candidateLemmas.indexOf('request_opened_unique')) reject();
   return { normalized, candidate };
 }
 
@@ -205,11 +230,12 @@ export function selectInvariantArguments(args) {
 }
 
 export function selectInvariantRunArguments(args) {
-  if (Array.isArray(args) && args.length === 2 && args[0] === `--profile=${DEPENDENT_PROFILE}` &&
+  if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
       typeof args[1] === 'string' && args[1].startsWith('--context=')) {
+    const selected = args[0].slice('--profile='.length);
     const context = args[1].slice('--context='.length);
-    invariantProfile(DEPENDENT_PROFILE, context);
-    return { selected: DEPENDENT_PROFILE, context };
+    invariantProfile(selected, context);
+    return { selected, context };
   }
   return { selected: selectInvariantArguments(args), context: 'baseline' };
 }
@@ -227,21 +253,29 @@ function directoryPrefix(selected, context) {
   return `INVARIANT_PROBE_ONLY-${selected}-${context}-`;
 }
 
-export function invariantArguments(input, selected, context = 'baseline') {
+export function requiredInvariantVerdicts(selected, context = 'baseline') {
   const profile = invariantProfile(selected, context);
+  return Object.fromEntries(profile.requiredLemmas.map((name) => [name, { trace: 'all-traces',
+    verdict: selected === REQUEST_SECURITY_PROFILE && context !== 'baseline' && name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified' : 'verified',
+  }]));
+}
+
+export function invariantArguments(input, selected, context = 'baseline') {
+  const expected = requiredInvariantVerdicts(selected, context);
   if (typeof input !== 'string' || !isAbsolute(input) || resolve(input) !== input || basename(input) !== 'request.input.spthy') reject();
-  if (selected === DEPENDENT_PROFILE && !basename(dirname(input)).startsWith(directoryPrefix(selected, context))) reject();
-  return proofArguments(input, Object.fromEntries(profile.requiredLemmas.map((name) => [name, { trace: 'all-traces', verdict: 'verified' }])));
+  if ([DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE].includes(selected) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context))) reject();
+  return proofArguments(input, expected);
 }
 
 export function selectedInvariantSummary(result, selected, input, context = 'baseline') {
   invariantArguments(input, selected, context);
   const profile = invariantProfile(selected, context);
-  const expected = Object.fromEntries(profile.requiredLemmas.map((name) => [name, { trace: 'all-traces', verdict: 'verified' }]));
+  const expected = requiredInvariantVerdicts(selected, context);
   const parsed = parseProofSummary(result, expected, profile.candidateLemmas, input);
   // --quit-on-warning must be honored; an exit-zero fixture cannot turn a
   // dependency/wellformedness warning into successful experiment evidence.
-  if (/\bWARNING\b|returned unsupported version/i.test(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)) {
+  const diagnosticOutput = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
+  if (/\bWARNING\b|returned unsupported version/i.test(diagnosticOutput)) {
     parsed.ok = false;
     parsed.reasons.push('prover reported a warning or unsupported dependency');
   }
@@ -283,7 +317,7 @@ export function validateInvariantManifest(manifest) {
     const matching = canaries.filter((canary) => canary?.id === context);
     if (matching.length !== 1) reject();
     same(matching[0].mutation, CONTEXT_MUTATIONS[context]);
-    same(matching[0].expected, { [context === 'missing-approval-signature' ? 'accepted_approval_requires_same_binding_auth' : 'request_accepted_at_most_once']:
+    same(matching[0].expected, { [REQUIRED_COUNTEREXAMPLES[context]]:
       { trace: 'all-traces', verdict: 'falsified' } });
   }
   const seen = new Set();
@@ -358,6 +392,7 @@ function freshDirectory(root, selected, context) {
 export async function runInvariantProbe(args = process.argv.slice(2), root = ROOT) {
   const { selected, context, binary, commit } = admitInvariantEnvironment(args, process.env, process.platform);
   const profile = invariantProfile(selected, context);
+  const securityProfile = selected === REQUEST_SECURITY_PROFILE;
   root = realpathSync(root);
   const directory = freshDirectory(root, selected, context);
   const cancellation = new AbortController();
@@ -366,12 +401,16 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   // completed its bounded cleanup; cancellation itself is irreversible.
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = {
-    classification: context === 'baseline' ? CLASSIFICATION : 'MUTANT_INVARIANT_PROBE_ONLY', eligibleAsNormalGate: false, baselineOnly: context === 'baseline',
+    classification: securityProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_PROBE_ONLY' : 'MUTANT_REQUEST_SECURITY_PROBE_ONLY')
+      : context === 'baseline' ? CLASSIFICATION : 'MUTANT_INVARIANT_PROBE_ONLY', eligibleAsNormalGate: false, baselineOnly: context === 'baseline',
     normalGateStatus: 'not-run', ...profile,
-    selectedProfile: selected, selectedHelper: profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
+    selectedProfile: selected, selectedHelper: securityProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
+    selectedSecurityProperties: securityProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
+    requiredExpected: requiredInvariantVerdicts(selected, context),
+    helperProofScope: 'same-invocation-same-context-only', importedProofs: false,
     unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' })),
     negativeControls: CONTEXT_NAMES.slice(1).map((name) => ({ name,
-      status: name === context ? 'mutated-context-only-counterexample-not-selected' : 'not-selected' })),
+      status: name === context ? (securityProfile ? 'required-counterexample-selected' : 'mutated-context-only-counterexample-not-selected') : 'not-selected' })),
     bounds: { proofInvocations: 1, timeoutMs: PROBE_TIMEOUT_MS, combinedOutputBytes: PROBE_OUTPUT_BYTES, heapGiB: 2, runtimeThreads: 2 },
     attempted: false, completed: false, inputsUnchanged: false, selectedProof: null, status: 'not-started',
   };
@@ -393,7 +432,7 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
     for (const binding of bindings) {
       if (hash(utf8(read(binding.path).bytes).replace(/\r\n/g, '\n')) !== binding.sha256) reject();
     }
-    for (const path of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-security.mjs', 'tools/prover-process.mjs',
+    for (const path of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs', 'tools/prover-process.mjs',
       'tools/install-tamarin.mjs', '.github/workflows/protocol-invariant-probe.yml']) read(path);
     const sources = [...files].map(([path, file], index) => {
       const snapshot = `source-${String(index).padStart(2, '0')}.txt`;
@@ -425,7 +464,9 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       manifestSha256: manifestFile.sha256, sourceBindings: bindings,
       sources, binary, binaryMetadata: tool, arguments: argv,
       toolchainAuthority: 'fixed workflow install-tamarin.mjs validates pinned Tamarin and Maude distributions; this run retains the binary digest',
-      scope: 'Only the fixed required helper proofs in this exact context. Original security properties and required counterexamples are not selected; no normal gate, implementation or native-security approval.' };
+      scope: securityProfile
+        ? 'Only the original six all-traces properties in baseline, or the exact manifest-required counterexample in its mutant, conditional on ALL reused helpers verifying in this SAME invocation/context. Original existential witnesses remain unselected. No normal gate, implementation or native-security approval.'
+        : 'Only the fixed required helper proofs in this exact context. Original security properties and required counterexamples are not selected; no normal gate, implementation or native-security approval.' };
     if (!unchanged()) reject();
     cancellation.signal.throwIfAborted();
     report = { ...report, attempted: true, status: 'running' };

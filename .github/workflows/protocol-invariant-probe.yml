@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   probe:
-    name: ${{ matrix.context }} helper dependency (not the normal security gate)
+    name: ${{ matrix.context }} request security with in-context helpers (not the normal security gate)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -46,15 +46,15 @@ jobs:
         run: node tools/install-tamarin.mjs
       - name: Check exact insertion, selection and existing process controls
         run: node --test tools/protocol-invariant-probe.test.mjs tools/prover-process.test.mjs
-      - name: Require the building helper and its dependent proof in this same context
+      - name: Require all helpers and the exact security verdicts in this same context
         env:
           TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
-        run: node tools/protocol-invariant-probe.mjs --profile=request-opened-with-building "--context=${{ matrix.context }}"
+        run: node tools/protocol-invariant-probe.mjs --profile=request-security-with-helpers "--context=${{ matrix.context }}"
       - name: Retain source-mapped experiment evidence even after failed proofs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
         with:
-          name: protocol-invariant-probe-dependent-${{ matrix.context }}-${{ github.sha }}
+          name: protocol-invariant-probe-request-security-${{ matrix.context }}-${{ github.sha }}
           path: artifacts/protocol-invariant-probe/
           if-no-files-found: error
           retention-days: 14

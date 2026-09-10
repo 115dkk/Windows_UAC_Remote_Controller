@@ -8,6 +8,8 @@ import test from 'node:test';
 import {
   ORIGIN_PATH, ORIGIN_HASH, HELPER_NAMES, DIRECT_HELPER_NAMES, BUILDING_HELPER,
   DEPENDENT_PROFILE, CONTEXT_NAMES, CONTEXT_MUTATIONS, DEPENDENT_HELPER_INSERTION, REUSED_BUILDING_INSERTION,
+  REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS,
+  REQUEST_SECURITY_HELPER_INSERTION, REQUIRED_COUNTEREXAMPLES, requiredInvariantVerdicts,
   ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
   eraseInvariantCandidate, invariantProfile, invariantContextSource,
@@ -305,7 +307,7 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY the fixed dependent profile in three independent contexts, not the normal gate', () => {
+test('CI runs ONLY the fixed request-security profile in three independent contexts, not the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
@@ -314,15 +316,226 @@ test('CI runs ONLY the fixed dependent profile in three independent contexts, no
   assert.doesNotMatch(workflow, /--helper=/u);
   assert.ok(workflow.includes('fail-fast: false'));
   assert.ok(workflow.includes('context: [baseline, missing-approval-signature, missing-replay-consumption]'));
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-opened-with-building "--context=${{ matrix.context }}"'));
+  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-with-helpers "--context=${{ matrix.context }}"'));
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-dependent-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-request-security-${{ matrix.context }}-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
   assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);
   for (const action of workflow.matchAll(/uses: ([^\s]+)@([^\s]+)/gu)) assert.match(action[2], /^[a-f0-9]{40}$/u);
+});
+
+function securityInput(context, invocation = 'fixture') {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${REQUEST_SECURITY_PROFILE}-${context}-${invocation}`, 'request.input.spthy');
+}
+
+function securityOutput(context, verdicts = {}, invocation = 'fixture') {
+  const path = securityInput(context, invocation), profile = invariantProfile(REQUEST_SECURITY_PROFILE, context);
+  const expected = requiredInvariantVerdicts(REQUEST_SECURITY_PROFILE, context);
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${path}\n${profile.candidateLemmas.map((name) => {
+      const trace = REQUEST_WITNESS_NAMES.includes(name) ? 'exists-trace' : 'all-traces';
+      const value = verdicts[name] ?? (Object.hasOwn(expected, name)
+        ? expected[name].verdict === 'verified' ? 'verified (14 steps)' : 'falsified - found trace (17 steps)'
+        : 'analysis incomplete (0 steps)');
+      return ` ${name} (${trace}): ${value}`;
+    }).join('\n')}\n` };
+}
+
+test('request-security selection is a closed two-argument profile; legacy selections remain distinct', () => {
+  for (const fixed of [REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS, REQUIRED_COUNTEREXAMPLES]) {
+    assert.ok(Object.isFrozen(fixed));
+  }
+  assert.deepEqual(REQUEST_SECURITY_NAMES, ORIGINAL_NAMES.slice(3));
+  assert.equal(REQUEST_SECURITY_NAMES.length, 6);
+  assert.deepEqual(REQUEST_WITNESS_NAMES, ORIGINAL_NAMES.slice(0, 3));
+  for (const context of CONTEXT_NAMES) {
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${REQUEST_SECURITY_PROFILE}`, `--context=${context}`]), { selected: REQUEST_SECURITY_PROFILE, context });
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${DEPENDENT_PROFILE}`, `--context=${context}`]), { selected: DEPENDENT_PROFILE, context });
+  }
+  for (const args of [
+    [`--profile=${REQUEST_SECURITY_PROFILE}`], [`--helper=${REQUEST_SECURITY_PROFILE}`],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=__proto__'],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=constructor'],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=missing-replay-consumption '],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=baseline', '--prove=all'],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=baseline', '--reuse'],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=baseline', '--context=missing-approval-signature'],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=baseline', '--timeout=1'],
+    ['--context=baseline', `--profile=${REQUEST_SECURITY_PROFILE}`],
+    [`--profile=${REQUEST_SECURITY_PROFILE}\n`, '--context=baseline'],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+});
+
+for (const context of CONTEXT_NAMES) {
+  test(`${context} security profile adds only reviewed reuse declarations/observations and exactly reverses to origin`, () => {
+    const { normalized, candidate } = insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, context, manifest);
+    const profile = invariantProfile(REQUEST_SECURITY_PROFILE, context);
+    const selectedProperties = context === 'baseline' ? REQUEST_SECURITY_NAMES : [REQUIRED_COUNTEREXAMPLES[context]];
+    assert.deepEqual(profile.requiredLemmas, [...REQUEST_SECURITY_HELPERS, ...selectedProperties]);
+    assert.deepEqual(profile.reusedHelpers, REQUEST_SECURITY_HELPERS);
+    assert.deepEqual(profile.candidateLemmas, [...REQUEST_SECURITY_HELPERS, ...ORIGINAL_NAMES]);
+    assert.deepEqual(profile.inductionHelpers, [BUILDING_HELPER]);
+    assert.equal(profile.helperReuse, true);
+    assert.equal(profile.observationalEventsAdded, true);
+    assert.deepEqual(admitInvariantCandidate(source, candidate, REQUEST_SECURITY_PROFILE, context, manifest), { normalized, candidate });
+    assert.equal(eraseInvariantCandidate(candidate, REQUEST_SECURITY_PROFILE, context, manifest), normalized);
+    assert.equal(digest(normalized), ORIGIN_HASH);
+    assert.equal((candidate.match(/\bBuildingProduced\(/gu) ?? []).length, 3);
+    assert.deepEqual([...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]), [
+      'lemma enrolled_revision_unique [reuse]:', 'lemma building_precedes_open [use_induction,reuse]:', 'lemma request_opened_unique [reuse]:',
+    ]);
+    assert.ok(candidate.indexOf('lemma building_precedes_open [use_induction,reuse]:') < candidate.indexOf('lemma request_opened_unique [reuse]:'));
+    for (const helper of REQUEST_SECURITY_HELPERS) {
+      assert.ok(candidate.indexOf(`lemma ${helper} `) < candidate.indexOf('lemma honest_approve_trace:'));
+    }
+    const anchor = '\nlemma honest_approve_trace:\n';
+    assert.equal(candidate.slice(candidate.indexOf(anchor)), normalized.slice(normalized.indexOf(anchor)), 'ALL original nine declarations/formulas and existential witnesses remain exact');
+    let erased = candidate.replace(REQUEST_SECURITY_HELPER_INSERTION, '');
+    for (const edit of [...BUILDING_ACTION_EDITS].reverse()) erased = erased.replace(edit.to, edit.from);
+    assert.equal(erased, invariantContextSource(source, REQUEST_SECURITY_PROFILE, context, manifest));
+    if (context !== 'baseline') {
+      const declared = manifest.models.find((model) => model.id === 'request-authorization').canaries.find((canary) => canary.id === context);
+      assert.deepEqual(declared.mutation, CONTEXT_MUTATIONS[context]);
+      assert.deepEqual(Object.keys(declared.expected), selectedProperties);
+      assert.equal(erased, normalized.replace(declared.mutation.from, declared.mutation.to));
+    }
+    const withoutAttributesOrComments = (text) => text.replace(/^\/\/[^\n]*\n/gm, '').replace(/ \[(?:reuse|use_induction,reuse)\](?=:)/g, '');
+    assert.equal(withoutAttributesOrComments(REQUEST_SECURITY_HELPER_INSERTION), withoutAttributesOrComments(DEPENDENT_HELPER_INSERTION), 'helper FORMULAS are unchanged');
+    assert.deepEqual(insertInvariantHelpers(source.replace(/\r?\n/g, '\r\n'), REQUEST_SECURITY_PROFILE, context, manifest), { normalized, candidate });
+    const unselected = profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name));
+    assert.deepEqual(unselected, ORIGINAL_NAMES.filter((name) => !selectedProperties.includes(name)));
+    for (const witness of REQUEST_WITNESS_NAMES) assert.ok(unselected.includes(witness));
+  });
+
+  test(`${context} security invocation requires all in-context helpers and only its original properties with unchanged controls`, () => {
+    const required = requiredInvariantVerdicts(REQUEST_SECURITY_PROFILE, context);
+    const properties = context === 'baseline' ? REQUEST_SECURITY_NAMES : [REQUIRED_COUNTEREXAMPLES[context]];
+    for (const helper of REQUEST_SECURITY_HELPERS) assert.deepEqual(required[helper], { trace: 'all-traces', verdict: 'verified' });
+    for (const property of properties) assert.deepEqual(required[property], { trace: 'all-traces', verdict: context === 'baseline' ? 'verified' : 'falsified' });
+    assert.deepEqual(Object.keys(required), [...REQUEST_SECURITY_HELPERS, ...properties]);
+    const path = securityInput(context);
+    assert.deepEqual(invariantArguments(path, REQUEST_SECURITY_PROFILE, context), [
+      path, '--quit-on-warning', ...Object.keys(required).map((name) => `--prove=${name}`), '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS',
+    ]);
+    assert.equal(PROBE_TIMEOUT_MS, 120_000);
+    assert.equal(PROBE_OUTPUT_BYTES, 4 * 1024 * 1024);
+    assert.throws(() => invariantArguments(input, REQUEST_SECURITY_PROFILE, context));
+    assert.throws(() => invariantArguments(dependentInput(context), REQUEST_SECURITY_PROFILE, context));
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.throws(() => invariantArguments(securityInput(other), REQUEST_SECURITY_PROFILE, context));
+    }
+  });
+
+  test(`${context} cannot count correct security rows without EVERY reused helper verified in this invocation`, () => {
+    const path = securityInput(context), valid = securityOutput(context);
+    const expected = requiredInvariantVerdicts(REQUEST_SECURITY_PROFILE, context);
+    const accepted = selectedInvariantSummary(valid, REQUEST_SECURITY_PROFILE, path, context);
+    assert.equal(accepted.ok, true);
+    assert.deepEqual(accepted.requiredVerdicts, expected);
+    assert.equal(Object.hasOwn(accepted, 'verdicts'), false);
+    for (const helper of REQUEST_SECURITY_HELPERS) {
+      for (const verdict of ['analysis incomplete (0 steps)', 'falsified - found trace (5 steps)', 'verified', 'verified (14 steps) trailing']) {
+        const observed = selectedInvariantSummary(securityOutput(context, { [helper]: verdict }), REQUEST_SECURITY_PROFILE, path, context);
+        assert.equal(observed.ok, false);
+        assert.deepEqual(observed.verdict, expected[Object.keys(expected).at(-1)], 'security consumer result is deliberately correct');
+      }
+      const row = ` ${helper} (all-traces): verified (14 steps)\n`;
+      const missing = valid.stdout.replace(row, '');
+      assert.notEqual(missing, valid.stdout);
+      const importedBaseline = selectedInvariantSummary(securityOutput('baseline'), REQUEST_SECURITY_PROFILE, securityInput('baseline'), 'baseline');
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: missing, requiredVerdicts: importedBaseline.requiredVerdicts }, REQUEST_SECURITY_PROFILE, path, context).ok, false, 'baseline metadata is not evidence for a missing in-context helper');
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + row }, REQUEST_SECURITY_PROFILE, path, context).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${helper} (all-traces)`, `${helper} (exists-trace)`) }, REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    }
+    for (const property of Object.keys(expected).filter((name) => REQUEST_SECURITY_NAMES.includes(name))) {
+      const contrary = context === 'baseline' ? 'falsified (8 steps)' : 'verified (18 steps)';
+      assert.equal(selectedInvariantSummary(securityOutput(context, { [property]: contrary }), REQUEST_SECURITY_PROFILE, path, context).ok, false);
+      assert.equal(selectedInvariantSummary(securityOutput(context, { [property]: 'analysis incomplete (0 steps)' }), REQUEST_SECURITY_PROFILE, path, context).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${property} (all-traces)`, `${property} (exists-trace)`) }, REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    }
+    if (context !== 'baseline') {
+      const wrong = Object.values(REQUIRED_COUNTEREXAMPLES).find((name) => name !== REQUIRED_COUNTEREXAMPLES[context]);
+      assert.equal(selectedInvariantSummary(securityOutput(context, { [REQUIRED_COUNTEREXAMPLES[context]]: 'verified (9 steps)', [wrong]: 'falsified - found trace (17 steps)' }), REQUEST_SECURITY_PROFILE, path, context).ok, false, 'another property counterexample never satisfies this manifest canary');
+    }
+  });
+
+  test(`${context} rejects crossed invocation/context output, warning, process failure, missing property and attribution drift`, () => {
+    const path = securityInput(context), valid = securityOutput(context);
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.equal(selectedInvariantSummary(securityOutput(other), REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    }
+    assert.equal(selectedInvariantSummary(securityOutput(context, {}, 'older-invocation'), REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    for (const stdout of [
+      valid.stdout + valid.stdout,
+      valid.stdout + ' unexpected_property (all-traces): verified (1 steps)\n',
+      valid.stdout.replace('summary of summaries:', 'partial summary:'),
+      `\u001b[33mWARNING\u001b[0m: unproved dependency\n${valid.stdout}`,
+      valid.stdout.replace(new RegExp(`^ ${Object.keys(requiredInvariantVerdicts(REQUEST_SECURITY_PROFILE, context)).at(-1)} \\(all-traces\\):[^\\n]*\\n`, 'm'), ''),
+    ]) assert.equal(selectedInvariantSummary({ ...valid, stdout }, REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    assert.equal(selectedInvariantSummary({ ...valid, stderr: 'WARNING: dependency assumption' }, REQUEST_SECURITY_PROFILE, path, context).ok, false);
+    for (const delta of [{ status: 1 }, { status: null }, { signal: 'SIGTERM' }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+      const observed = invariantRunSummary({ ...valid, ...delta }, REQUEST_SECURITY_PROFILE, path, true, context);
+      assert.equal(observed.completed, false);
+      assert.equal(observed.selectedProof.ok, false);
+    }
+    for (const unchanged of [false, null, undefined, 'true']) {
+      assert.equal(invariantRunSummary(valid, REQUEST_SECURITY_PROFILE, path, unchanged, context).selectedProof.ok, false);
+    }
+  });
+}
+
+test('security source admission forbids reordered/missing helpers, baseline assumptions, altered formulas or enlarged mutations', () => {
+  for (const context of CONTEXT_NAMES) {
+    const { candidate } = insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, context, manifest);
+    const movedBuilding = candidate.replace(REUSED_BUILDING_INSERTION, '').replace('\nlemma honest_approve_trace:\n', REUSED_BUILDING_INSERTION + '\nlemma honest_approve_trace:\n');
+    const changes = [
+      movedBuilding, candidate.replace(REQUEST_SECURITY_HELPER_INSERTION, ''),
+      candidate.replace(REQUEST_SECURITY_HELPER_INSERTION, REQUEST_SECURITY_HELPER_INSERTION + REQUEST_SECURITY_HELPER_INSERTION),
+      candidate.replace('lemma enrolled_revision_unique [reuse]:', 'lemma enrolled_revision_unique:'),
+      candidate.replace('lemma request_opened_unique [reuse]:', 'lemma request_opened_unique:'),
+      candidate.replace('[use_induction,reuse]', '[reuse]'),
+      candidate.replace('[use_induction,reuse]', '[use_induction]'),
+      candidate.replace('lemma enrolled_revision_unique [reuse]:', 'lemma enrolled_revision_unique [sources]:'),
+      candidate.replace('     ==> b < o"', '     ==> #b = #o"'),
+      candidate.replace(BUILDING_ACTION_EDITS[0].to, BUILDING_ACTION_EDITS[0].from),
+      candidate.replace(BUILDING_ACTION_EDITS[1].to, BUILDING_ACTION_EDITS[1].from),
+      candidate.replace('left = right', 'left = left'),
+      candidate + '\nrestriction assume_baseline: "All #i. False()@i ==> F"\n',
+      candidate + '\n// unreviewed mutation\n',
+      ...ORIGINAL_NAMES.map((name) => candidate.replace(`lemma ${name}:`, `lemma ${name} [reuse]:`)),
+    ];
+    for (const changed of changes) {
+      assert.notEqual(changed, candidate);
+      assert.throws(() => admitInvariantCandidate(source, changed, REQUEST_SECURITY_PROFILE, context, manifest));
+      assert.throws(() => eraseInvariantCandidate(changed, REQUEST_SECURITY_PROFILE, context, manifest));
+    }
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.throws(() => admitInvariantCandidate(source, candidate, REQUEST_SECURITY_PROFILE, other, manifest));
+    }
+    assert.throws(() => admitInvariantCandidate(source, candidate, DEPENDENT_PROFILE, context, manifest));
+    assert.throws(() => admitInvariantCandidate(source, insertInvariantHelpers(source, DEPENDENT_PROFILE, context, manifest).candidate, REQUEST_SECURITY_PROFILE, context, manifest));
+    const modifiedManifest = structuredClone(manifest);
+    modifiedManifest.models.find((model) => model.id === 'request-authorization').canaries[0].mutation.to += '\n// enlarged mutant';
+    assert.throws(() => insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, context, modifiedManifest));
+  }
+});
+
+test('security evidence remains explicitly isolated, context-attributed and honest about unselected obligations', () => {
+  assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
+  assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
+  assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context)'));
+  assert.ok(probeSource.includes("'required-counterexample-selected'"));
+  assert.ok(probeSource.includes('selectedHelper: securityProfile ? null'));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
+  assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
+  assert.ok(probeSource.includes("'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs'"));
+  assert.ok(probeSource.includes("unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' }))"));
+  assert.doesNotMatch(workflow, /--profile=request-opened-with-building|--prove=|--reuse|--bound=|continue-on-error/u);
+  assert.ok(workflow.includes('timeout-minutes: 15'));
+  assert.equal((workflow.match(/run: node tools\/protocol-invariant-probe\.mjs /gu) ?? []).length, 1);
 });
 
 function dependentInput(context) {
