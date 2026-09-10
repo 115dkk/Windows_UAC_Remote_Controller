@@ -1,4 +1,4 @@
-name: Stored shaped-proof check-only experiment
+name: Stored deny shaped-proof check-only experiment
 
 on:
   workflow_dispatch:
@@ -7,6 +7,7 @@ on:
     paths:
       - 'tools/protocol-witness-shape*'
       - 'security/tamarin/candidates/HonestApproveShapedProof.spthy'
+      - 'security/tamarin/candidates/HonestDenyShapedProof.spthy'
       - '.github/workflows/protocol-witness-shape.yml'
 
 permissions:
@@ -18,7 +19,7 @@ concurrency:
 
 jobs:
   investigate:
-    name: Stored approve proof ${{ matrix.context }} (not a security gate)
+    name: Stored deny be8a31b proof ${{ matrix.context }} (not a security gate)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -26,11 +27,11 @@ jobs:
       matrix:
         include:
           - context: good
-            argument: --check-stored=good
+            argument: --check-deny-stored=good
           - context: sorry
-            argument: --check-stored=sorry
+            argument: --check-deny-stored=sorry
           - context: contradiction
-            argument: --check-stored=contradiction
+            argument: --check-deny-stored=contradiction
     env:
       CI: 'true'
     steps:
@@ -60,7 +61,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
         with:
-          name: protocol-witness-shape-check-${{ matrix.context }}-${{ github.sha }}
+          name: protocol-deny-shape-check-${{ matrix.context }}-${{ github.sha }}
           path: artifacts/protocol-witness-shape/
           if-no-files-found: error
           retention-days: 14

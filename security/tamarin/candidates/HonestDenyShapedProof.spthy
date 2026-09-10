@@ -1,0 +1,402 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Authored/unverified application contract. Decisions and complete request
+// bindings are PUBLIC; channel confidentiality cannot prove authorization here.
+theory RequestAuthorization
+begin
+
+// Ranking only: prioritize existing constraints over unbounded previous-state
+// chains. This does not restrict traces or assume any security conclusion.
+heuristic: i
+
+builtins: signing
+
+restriction Equality:
+  "All left right #i. Eq(left, right) @i ==> left = right"
+
+// Different devices share the SAME PC and can sign the SAME published request.
+// No global owner token serializes unrelated operations: this conservatively
+// admits extra registry/request interleavings beyond the atomic Rust owner.
+rule CreatePc:
+  [ Fr(~pc), Fr(~epoch), Fr(~session_id), Fr(~logon_luid) ]
+  -->
+  [ !HostContext(~pc, ~epoch, ~session_id, ~logon_luid),
+    Out(<~pc, ~epoch, ~session_id, ~logon_luid>) ]
+
+// TCB, not a proved ceremony or hardware-authentication fact. This rule may
+// enroll arbitrarily many distinct devices under one existing PC. Fresh
+// revision tokens abstract allocator non-reuse, not u64 arithmetic/storage.
+rule TrustedEnrollment:
+  [ !HostContext(pc, epoch, session_id, logon_luid),
+    Fr(~device), Fr(~approval_sk), Fr(~denial_sk), Fr(~revision) ]
+  --[ Enrolled(pc, ~device, ~revision, pk(~approval_sk), pk(~denial_sk)) ]->
+  [ !PhoneKeys(~device, ~approval_sk, ~denial_sk),
+    !EnrollmentKeys(pc, ~device, pk(~approval_sk), pk(~denial_sk)),
+    RegistrySlot(~device, pc, ~revision, 'active'),
+    Out(<pc, ~device, ~revision,
+      pk(~approval_sk), pk(~denial_sk)>) ]
+
+rule OpenActualRequest:
+  let binding = <pc, epoch, session_id, logon_luid, ~request_id, ~nonce,
+        ~content_digest, ~expiry>
+  in
+  [ !HostContext(pc, epoch, session_id, logon_luid),
+    Fr(~request_id), Fr(~nonce), Fr(~content_digest), Fr(~expiry) ]
+  -->
+  [ RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]
+
+// Immutable keys originate ONLY in TrustedEnrollment. The previous theory also
+// kept these keys unchanged across every revision; current membership remains
+// linear and revocable. RequestOrigin links the existing slot ID to its binding
+// ONLY at actual open. Its input [+] changes search priority only; this origin
+// never replaces the request slot, frozen Snapshot or exact registry phase.
+
+// Each capture checks current registration, but registry changes and other
+// requests MAY interleave between captures. This overapproximates atomic Rust
+// snapshot collection. Repeated captures are harmless persistent duplicates;
+// any nonempty subset, including a full serial registry snapshot, is possible.
+rule CaptureEligibleDevice:
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key) ]
+  --[ SnapshotCaptured(pc, device, revision, binding) ]->
+  [ RequestSlot(request_id, pc, binding, 'building'),
+    RegistrySlot(device, pc, revision, 'active'),
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
+
+// A nonempty frozen snapshot permits publication. Changing the building phase
+// makes later capture impossible. The pending slot is GLOBAL to the request,
+// never one replay guard per eligible device or key revision.
+rule PublishRequest:
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]
+  --[ RequestOpened(pc, binding) ]->
+  [ RequestSlot(request_id, pc, binding, 'pending'), Out(<'opened', pc, binding>) ]
+
+// Models the trusted native per-use authorization event for this exact binding.
+// It is not a network-supplied authenticated=true value. It cannot sign by
+// itself; the linear ticket must be consumed by the exact approval operation.
+rule UserAuthenticatesExactApproval:
+  [ !PhoneKeys(device, approval_sk, denial_sk),
+    In(<'opened', pc, binding>) ]
+  --[ UserAuthenticated(device, binding) ]->
+  [ ApprovalTicket(device, binding, approval_sk) ]
+
+rule SignExactApprovalOnce:
+  let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
+        'v1', device, 'approve', binding>
+  in
+  [ ApprovalTicket(device, binding, approval_sk) ]
+  --[ ApprovalSigned(device, binding) ]->
+  [ Out(<'decision', device, 'approve', binding, sign(approval_message, approval_sk)>) ]
+
+rule SignDenialWithoutApprovalAuthentication:
+  let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
+        'v1', device, 'deny', binding>
+  in
+  [ !PhoneKeys(device, approval_sk, denial_sk),
+    In(<'opened', pc, binding>) ]
+  --[ DenialSigned(device, binding) ]->
+  [ Out(<'decision', device, 'deny', binding, sign(denial_message, denial_sk)>) ]
+
+rule AcceptApproval:
+  let approval_message = <'Windows-UAC-Remote-Controller/approve/v1',
+        'v1', device, 'approve', binding>
+  in
+  [ RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding),
+    RequestSlot(request_id, pc, binding, 'pending'),
+    In(<'decision', device, 'approve', binding, signature>) ]
+  --[ Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE
+      RequestAccepted(pc, device, revision, binding, 'approve') ]->
+  [ RegistrySlot(device, pc, revision, 'active')
+    // CANARY_REPLAY_GUARD
+  ]
+
+rule AcceptDenial:
+  let denial_message = <'Windows-UAC-Remote-Controller/deny/v1',
+        'v1', device, 'deny', binding>
+  in
+  [ RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    !RequestOrigin(request_id, pc, binding)[+],
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding),
+    RequestSlot(request_id, pc, binding, 'pending'),
+    In(<'decision', device, 'deny', binding, signature>) ]
+  --[ Eq(verify(signature, denial_message, denial_key), true),
+      RequestAccepted(pc, device, revision, binding, 'deny') ]->
+  [ RegistrySlot(device, pc, revision, 'active') ]
+
+// Real retirement of the linear active registration. The retired phase permits
+// explicit re-enrollment but never restores the old revision.
+rule RevokeCurrentDevice:
+  [ RegistrySlot(device, pc, revision, 'active') ]
+  --[ RegistryRevoked(pc, device, revision) ]->
+  [ RegistrySlot(device, pc, revision, 'retired') ]
+
+rule TrustedReenrollmentWithSameKeys:
+  [ RegistrySlot(device, pc, old_revision, 'retired'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    Fr(~new_revision) ]
+  --[ Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
+    Out(~new_revision) ]
+
+// Core replacement likewise invalidates the former revision even with the same
+// keys; no pending snapshot is silently upgraded to the new membership.
+rule TrustedReplacementWithSameKeys:
+  [ RegistrySlot(device, pc, old_revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key),
+    Fr(~new_revision) ]
+  --[ RegistryRevoked(pc, device, old_revision),
+      Enrolled(pc, device, ~new_revision, approval_key, denial_key) ]->
+  [ RegistrySlot(device, pc, ~new_revision, 'active'),
+    Out(~new_revision) ]
+
+rule CancelExactRequest:
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
+  --[ RequestCancelled(binding) ]->
+  [ ]
+
+// Explicit native expiry transition, not a modeled numerical clock. There is
+// intentionally no claim that this rule executes within a wall-clock duration.
+rule ExpireExactRequest:
+  [ RequestSlot(request_id, pc, binding, 'pending'), !RequestOrigin(request_id, pc, binding)[+] ]
+  --[ RequestExpired(binding) ]->
+  [ ]
+
+lemma honest_approve_trace:
+  exists-trace
+  "Ex pc device revision binding #o #u #a.
+    RequestOpened(pc, binding) @o
+    & UserAuthenticated(device, binding) @u
+    & RequestAccepted(pc, device, revision, binding, 'approve') @a
+    & o < u & u < a"
+
+lemma honest_deny_without_approval_auth_trace:
+  exists-trace
+  "Ex pc device revision binding approval_key denial_key #e #c #o #s #a.
+    RequestOpened(pc, binding) @o
+    & RequestAccepted(pc, device, revision, binding, 'deny') @a
+    & o < a
+    & not (Ex #u. UserAuthenticated(device, binding) @u)
+    & Enrolled(pc, device, revision, approval_key, denial_key) @e
+    & SnapshotCaptured(pc, device, revision, binding) @c
+    & DenialSigned(device, binding) @s
+    & e < c & c < o & o < s & s < a
+    & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"
+
+simplify
+solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #c )
+  case OpenActualRequest
+  solve( !RequestOrigin( request_id.1, ~pc,
+                         <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                          ~content_digest, ~expiry>
+         )[+] ▶₁ #o )
+    case OpenActualRequest
+    solve( RequestAccepted( ~pc, device, revision,
+                            <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                             ~content_digest, ~expiry>,
+                            'deny'
+           ) @ #a )
+      case AcceptDenial
+      solve( !RequestOrigin( request_id, ~pc,
+                             <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id.1, ~nonce,
+                              ~content_digest, ~expiry>
+             )[+] ▶₂ #a )
+        case OpenActualRequest
+        solve( Enrolled( ~pc, device, revision, approval_key.3, denial_key.2
+               ) @ #e )
+          case TrustedEnrollment
+          solve( !EnrollmentKeys( ~pc, ~device, approval_key.1, denial_key
+                 ) ▶₃ #c )
+            case TrustedEnrollment
+            solve( RequestSlot( ~request_id, ~pc,
+                                <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                 ~content_digest, ~expiry>,
+                                'building'
+                   ) ▶₀ #o )
+              case CaptureEligibleDevice
+              solve( !Snapshot( ~pc, device.1, revision.1, approval_key.1, denial_key,
+                                <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                 ~content_digest, ~expiry>
+                     ) ▶₂ #o )
+                case CaptureEligibleDevice
+                solve( !PhoneKeys( ~device, approval_sk.1, denial_sk.1 ) ▶₀ #s )
+                  case TrustedEnrollment
+                  solve( !EnrollmentKeys( ~pc, ~device, approval_key, pk(x) ) ▶₁ #a )
+                    case TrustedEnrollment
+                    solve( !Snapshot( ~pc, ~device, ~revision, pk(~approval_sk),
+                                      pk(~denial_sk),
+                                      <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                       ~content_digest, ~expiry>
+                           ) ▶₃ #a )
+                      case CaptureEligibleDevice
+                      solve( RequestSlot( ~request_id, ~pc,
+                                          <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                           ~content_digest, ~expiry>,
+                                          'pending'
+                             ) ▶₄ #a )
+                        case PublishRequest
+                        solve( RequestSlot( ~request_id, ~pc,
+                                            <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                             ~content_digest, ~expiry>,
+                                            'building'
+                               ) ▶₀ #c )
+                          case OpenActualRequest
+                          solve( RegistrySlot( ~device, ~pc, ~revision, 'active' ) ▶₂ #c )
+                            case AcceptDenial
+                            by sorry
+                          next
+                            case CaptureEligibleDevice
+                            by sorry
+                          next
+                            case TrustedEnrollment
+                            solve( RegistrySlot( ~device, ~pc, ~revision, 'active' ) ▶₀ #a )
+                              case AcceptDenial
+                              by sorry
+                            next
+                              case CaptureEligibleDevice
+                              solve( !KU( ~pc ) @ #vk.9 )
+                                case CreatePc
+                                solve( !KU( ~epoch ) @ #vk.11 )
+                                  case CreatePc
+                                  solve( !KU( ~session_id ) @ #vk.13 )
+                                    case CreatePc
+                                    solve( !KU( ~logon_luid ) @ #vk.15 )
+                                      case CreatePc
+                                      solve( !KU( ~request_id ) @ #vk.17 )
+                                        case PublishRequest
+                                        solve( !KU( ~nonce ) @ #vk.19 )
+                                          case PublishRequest
+                                          solve( !KU( ~content_digest ) @ #vk.21 )
+                                            case PublishRequest
+                                            solve( !KU( ~expiry ) @ #vk.22 )
+                                              case PublishRequest
+                                              solve( !KU( ~device ) @ #vk.24 )
+                                                case SignDenialWithoutApprovalAuthentication
+                                                solve( !KU( sign(<'Windows-UAC-Remote-Controller/deny/v1',
+                                                                  'v1', ~device, 'deny', ~pc, ~epoch,
+                                                                  ~session_id, ~logon_luid, ~request_id,
+                                                                  ~nonce, ~content_digest, ~expiry>,
+                                                                 ~denial_sk)
+                                                       ) @ #vk.27 )
+                                                  case SignDenialWithoutApprovalAuthentication
+                                                  SOLVED // trace found
+                                                next
+                                                  case c_sign
+                                                  by sorry
+                                                qed
+                                              next
+                                                case SignExactApprovalOnce
+                                                by sorry
+                                              next
+                                                case TrustedEnrollment
+                                                by sorry
+                                              qed
+                                            qed
+                                          qed
+                                        qed
+                                      qed
+                                    next
+                                      case PublishRequest
+                                      by sorry
+                                    qed
+                                  next
+                                    case PublishRequest
+                                    by sorry
+                                  qed
+                                next
+                                  case PublishRequest
+                                  by sorry
+                                qed
+                              next
+                                case PublishRequest_case_1
+                                by sorry
+                              next
+                                case PublishRequest_case_2
+                                by sorry
+                              next
+                                case TrustedEnrollment
+                                by sorry
+                              qed
+                            qed
+                          qed
+                        qed
+                      qed
+                    qed
+                  qed
+                qed
+              qed
+            next
+              case OpenActualRequest
+              by sorry
+            qed
+          qed
+        next
+          case TrustedReenrollmentWithSameKeys
+          by sorry
+        next
+          case TrustedReplacementWithSameKeys
+          by sorry
+        qed
+      qed
+    qed
+  qed
+qed
+
+lemma honest_two_approvers_single_winner_trace:
+  exists-trace
+  "Ex pc first_device second_device first_revision second_revision binding
+      #c1 #c2 #o #s1 #s2 #a.
+    SnapshotCaptured(pc, first_device, first_revision, binding) @c1
+    & SnapshotCaptured(pc, second_device, second_revision, binding) @c2
+    & RequestOpened(pc, binding) @o
+    & ApprovalSigned(first_device, binding) @s1
+    & ApprovalSigned(second_device, binding) @s2
+    & RequestAccepted(pc, first_device, first_revision, binding, 'approve') @a
+    & not (first_device = second_device)
+    & c1 < o & c2 < o & o < s1 & o < s2 & s1 < a & s2 < a
+    & not (Ex purpose #other.
+      RequestAccepted(pc, second_device, second_revision, binding, purpose) @other)"
+
+lemma accepted_approval_requires_same_binding_auth:
+  "All pc device revision binding #a.
+    RequestAccepted(pc, device, revision, binding, 'approve') @a
+    ==> (Ex #u. UserAuthenticated(device, binding) @u & u < a)"
+
+lemma accepted_decision_matches_opened_request:
+  "All pc device revision binding purpose #a.
+    RequestAccepted(pc, device, revision, binding, purpose) @a
+    ==> (Ex #c #o.
+      SnapshotCaptured(pc, device, revision, binding) @c
+      & RequestOpened(pc, binding) @o & c < o & o < a)"
+
+lemma request_accepted_at_most_once:
+  "All pc first_device second_device first_revision second_revision binding
+      first_purpose second_purpose #i #j.
+    RequestAccepted(pc, first_device, first_revision, binding, first_purpose) @i
+    & RequestAccepted(pc, second_device, second_revision, binding, second_purpose) @j
+    ==> #i = #j"
+
+lemma no_accept_after_revision_revoked:
+  "All pc device revision binding purpose #r #a.
+    RegistryRevoked(pc, device, revision) @r
+    & RequestAccepted(pc, device, revision, binding, purpose) @a
+    ==> not (r < a)"
+
+lemma no_accept_after_request_cancelled:
+  "All pc device revision binding purpose #c #a.
+    RequestCancelled(binding) @c
+    & RequestAccepted(pc, device, revision, binding, purpose) @a
+    ==> not (c < a)"
+
+lemma no_accept_after_request_expired:
+  "All pc device revision binding purpose #e #a.
+    RequestExpired(binding) @e
+    & RequestAccepted(pc, device, revision, binding, purpose) @a
+    ==> not (e < a)"
+
+end

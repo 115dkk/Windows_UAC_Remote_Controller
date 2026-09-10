@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
-  ORIGINAL, SHAPED, APPROVE_TIGHT_SHAPED, DENY_SHAPED, TWO_APPROVERS_SHAPED, WITNESS_VARIANTS,
+  ORIGINAL, SHAPED, APPROVE_TIGHT_SHAPED, DENY_ORIGINAL, DENY_SHAPED, DENY_STORED_SHAPED, DENY_STORED_SOURCE_HASH, TWO_APPROVERS_SHAPED, WITNESS_VARIANTS,
   admitStoredProof, shapeWitness, selectWitnessArguments, selectedExpectation, selectedWitnessSummary,
   STORED_CHECK_CONTEXTS, storedCheckInput, storedCheckArguments, storedCheckSummary,
+  storedDenyCheckInput, storedDenyCheckSummary,
 } from './protocol-witness-shape.mjs';
 import { proofArguments } from './protocol-security.mjs';
 
@@ -150,15 +151,17 @@ test('summary accepts only the selected verified witness, never unselected or in
   }
 });
 
-test('CI runs only three stored-proof contexts independently, while legacy variants remain CLI choices', () => {
+test('CI runs only three deny stored-proof contexts independently, while approve and legacy variants remain CLI choices', () => {
   const workflow = readFileSync(new URL('../.github/workflows/protocol-witness-shape.yml', import.meta.url), 'utf8');
   assert.match(workflow, /fail-fast: false/u);
   for (const context of STORED_CHECK_CONTEXTS) {
     assert.ok(workflow.includes(`context: ${context}`));
-    assert.ok(workflow.includes(`argument: --check-stored=${context}`));
+    assert.ok(workflow.includes(`argument: --check-deny-stored=${context}`));
   }
   assert.doesNotMatch(workflow, /argument: --replay|argument: --variant=/u);
-  assert.ok(workflow.includes('protocol-witness-shape-check-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-deny-shape-check-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('security/tamarin/candidates/HonestDenyShapedProof.spthy'));
+  assert.doesNotMatch(workflow, /argument: --check-stored=/u);
   assert.ok(workflow.includes('if: ${{ always() }}'));
   assert.doesNotMatch(workflow, /continue-on-error|protocol-security\.mjs\s*$/mu);
 });
@@ -233,4 +236,76 @@ test('stored proof checks distinguish verified replay from exact incomplete nega
     }
   }
   assert.throws(() => storedCheckSummary(result(), 'replay', known, input));
+});
+
+test('deny check flags are distinct, fixed and never alias the newer automatic deny variant', () => {
+  for (const context of STORED_CHECK_CONTEXTS) {
+    assert.deepEqual(selectWitnessArguments([`--check-deny-stored=${context}`]), { variant: 'deny-be8a31b', replay: false, checkDenyStored: context });
+    assert.deepEqual(selectWitnessArguments([`--check-stored=${context}`]), { variant: 'approve', replay: true, checkStored: context });
+  }
+  assert.deepEqual(selectWitnessArguments(['--variant=deny']), { variant: 'deny', replay: false });
+  assert.deepEqual(selectWitnessArguments(['--replay']), { variant: 'approve', replay: true });
+  for (const args of [['--check-deny-stored'], ['--check-deny-stored='], ['--check-deny-stored=unknown'],
+    ['--check-deny-stored=constructor'], ['--check-deny-stored=good\n'], ['--check-deny-stored=SOLVED'],
+    ['--check-deny-stored=good', '--check-stored=good'], ['--check-deny-stored=good', '--variant=deny'],
+    ['--check-deny-stored=sorry', '--prove'], ['--check-deny-stored=good', '--replay']]) assert.throws(() => selectWitnessArguments(args));
+});
+
+test('deny candidate erases to exact be8 shape then original7af without importing later uniqueness or changing other lemmas', () => {
+  const stored = readFileSync(new URL('../security/tamarin/candidates/HonestDenyShapedProof.spthy', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const original = shapeWitness(source).normalized, base = original.replace(DENY_ORIGINAL, DENY_STORED_SHAPED);
+  const marker = '\nlemma honest_two_approvers_single_winner_trace:', beginning = base.indexOf(marker);
+  assert.equal(DENY_STORED_SOURCE_HASH, '8cace48c3e4480400a984495dacb00601e31ea91462e2df247f220362d8a3012');
+  assert.doesNotMatch(DENY_STORED_SHAPED, /All #x\. DenialSigned/u);
+  assert.notEqual(DENY_STORED_SHAPED, DENY_SHAPED);
+  for (const context of STORED_CHECK_CONTEXTS) {
+    const prepared = storedDenyCheckInput(source, stored, context), ending = prepared.candidate.indexOf(marker);
+    assert.equal(prepared.shaped, base);
+    assert.equal(prepared.shaped.replace(DENY_STORED_SHAPED, DENY_ORIGINAL), original);
+    assert.equal(prepared.candidate.slice(0, beginning) + prepared.candidate.slice(ending), base);
+    assert.equal(prepared.candidate.slice(0, beginning), base.slice(0, beginning));
+    assert.equal(prepared.candidate.slice(ending), base.slice(beginning));
+    assert.ok(prepared.candidate.includes(ORIGINAL));
+    if (context === 'good') {
+      assert.equal(prepared.candidate, stored.trimEnd() + '\n');
+      const body = prepared.candidate.slice(beginning, ending);
+      assert.equal((body.match(/\bSOLVED\b/gu) ?? []).length, 1);
+      assert.equal((body.match(/^\s*solve\(/gm) ?? []).length, (body.match(/^\s*qed\s*$/gm) ?? []).length);
+      assert.doesNotMatch(body, /by contradiction|by solve\(/u);
+      assert.ok(body.includes('case SignDenialWithoutApprovalAuthentication\n                                                  SOLVED'));
+      for (const label of ['c_sign', 'SignExactApprovalOnce', 'PublishRequest_case_1', 'PublishRequest_case_2',
+        'TrustedReenrollmentWithSameKeys', 'TrustedReplacementWithSameKeys']) {
+        assert.match(body, new RegExp(`case ${label}\\n\\s+by sorry`, 'u'));
+      }
+    } else assert.equal(prepared.candidate.slice(beginning, ending), `\nby ${context}\n`);
+  }
+  for (const altered of [stored.replace(DENY_STORED_SHAPED, DENY_SHAPED), stored.replace(DENY_STORED_SHAPED, DENY_ORIGINAL),
+    stored.replace('==> #i = #j', '==> #i < #j'), stored.replace('builtins: signing', 'builtins: signing, hashing'),
+    stored.replace('simplify\n', 'simplify\nlemma injected [reuse]: "T"\n'), stored.replace('SOLVED', 'SOLVED\nSOLVED'),
+    stored + '\nlemma extra: "T"\n']) assert.throws(() => storedDenyCheckInput(source, altered, 'good'));
+  const approveStored = readFileSync(new URL('../security/tamarin/candidates/HonestApproveShapedProof.spthy', import.meta.url), 'utf8');
+  assert.throws(() => storedDenyCheckInput(source, approveStored, 'good'));
+  assert.throws(() => storedCheckInput(source, stored, 'good'));
+});
+
+test('deny selected summaries cannot borrow approve success or accept unknown negative rows', () => {
+  const input = '/isolated/request.input.spthy', known = ['honest_approve_trace', 'honest_deny_without_approval_auth_trace'];
+  const result = (verdict) => ({ status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${input}\n honest_approve_trace (exists-trace): verified (43 steps)\n honest_deny_without_approval_auth_trace (exists-trace): ${verdict}\n` });
+  assert.equal(storedDenyCheckSummary(result('verified (42 steps)'), 'good', known, input).ok, true);
+  assert.equal(storedDenyCheckSummary(result('analysis incomplete (1 steps)'), 'good', known, input).ok, false);
+  assert.equal(storedCheckSummary(result('analysis incomplete (1 steps)'), 'good', known, input).ok, true, 'approve selection is unchanged');
+  for (const context of ['sorry', 'contradiction']) {
+    assert.equal(storedDenyCheckSummary(result('analysis incomplete (2 steps)'), context, known, input).ok, true);
+    for (const verdict of ['verified (42 steps)', 'unknown (2 steps)', 'analysis undetermined (2 steps)', 'analysis incomplete', 'analysis incomplete (2 steps) extra']) {
+      assert.equal(storedDenyCheckSummary(result(verdict), context, known, input).ok, false);
+    }
+    const complete = result('analysis incomplete (2 steps)');
+    for (const changed of [{ status: 1 }, { error: new Error('timeout') }, { signal: 'SIGTERM' }, { cancelled: true },
+      { cleanupIncomplete: true }, { stderr: 'Warning: unsupported output' }, { classification: 'WITNESS_SHAPE_EXPERIMENT_ONLY' },
+      { stdout: complete.stdout + complete.stdout }, { stdout: complete.stdout.replace(input, '/other/request.input.spthy') },
+      { stdout: complete.stdout.replace('honest_deny_without_approval_auth_trace (exists-trace)', 'honest_deny_without_approval_auth_trace (all-traces)') }]) {
+      assert.equal(storedDenyCheckSummary({ ...complete, ...changed }, context, known, input).ok, false);
+    }
+  }
 });

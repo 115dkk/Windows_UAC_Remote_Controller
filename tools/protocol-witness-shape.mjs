@@ -56,6 +56,22 @@ export const DENY_SHAPED = `lemma honest_deny_without_approval_auth_trace:
     & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
     & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)
     & (All #x. DenialSigned(device, binding) @x ==> #x = #s)"`;
+// Exact earlier be8a31b input, NOT the later deny variant above. Its actual
+// transcript proved this formula without the added DenialSigned uniqueness.
+export const DENY_STORED_SHAPED = `lemma honest_deny_without_approval_auth_trace:
+  exists-trace
+  "Ex pc device revision binding approval_key denial_key #e #c #o #s #a.
+    RequestOpened(pc, binding) @o
+    & RequestAccepted(pc, device, revision, binding, 'deny') @a
+    & o < a
+    & not (Ex #u. UserAuthenticated(device, binding) @u)
+    & Enrolled(pc, device, revision, approval_key, denial_key) @e
+    & SnapshotCaptured(pc, device, revision, binding) @c
+    & DenialSigned(device, binding) @s
+    & e < c & c < o & o < s & s < a
+    & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"`;
+export const DENY_STORED_SOURCE_HASH = '8cace48c3e4480400a984495dacb00601e31ea91462e2df247f220362d8a3012';
 export const TWO_APPROVERS_ORIGINAL = `lemma honest_two_approvers_single_winner_trace:
   exists-trace
   "Ex pc first_device second_device first_revision second_revision binding
@@ -128,7 +144,8 @@ export function selectWitnessArguments(args) {
   if (args[0] === '--variant=deny') return { variant: 'deny', replay: false };
   if (args[0] === '--variant=two-approvers') return { variant: 'two-approvers', replay: false };
   for (const context of STORED_CHECK_CONTEXTS) if (args[0] === `--check-stored=${context}`) return { variant: 'approve', replay: true, checkStored: context };
-  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=approve-tight|--variant=deny|--variant=two-approvers|--check-stored=good|--check-stored=sorry|--check-stored=contradiction]');
+  for (const context of STORED_CHECK_CONTEXTS) if (args[0] === `--check-deny-stored=${context}`) return { variant: 'deny-be8a31b', replay: false, checkDenyStored: context };
+  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=approve-tight|--variant=deny|--variant=two-approvers|--check-stored=good|--check-stored=sorry|--check-stored=contradiction|--check-deny-stored=good|--check-deny-stored=sorry|--check-deny-stored=contradiction]');
 }
 
 export function selectedExpectation(variant) {
@@ -192,6 +209,30 @@ export function storedCheckInput(source, stored, context) {
     originalBodySha256: hash(originalBody), replacementBodySha256: hash(replacement) };
 }
 
+export function storedDenyCheckInput(source, stored, context) {
+  storedContext(context);
+  assert.equal(typeof stored, 'string'); assert.ok(Buffer.byteLength(stored) <= MAX_SOURCE);
+  const { normalized } = shapeWitness(source); // Existing exact original-source admission, not a new formula input.
+  const base = mutateExactlyOnce(normalized, { from: DENY_ORIGINAL, to: DENY_STORED_SHAPED });
+  assert.equal(hash(base), DENY_STORED_SOURCE_HASH, 'The exact be8a31b deny shape changed.');
+  assert.equal(mutateExactlyOnce(base, { from: DENY_STORED_SHAPED, to: DENY_ORIGINAL }), normalized);
+  const admitted = stored.replace(/\r\n/g, '\n').trimEnd() + '\n';
+  const marker = '\nlemma honest_two_approvers_single_winner_trace:';
+  const beginning = base.indexOf(marker), ending = admitted.indexOf(marker);
+  assert.ok(beginning > 0 && ending > beginning && base.lastIndexOf(marker) === beginning && admitted.lastIndexOf(marker) === ending);
+  assert.equal(admitted.slice(0, beginning), base.slice(0, beginning));
+  assert.equal(admitted.slice(ending), base.slice(beginning));
+  const originalBody = admitted.slice(beginning, ending), proof = originalBody.trim();
+  assert.ok(proof.startsWith('simplify\n') && proof.endsWith('qed'));
+  assert.equal((proof.match(/\bSOLVED\b/gu) ?? []).length, 1, 'Retain only the first solved deny spine.');
+  assert.doesNotMatch(proof, /\b(?:lemma|rule|restriction|axiom|builtins|functions|equations|heuristic|tactic|configuration|theory|oracle)\b|#\s*(?:include|define|ifdef|endif)\b/iu);
+  const replacement = context === 'good' ? originalBody : `\nby ${context}\n`;
+  const candidate = admitted.slice(0, beginning) + replacement + admitted.slice(ending);
+  assert.equal(candidate.slice(0, beginning) + candidate.slice(beginning + replacement.length), base);
+  return { normalized, shaped: base, admitted, candidate,
+    originalBodySha256: hash(originalBody), replacementBodySha256: hash(replacement) };
+}
+
 export function storedCheckArguments(input) {
   assert.ok(typeof input === 'string' && input.length <= 4096 && !/[\u0000-\u001f\u007f]/u.test(input) &&
     posix.isAbsolute(input) && posix.normalize(input) === input && posix.basename(input) === 'request.input.spthy');
@@ -199,8 +240,16 @@ export function storedCheckArguments(input) {
 }
 
 export function storedCheckSummary(result, context, known, input) {
+  return storedProofSummary(result, context, known, input, STORED_LEMMA);
+}
+
+export function storedDenyCheckSummary(result, context, known, input) {
+  return storedProofSummary(result, context, known, input, 'honest_deny_without_approval_auth_trace');
+}
+
+function storedProofSummary(result, context, known, input, selectedLemma) {
   storedContext(context);
-  const expected = { [STORED_LEMMA]: { trace: 'exists-trace', verdict: context === 'good' ? 'verified' : 'inconclusive' } };
+  const expected = { [selectedLemma]: { trace: 'exists-trace', verdict: context === 'good' ? 'verified' : 'inconclusive' } };
   // Reuse exact-input/single-summary/known-name/process ownership checks. For
   // negatives, the parser's broad inconclusive category is NEVER sufficient.
   const parsed = parseProofSummary(result, expected, known, input);
@@ -210,10 +259,10 @@ export function storedCheckSummary(result, context, known, input) {
   if (Buffer.byteLength(output) > 4 * 1024 * 1024 + 1) reasons.push('stored-proof check output exceeds its bound');
   if (/\bwarn(?:ing|ings)?\b|returned unsupported version/i.test(output)) reasons.push('prover warning or unsupported dependency');
   const summary = output.slice(Math.max(0, output.lastIndexOf('summary of summaries:')));
-  const rows = [...summary.matchAll(/^\s*honest_approve_trace\s+\(exists-trace\):\s*([^\r\n]+)$/gm)];
+  const rows = [...summary.matchAll(new RegExp(`^\\s*${selectedLemma}\\s+\\(exists-trace\\):\\s*([^\\r\\n]+)$`, 'gm'))];
   const exact = context === 'good' ? /^verified \(\d+ steps\)\s*$/ : /^analysis incomplete \(\d+ steps\)\s*$/;
   if (rows.length !== 1 || !exact.test(rows[0][1])) reasons.push('selected check did not produce its exact required verdict row');
-  return { ok: reasons.length === 0, reasons, selectedLemma: STORED_LEMMA,
+  return { ok: reasons.length === 0, reasons, selectedLemma,
     expected: context === 'good' ? 'verified' : 'analysis incomplete', observedRow: rows.length === 1 ? rows[0][1].trim() : null };
 }
 
@@ -252,8 +301,11 @@ function storedFile(path, maximum = MAX_SOURCE, capture = true) {
   } finally { closeSync(fd); }
 }
 
-async function runStoredCheck(context) {
+async function runStoredCheck(context, variant = 'approve') {
   storedContext(context);
+  assert.ok(variant === 'approve' || variant === 'deny-be8a31b');
+  const deny = variant === 'deny-be8a31b';
+  const selectedLemma = deny ? 'honest_deny_without_approval_auth_trace' : STORED_LEMMA;
   const commit = process.env.GITHUB_SHA, binary = process.env.TAMARIN_BIN;
   assert.ok(/^[0-9a-f]{40}$/.test(commit ?? '') && Number(process.versions.node.split('.')[0]) === 24);
   assert.ok(typeof binary === 'string' && isAbsolute(binary) && realpathSync(root) === root);
@@ -262,11 +314,11 @@ async function runStoredCheck(context) {
     try { mkdirSync(path, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
     assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink());
   }
-  const directory = mkdtempSync(resolve(root, 'artifacts/protocol-witness-shape', `${STORED_CLASSIFICATION}-${context}-`));
+  const directory = mkdtempSync(resolve(root, 'artifacts/protocol-witness-shape', `${STORED_CLASSIFICATION}${deny ? '-deny-be8a31b' : ''}-${context}-`));
   const controller = new AbortController(), stop = () => controller.abort(new Error('Stored-proof check interrupted.'));
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = { classification: STORED_CLASSIFICATION, eligibleAsNormalGate: false, normalGateStatus: 'not-run',
-    commit, context, variant: 'approve', selectedLemma: STORED_LEMMA, helpers: [],
+    commit, context, variant, selectedLemma, helpers: [],
     originalWeakerWitnessDirectlyVerified: false, storedProofReplayedAndVerified: false,
     expected: context === 'good' ? 'verified' : 'analysis incomplete',
     bounds: { invocations: 1, timeoutMs: 120000, outputBytes: 4 * 1024 * 1024, maxSourceFiles: 48, sourceBytesEach: MAX_SOURCE, heapGiB: 2, runtimeThreads: 2 },
@@ -286,12 +338,12 @@ async function runStoredCheck(context) {
       const entry = { path: name, snapshot, ...file }; snapshots.set(name, entry); return entry;
     };
     const original = capture('security/tamarin/RequestAuthorization.spthy');
-    const stored = capture('security/tamarin/candidates/HonestApproveShapedProof.spthy');
+    const stored = capture(deny ? 'security/tamarin/candidates/HonestDenyShapedProof.spthy' : 'security/tamarin/candidates/HonestApproveShapedProof.spthy');
     const manifest = JSON.parse(capture('security/tamarin/manifest.json').bytes.toString('utf8'));
     assert.equal(manifest.version, 1); assert.equal(manifest.toolVersion, '1.12.0');
     const models = manifest.models.filter((model) => model.id === 'request-authorization');
     assert.equal(models.length, 1); assert.ok(!Object.hasOwn(models[0], 'helpers'));
-    assert.deepEqual(models[0].expected[STORED_LEMMA], selectedExpectation('approve')[STORED_LEMMA]);
+    assert.deepEqual(models[0].expected[selectedLemma], selectedExpectation(deny ? 'deny' : 'approve')[selectedLemma]);
     const known = Object.keys(models[0].expected);
     assert.deepEqual(known, [...original.bytes.toString('utf8').matchAll(/^lemma ([A-Za-z0-9_]+):/gm)].map((match) => match[1]));
     assert.ok(Array.isArray(manifest.sourceBindings) && manifest.sourceBindings.length > 0 && manifest.sourceBindings.length <= 32);
@@ -303,7 +355,7 @@ async function runStoredCheck(context) {
     }
     for (const name of ['tools/protocol-witness-shape.mjs', 'tools/protocol-witness-shape.test.mjs', 'tools/protocol-security.mjs',
       'tools/prover-process.mjs', 'tools/install-tamarin.mjs', '.github/workflows/protocol-witness-shape.yml', '.node-version']) capture(name);
-    const candidate = storedCheckInput(original.bytes.toString('utf8'), stored.bytes.toString('utf8'), context);
+    const candidate = (deny ? storedDenyCheckInput : storedCheckInput)(original.bytes.toString('utf8'), stored.bytes.toString('utf8'), context);
     const input = resolve(directory, 'request.input.spthy'), args = storedCheckArguments(input);
     writeFileSync(input, candidate.candidate, { flag: 'wx', mode: 0o400 });
     writeFileSync(resolve(directory, 'shaped-without-proof.spthy'), candidate.shaped, { flag: 'wx', mode: 0o400 });
@@ -325,13 +377,16 @@ async function runStoredCheck(context) {
       storedProofSha256: stored.sha256, inputSha256: inputHash, originalBodySha256: candidate.originalBodySha256,
       replacementBodySha256: candidate.replacementBodySha256, exactProofBodyErasureMatchesShapedSource: true,
       originalRulesRestrictionsAndOtherLemmasUnchanged: true, originalShapedFormulaUnchanged: true,
-      unselectedLemmas: known.filter((name) => name !== STORED_LEMMA).map((name) => ({ name, status: 'not-required-by-this-experiment' })) };
+      ...(deny ? { retainedShapedSourceSha256: DENY_STORED_SOURCE_HASH, shapedFormulaSha256: hash(DENY_STORED_SHAPED),
+        originalFormulaSha256: hash(DENY_ORIGINAL), proofExtraction: { sourceCommit: 'be8a31b', sourceBodyLines: [419, 2424],
+          retainedSolvedLine: 515, transform: 'first-SOLVED-ancestor-spine; sibling subtrees become by sorry', previouslyCheckedAsStoredProof: false } } : {}),
+      unselectedLemmas: known.filter((name) => name !== selectedLemma).map((name) => ({ name, status: 'not-required-by-this-experiment' })) };
     unchanged(); controller.signal.throwIfAborted();
     writeFileSync(resolve(directory, 'invocation.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
     report.attempted = true; save();
     const result = await runProver(binary, args, { cwd: directory, logPath: resolve(directory, 'prover.log'),
       timeoutMs: 120000, maxOutputBytes: 4 * 1024 * 1024, signal: controller.signal });
-    const selectedCheck = storedCheckSummary(result, context, known, input);
+    const selectedCheck = (deny ? storedDenyCheckSummary : storedCheckSummary)(result, context, known, input);
     report = { ...report, selectedCheck,
       completed: !result.error && !result.signal && result.status === 0 && !result.cancelled && !result.cleanupIncomplete,
       process: { status: result.status, signal: result.signal, error: result.error?.message ?? null,
@@ -354,8 +409,9 @@ async function main() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.env.CI, 'true');
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
-  const { variant, replay, checkStored } = selectWitnessArguments(process.argv.slice(2));
+  const { variant, replay, checkStored, checkDenyStored } = selectWitnessArguments(process.argv.slice(2));
   if (checkStored !== undefined) return runStoredCheck(checkStored);
+  if (checkDenyStored !== undefined) return runStoredCheck(checkDenyStored, 'deny-be8a31b');
   const expected = selectedExpectation(variant);
   const binary = process.env.TAMARIN_BIN;
   assert.ok(typeof binary === 'string' && isAbsolute(binary));
