@@ -180,6 +180,84 @@ pub(crate) fn validate_probe_installation() -> Result<ValidatedProbeInstallation
     })
 }
 
+/// Fixed installed pairing participants. Pins establish protected path/file
+/// identity, not a hash of another process's already mapped executable pages.
+#[cfg(target_pointer_width = "64")]
+pub(super) struct ValidatedPairingInstallation {
+    installation: ValidatedInstallation,
+    controller: PathBuf,
+    controller_pin: OwnedHandle,
+    service_pin: OwnedHandle,
+}
+
+#[cfg(target_pointer_width = "64")]
+impl ValidatedPairingInstallation {
+    pub(super) fn service(&self) -> &Path {
+        self.installation.executable()
+    }
+
+    pub(super) fn check_service_image(&self, reported: &Path) -> Result<(), ServiceError> {
+        self.check_image(reported, self.service(), &self.service_pin)
+    }
+
+    pub(super) fn check_controller_image(&self, reported: &Path) -> Result<(), ServiceError> {
+        self.check_image(reported, &self.controller, &self.controller_pin)
+    }
+
+    fn check_image(
+        &self,
+        reported: &Path,
+        expected: &Path,
+        original: &OwnedHandle,
+    ) -> Result<(), ServiceError> {
+        // Reject the observed process path BEFORE opening anything. Only the
+        // fixed installed leaf is opened; a client cannot nominate a path.
+        if !same_path(reported, expected)? {
+            return Err(ServiceError::UntrustedInstallation);
+        }
+        let trusted = policy::trusted_system_sids();
+        inspect_open_handle(
+            original,
+            expected,
+            false,
+            ObjectPolicy::Installation,
+            &trusted,
+        )?;
+        let current = open_checked(expected, false, ObjectPolicy::Installation, &trusted)?;
+        if file_identity(original)? != file_identity(&current)? {
+            return Err(ServiceError::UntrustedInstallation);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+pub(super) fn validate_pairing_installation() -> Result<ValidatedPairingInstallation, ServiceError>
+{
+    let installation = validate_installation(true)?;
+    let controller = installation
+        .executable()
+        .parent()
+        .ok_or(ServiceError::UnsafePath)?
+        .join("controller-app.exe");
+    let trusted = policy::trusted_system_sids();
+    let controller_pin = open_checked(&controller, false, ObjectPolicy::Installation, &trusted)?;
+    // Explicit leaf pins avoid depending on the order of installation's private
+    // ancestor vector. All opens deny write/delete sharing for the binaries.
+    let service_pin = open_checked(
+        installation.executable(),
+        false,
+        ObjectPolicy::Installation,
+        &trusted,
+    )?;
+    Ok(ValidatedPairingInstallation {
+        installation,
+        controller,
+        controller_pin,
+        service_pin,
+    })
+}
+
 fn same_path(a: &Path, b: &Path) -> Result<bool, ServiceError> {
     let a = a.to_str().ok_or(ServiceError::UnsafePath)?;
     let b = b.to_str().ok_or(ServiceError::UnsafePath)?;

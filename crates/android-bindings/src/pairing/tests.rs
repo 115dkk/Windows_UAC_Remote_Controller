@@ -3,7 +3,6 @@
 //! Callback counters/opaque certificate bytes are NOT Android/attestation QA.
 
 use android_controller::{ControllerCheckpoint, LocalKeySetPhase};
-use approval_protocol::DeviceId;
 use notification_policy::{CapacityLimits, NotificationPolicy};
 use p256::{
     ecdsa::{Signature, SigningKey, signature::Signer},
@@ -13,7 +12,8 @@ use phone_state_store::{
     NativePrivateDirectory, SNAPSHOT_FILE_NAME, STAGING_FILE_NAME, SnapshotStore,
 };
 use service_protocol::{
-    EnrollmentAcceptanceFields, PairingChallenge, PhoneKeyDigest, UnsignedEnrollmentAcceptance,
+    EnrollmentAcceptanceFields, FrozenCandidateFields, MAX_FROZEN_CANDIDATE_BYTES,
+    UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate,
 };
 use std::{
     fs,
@@ -30,6 +30,8 @@ struct TestClock {
     fail: AtomicBool,
     reads: AtomicU64,
     stop_on_read: AtomicU64,
+    fail_on_read: AtomicU64,
+    seconds_on_read: Mutex<Option<(u64, u64)>>,
     controller: Mutex<Weak<MobileController>>,
 }
 impl SocketClock for TestClock {
@@ -39,6 +41,14 @@ impl SocketClock for TestClock {
             && let Some(controller) = self.controller.lock().unwrap().upgrade()
         {
             controller.stop_intake();
+        }
+        if let Some((at, seconds)) = *self.seconds_on_read.lock().unwrap()
+            && at == read
+        {
+            self.seconds.store(seconds, Ordering::Release);
+        }
+        if self.fail_on_read.load(Ordering::Acquire) == read {
+            self.fail.store(true, Ordering::Release);
         }
         if self.fail.load(Ordering::Acquire) {
             return Err(framed_transport::SocketClockUnavailable);
@@ -287,6 +297,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_lease(Arc::new(OwnerLease::acquire().unwrap()))
+    }
+    // Test-only sharing permits two independent host stores/controllers to
+    // exercise pointer identity. Production still acquires one process owner.
+    fn with_lease(lease: Arc<OwnerLease>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let clock = Arc::new(TestClock {
             origin: Instant::now(),
@@ -294,6 +309,8 @@ impl Fixture {
             fail: AtomicBool::new(false),
             reads: AtomicU64::new(0),
             stop_on_read: AtomicU64::new(0),
+            fail_on_read: AtomicU64::new(0),
+            seconds_on_read: Mutex::new(None),
             controller: Mutex::new(Weak::new()),
         });
         let platform = Arc::new(Platform {
@@ -337,7 +354,7 @@ impl Fixture {
             key_cleanup_pending: AtomicBool::new(false),
             key_cleanup_failed: AtomicBool::new(false),
             native_floor_nanos: AtomicU64::new(reading.phone_monotonic_nanos()),
-            _owner_lease: Arc::new(OwnerLease::acquire().unwrap()),
+            _owner_lease: lease,
         });
         *platform.controller.lock().unwrap() = Arc::downgrade(&controller);
         *clock.controller.lock().unwrap() = Arc::downgrade(&controller);
@@ -354,8 +371,11 @@ impl Fixture {
             challenge: LocalAttestationChallenge::from_bytes([65; 32]).unwrap(),
             ceremony_nonce: PairingNonce::from_bytes([nonce; 32]).unwrap(),
             pc: PcIdentity::from_bytes([1; 32]).unwrap(),
+            recipient_device: DeviceId::from_bytes([1; 16]).unwrap(),
             pc_signing_key: public(20),
             pc_transport_key: public(21),
+            // Synthetic original invitation digest, NOT QR/native proof.
+            invitation_context: InvitationContextDigest::from_bytes([71; 32]),
             clock: self.clock.clone(),
             started_at: self.clock.origin,
             deadline: self.clock.origin + MAX_PAIRING_ACCEPTANCE_LIFETIME,
@@ -378,9 +398,9 @@ impl Drop for Fixture {
         let _ = self.controller.shutdown_native_owner();
     }
 }
-fn signed(created: &CreatedPairingKeys, nonce: u8) -> Vec<u8> {
+fn acceptance_fields(created: &CreatedPairingKeys, nonce: u8) -> EnrollmentAcceptanceFields {
     let keys = created.local_keys();
-    let fields = EnrollmentAcceptanceFields {
+    EnrollmentAcceptanceFields {
         ceremony_nonce: PairingNonce::from_bytes([nonce; 32]).unwrap(),
         attestation_challenge: PairingChallenge::from_bytes(*keys.challenge().as_bytes()).unwrap(),
         pc: PcIdentity::from_bytes([1; 32]).unwrap(),
@@ -394,15 +414,50 @@ fn signed(created: &CreatedPairingKeys, nonce: u8) -> Vec<u8> {
         .unwrap(),
         pc_signing_key: public(20),
         pc_transport_key: public(21),
-    };
+    }
+}
+fn signed_acceptance(fields: EnrollmentAcceptanceFields, signer: u8) -> Vec<u8> {
     let statement = UnsignedEnrollmentAcceptance::new(fields).unwrap();
-    let signature: Signature = SigningKey::from_slice(&[20; 32])
+    let signature: Signature = SigningKey::from_slice(&[signer; 32])
         .unwrap()
         .sign(&statement.signing_bytes());
     statement
         .with_der_signature(signature.to_der().as_bytes())
         .unwrap()
         .to_wire()
+}
+fn signed(created: &CreatedPairingKeys, nonce: u8) -> Vec<u8> {
+    signed_acceptance(acceptance_fields(created, nonce), 20)
+}
+fn frozen_fields(created: &CreatedPairingKeys) -> FrozenCandidateFields {
+    let acceptance = acceptance_fields(created, 2);
+    FrozenCandidateFields {
+        context: FrozenCandidateContext {
+            ceremony_nonce: acceptance.ceremony_nonce,
+            attestation_challenge: acceptance.attestation_challenge,
+            pc: acceptance.pc,
+            recipient_device: acceptance.recipient_device,
+            phone_keys: acceptance.phone_keys,
+            pc_signing_key: acceptance.pc_signing_key,
+            pc_transport_key: acceptance.pc_transport_key,
+            invitation_context: InvitationContextDigest::from_bytes([71; 32]),
+        },
+        intended_registry_revision: acceptance.registry_revision,
+    }
+}
+fn signed_frozen(fields: FrozenCandidateFields, signer: u8) -> Vec<u8> {
+    let statement = UnsignedFrozenCandidate::new(fields).unwrap();
+    let signature: Signature = SigningKey::from_slice(&[signer; 32])
+        .unwrap()
+        .sign(&statement.signing_bytes());
+    statement
+        .with_der_signature(signature.to_der().as_bytes())
+        .unwrap()
+        .to_wire()
+}
+fn freeze(f: &Fixture, created: CreatedPairingKeys) -> FrozenCreatedPairing {
+    let wire = signed_frozen(frozen_fields(&created), 20);
+    f.controller.match_frozen_candidate(created, &wire).unwrap()
 }
 
 #[test]
@@ -451,7 +506,13 @@ fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptanc
         BridgeError::InvalidObservation
     );
     let wire = signed(&created, 2);
-    let committed = f.controller.commit_created_pairing(created, &wire).unwrap();
+    let before_freeze = f.bytes();
+    let frozen = freeze(&f, created);
+    let code = frozen.comparison_code().unwrap();
+    assert_eq!(code.as_str().len(), 6);
+    assert!(code.as_str().bytes().all(|byte| byte.is_ascii_digit()));
+    assert_eq!(f.bytes(), before_freeze);
+    let committed = f.controller.commit_created_pairing(frozen, &wire).unwrap();
     assert!(
         f.checkpoint()
             .peer_associations()
@@ -862,11 +923,8 @@ fn dropped_created_result_leaves_metadata_and_old_signed_receipt_cannot_rebind_n
     let created = f.controller.create_pairing_keys(f.intent()).unwrap();
     let before = f.bytes();
     let wrong = signed(&created, 99);
-    assert!(
-        f.controller
-            .commit_created_pairing(created, &wrong)
-            .is_err()
-    );
+    let frozen = freeze(&f, created);
+    assert!(f.controller.commit_created_pairing(frozen, &wrong).is_err());
     assert_eq!(f.bytes(), before);
     assert!(
         f.checkpoint()
@@ -895,11 +953,13 @@ fn acceptance_receive_and_precommit_reads_observe_original_creation_stop() {
     let _serial = crate::tests::SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    // Commit entry is read1, core receive read2, final core precommit read3.
-    for stop_at in [2, 3] {
+    // Entry is read1, post-frozen-binding read2, core receive read3, and final
+    // core precommit read4. Each observes the SAME original creation clock.
+    for stop_at in [2, 3, 4] {
         let f = Fixture::new();
         let created = f.controller.create_pairing_keys(f.intent()).unwrap();
         let wire = signed(&created, 2);
+        let frozen = freeze(&f, created);
         let before = f.bytes();
         let previous = f.clock.reads.load(Ordering::Acquire);
         f.clock
@@ -907,7 +967,7 @@ fn acceptance_receive_and_precommit_reads_observe_original_creation_stop() {
             .store(previous + stop_at, Ordering::Release);
         let error = f
             .controller
-            .commit_created_pairing(created, &wire)
+            .commit_created_pairing(frozen, &wire)
             .unwrap_err();
         assert!(matches!(error, CreatedPairingCommitError::Rejected(_)));
         assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + stop_at);
@@ -925,18 +985,19 @@ fn post_commit_stop_returns_the_real_receipt_without_claiming_live_success_or_ro
     let f = Fixture::new();
     let created = f.controller.create_pairing_keys(f.intent()).unwrap();
     let wire = signed(&created, 2);
+    let frozen = freeze(&f, created);
     let before = f.bytes();
     let previous = f.clock.reads.load(Ordering::Acquire);
-    f.clock.stop_on_read.store(previous + 4, Ordering::Release);
+    f.clock.stop_on_read.store(previous + 5, Ordering::Release);
     let error = f
         .controller
-        .commit_created_pairing(created, &wire)
+        .commit_created_pairing(frozen, &wire)
         .unwrap_err();
     let CreatedPairingCommitError::CommittedButNotLive { committed, cause } = error else {
         panic!("the confirmed commit must remain observable");
     };
     assert_eq!(cause, BridgeError::Closed);
-    assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + 4);
+    assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + 5);
     assert_ne!(f.bytes(), before);
     assert!(
         f.checkpoint()
@@ -967,4 +1028,643 @@ fn creation_clock_returns_exactly_the_one_original_sample_and_rejects_dropped_or
     drop(intent);
     assert!(guarded.now().is_err());
     assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + 1);
+}
+
+fn assert_created_only_unchanged(f: &Fixture, before: &[u8]) {
+    assert_eq!(f.bytes(), before);
+    let checkpoint = f.checkpoint();
+    assert!(matches!(
+        checkpoint.local_keys().entries().next(),
+        Some(LocalKeySetPhase::CreatedUnverified(_))
+    ));
+    assert!(checkpoint.peer_associations().is_empty());
+    assert_eq!(checkpoint.peer_associations().next_generation(), 1);
+    assert_eq!(f.platform.calls.load(Ordering::Acquire), 1);
+    assert_eq!(f.platform.created.load(Ordering::Acquire), 1);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ContextMismatch {
+    Invitation,
+    Recipient,
+    Nonce,
+    Challenge,
+    Pc,
+    Approval,
+    Denial,
+    Transport,
+    RoleOrder,
+    SigningPin,
+    TransportPin,
+    BothPins,
+}
+fn change_context(context: &mut FrozenCandidateContext, mismatch: ContextMismatch) -> u8 {
+    match mismatch {
+        ContextMismatch::Invitation => {
+            context.invitation_context = InvitationContextDigest::from_bytes([99; 32]);
+        }
+        ContextMismatch::Recipient => {
+            context.recipient_device = DeviceId::from_bytes([99; 16]).unwrap();
+        }
+        ContextMismatch::Nonce => {
+            context.ceremony_nonce = PairingNonce::from_bytes([99; 32]).unwrap();
+        }
+        ContextMismatch::Challenge => {
+            context.attestation_challenge = PairingChallenge::from_bytes([99; 32]).unwrap();
+        }
+        ContextMismatch::Pc => context.pc = PcIdentity::from_bytes([99; 32]).unwrap(),
+        ContextMismatch::Approval => {
+            context.phone_keys =
+                PhoneKeyDigest::from_keys(&public(6), &public(4), &public(5)).unwrap();
+        }
+        ContextMismatch::Denial => {
+            context.phone_keys =
+                PhoneKeyDigest::from_keys(&public(3), &public(6), &public(5)).unwrap();
+        }
+        ContextMismatch::Transport => {
+            context.phone_keys =
+                PhoneKeyDigest::from_keys(&public(3), &public(4), &public(6)).unwrap();
+        }
+        ContextMismatch::RoleOrder => {
+            context.phone_keys =
+                PhoneKeyDigest::from_keys(&public(4), &public(3), &public(5)).unwrap();
+        }
+        ContextMismatch::SigningPin => context.pc_signing_key = public(22),
+        ContextMismatch::TransportPin => context.pc_transport_key = public(23),
+        ContextMismatch::BothPins => {
+            context.pc_signing_key = public(22);
+            context.pc_transport_key = public(23);
+        }
+    }
+    if matches!(
+        mismatch,
+        ContextMismatch::SigningPin | ContextMismatch::BothPins
+    ) {
+        // Self-consistent attacker pin/signature still cannot replace the
+        // separately retained original pin.
+        22
+    } else {
+        20
+    }
+}
+
+fn acceptance_from_frozen(fields: &FrozenCandidateFields) -> EnrollmentAcceptanceFields {
+    let context = &fields.context;
+    EnrollmentAcceptanceFields {
+        ceremony_nonce: context.ceremony_nonce,
+        attestation_challenge: context.attestation_challenge,
+        pc: context.pc,
+        recipient_device: context.recipient_device,
+        registry_revision: fields.intended_registry_revision,
+        phone_keys: context.phone_keys,
+        pc_signing_key: context.pc_signing_key.clone(),
+        pc_transport_key: context.pc_transport_key.clone(),
+    }
+}
+
+#[test]
+fn frozen_signature_never_supplies_its_own_original_context_or_role_tuple() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for mismatch in [
+        ContextMismatch::Invitation,
+        ContextMismatch::Recipient,
+        ContextMismatch::Nonce,
+        ContextMismatch::Challenge,
+        ContextMismatch::Pc,
+        ContextMismatch::Approval,
+        ContextMismatch::Denial,
+        ContextMismatch::Transport,
+        ContextMismatch::RoleOrder,
+        ContextMismatch::SigningPin,
+        ContextMismatch::TransportPin,
+        ContextMismatch::BothPins,
+    ] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let before = f.bytes();
+        let mut fields = frozen_fields(&created);
+        let signer = change_context(&mut fields.context, mismatch);
+        let wire = signed_frozen(fields, signer);
+        assert_eq!(
+            f.controller
+                .match_frozen_candidate(created, &wire)
+                .unwrap_err(),
+            BridgeError::InvalidObservation,
+            "{mismatch:?}"
+        );
+        assert_created_only_unchanged(&f, &before);
+        f.platform.request.lock().unwrap().take();
+        assert!(
+            f.controller
+                .creation_slot
+                .lock()
+                .unwrap()
+                .upgrade()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn frozen_wrong_signer_malformed_truncated_and_revision_tampering_never_commit() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Revision is PC-assigned and signed, not a phone-selected expectation.
+    // Test invalid endpoints and a changed valid revision without a new signature.
+    enum Defect {
+        WrongSigner,
+        Empty,
+        HeaderOnly,
+        MissingLastByte,
+        TrailingByte,
+        Oversized,
+        Magic,
+        Signature,
+        ZeroRevision,
+        ExhaustedRevision,
+        ChangedRevision,
+        AcceptanceInsteadOfFrozen,
+    }
+    for defect in [
+        Defect::WrongSigner,
+        Defect::Empty,
+        Defect::HeaderOnly,
+        Defect::MissingLastByte,
+        Defect::TrailingByte,
+        Defect::Oversized,
+        Defect::Magic,
+        Defect::Signature,
+        Defect::ZeroRevision,
+        Defect::ExhaustedRevision,
+        Defect::ChangedRevision,
+        Defect::AcceptanceInsteadOfFrozen,
+    ] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let before = f.bytes();
+        let mut wire = signed_frozen(frozen_fields(&created), 20);
+        const REVISION_OFFSET: usize = 12 + 32 + 32 + 32 + 16;
+        match defect {
+            Defect::WrongSigner => wire = signed_frozen(frozen_fields(&created), 22),
+            Defect::Empty => wire.clear(),
+            Defect::HeaderOnly => wire.truncate(12),
+            Defect::MissingLastByte => {
+                wire.pop();
+            }
+            Defect::TrailingByte => wire.push(0),
+            Defect::Oversized => wire = vec![0; MAX_FROZEN_CANDIDATE_BYTES + 1],
+            Defect::Magic => wire[0] ^= 1,
+            Defect::Signature => *wire.last_mut().unwrap() ^= 1,
+            Defect::ZeroRevision => {
+                wire[REVISION_OFFSET..REVISION_OFFSET + 8].copy_from_slice(&0u64.to_be_bytes());
+            }
+            Defect::ExhaustedRevision => {
+                wire[REVISION_OFFSET..REVISION_OFFSET + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+            }
+            Defect::ChangedRevision => {
+                wire[REVISION_OFFSET..REVISION_OFFSET + 8].copy_from_slice(&2u64.to_be_bytes());
+            }
+            Defect::AcceptanceInsteadOfFrozen => wire = signed(&created, 2),
+        }
+        assert_eq!(
+            f.controller
+                .match_frozen_candidate(created, &wire)
+                .unwrap_err(),
+            BridgeError::InvalidObservation
+        );
+        assert_created_only_unchanged(&f, &before);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClockLoss {
+    Stop,
+    Expiry,
+    Regression,
+    Unavailable,
+}
+fn lose_clock_at(f: &Fixture, read: u64, loss: ClockLoss) {
+    match loss {
+        ClockLoss::Stop => f.clock.stop_on_read.store(read, Ordering::Release),
+        ClockLoss::Expiry => *f.clock.seconds_on_read.lock().unwrap() = Some((read, 300)),
+        ClockLoss::Regression => *f.clock.seconds_on_read.lock().unwrap() = Some((read, 0)),
+        ClockLoss::Unavailable => f.clock.fail_on_read.store(read, Ordering::Release),
+    }
+}
+
+#[test]
+fn frozen_matching_rechecks_original_liveness_before_and_after_verification() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for boundary in [1, 2] {
+        for loss in [
+            ClockLoss::Stop,
+            ClockLoss::Expiry,
+            ClockLoss::Regression,
+            ClockLoss::Unavailable,
+        ] {
+            let f = Fixture::new();
+            let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+            let wire = signed_frozen(frozen_fields(&created), 20);
+            let before = f.bytes();
+            let previous = f.clock.reads.load(Ordering::Acquire);
+            lose_clock_at(&f, previous + boundary, loss);
+            assert!(f.controller.match_frozen_candidate(created, &wire).is_err());
+            assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + boundary);
+            assert_created_only_unchanged(&f, &before);
+        }
+    }
+}
+
+#[test]
+fn comparison_code_is_checked_live_at_both_boundaries_and_never_revives() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for boundary in [1, 2] {
+        for loss in [
+            ClockLoss::Stop,
+            ClockLoss::Expiry,
+            ClockLoss::Regression,
+            ClockLoss::Unavailable,
+        ] {
+            let f = Fixture::new();
+            let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+            let frozen = freeze(&f, created);
+            let before = f.bytes();
+            let previous = f.clock.reads.load(Ordering::Acquire);
+            lose_clock_at(&f, previous + boundary, loss);
+            assert!(frozen.comparison_code().is_err());
+            assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + boundary);
+            f.clock.seconds.store(1, Ordering::Release);
+            f.clock.fail.store(false, Ordering::Release);
+            assert!(frozen.comparison_code().is_err());
+            assert_created_only_unchanged(&f, &before);
+        }
+    }
+}
+
+#[test]
+fn final_acceptance_original_clock_loss_before_commit_never_mutates() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for boundary in [1, 2, 3, 4] {
+        for loss in [
+            ClockLoss::Expiry,
+            ClockLoss::Regression,
+            ClockLoss::Unavailable,
+        ] {
+            let f = Fixture::new();
+            let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+            let wire = signed(&created, 2);
+            let frozen = freeze(&f, created);
+            let before = f.bytes();
+            let previous = f.clock.reads.load(Ordering::Acquire);
+            lose_clock_at(&f, previous + boundary, loss);
+            assert!(matches!(
+                f.controller.commit_created_pairing(frozen, &wire),
+                Err(CreatedPairingCommitError::Rejected(_))
+            ));
+            assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + boundary);
+            assert_created_only_unchanged(&f, &before);
+        }
+    }
+}
+
+#[test]
+fn post_commit_clock_loss_keeps_the_actual_local_receipt() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for loss in [
+        ClockLoss::Expiry,
+        ClockLoss::Regression,
+        ClockLoss::Unavailable,
+    ] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let wire = signed(&created, 2);
+        let frozen = freeze(&f, created);
+        let before = f.bytes();
+        let previous = f.clock.reads.load(Ordering::Acquire);
+        lose_clock_at(&f, previous + 5, loss);
+        let error = f
+            .controller
+            .commit_created_pairing(frozen, &wire)
+            .unwrap_err();
+        let CreatedPairingCommitError::CommittedButNotLive { committed, cause } = error else {
+            panic!("the confirmed local receipt must survive late clock loss");
+        };
+        assert_eq!(
+            cause,
+            match loss {
+                ClockLoss::Unavailable => BridgeError::NativeUnavailable,
+                _ => BridgeError::InvalidObservation,
+            }
+        );
+        assert_eq!(f.clock.reads.load(Ordering::Acquire), previous + 5);
+        assert_ne!(f.bytes(), before);
+        assert!(
+            f.checkpoint()
+                .peer_associations()
+                .resolve(committed.association())
+                .is_some()
+        );
+        assert_eq!(f.checkpoint().peer_associations().next_generation(), 2);
+    }
+}
+
+#[test]
+fn cancellation_before_or_after_freeze_never_yields_a_code_or_acceptance() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for after_freeze in [false, true] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let before = f.bytes();
+        if after_freeze {
+            let wire = signed(&created, 2);
+            let frozen = freeze(&f, created);
+            frozen.cancel();
+            assert_eq!(frozen.comparison_code().unwrap_err(), BridgeError::Closed);
+            assert!(matches!(
+                f.controller.commit_created_pairing(frozen, &wire),
+                Err(CreatedPairingCommitError::Rejected(BridgeError::Closed))
+            ));
+        } else {
+            let wire = signed_frozen(frozen_fields(&created), 20);
+            created.cancel();
+            assert_eq!(
+                f.controller
+                    .match_frozen_candidate(created, &wire)
+                    .unwrap_err(),
+                BridgeError::Closed
+            );
+        }
+        assert_created_only_unchanged(&f, &before);
+    }
+}
+
+#[test]
+fn another_live_controller_cannot_match_or_commit_an_original_candidate() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for after_freeze in [false, true] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let other = Fixture::with_lease(Arc::clone(&f.controller._owner_lease));
+        let original_before = f.bytes();
+        let other_before = other.bytes();
+        if after_freeze {
+            let wire = signed(&created, 2);
+            let frozen = freeze(&f, created);
+            assert!(matches!(
+                other.controller.commit_created_pairing(frozen, &wire),
+                Err(CreatedPairingCommitError::Rejected(
+                    BridgeError::InvalidObservation
+                ))
+            ));
+        } else {
+            let wire = signed_frozen(frozen_fields(&created), 20);
+            assert_eq!(
+                other
+                    .controller
+                    .match_frozen_candidate(created, &wire)
+                    .unwrap_err(),
+                BridgeError::InvalidObservation
+            );
+        }
+        assert_created_only_unchanged(&f, &original_before);
+        assert_eq!(other.bytes(), other_before);
+        assert_eq!(other.platform.calls.load(Ordering::Acquire), 0);
+    }
+}
+
+#[test]
+fn dropped_controller_cannot_leave_frozen_comparison_metadata_live() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let old = Fixture::new();
+    let created = old.controller.create_pairing_keys(old.intent()).unwrap();
+    let wire = signed(&created, 2);
+    let frozen = freeze(&old, created);
+    drop(old);
+    assert_eq!(frozen.comparison_code().unwrap_err(), BridgeError::Closed);
+    let next = Fixture::new();
+    let before = next.bytes();
+    assert!(matches!(
+        next.controller.commit_created_pairing(frozen, &wire),
+        Err(CreatedPairingCommitError::Rejected(
+            BridgeError::InvalidObservation
+        ))
+    ));
+    assert_eq!(next.bytes(), before);
+    assert_eq!(next.platform.calls.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn every_final_acceptance_binding_must_match_the_retained_frozen_candidate() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for mismatch in [
+        ContextMismatch::Recipient,
+        ContextMismatch::Nonce,
+        ContextMismatch::Challenge,
+        ContextMismatch::Pc,
+        ContextMismatch::Approval,
+        ContextMismatch::Denial,
+        ContextMismatch::Transport,
+        ContextMismatch::RoleOrder,
+        ContextMismatch::SigningPin,
+        ContextMismatch::TransportPin,
+        ContextMismatch::BothPins,
+    ] {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let mut fields = frozen_fields(&created);
+        let frozen = freeze(&f, created);
+        let before = f.bytes();
+        let signer = change_context(&mut fields.context, mismatch);
+        let wire = signed_acceptance(acceptance_from_frozen(&fields), signer);
+        assert!(
+            matches!(
+                f.controller.commit_created_pairing(frozen, &wire),
+                Err(CreatedPairingCommitError::Rejected(
+                    BridgeError::InvalidObservation
+                ))
+            ),
+            "{mismatch:?}"
+        );
+        assert_created_only_unchanged(&f, &before);
+    }
+}
+
+#[test]
+fn final_acceptance_wrong_revision_signature_or_wire_is_rejected_before_commit() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for defect in 0..4 {
+        let f = Fixture::new();
+        let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+        let mut fields = acceptance_fields(&created, 2);
+        let frozen_wire = signed_frozen(frozen_fields(&created), 20);
+        let frozen = freeze(&f, created);
+        let before = f.bytes();
+        let wire = match defect {
+            0 => {
+                fields.registry_revision = 2;
+                signed_acceptance(fields, 20)
+            }
+            1 => signed_acceptance(fields, 22),
+            2 => Vec::new(),
+            3 => frozen_wire,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            f.controller.commit_created_pairing(frozen, &wire),
+            Err(CreatedPairingCommitError::Rejected(
+                BridgeError::InvalidObservation
+            ))
+        ));
+        assert_created_only_unchanged(&f, &before);
+    }
+}
+
+#[test]
+fn original_nondefault_context_and_pc_selected_revision_are_retained_without_reassignment() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let f = Fixture::new();
+    let mut context = f.context(37);
+    context.pc = PcIdentity::from_bytes([44; 32]).unwrap();
+    context.recipient_device = DeviceId::from_bytes([42; 16]).unwrap();
+    context.pc_signing_key = public(22);
+    context.pc_transport_key = public(23);
+    context.invitation_context = InvitationContextDigest::from_bytes([43; 32]);
+    let intent = f
+        .controller
+        .begin_key_creation_from_trusted_host(context)
+        .unwrap();
+    let created = f.controller.create_pairing_keys(intent).unwrap();
+    let mut fields = frozen_fields(&created);
+    fields.context.ceremony_nonce = PairingNonce::from_bytes([37; 32]).unwrap();
+    fields.context.pc = PcIdentity::from_bytes([44; 32]).unwrap();
+    fields.context.recipient_device = DeviceId::from_bytes([42; 16]).unwrap();
+    fields.context.pc_signing_key = public(22);
+    fields.context.pc_transport_key = public(23);
+    fields.context.invitation_context = InvitationContextDigest::from_bytes([43; 32]);
+    fields.intended_registry_revision = 41;
+    let acceptance = signed_acceptance(acceptance_from_frozen(&fields), 22);
+    let wire = signed_frozen(fields.clone(), 22);
+    let expected_code = SignedFrozenCandidate::from_wire(&wire)
+        .unwrap()
+        .verify(&public(22))
+        .unwrap()
+        .match_original(&fields.context)
+        .unwrap()
+        .comparison_code();
+    let before = f.bytes();
+    let frozen = f.controller.match_frozen_candidate(created, &wire).unwrap();
+    assert_eq!(frozen.comparison_code().unwrap(), expected_code);
+    assert_eq!(f.bytes(), before);
+    let committed = f
+        .controller
+        .commit_created_pairing(frozen, &acceptance)
+        .unwrap();
+    let checkpoint = f.checkpoint();
+    let association = checkpoint
+        .peer_associations()
+        .resolve(committed.association())
+        .unwrap();
+    assert_eq!(
+        association.descriptor().recipient_device_id(),
+        fields.context.recipient_device
+    );
+    assert_eq!(association.descriptor().pc_registry_revision(), 41);
+}
+
+#[test]
+fn frozen_wrapper_retains_the_same_slot_and_redacts_code_and_context() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let f = Fixture::new();
+    let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+    let frozen = freeze(&f, created);
+    let before = f.bytes();
+    assert_eq!(
+        format!("{frozen:?}"),
+        "FrozenCreatedPairing([redacted], matched_not_paired)"
+    );
+    assert_eq!(
+        format!("{:?}", frozen.comparison_code().unwrap()),
+        "PairingComparisonCode([redacted], public_comparison_only)"
+    );
+    let other_context = || {
+        let mut context = f.context(3);
+        context.handle = LocalKeyHandle::from_bytes([2; 32]).unwrap();
+        context.challenge = LocalAttestationChallenge::from_bytes([66; 32]).unwrap();
+        context.pc = PcIdentity::from_bytes([2; 32]).unwrap();
+        context.pc_signing_key = public(22);
+        context.pc_transport_key = public(23);
+        context
+    };
+    assert_eq!(
+        f.controller
+            .begin_key_creation_from_trusted_host(other_context())
+            .unwrap_err(),
+        BridgeError::Busy
+    );
+    drop(frozen);
+    assert_eq!(
+        f.controller
+            .begin_key_creation_from_trusted_host(other_context())
+            .unwrap_err(),
+        BridgeError::Busy
+    );
+    f.platform.request.lock().unwrap().take();
+    drop(
+        f.controller
+            .begin_key_creation_from_trusted_host(other_context())
+            .unwrap(),
+    );
+    assert_created_only_unchanged(&f, &before);
+}
+
+#[test]
+fn frozen_acceptance_storage_failure_preserves_the_existing_uncertain_owner_contract() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let f = Fixture::new();
+    let created = f.controller.create_pairing_keys(f.intent()).unwrap();
+    let wire = signed(&created, 2);
+    let frozen = freeze(&f, created);
+    fs::write(
+        f.temp.path().join(STAGING_FILE_NAME),
+        b"synthetic acceptance blocker",
+    )
+    .unwrap();
+    assert!(matches!(
+        f.controller.commit_created_pairing(frozen, &wire),
+        Err(CreatedPairingCommitError::Rejected(
+            BridgeError::StorageUnavailable
+        ))
+    ));
+    assert!(f.controller.state.lock().unwrap().is_none());
+    assert!(!f.controller.approval_alive.load(Ordering::Acquire));
+    assert_eq!(f.platform.calls.load(Ordering::Acquire), 1);
+    // This explicit early blocker does not characterize an arbitrary failed
+    // flush or promise rollback/deletion/recovery of its persistent bytes.
 }

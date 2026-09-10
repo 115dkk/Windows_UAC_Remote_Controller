@@ -8,11 +8,20 @@ mod diagnostic;
 mod elevation;
 mod filesystem;
 #[cfg(target_pointer_width = "64")]
+mod overlapped_pipe;
+#[cfg(target_pointer_width = "64")]
+mod pairing_peer;
+#[cfg(target_pointer_width = "64")]
 pub(crate) mod probe_supervisor;
 mod security;
 mod trust_store;
 
 pub(crate) use elevation::request_elevated_control;
+#[cfg(target_pointer_width = "64")]
+pub use pairing_peer::{
+    PairingPeer, PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe,
+    PairingPipeProgress, PairingServerEndpoint, PairingServerEndpoints,
+};
 pub(crate) use trust_store::{
     MAX_TRUST_FILE_BYTES, ServiceTrustFile, TrustDirectory, provision_trust_directory,
 };

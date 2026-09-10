@@ -1,15 +1,15 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `2941d942e1f47e8e191693cf74004637d9130ae4` on
+Last checked implementation revision: `65f9883f417ea8d573e036b97af8e2e0bd7a84ef` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
 
-At2941d94, all five CI workflows passed. Full host/Android quality, both packages,
+At65f9883, all five CI workflows passed. Full host/Android quality, both packages,
 notification rendering and the genuine unlocked-emulator lifecycle are green.
-[Actual lifecycle34519328370](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34519328370)
+[Actual lifecycle34529268532](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34529268532)
 completed seven instrumentation phases and twelve host observations: document
 load/recreation/close-relaunch, exact current-versus-retired IPC, enabled reboot
 and package update before app launch, explicit stop, disabled reopen/reboot/update,
@@ -17,7 +17,7 @@ and explicit restart. A subsequent real file-based-encryption reboot remained
 locked with a foreground notification and WAITING_FOR_UNLOCK but no native owner.
 Ordinary System UI entry of a public synthetic CI PIN then produced full READY
 on that same boot before any target Activity/instrumentation launch. ROOT retained
-and hash-checked all540 command logs, reparsed seven instrumentation receipts,
+and hash-checked all529 command logs, reparsed seven instrumentation receipts,
 and checked six actual System UI hierarchies/tap coordinates. APKs were not
 downloaded again; bounded log extraction kept the ZIP only in memory.
 
@@ -34,16 +34,18 @@ bootstrap/provider observation was obtained. At05:48:50 the temporary service,
 process, installation and result directories were absent. That one-shot permission
 is consumed. Production service/key/security policy were unchanged.
 
-New source work separates early SCM Running from actual initialization, adds a
+The65f9883 source separates early SCM Running from actual initialization, adds a
 one-use running acknowledgement before platform-key calls, and keeps the original
 deadline through Ready. Product status remains StartPending until both readiness
 controls are present. A distinct signed frozen-candidate codec binds the original
 pairing context and three role-labelled phone keys before exposing a comparison
-code. These source additions require fresh CI; they are neither a TPM fix nor
-completed native pairing. Native pipe-peer authentication and the Android frozen-
-candidate owner integration are separate in-progress slices.
+code. These changes passed full Windows/Linux quality, including actual Analyzer
+and its canaries. Linux logs explicitly include all14 frozen-codec cases and16
+portable startup-phase cases. They are neither a TPM fix nor completed native
+pairing. New native pipe-peer authentication, bounded server I/O and Android
+frozen-candidate owner integration are separate source slices awaiting fresh CI.
 
-The checkpoints below are historical; the2941d94 result above is the current
+The checkpoints below are historical; the65f9883 result above is the current
 completed lifecycle/first-unlock and quality baseline.
 
 At0713333 the full Quality run34510391762 passed: Windows15m00, Linux8m54,

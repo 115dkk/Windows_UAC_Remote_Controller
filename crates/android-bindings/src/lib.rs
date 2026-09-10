@@ -33,8 +33,8 @@ pub use intake_delivery::NativeDecisionProgress;
 pub use local_keys::NativeLocalKeySet;
 pub use native_clock::NativePresentationClock;
 pub use pairing::{
-    CreatedPairingCommitError, CreatedPairingKeys, KeyCreationContext, KeyCreationIntent,
-    NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
+    CreatedPairingCommitError, CreatedPairingKeys, FrozenCreatedPairing, KeyCreationContext,
+    KeyCreationIntent, NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
     NativeKeyCreationRequest,
 };
 pub use request_projection::{

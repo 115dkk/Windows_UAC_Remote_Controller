@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Native-only creation composition. No UI/startup caller, enrollment proof,
+//! Native-only creation/frozen-candidate composition. No UI/startup caller, enrollment proof,
 //! separate persistence owner, attestation adjudicator or key-generation retry.
 
 use std::{
@@ -16,10 +16,14 @@ use android_controller::{
     LocalKeyMutationError, LocalKeySetDescriptor, MAX_PAIRING_ACCEPTANCE_LIFETIME,
     PairingAcceptanceContext, PairingAcceptanceError, PendingPairingAcceptance,
 };
-use approval_protocol::PcIdentity;
+use approval_protocol::{DeviceId, PcIdentity};
 use framed_transport::SocketClock;
 use secure_channel::TlsPublicKey;
-use service_protocol::PairingNonce;
+use service_protocol::{
+    FrozenCandidateContext, InvitationContextDigest, MatchedFrozenCandidate, PairingChallenge,
+    PairingComparisonCode, PairingNonce, PhoneKeyDigest, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate,
+};
 
 use crate::{BridgeError, MobileController, native_clock::native_callback};
 
@@ -30,6 +34,9 @@ pub const MAX_CREATION_CHAIN_BYTES: usize = 32 * 1024;
 /// ORIGINAL trusted-native ceremony inputs, NOT an enrollment witness.
 /// The missing real ceremony owner must establish consent/QR provenance, PC
 /// pins, fresh non-reused CSPRNG handle/nonce/challenge and the original lifetime.
+/// `recipient_device` is the fresh PC-selected ID from the ORIGINAL invitation,
+/// never a receipt assignment. `invitation_context` must be computed from that
+/// canonical original invitation, never replaced with a zero/default digest.
 /// All Instants MUST use this SAME captured native clock's coordinate. Neither
 /// receipt fields, renderer values nor a later clock can supply these inputs.
 /// This freely constructible Rust DTO is deliberately absent from UniFFI/JS.
@@ -38,8 +45,10 @@ pub struct KeyCreationContext {
     pub challenge: LocalAttestationChallenge,
     pub ceremony_nonce: PairingNonce,
     pub pc: PcIdentity,
+    pub recipient_device: DeviceId,
     pub pc_signing_key: TlsPublicKey,
     pub pc_transport_key: TlsPublicKey,
+    pub invitation_context: InvitationContextDigest,
     pub clock: Arc<dyn SocketClock>,
     pub started_at: Instant,
     pub deadline: Instant,
@@ -275,6 +284,18 @@ impl NativeCreatedKeyEvidence {
 /// existing one-shot PendingPairingAcceptance, never a hidden native key wrapper.
 /// Retains the single ceremony slot until drop or acceptance consumption. Drop
 /// abandons the ceremony; it does not delete keys or erase committed metadata.
+/// No comparison code or final-commit capability exists before a signed frozen
+/// candidate matches the independently retained original native context.
+/// ```compile_fail
+/// fn display_before_matching(value: uac_android_controller::CreatedPairingKeys) {
+///     let _code = value.comparison_code();
+/// }
+/// ```
+/// ```compile_fail
+/// fn duplicate(value: uac_android_controller::CreatedPairingKeys) {
+///     let _copy = value.clone();
+/// }
+/// ```
 #[must_use]
 pub struct CreatedPairingKeys {
     state: Arc<CreationState>,
@@ -297,6 +318,82 @@ impl CreatedPairingKeys {
 impl fmt::Debug for CreatedPairingKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("CreatedPairingKeys([redacted], not_paired)")
+    }
+}
+
+/// One matched signed candidate retains the original CreatedUnverified result
+/// and its existing one-shot acceptance reservation. Private fields prevent a
+/// caller from supplying an expected tuple, replacing the candidate or bypassing
+/// the original clock/controller. No Clone, serialization or foreign surface.
+/// This is not proof of native display, consent, attestation or a remote commit.
+/// ```compile_fail
+/// fn duplicate(value: uac_android_controller::FrozenCreatedPairing) {
+///     let _copy = value.clone();
+/// }
+/// ```
+/// ```compile_fail
+/// fn commit_before_matching(
+///     controller: std::sync::Arc<uac_android_controller::MobileController>,
+///     created: uac_android_controller::CreatedPairingKeys,
+///     wire: &[u8],
+/// ) {
+///     let _ = controller.commit_created_pairing(created, wire);
+/// }
+/// ```
+#[must_use]
+pub struct FrozenCreatedPairing {
+    created: CreatedPairingKeys,
+    matched: MatchedFrozenCandidate,
+}
+impl FrozenCreatedPairing {
+    /// Public comparison metadata only, freshly guarded by the same original
+    /// native clock before and after derivation. A returned code is not a live
+    /// display/confirmation capability and must not be used as authorization.
+    pub fn comparison_code(&self) -> Result<PairingComparisonCode, BridgeError> {
+        let controller = self
+            .created
+            .state
+            .controller
+            .upgrade()
+            .ok_or(BridgeError::Closed)?;
+        let _admission = controller.enter()?;
+        self.created.state.check_owner(&controller)?;
+        let code = self.matched.comparison_code();
+        self.created.state.check_current()?;
+        Ok(code)
+    }
+
+    pub fn cancel(&self) {
+        self.created.cancel();
+    }
+
+    fn check_acceptance(&self, wire: &[u8]) -> Result<(), BridgeError> {
+        // The pin remains independent of BOTH received statements. This guard
+        // supplements, rather than replaces, the durable owner's original
+        // signature/context/key-lifecycle verification below.
+        let acceptance = SignedEnrollmentAcceptance::from_wire(wire)
+            .and_then(|signed| signed.verify(&self.created.state.original.pc_signing_key))
+            .map_err(|_| BridgeError::InvalidObservation)?;
+        let fields = acceptance.fields();
+        let frozen = self.matched.fields();
+        let expected = &frozen.context;
+        if fields.ceremony_nonce != expected.ceremony_nonce
+            || fields.attestation_challenge != expected.attestation_challenge
+            || fields.pc != expected.pc
+            || fields.recipient_device != expected.recipient_device
+            || fields.phone_keys != expected.phone_keys
+            || fields.pc_signing_key != expected.pc_signing_key
+            || fields.pc_transport_key != expected.pc_transport_key
+            || fields.registry_revision != frozen.intended_registry_revision
+        {
+            return Err(BridgeError::InvalidObservation);
+        }
+        Ok(())
+    }
+}
+impl fmt::Debug for FrozenCreatedPairing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FrozenCreatedPairing([redacted], matched_not_paired)")
     }
 }
 
@@ -440,18 +537,68 @@ impl MobileController {
         result
     }
 
-    /// Reuses the existing signed-acceptance codec/checkpoint owner unchanged.
-    /// A successful result witnesses only this phone's LOCAL association commit.
-    pub fn commit_created_pairing(
+    /// Consume one created result and one bounded candidate wire. Its expected
+    /// context comes ONLY from the original native inputs and actual retained
+    /// three-role descriptor, never from this reply or caller-supplied fields.
+    /// Rejection consumes the attempt without changing CreatedUnverified bytes.
+    pub fn match_frozen_candidate(
         self: &Arc<Self>,
         created: CreatedPairingKeys,
         wire: &[u8],
+    ) -> Result<FrozenCreatedPairing, BridgeError> {
+        let _admission = self.enter()?;
+        created.state.check_owner(self)?;
+        let original = &created.state.original;
+        let expected = FrozenCandidateContext {
+            ceremony_nonce: original.ceremony_nonce,
+            attestation_challenge: PairingChallenge::from_bytes(*original.challenge.as_bytes())
+                .map_err(|_| BridgeError::InvalidObservation)?,
+            pc: original.pc,
+            recipient_device: original.recipient_device,
+            phone_keys: PhoneKeyDigest::from_keys(
+                created.local_keys.approval_key(),
+                created.local_keys.denial_key(),
+                created.local_keys.transport_key(),
+            )
+            .map_err(|_| BridgeError::InvalidObservation)?,
+            pc_signing_key: original.pc_signing_key.clone(),
+            pc_transport_key: original.pc_transport_key.clone(),
+            invitation_context: original.invitation_context,
+        };
+        let matched = SignedFrozenCandidate::from_wire(wire)
+            .and_then(|signed| signed.verify(&original.pc_signing_key))
+            .and_then(|verified| verified.match_original(&expected))
+            .map_err(|_| BridgeError::InvalidObservation)?;
+        // Native cancellation, stop, expiry or regression during parsing and
+        // signature work cannot publish a live code/commit-bearing wrapper.
+        created.state.check_owner(self)?;
+        Ok(FrozenCreatedPairing { created, matched })
+    }
+
+    /// Requires the exact retained frozen candidate, then reuses the existing
+    /// signed-acceptance codec/checkpoint owner unchanged. There is no legacy
+    /// overload accepting a merely created or signature-only candidate.
+    /// A successful result witnesses only this phone's LOCAL association commit.
+    pub fn commit_created_pairing(
+        self: &Arc<Self>,
+        frozen: FrozenCreatedPairing,
+        wire: &[u8],
     ) -> Result<CommittedPairingAcceptance, CreatedPairingCommitError> {
         let _admission = self.enter().map_err(CreatedPairingCommitError::Rejected)?;
-        created
+        frozen
+            .created
             .state
             .check_owner(self)
             .map_err(CreatedPairingCommitError::Rejected)?;
+        frozen
+            .check_acceptance(wire)
+            .map_err(CreatedPairingCommitError::Rejected)?;
+        frozen
+            .created
+            .state
+            .check_current()
+            .map_err(CreatedPairingCommitError::Rejected)?;
+        let created = frozen.created;
         let committed = self
             .with_inbox(|owner| {
                 owner
