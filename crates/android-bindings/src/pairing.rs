@@ -350,13 +350,10 @@ impl FrozenCreatedPairing {
     /// native clock before and after derivation. A returned code is not a live
     /// display/confirmation capability and must not be used as authorization.
     pub fn comparison_code(&self) -> Result<PairingComparisonCode, BridgeError> {
-        let controller = self
-            .created
-            .state
-            .controller
-            .upgrade()
-            .ok_or(BridgeError::Closed)?;
-        let _admission = controller.enter()?;
+        let controller: Arc<MobileController> =
+            Weak::<MobileController>::upgrade(&self.created.state.controller)
+                .ok_or(BridgeError::Closed)?;
+        let _admission = MobileController::enter(Arc::as_ref(&controller))?;
         self.created.state.check_owner(&controller)?;
         let code = self.matched.comparison_code();
         self.created.state.check_current()?;

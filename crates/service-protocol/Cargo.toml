@@ -10,6 +10,7 @@ description = "Bounded signed PC request and lifecycle messages"
 
 [dependencies]
 approval-protocol = { path = "../approval-protocol" }
+base64 = "=0.22.1"
 secure-channel = { path = "../secure-channel" }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }

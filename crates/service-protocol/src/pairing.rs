@@ -5,10 +5,17 @@
 #![forbid(unsafe_code)]
 
 mod frozen;
+mod invitation;
 pub use frozen::{
     FrozenCandidateContext, FrozenCandidateError, FrozenCandidateFields, InvitationContextDigest,
     MAX_FROZEN_CANDIDATE_BYTES, MatchedFrozenCandidate, PairingComparisonCode,
     SignedFrozenCandidate, UnsignedFrozenCandidate, VerifiedFrozenCandidate,
+};
+pub use invitation::{
+    MAX_PAIRING_INVITATION_BYTES, MAX_PAIRING_INVITATION_QR_TEXT_BYTES,
+    MIN_PAIRING_INVITATION_BYTES, MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
+    PAIRING_INVITATION_QR_PREFIX, PairingInvitation, PairingInvitationError,
+    PairingInvitationFields,
 };
 
 use approval_protocol::{DeviceId, MAX_DER_SIGNATURE_BYTES, MIN_DER_SIGNATURE_BYTES, PcIdentity};

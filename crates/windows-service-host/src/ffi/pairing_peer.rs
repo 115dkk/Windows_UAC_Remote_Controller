@@ -602,6 +602,11 @@ struct TokenBuffer {
 }
 impl TokenBuffer {
     fn read(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Self, PairingPeerError> {
+        // Only these variable-sized outputs use the bounded allocation. Fixed
+        // scalar/statistics classes have exact-size initialized ABI storage below.
+        if ![TokenUser, TokenIntegrityLevel, TokenGroups].contains(&class) {
+            return Err(PairingPeerError::Malformed);
+        }
         let mut value = Self {
             words: vec![0; MAX_TOKEN_BYTES / mem::size_of::<usize>()],
             length: 0,
@@ -629,19 +634,69 @@ impl TokenBuffer {
         // SAFETY: immutable initialized storage, bounded by actual native length.
         unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast(), self.length) }
     }
-    fn scalar(&self) -> Result<u32, PairingPeerError> {
-        Ok(u32::from_ne_bytes(
-            self.bytes()
-                .try_into()
-                .map_err(|_| PairingPeerError::Malformed)?,
-        ))
-    }
     fn sid(&self, pointer: *mut std::ffi::c_void) -> Result<Vec<u8>, PairingPeerError> {
         let offset = (pointer as usize)
             .checked_sub(self.words.as_ptr() as usize)
             .ok_or(PairingPeerError::Malformed)?;
         bounded_sid(self.bytes(), offset)
     }
+}
+fn token_scalar(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<u32, PairingPeerError> {
+    if ![
+        TokenType,
+        TokenSessionId,
+        TokenElevation,
+        TokenElevationType,
+        TokenIsAppContainer,
+        TokenUIAccess,
+    ]
+    .contains(&class)
+    {
+        return Err(PairingPeerError::Malformed);
+    }
+    let mut value = 0u32;
+    let mut returned = 0;
+    // SAFETY: query-only retained token, strict fixed-DWORD class allowlist,
+    // exact initialized/aligned four-byte output and a disjoint length output.
+    // No NULL-size probe or oversized variable-buffer ABI assumption is used.
+    unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some(ptr::from_mut(&mut value).cast()),
+            mem::size_of::<u32>() as u32,
+            &mut returned,
+        )
+    }
+    .map_err(|error| native_error(PairingPeerStage::QueryToken, error))?;
+    if returned as usize != mem::size_of::<u32>() {
+        return Err(PairingPeerError::Malformed);
+    }
+    Ok(value)
+}
+fn token_statistics(token: HANDLE) -> Result<TOKEN_STATISTICS, PairingPeerError> {
+    let mut value = TOKEN_STATISTICS::default();
+    let mut returned = 0;
+    // SAFETY: one fixed information class with its exact initialized C-layout
+    // output. The successful returned extent and primary type are checked before
+    // any statistics participate in retained token identity.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenStatistics,
+            Some(ptr::from_mut(&mut value).cast()),
+            mem::size_of::<TOKEN_STATISTICS>() as u32,
+            &mut returned,
+        )
+    }
+    .map_err(|error| native_error(PairingPeerStage::QueryToken, error))?;
+    if returned as usize != mem::size_of::<TOKEN_STATISTICS>() {
+        return Err(PairingPeerError::Malformed);
+    }
+    if value.TokenType != TokenPrimary {
+        return Err(PairingPeerError::Rejected);
+    }
+    Ok(value)
 }
 fn bounded_sid(bytes: &[u8], offset: usize) -> Result<Vec<u8>, PairingPeerError> {
     let sid = bytes.get(offset..).ok_or(PairingPeerError::Malformed)?;
@@ -711,16 +766,14 @@ impl TokenFacts {
         unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
             .map_err(|e| native_error(PairingPeerStage::QueryToken, e))?;
         let token = Handle::new(token, PairingPeerStage::QueryToken)?;
-        let read = |class| TokenBuffer::read(token.raw(), class);
-        if read(TokenType)?.scalar()? != TokenPrimary.0 as u32 {
+        if token_scalar(token.raw(), TokenType)? != TokenPrimary.0 as u32 {
             return Err(PairingPeerError::Rejected);
         }
-        let user = read(TokenUser)?;
-        let integrity = read(TokenIntegrityLevel)?;
-        let statistics = read(TokenStatistics)?;
+        let user = TokenBuffer::read(token.raw(), TokenUser)?;
+        let integrity = TokenBuffer::read(token.raw(), TokenIntegrityLevel)?;
+        let native_stats = token_statistics(token.raw())?;
         if user.length < mem::size_of::<TOKEN_USER>()
             || integrity.length < mem::size_of::<TOKEN_MANDATORY_LABEL>()
-            || statistics.length != mem::size_of::<TOKEN_STATISTICS>()
         {
             return Err(PairingPeerError::Malformed);
         }
@@ -732,23 +785,17 @@ impl TokenFacts {
         let native_integrity = unsafe {
             ptr::read_unaligned(integrity.bytes().as_ptr().cast::<TOKEN_MANDATORY_LABEL>())
         };
-        // SAFETY: exact statistics struct contains only scalar values.
-        let native_stats =
-            unsafe { ptr::read_unaligned(statistics.bytes().as_ptr().cast::<TOKEN_STATISTICS>()) };
-        if native_stats.TokenType != TokenPrimary {
-            return Err(PairingPeerError::Rejected);
-        }
         Ok(Self {
             user: user.sid(native_user.User.Sid.0)?,
             integrity: integrity.sid(native_integrity.Label.Sid.0)?,
             groups: token_groups(token.raw())?,
             token_id: luid(native_stats.TokenId),
             logon_id: luid(native_stats.AuthenticationId),
-            session: read(TokenSessionId)?.scalar()?,
-            elevation: read(TokenElevation)?.scalar()?,
-            elevation_type: read(TokenElevationType)?.scalar()?,
-            app_container: read(TokenIsAppContainer)?.scalar()?,
-            ui_access: read(TokenUIAccess)?.scalar()?,
+            session: token_scalar(token.raw(), TokenSessionId)?,
+            elevation: token_scalar(token.raw(), TokenElevation)?,
+            elevation_type: token_scalar(token.raw(), TokenElevationType)?,
+            app_container: token_scalar(token.raw(), TokenIsAppContainer)?,
+            ui_access: token_scalar(token.raw(), TokenUIAccess)?,
         })
     }
     fn require(&self, role: PairingPeerRole, pipe_session: u32) -> Result<(), PairingPeerError> {
@@ -806,6 +853,55 @@ mod tests {
             PairingServerEndpoints::create_for_running_service(),
             Err(PairingPeerError::Service(_))
         ));
+    }
+
+    #[test]
+    fn current_process_primary_token_uses_actual_exact_fixed_query_abi() {
+        // Real Windows read-only query of this ordinary CI process, never a role
+        // grant. The borrowed pseudo-process handle is NEVER owned or closed;
+        // observe owns and closes only its normally opened TOKEN_QUERY handle.
+        // SAFETY: borrowing the documented current-process pseudo-handle only.
+        let process = unsafe { windows::Win32::System::Threading::GetCurrentProcess() };
+        let observed = TokenFacts::observe(process).unwrap();
+        // observe required actual TokenPrimary from both exact native queries.
+        // No Administrator, session number, username, SID or integrity assumption.
+        assert!(observed.elevation <= 1);
+        assert!(observed.app_container <= 1);
+        assert!(observed.ui_access <= 1);
+        assert!(
+            [
+                TokenElevationTypeDefault.0 as u32,
+                TokenElevationTypeFull.0 as u32,
+                TokenElevationTypeLimited.0 as u32,
+            ]
+            .contains(&observed.elevation_type)
+        );
+    }
+
+    #[test]
+    fn token_query_shapes_cannot_cross_fixed_and_variable_allowlists() {
+        // Unsupported classes are rejected BEFORE any native call; the null
+        // sentinel is not a native token fixture and is never adopted/closed.
+        for class in [TokenUser, TokenIntegrityLevel, TokenGroups, TokenStatistics] {
+            assert_eq!(
+                token_scalar(HANDLE::default(), class),
+                Err(PairingPeerError::Malformed)
+            );
+        }
+        for class in [
+            TokenType,
+            TokenSessionId,
+            TokenElevation,
+            TokenElevationType,
+            TokenIsAppContainer,
+            TokenUIAccess,
+            TokenStatistics,
+        ] {
+            assert!(matches!(
+                TokenBuffer::read(HANDLE::default(), class),
+                Err(PairingPeerError::Malformed)
+            ));
+        }
     }
 
     #[test]
@@ -940,7 +1036,14 @@ mod tests {
     fn bounded_sid_rejects_offsets_headers_and_extent_before_pointer_use() {
         assert_eq!(bounded_sid(SYSTEM, 0).unwrap(), SYSTEM);
         assert!(bounded_sid(SYSTEM, usize::MAX).is_err());
-        assert!(bounded_sid(SYSTEM, 1).is_err());
+        // Offset 1 happens to start another structurally valid revision/count
+        // header (revision 1, count 0); it is not a malformed-header fixture.
+        // Offset 2 starts with revision 0 and must reject. Native pointer/role
+        // provenance is checked separately from this bounded byte parser.
+        assert!(bounded_sid(SYSTEM, 2).is_err());
+        let mut prefixed = vec![0; 4];
+        prefixed.extend_from_slice(SYSTEM);
+        assert_eq!(bounded_sid(&prefixed, 4).unwrap(), SYSTEM);
         assert!(bounded_sid(&SYSTEM[..11], 0).is_err());
         let mut invalid = SYSTEM.to_vec();
         invalid[1] = 16;
