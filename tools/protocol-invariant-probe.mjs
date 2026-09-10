@@ -23,8 +23,9 @@ export const HELPER_NAMES = Object.freeze([...DIRECT_HELPER_NAMES, BUILDING_HELP
 export const DEPENDENT_PROFILE = 'request-opened-with-building';
 export const REQUEST_SECURITY_PROFILE = 'request-security-with-helpers';
 export const REQUEST_SECURITY_HELPERS_ONLY_PROFILE = 'request-security-helpers-only';
+export const REQUEST_SECURITY_ONE_PROPERTY_PROFILE = 'request-security-one-property';
 // Source identities from ROOT's 8629bac invocation artifacts, NOT proof results.
-// All three prior runs timed out; these hashes confer no helper/security verdict.
+// All three 8629bac runs timed out; these hashes confer no helper/security verdict.
 export const REQUEST_SECURITY_REFERENCE_COMMIT = '8629bac07c27d86641f9ba2e8f8faaa99726a444';
 export const REQUEST_SECURITY_CANDIDATE_HASHES = Object.freeze({
   baseline: '26d0d14f593defdee7538645296401f55de0b1b0e2bddbe01c491dabcba06db6',
@@ -56,6 +57,10 @@ export const REQUIRED_COUNTEREXAMPLES = Object.freeze({
   'missing-approval-signature': 'accepted_approval_requires_same_binding_auth',
   'missing-replay-consumption': 'request_accepted_at_most_once',
 });
+export const ONE_PROPERTY_CASES = Object.freeze([
+  ...REQUEST_SECURITY_NAMES.map((property) => Object.freeze({ context: 'baseline', property })),
+  ...CONTEXT_NAMES.slice(1).map((context) => Object.freeze({ context, property: REQUIRED_COUNTEREXAMPLES[context] })),
+]);
 export const HELPER_INSERTION = `
 // INVARIANT_PROBE_ONLY: two independent direct helpers, no proof reuse.
 lemma enrolled_revision_unique:
@@ -134,13 +139,21 @@ function helper(name) {
 }
 
 function requestSecurityCandidate(selected) {
-  return selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE;
+  return selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
 }
 
-export function invariantProfile(selected, context = 'baseline') {
+function pinnedSecurityCandidate(selected) {
+  return selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
+}
+
+export function invariantProfile(selected, context = 'baseline', property) {
   if (typeof context !== 'string' || !CONTEXT_NAMES.includes(context)) reject();
+  if (selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE) {
+    if (!ONE_PROPERTY_CASES.some((entry) => entry.context === context && entry.property === property)) reject();
+  } else if (property !== undefined) reject();
   if (requestSecurityCandidate(selected)) {
     const properties = selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE ? []
+      : selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE ? [property]
       : context === 'baseline' ? REQUEST_SECURITY_NAMES : [REQUIRED_COUNTEREXAMPLES[context]];
     return {
       observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], helperReuse: true,
@@ -179,8 +192,8 @@ function contextMutation(context, manifest) {
   return CONTEXT_MUTATIONS[context];
 }
 
-export function invariantContextSource(source, selected, context = 'baseline', manifest) {
-  invariantProfile(selected, context);
+export function invariantContextSource(source, selected, context = 'baseline', manifest, property) {
+  invariantProfile(selected, context, property);
   const normalized = normalize(source);
   if (hash(normalized) !== ORIGIN_HASH) reject();
   const mutation = contextMutation(context, manifest);
@@ -188,10 +201,10 @@ export function invariantContextSource(source, selected, context = 'baseline', m
 }
 
 /** Erase ONLY this profile's exact additions; any unrelated change rejects. */
-export function eraseInvariantCandidate(candidate, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest) {
-  const profile = invariantProfile(selected, context), mutation = contextMutation(context, manifest);
+export function eraseInvariantCandidate(candidate, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest, property) {
+  const profile = invariantProfile(selected, context, property), mutation = contextMutation(context, manifest);
   if (typeof candidate !== 'string' || Buffer.byteLength(candidate) > MAX_SOURCE_BYTES) reject();
-  if (selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE && hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]) reject();
+  if (pinnedSecurityCandidate(selected) && hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]) reject();
   let restored = mutateExactlyOnce(candidate, { from: insertion(selected) + ANCHOR, to: ANCHOR });
   if (profile.observationalEventsAdded) {
     for (const edit of [...BUILDING_ACTION_EDITS].reverse()) {
@@ -204,16 +217,16 @@ export function eraseInvariantCandidate(candidate, selected = DIRECT_HELPER_NAME
 }
 
 /** Text admission, not a substitute Tamarin parser or a proved invariant. */
-export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest) {
-  const profile = invariantProfile(selected, context);
+export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest, property) {
+  const profile = invariantProfile(selected, context, property);
   const normalized = normalize(source);
   if (hash(normalized) !== ORIGIN_HASH) reject();
-  let candidate = invariantContextSource(normalized, selected, context, manifest);
+  let candidate = invariantContextSource(normalized, selected, context, manifest, property);
   if (profile.observationalEventsAdded) {
     for (const edit of BUILDING_ACTION_EDITS) candidate = mutateExactlyOnce(candidate, edit);
   }
   candidate = mutateExactlyOnce(candidate, { from: ANCHOR, to: insertion(selected) + ANCHOR });
-  if (eraseInvariantCandidate(candidate, selected, context, manifest) !== normalized) reject();
+  if (eraseInvariantCandidate(candidate, selected, context, manifest, property) !== normalized) reject();
   const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*)(?: \[(?:reuse|use_induction(?:,reuse)?)\])?:$/gm)].map((match) => match[1]);
   same(names, profile.candidateLemmas);
   const attributes = [...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]);
@@ -233,10 +246,10 @@ export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0]
   return { normalized, candidate };
 }
 
-export function admitInvariantCandidate(source, candidate, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest) {
-  const expected = insertInvariantHelpers(source, selected, context, manifest);
+export function admitInvariantCandidate(source, candidate, selected = DIRECT_HELPER_NAMES[0], context = 'baseline', manifest, property) {
+  const expected = insertInvariantHelpers(source, selected, context, manifest, property);
   if (typeof candidate !== 'string' || candidate !== expected.candidate ||
-      eraseInvariantCandidate(candidate, selected, context, manifest) !== expected.normalized) reject();
+      eraseInvariantCandidate(candidate, selected, context, manifest, property) !== expected.normalized) reject();
   return expected;
 }
 
@@ -246,6 +259,13 @@ export function selectInvariantArguments(args) {
 }
 
 export function selectInvariantRunArguments(args) {
+  if (Array.isArray(args) && args.length === 3 && args[0] === `--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}` &&
+      typeof args[1] === 'string' && args[1].startsWith('--context=') &&
+      typeof args[2] === 'string' && args[2].startsWith('--property=')) {
+    const context = args[1].slice('--context='.length), property = args[2].slice('--property='.length);
+    invariantProfile(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
+    return { selected: REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property };
+  }
   if (Array.isArray(args) && args.length === 2 && [DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE].some((name) => args[0] === `--profile=${name}`) &&
       typeof args[1] === 'string' && args[1].startsWith('--context=')) {
     const selected = args[0].slice('--profile='.length);
@@ -264,34 +284,34 @@ export function admitInvariantEnvironment(args, env, platform) {
   return { ...selection, binary: env.TAMARIN_BIN, commit: env.GITHUB_SHA };
 }
 
-function directoryPrefix(selected, context) {
-  invariantProfile(selected, context);
-  return `INVARIANT_PROBE_ONLY-${selected}-${context}-`;
+function directoryPrefix(selected, context, property) {
+  invariantProfile(selected, context, property);
+  return `INVARIANT_PROBE_ONLY-${selected}-${context}-${property === undefined ? '' : `${property}-`}`;
 }
 
-export function requiredInvariantVerdicts(selected, context = 'baseline') {
-  const profile = invariantProfile(selected, context);
+export function requiredInvariantVerdicts(selected, context = 'baseline', property) {
+  const profile = invariantProfile(selected, context, property);
   return Object.fromEntries(profile.requiredLemmas.map((name) => [name, { trace: 'all-traces',
-    verdict: selected === REQUEST_SECURITY_PROFILE && context !== 'baseline' && name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified' : 'verified',
+    verdict: (selected === REQUEST_SECURITY_PROFILE || selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE) && context !== 'baseline' && name === REQUIRED_COUNTEREXAMPLES[context] ? 'falsified' : 'verified',
   }]));
 }
 
-export function invariantArguments(input, selected, context = 'baseline') {
-  const expected = requiredInvariantVerdicts(selected, context);
+export function invariantArguments(input, selected, context = 'baseline', property) {
+  const expected = requiredInvariantVerdicts(selected, context, property);
   if (typeof input !== 'string' || !isAbsolute(input) || resolve(input) !== input || basename(input) !== 'request.input.spthy') reject();
-  if ([DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE].includes(selected) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context))) reject();
+  if ((selected === DEPENDENT_PROFILE || requestSecurityCandidate(selected)) && !basename(dirname(input)).startsWith(directoryPrefix(selected, context, property))) reject();
   return proofArguments(input, expected);
 }
 
-export function selectedInvariantSummary(result, selected, input, context = 'baseline') {
-  invariantArguments(input, selected, context);
-  const profile = invariantProfile(selected, context);
-  const expected = requiredInvariantVerdicts(selected, context);
+export function selectedInvariantSummary(result, selected, input, context = 'baseline', property) {
+  invariantArguments(input, selected, context, property);
+  const profile = invariantProfile(selected, context, property);
+  const expected = requiredInvariantVerdicts(selected, context, property);
   const parsed = parseProofSummary(result, expected, profile.candidateLemmas, input);
-  if (selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE && ORIGINAL_NAMES.some((name) =>
-    parsed.verdicts[name] && parsed.verdicts[name].verdict !== 'inconclusive')) {
+  if (pinnedSecurityCandidate(selected) && ORIGINAL_NAMES.some((name) =>
+    !profile.requiredLemmas.includes(name) && parsed.verdicts[name] && parsed.verdicts[name].verdict !== 'inconclusive')) {
     parsed.ok = false;
-    parsed.reasons.push('helpers-only invocation reported a verdict for an unselected original obligation');
+    parsed.reasons.push('fixed diagnostic reported a verdict for an unselected original obligation');
   }
   // --quit-on-warning must be honored; an exit-zero fixture cannot turn a
   // dependency/wellformedness warning into successful experiment evidence.
@@ -305,8 +325,8 @@ export function selectedInvariantSummary(result, selected, input, context = 'bas
     requiredVerdicts: Object.fromEntries(profile.requiredLemmas.map((name) => [name, parsed.verdicts[name] ?? null])) };
 }
 
-export function invariantRunSummary(result, selected, input, inputsUnchanged, context = 'baseline') {
-  const selectedProof = selectedInvariantSummary(result, selected, input, context);
+export function invariantRunSummary(result, selected, input, inputsUnchanged, context = 'baseline', property) {
+  const selectedProof = selectedInvariantSummary(result, selected, input, context, property);
   if (inputsUnchanged !== true) {
     selectedProof.ok = false;
     selectedProof.reasons.push('input, mapped source or binary identity could not be preserved');
@@ -399,7 +419,7 @@ function utf8(bytes) {
   return text;
 }
 
-function freshDirectory(root, selected, context) {
+function freshDirectory(root, selected, context, property) {
   for (const child of ['artifacts', 'artifacts/protocol-invariant-probe']) {
     const path = owned(root, child);
     plainAncestors(path);
@@ -407,35 +427,38 @@ function freshDirectory(root, selected, context) {
     const stat = lstatSync(path);
     if (!stat.isDirectory() || stat.isSymbolicLink()) reject();
   }
-  return mkdtempSync(join(owned(root, 'artifacts/protocol-invariant-probe'), directoryPrefix(selected, context)));
+  return mkdtempSync(join(owned(root, 'artifacts/protocol-invariant-probe'), directoryPrefix(selected, context, property)));
 }
 
 export async function runInvariantProbe(args = process.argv.slice(2), root = ROOT) {
-  const { selected, context, binary, commit } = admitInvariantEnvironment(args, process.env, process.platform);
-  const profile = invariantProfile(selected, context);
+  const { selected, context, property, binary, commit } = admitInvariantEnvironment(args, process.env, process.platform);
+  const profile = invariantProfile(selected, context, property);
   const securityProfile = selected === REQUEST_SECURITY_PROFILE;
   const helpersOnlyProfile = selected === REQUEST_SECURITY_HELPERS_ONLY_PROFILE;
+  const onePropertyProfile = selected === REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
   root = realpathSync(root);
-  const directory = freshDirectory(root, selected, context);
+  const directory = freshDirectory(root, selected, context, property);
   const cancellation = new AbortController();
   const stop = () => cancellation.abort(new Error('Invariant experiment interrupted.'));
   // Keep repeated parent signals handled until the owned prover group has
   // completed its bounded cleanup; cancellation itself is irreversible.
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = {
-    classification: helpersOnlyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_HELPERS_ONLY_PROBE' : 'MUTANT_REQUEST_SECURITY_HELPERS_ONLY_PROBE')
+    classification: onePropertyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_ONE_PROPERTY_PROBE' : 'MUTANT_REQUEST_SECURITY_ONE_PROPERTY_PROBE')
+      : helpersOnlyProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_HELPERS_ONLY_PROBE' : 'MUTANT_REQUEST_SECURITY_HELPERS_ONLY_PROBE')
       : securityProfile ? (context === 'baseline' ? 'BASELINE_REQUEST_SECURITY_PROBE_ONLY' : 'MUTANT_REQUEST_SECURITY_PROBE_ONLY')
       : context === 'baseline' ? CLASSIFICATION : 'MUTANT_INVARIANT_PROBE_ONLY', eligibleAsNormalGate: false, baselineOnly: context === 'baseline',
     normalGateStatus: 'not-run', ...profile,
-    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
-    candidateReference: helpersOnlyProfile ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
+    selectedProfile: selected, selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile ? null : profile.requiredLemmas.at(-1), context, commit, toolVersion: '1.12.0',
+    selectedProperty: onePropertyProfile ? property : null,
+    candidateReference: pinnedSecurityCandidate(selected) ? { profile: REQUEST_SECURITY_PROFILE, commit: REQUEST_SECURITY_REFERENCE_COMMIT,
       sha256: REQUEST_SECURITY_CANDIDATE_HASHES[context], proofAuthority: 'none-source-identity-only' } : null,
-    selectedSecurityProperties: securityProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
-    requiredExpected: requiredInvariantVerdicts(selected, context),
+    selectedSecurityProperties: securityProfile || onePropertyProfile ? profile.requiredLemmas.filter((name) => REQUEST_SECURITY_NAMES.includes(name)) : [],
+    requiredExpected: requiredInvariantVerdicts(selected, context, property),
     helperProofScope: 'same-invocation-same-context-only', importedProofs: false,
     unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' })),
     negativeControls: CONTEXT_NAMES.slice(1).map((name) => ({ name,
-      status: name === context ? (securityProfile ? 'required-counterexample-selected' : 'mutated-context-only-counterexample-not-selected') : 'not-selected' })),
+      status: name === context ? (securityProfile || onePropertyProfile ? 'required-counterexample-selected' : 'mutated-context-only-counterexample-not-selected') : 'not-selected' })),
     bounds: { proofInvocations: 1, timeoutMs: PROBE_TIMEOUT_MS, combinedOutputBytes: PROBE_OUTPUT_BYTES, heapGiB: 2, runtimeThreads: 2 },
     attempted: false, completed: false, inputsUnchanged: false, selectedProof: null, status: 'not-started',
   };
@@ -450,9 +473,9 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
     const origin = read(ORIGIN_PATH), manifestFile = read(MANIFEST_PATH);
     const manifest = JSON.parse(utf8(manifestFile.bytes));
     const bindings = validateInvariantManifest(manifest);
-    const { normalized, candidate } = insertInvariantHelpers(utf8(origin.bytes), selected, context, manifest);
-    admitInvariantCandidate(utf8(origin.bytes), candidate, selected, context, manifest);
-    const contextual = invariantContextSource(normalized, selected, context, manifest);
+    const { normalized, candidate } = insertInvariantHelpers(utf8(origin.bytes), selected, context, manifest, property);
+    admitInvariantCandidate(utf8(origin.bytes), candidate, selected, context, manifest, property);
+    const contextual = invariantContextSource(normalized, selected, context, manifest, property);
     const mutation = contextMutation(context, manifest);
     for (const binding of bindings) {
       if (hash(utf8(read(binding.path).bytes).replace(/\r\n/g, '\n')) !== binding.sha256) reject();
@@ -469,7 +492,7 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
     writeFileSync(contextInput, contextual, { flag: 'wx', mode: 0o400 });
     writeFileSync(input, candidate, { flag: 'wx', mode: 0o400 });
     const candidateHash = hash(candidate), contextHash = hash(contextual), tool = regular(binary, 150 * 1024 * 1024, false);
-    const argv = invariantArguments(input, selected, context);
+    const argv = invariantArguments(input, selected, context, property);
     const unchanged = () => regular(input).sha256 === candidateHash &&
       regular(contextInput).sha256 === contextHash &&
       regular(binary, 150 * 1024 * 1024, false).sha256 === tool.sha256 &&
@@ -489,7 +512,9 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       manifestSha256: manifestFile.sha256, sourceBindings: bindings,
       sources, binary, binaryMetadata: tool, arguments: argv,
       toolchainAuthority: 'fixed workflow install-tamarin.mjs validates pinned Tamarin and Maude distributions; this run retains the binary digest',
-      scope: helpersOnlyProfile
+      scope: onePropertyProfile
+        ? 'Only ONE closed selected original property in this exact context, and ALL THREE reused helpers verified in this SAME invocation. All other original obligations remain unselected; no baseline/previous helper proof is imported, no normal-gate or aggregate security pass is claimed.'
+        : helpersOnlyProfile
         ? 'Only ALL THREE reused helpers in this SAME invocation/context, using byte-identical 8629bac candidate input. ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected. Prior runs and source hashes supply NO proof authority; no normal-gate or security-property result.'
         : securityProfile
         ? 'Only the original six all-traces properties in baseline, or the exact manifest-required counterexample in its mutant, conditional on ALL reused helpers verifying in this SAME invocation/context. Original existential witnesses remain unselected. No normal gate, implementation or native-security approval.'
@@ -502,7 +527,7 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       timeoutMs: PROBE_TIMEOUT_MS, maxOutputBytes: PROBE_OUTPUT_BYTES, signal: cancellation.signal });
     let inputsUnchanged = false;
     try { inputsUnchanged = unchanged(); } catch { /* No attribution to changed/unreadable inputs. */ }
-    report = { ...report, ...invariantRunSummary(result, selected, input, inputsUnchanged, context) };
+    report = { ...report, ...invariantRunSummary(result, selected, input, inputsUnchanged, context, property) };
   } catch {
     report = { ...report, status: cancellation.signal.aborted ? 'cancelled' : 'rejected-or-unavailable', error: 'invariant_probe_failed' };
   } finally {

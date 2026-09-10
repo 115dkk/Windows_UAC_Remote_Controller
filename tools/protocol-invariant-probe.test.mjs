@@ -10,6 +10,7 @@ import {
   DEPENDENT_PROFILE, CONTEXT_NAMES, CONTEXT_MUTATIONS, DEPENDENT_HELPER_INSERTION, REUSED_BUILDING_INSERTION,
   REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS,
   REQUEST_SECURITY_HELPERS_ONLY_PROFILE, REQUEST_SECURITY_REFERENCE_COMMIT, REQUEST_SECURITY_CANDIDATE_HASHES,
+  REQUEST_SECURITY_ONE_PROPERTY_PROFILE, ONE_PROPERTY_CASES,
   REQUEST_SECURITY_HELPER_INSERTION, REQUIRED_COUNTEREXAMPLES, requiredInvariantVerdicts,
   ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
@@ -308,7 +309,7 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY the fixed helpers-only diagnostic in three independent contexts, not the normal gate', () => {
+test('CI runs ONLY eight fixed context/property diagnostics, not the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
@@ -316,12 +317,16 @@ test('CI runs ONLY the fixed helpers-only diagnostic in three independent contex
   assert.ok(workflow.includes('workflow_dispatch:'));
   assert.doesNotMatch(workflow, /--helper=/u);
   assert.ok(workflow.includes('fail-fast: false'));
-  assert.ok(workflow.includes('context: [baseline, missing-approval-signature, missing-replay-consumption]'));
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-helpers-only "--context=${{ matrix.context }}"'));
+  const combinations = [...workflow.replace(/\r\n/g, '\n').matchAll(/- context: ([a-z-]+)\n\s+property: ([a-z_]+)/gu)]
+    .map(([, context, property]) => ({ context, property }));
+  assert.deepEqual(combinations, ONE_PROPERTY_CASES);
+  assert.equal(combinations.length, 8);
+  assert.doesNotMatch(workflow, /^\s+(?:context|property):\s*\[/mu);
+  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-one-property "--context=${{ matrix.context }}" "--property=${{ matrix.property }}"'));
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-security-helpers-only-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-one-property-${{ matrix.context }}-${{ matrix.property }}-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
   assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);
@@ -527,14 +532,14 @@ test('security source admission forbids reordered/missing helpers, baseline assu
 test('security evidence remains explicitly isolated, context-attributed and honest about unselected obligations', () => {
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
-  assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context)'));
+  assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
   assert.ok(probeSource.includes("'required-counterexample-selected'"));
-  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile ? null'));
+  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile || onePropertyProfile ? null'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes("'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs'"));
   assert.ok(probeSource.includes("unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' }))"));
-  assert.doesNotMatch(workflow, /--profile=request-opened-with-building|--profile=request-security-with-helpers|--prove=|--reuse|--bound=|continue-on-error/u);
+  assert.doesNotMatch(workflow, /--profile=request-opened-with-building|--profile=request-security-with-helpers|--profile=request-security-helpers-only|--prove=|--reuse|--bound=|continue-on-error/u);
   assert.ok(workflow.includes('timeout-minutes: 15'));
   assert.equal((workflow.match(/run: node tools\/protocol-invariant-probe\.mjs /gu) ?? []).length, 1);
 });
@@ -643,7 +648,7 @@ test('helpers-only report never attributes original obligations or prior candida
   assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected'));
-  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile ?'));
+  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile || onePropertyProfile ?'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes('hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]'));
@@ -788,4 +793,139 @@ test('context mutations are fixed manifest entries, never custom rewrites or inf
     assert.notEqual(alreadyMutated, source);
     assert.throws(() => insertInvariantHelpers(alreadyMutated, DEPENDENT_PROFILE, context, manifest));
   }
+});
+
+function onePropertyInput(context, property, invocation = 'fixture') {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}-${context}-${property}-${invocation}`, 'request.input.spthy');
+}
+
+function onePropertyOutput(context, property, overrides = {}, invocation = 'fixture') {
+  const profile = invariantProfile(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
+  const expected = requiredInvariantVerdicts(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property);
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${onePropertyInput(context, property, invocation)}\n${profile.candidateLemmas.map((name) => {
+      const trace = REQUEST_WITNESS_NAMES.includes(name) ? 'exists-trace' : 'all-traces';
+      return ` ${name} (${trace}): ${overrides[name] ?? (Object.hasOwn(expected, name)
+        ? expected[name].verdict === 'verified' ? 'verified (14 steps)' : 'falsified - found trace (17 steps)'
+        : 'analysis incomplete (0 steps)')}`;
+    }).join('\n')}\n` };
+}
+
+test('one-property CLI permits exactly six baseline cases and the two exact manifest canaries', () => {
+  assert.ok(Object.isFrozen(ONE_PROPERTY_CASES));
+  assert.equal(ONE_PROPERTY_CASES.length, 8);
+  for (const entry of ONE_PROPERTY_CASES) {
+    assert.ok(Object.isFrozen(entry));
+    const { context, property } = entry;
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, `--context=${context}`, `--property=${property}`]), {
+      selected: REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property,
+    });
+  }
+  assert.deepEqual(ONE_PROPERTY_CASES.filter((entry) => entry.context === 'baseline').map((entry) => entry.property), REQUEST_SECURITY_NAMES);
+  for (const context of CONTEXT_NAMES.slice(1)) {
+    const canary = manifest.models.find((model) => model.id === 'request-authorization').canaries.find((value) => value.id === context);
+    assert.deepEqual(ONE_PROPERTY_CASES.filter((entry) => entry.context === context).map((entry) => entry.property), Object.keys(canary.expected));
+  }
+  for (const context of CONTEXT_NAMES) for (const property of [...ORIGINAL_NAMES, ...HELPER_NAMES, '__proto__', 'constructor', 'all']) {
+    if (!ONE_PROPERTY_CASES.some((entry) => entry.context === context && entry.property === property)) {
+      assert.throws(() => selectInvariantRunArguments([`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, `--context=${context}`, `--property=${property}`]));
+      assert.throws(() => invariantProfile(REQUEST_SECURITY_ONE_PROPERTY_PROFILE, context, property));
+    }
+  }
+  const property = REQUEST_SECURITY_NAMES[0];
+  for (const args of [
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`],
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, '--context=baseline'],
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, `--property=${property}`, '--context=baseline'],
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, '--context=baseline', `--property=${property} `],
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, '--context=baseline', `--property=${property}`, '--reuse'],
+    [`--profile=${REQUEST_SECURITY_ONE_PROPERTY_PROFILE}`, '--context=baseline', `--property=${property}`, `--property=${REQUEST_SECURITY_NAMES[1]}`],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=baseline', `--property=${property}`],
+    [`--profile=${REQUEST_SECURITY_PROFILE}`, '--context=baseline', `--property=${property}`],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+  for (const selected of [...HELPER_NAMES, DEPENDENT_PROFILE, REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_HELPERS_ONLY_PROFILE]) {
+    assert.throws(() => invariantProfile(selected, 'baseline', property), 'old profiles cannot silently ignore a property override');
+  }
+});
+
+for (const { context, property } of ONE_PROPERTY_CASES) {
+  test(`${context}/${property} selects exactly three helpers plus one original property on the pinned unchanged candidate`, () => {
+    const selected = REQUEST_SECURITY_ONE_PROPERTY_PROFILE;
+    const old = insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, context, manifest);
+    const candidate = insertInvariantHelpers(source, selected, context, manifest, property);
+    assert.deepEqual(candidate, old);
+    assert.equal(digest(candidate.candidate), REQUEST_SECURITY_CANDIDATE_HASHES[context]);
+    assert.equal(eraseInvariantCandidate(candidate.candidate, selected, context, manifest, property), candidate.normalized);
+    assert.equal(digest(candidate.normalized), ORIGIN_HASH);
+    assert.deepEqual(admitInvariantCandidate(source, old.candidate, selected, context, manifest, property), candidate);
+    assert.throws(() => insertInvariantHelpers(source, selected, context, manifest));
+    assert.throws(() => eraseInvariantCandidate(candidate.candidate + '\n', selected, context, manifest, property));
+    const profile = invariantProfile(selected, context, property);
+    assert.deepEqual(profile.requiredLemmas, [...REQUEST_SECURITY_HELPERS, property]);
+    assert.deepEqual(profile.reusedHelpers, REQUEST_SECURITY_HELPERS);
+    assert.deepEqual(profile.candidateLemmas, [...REQUEST_SECURITY_HELPERS, ...ORIGINAL_NAMES]);
+    assert.deepEqual(profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)), ORIGINAL_NAMES.filter((name) => name !== property));
+    const expected = Object.fromEntries([...REQUEST_SECURITY_HELPERS, property].map((name) => [name, {
+      trace: 'all-traces', verdict: name === property && context !== 'baseline' ? 'falsified' : 'verified',
+    }]));
+    assert.deepEqual(requiredInvariantVerdicts(selected, context, property), expected);
+    const input = onePropertyInput(context, property);
+    assert.deepEqual(invariantArguments(input, selected, context, property), [
+      input, '--quit-on-warning', ...Object.keys(expected).map((name) => `--prove=${name}`), '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS',
+    ]);
+    assert.equal(Object.keys(expected).length, 4);
+    assert.equal(PROBE_TIMEOUT_MS, 120_000);
+    assert.equal(PROBE_OUTPUT_BYTES, 4 * 1024 * 1024);
+  });
+
+  test(`${context}/${property} requires fresh same-invocation helpers and rejects crossed or incomplete property evidence`, () => {
+    const selected = REQUEST_SECURITY_ONE_PROPERTY_PROFILE, input = onePropertyInput(context, property);
+    const expected = requiredInvariantVerdicts(selected, context, property), valid = onePropertyOutput(context, property);
+    assert.equal(selectedInvariantSummary(valid, selected, input, context, property).ok, true);
+    assert.deepEqual(selectedInvariantSummary(valid, selected, input, context, property).requiredVerdicts, expected);
+    for (const name of Object.keys(expected)) {
+      for (const verdict of ['analysis incomplete (0 steps)', expected[name].verdict === 'verified' ? 'falsified (3 steps)' : 'verified (14 steps)']) {
+        assert.equal(selectedInvariantSummary(onePropertyOutput(context, property, { [name]: verdict }), selected, input, context, property).ok, false);
+      }
+      const row = valid.stdout.split('\n').find((line) => line.startsWith(` ${name} (all-traces):`));
+      assert.ok(row);
+      const missing = valid.stdout.replace(`${row}\n`, '');
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: missing, requiredVerdicts: expected }, selected, input, context, property).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + `${row}\n` }, selected, input, context, property).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${name} (all-traces)`, `${name} (exists-trace)`) }, selected, input, context, property).ok, false);
+    }
+    for (const other of ONE_PROPERTY_CASES.filter((entry) => entry.context !== context || entry.property !== property)) {
+      assert.throws(() => invariantArguments(onePropertyInput(other.context, other.property), selected, context, property));
+      assert.equal(selectedInvariantSummary(onePropertyOutput(other.context, other.property), selected, input, context, property).ok, false);
+    }
+    assert.equal(selectedInvariantSummary(onePropertyOutput(context, property, {}, 'old-run'), selected, input, context, property).ok, false);
+    assert.throws(() => invariantArguments(helpersOnlyInput(context), selected, context, property));
+    assert.throws(() => invariantArguments(securityInput(context), selected, context, property));
+    const relabeledHelpers = helpersOnlyOutput(context).stdout.replace(helpersOnlyInput(context), input);
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: relabeledHelpers }, selected, input, context, property).ok, false, 'completed helper-only diagnostic is not a property result');
+    for (const unselected of ORIGINAL_NAMES.filter((name) => name !== property)) {
+      assert.equal(selectedInvariantSummary(onePropertyOutput(context, property, { [unselected]: 'verified (14 steps)' }), selected, input, context, property).ok, false);
+    }
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + valid.stdout }, selected, input, context, property).ok, false);
+    assert.equal(selectedInvariantSummary({ ...valid, stderr: 'WARNING: imported assumption' }, selected, input, context, property).ok, false);
+    for (const delta of [{ status: 1 }, { signal: 'SIGTERM' }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+      const observed = invariantRunSummary({ ...valid, ...delta }, selected, input, true, context, property);
+      assert.equal(observed.completed, false);
+      assert.equal(observed.selectedProof.ok, false);
+    }
+    assert.equal(invariantRunSummary(valid, selected, input, false, context, property).selectedProof.ok, false);
+  });
+}
+
+test('one-property attribution is explicit and cannot become a cached-helper or aggregate normal-gate claim', () => {
+  assert.ok(probeSource.includes('selectedProperty: onePropertyProfile ? property : null'));
+  assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context, property)'));
+  assert.ok(probeSource.includes('invariantRunSummary(result, selected, input, inputsUnchanged, context, property)'));
+  assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
+  assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
+  assert.ok(probeSource.includes('Only ONE closed selected original property in this exact context'));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
+  assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
+  assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
+  assert.equal((workflow.match(/run: node tools\/protocol-invariant-probe\.mjs /gu) ?? []).length, 1);
 });
