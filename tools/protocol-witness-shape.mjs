@@ -30,6 +30,11 @@ export const SHAPED = `lemma honest_approve_trace:
     & e < c & c < o & u < s & s < a
     & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
     & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"`;
+// Only the new named variant gets these conjuncts. The original shape and its
+// stored-proof admission remain byte-for-byte unchanged.
+export const APPROVE_TIGHT_SHAPED = `${SHAPED.slice(0, -1)}
+    & (All #x. UserAuthenticated(device, binding) @x ==> #x = #u)
+    & (All #x. ApprovalSigned(device, binding) @x ==> #x = #s)"`;
 export const DENY_ORIGINAL = `lemma honest_deny_without_approval_auth_trace:
   exists-trace
   "Ex pc device revision binding #o #a.
@@ -49,7 +54,8 @@ export const DENY_SHAPED = `lemma honest_deny_without_approval_auth_trace:
     & DenialSigned(device, binding) @s
     & e < c & c < o & o < s & s < a
     & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
-    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"`;
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)
+    & (All #x. DenialSigned(device, binding) @x ==> #x = #s)"`;
 export const TWO_APPROVERS_ORIGINAL = `lemma honest_two_approvers_single_winner_trace:
   exists-trace
   "Ex pc first_device second_device first_revision second_revision binding
@@ -68,7 +74,7 @@ export const TWO_APPROVERS_SHAPED = `lemma honest_two_approvers_single_winner_tr
   exists-trace
   "Ex pc first_device second_device first_revision second_revision binding
       first_approval_key first_denial_key second_approval_key second_denial_key
-      #e1 #e2 #c1 #c2 #o #s1 #s2 #a.
+      #e1 #e2 #c1 #c2 #o #u1 #u2 #s1 #s2 #a.
     SnapshotCaptured(pc, first_device, first_revision, binding) @c1
     & SnapshotCaptured(pc, second_device, second_revision, binding) @c2
     & RequestOpened(pc, binding) @o
@@ -83,9 +89,17 @@ export const TWO_APPROVERS_SHAPED = `lemma honest_two_approvers_single_winner_tr
     & Enrolled(pc, second_device, second_revision, second_approval_key, second_denial_key) @e2
     & e1 < e2 & e2 < c1 & c1 < c2 & s1 < s2
     & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> (#x = #c1 | #x = #c2))
-    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> (#x = #e1 | #x = #e2))"`;
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> (#x = #e1 | #x = #e2))
+    & UserAuthenticated(first_device, binding) @u1
+    & UserAuthenticated(second_device, binding) @u2
+    & o < u1 & u1 < s1 & s1 < u2 & u2 < s2 & s2 < a
+    & (All #x. UserAuthenticated(first_device, binding) @x ==> #x = #u1)
+    & (All #x. UserAuthenticated(second_device, binding) @x ==> #x = #u2)
+    & (All #x. ApprovalSigned(first_device, binding) @x ==> #x = #s1)
+    & (All #x. ApprovalSigned(second_device, binding) @x ==> #x = #s2)"`;
 export const WITNESS_VARIANTS = Object.freeze({
   approve: Object.freeze({ lemma: 'honest_approve_trace', original: ORIGINAL, shaped: SHAPED }),
+  'approve-tight': Object.freeze({ lemma: 'honest_approve_trace', original: ORIGINAL, shaped: APPROVE_TIGHT_SHAPED }),
   deny: Object.freeze({ lemma: 'honest_deny_without_approval_auth_trace', original: DENY_ORIGINAL, shaped: DENY_SHAPED }),
   'two-approvers': Object.freeze({ lemma: 'honest_two_approvers_single_winner_trace', original: TWO_APPROVERS_ORIGINAL, shaped: TWO_APPROVERS_SHAPED }),
 });
@@ -100,9 +114,10 @@ export function selectWitnessArguments(args) {
   assert.ok(Array.isArray(args) && args.length <= 1, 'Select at most one fixed witness variant.');
   if (args.length === 0) return { variant: 'approve', replay: false };
   if (args[0] === '--replay') return { variant: 'approve', replay: true };
+  if (args[0] === '--variant=approve-tight') return { variant: 'approve-tight', replay: false };
   if (args[0] === '--variant=deny') return { variant: 'deny', replay: false };
   if (args[0] === '--variant=two-approvers') return { variant: 'two-approvers', replay: false };
-  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=deny|--variant=two-approvers]');
+  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=approve-tight|--variant=deny|--variant=two-approvers]');
 }
 
 export function selectedExpectation(variant) {
@@ -183,7 +198,7 @@ async function main() {
   let report = {
     classification: 'WITNESS_SHAPE_EXPERIMENT_ONLY', eligibleAsNormalGate: false,
     variant, selectedLemma, unselectedLemmas: known.filter((name) => name !== selectedLemma).map((name) => ({ name, status: 'not-selected' })),
-    replayOfActualProverOutput: replay,
+    storedProofIncludedInInput: replay, storedProofUsageEstablished: false,
     originSha256: hash(normalized), candidateSha256: hash(candidate),
     originalRulesRestrictionsAndOtherLemmasUnchanged: true,
     bounds: { invocations: 1, timeoutMs: 120000, outputBytes: 4 * 1024 * 1024, heapGiB: 2, runtimeThreads: 2 },

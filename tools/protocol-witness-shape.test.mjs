@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
-  ORIGINAL, SHAPED, DENY_SHAPED, TWO_APPROVERS_SHAPED, WITNESS_VARIANTS,
+  ORIGINAL, SHAPED, APPROVE_TIGHT_SHAPED, DENY_SHAPED, TWO_APPROVERS_SHAPED, WITNESS_VARIANTS,
   admitStoredProof, shapeWitness, selectWitnessArguments, selectedExpectation, selectedWitnessSummary,
 } from './protocol-witness-shape.mjs';
 import { proofArguments } from './protocol-security.mjs';
@@ -36,7 +36,7 @@ test('actual stored proof can add methods only, never rules or property changes'
   assert.throws(() => admitStoredProof(base, stored.replace('simplify\n', 'simplify\nrule injected:\n')));
 });
 
-for (const variant of ['deny', 'two-approvers']) {
+for (const variant of ['approve-tight', 'deny', 'two-approvers']) {
   test(`${variant} changes only its existential formula and preserves every original conjunction`, () => {
     const { original, shaped } = WITNESS_VARIANTS[variant];
     const { normalized, candidate } = shapeWitness(source, variant);
@@ -47,7 +47,9 @@ for (const variant of ['deny', 'two-approvers']) {
     assert.equal(candidate.replace(shaped, original), normalized);
     const originalConjunctions = original.slice(original.indexOf('.\n') + 2, -1);
     assert.ok(shaped.includes(originalConjunctions));
-    assert.ok(candidate.includes(ORIGINAL), 'the approved stored-approve experiment is not substituted into this independent input');
+    for (const other of Object.values(WITNESS_VARIANTS).filter((entry) => entry.lemma !== WITNESS_VARIANTS[variant].lemma)) {
+      assert.ok(candidate.includes(other.original), 'every unselected lemma remains its original formula');
+    }
     assert.equal(candidate.split('lemma ').length, normalized.split('lemma ').length);
     assert.deepEqual(shapeWitness(source.replace(/\r?\n/g, '\r\n'), variant), shapeWitness(source, variant));
   });
@@ -70,12 +72,26 @@ for (const variant of ['deny', 'two-approvers']) {
   });
 }
 
+test('approve-tight adds exactly the selected same-binding auth/sign timepoints to the old shape', () => {
+  assert.ok(APPROVE_TIGHT_SHAPED.startsWith(SHAPED.slice(0, -1)));
+  const suffix = APPROVE_TIGHT_SHAPED.slice(SHAPED.length - 1);
+  assert.equal(suffix, `
+    & (All #x. UserAuthenticated(device, binding) @x ==> #x = #u)
+    & (All #x. ApprovalSigned(device, binding) @x ==> #x = #s)"`);
+  assert.doesNotMatch(SHAPED, /All #x\. (?:UserAuthenticated|ApprovalSigned)/u);
+  const stored = readFileSync(new URL('../security/tamarin/candidates/HonestApproveShapedProof.spthy', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => admitStoredProof(shapeWitness(source).candidate, stored));
+  assert.throws(() => admitStoredProof(shapeWitness(source, 'approve-tight').candidate, stored));
+});
+
 test('deny retains no authentication and requires one explicit enrollment/capture/signing chain', () => {
   assert.ok(DENY_SHAPED.includes("& not (Ex #u. UserAuthenticated(device, binding) @u)"));
   assert.ok(DENY_SHAPED.includes('& DenialSigned(device, binding) @s'));
   assert.ok(DENY_SHAPED.includes('& e < c & c < o & o < s & s < a'));
   assert.ok(DENY_SHAPED.includes('SnapshotCaptured(pc, d, r, b) @x ==> #x = #c'));
   assert.ok(DENY_SHAPED.includes('Enrolled(pc, d, r, ak, dk) @x ==> #x = #e'));
+  assert.ok(DENY_SHAPED.includes('(All #x. DenialSigned(device, binding) @x ==> #x = #s)'));
+  assert.equal((DENY_SHAPED.match(/UserAuthenticated\(/gu) ?? []).length, 1, 'only the original negative auth condition is present');
 });
 
 test('two-device witness permits exactly two ordered enrollment/capture timepoints, not one owner', () => {
@@ -89,12 +105,19 @@ test('two-device witness permits exactly two ordered enrollment/capture timepoin
   assert.ok(TWO_APPROVERS_SHAPED.includes('& not (Ex purpose #other.\n      RequestAccepted(pc, second_device, second_revision, binding, purpose) @other)'));
   assert.ok(TWO_APPROVERS_SHAPED.includes('SnapshotCaptured(pc, d, r, b) @x ==> (#x = #c1 | #x = #c2)'));
   assert.ok(TWO_APPROVERS_SHAPED.includes('Enrolled(pc, d, r, ak, dk) @x ==> (#x = #e1 | #x = #e2)'));
+  assert.ok(TWO_APPROVERS_SHAPED.includes('#o #u1 #u2 #s1 #s2 #a.'));
+  assert.ok(TWO_APPROVERS_SHAPED.includes('& o < u1 & u1 < s1 & s1 < u2 & u2 < s2 & s2 < a'));
+  for (const [who, index] of [['first', 1], ['second', 2]]) {
+    assert.ok(TWO_APPROVERS_SHAPED.includes(`& UserAuthenticated(${who}_device, binding) @u${index}`));
+    assert.ok(TWO_APPROVERS_SHAPED.includes(`(All #x. UserAuthenticated(${who}_device, binding) @x ==> #x = #u${index})`));
+    assert.ok(TWO_APPROVERS_SHAPED.includes(`(All #x. ApprovalSigned(${who}_device, binding) @x ==> #x = #s${index})`));
+  }
 });
 
 test('CLI has only fixed independent variants and keeps approve replay intact', () => {
   assert.deepEqual(selectWitnessArguments([]), { variant: 'approve', replay: false });
   assert.deepEqual(selectWitnessArguments(['--replay']), { variant: 'approve', replay: true });
-  for (const variant of ['deny', 'two-approvers']) {
+  for (const variant of ['approve-tight', 'deny', 'two-approvers']) {
     assert.deepEqual(selectWitnessArguments([`--variant=${variant}`]), { variant, replay: false });
     const expected = selectedExpectation(variant);
     assert.deepEqual(Object.keys(expected), [WITNESS_VARIANTS[variant].lemma]);
@@ -103,7 +126,7 @@ test('CLI has only fixed independent variants and keeps approve replay intact', 
       '--stop-on-trace=BFS', '+RTS', '-N2', '-M2G', '-RTS',
     ]);
   }
-  for (const args of [['--variant=unknown'], ['--variant=__proto__'], ['--variant=deny', '--replay'], ['--bound=1'], ['--model=elsewhere'], ['--variant=deny --replay']]) {
+  for (const args of [['--variant=unknown'], ['--variant=__proto__'], ['--variant=deny', '--replay'], ['--variant=approve-tight', '--replay'], ['--bound=1'], ['--model=elsewhere'], ['--variant=deny --replay']]) {
     assert.throws(() => selectWitnessArguments(args));
   }
   for (const variant of ['__proto__', 'constructor', 'unknown', null]) assert.throws(() => shapeWitness(source, variant));
@@ -126,11 +149,12 @@ test('summary accepts only the selected verified witness, never unselected or in
   }
 });
 
-test('CI runs approve replay and both new witnesses independently with separate artifacts', () => {
+test('CI runs only the three tight witnesses independently, while legacy replay remains a CLI choice', () => {
   const workflow = readFileSync(new URL('../.github/workflows/protocol-witness-shape.yml', import.meta.url), 'utf8');
   assert.match(workflow, /fail-fast: false/u);
-  for (const name of ['approve-replay', 'deny', 'two-approvers']) assert.ok(workflow.includes(`variant: ${name}`));
-  for (const argument of ['--replay', '--variant=deny', '--variant=two-approvers']) assert.ok(workflow.includes(`argument: ${argument}`));
+  for (const name of ['approve-tight', 'deny', 'two-approvers']) assert.ok(workflow.includes(`variant: ${name}`));
+  for (const argument of ['--variant=approve-tight', '--variant=deny', '--variant=two-approvers']) assert.ok(workflow.includes(`argument: ${argument}`));
+  assert.doesNotMatch(workflow, /variant: approve-replay|argument: --replay/u);
   assert.ok(workflow.includes('protocol-witness-shape-${{ matrix.variant }}-${{ github.sha }}'));
   assert.doesNotMatch(workflow, /continue-on-error|protocol-security\.mjs\s*$/mu);
 });
