@@ -80,6 +80,8 @@ contrast after rendering; values above are design intent, not a passed audit.
   `--sidebar-max-share`. Ordinary 980/760px client widths retain the 216px rail
   at the default 16px root; enlarged text cannot take more than 30% of the window.
   The rail brand may wrap its icon/text onto separate rows instead of overflowing.
+  Desktop navigation items likewise wrap the icon before splitting a Korean
+  menu word; their text keeps normal word boundaries at enlarged sizes.
   Content padding remains 2rem (1rem at narrow bounds).
 - Desktop native window initial 980x740, minimum 760x580. Browser QA additionally
   stresses 390/768/1280 widths; those are not native-platform proof.

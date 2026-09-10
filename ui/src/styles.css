@@ -131,6 +131,8 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .desktop-shell { display: grid; grid-template-columns: min(var(--sidebar-width), var(--sidebar-max-share)) minmax(0, 1fr); font-size: var(--text-body); }
 .navigation-shell { min-width: 0; padding: var(--space-8) var(--space-3); display: flex; flex-direction: column; background: var(--surface-subtle); }
 .desktop-shell .navigation-shell { min-height: 0; overflow-y: auto; scroll-padding-block: var(--space-3); }
+.desktop-shell .navigation-item { flex-wrap: wrap; }
+.desktop-shell .navigation-item > span { overflow-wrap: normal; word-break: keep-all; }
 .app-brand { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; padding-inline: var(--space-3); margin-bottom: var(--space-10); font-size: var(--text-brand); font-weight: var(--weight-title); }
 .brand-symbol { color: var(--accent); display: grid; place-items: center; }
 .brand-symbol .icon { width: 1.5rem; height: 1.5rem; }
