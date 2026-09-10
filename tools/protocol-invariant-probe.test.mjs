@@ -9,6 +9,7 @@ import {
   ORIGIN_PATH, ORIGIN_HASH, HELPER_NAMES, DIRECT_HELPER_NAMES, BUILDING_HELPER,
   DEPENDENT_PROFILE, CONTEXT_NAMES, CONTEXT_MUTATIONS, DEPENDENT_HELPER_INSERTION, REUSED_BUILDING_INSERTION,
   REQUEST_SECURITY_PROFILE, REQUEST_SECURITY_NAMES, REQUEST_WITNESS_NAMES, REQUEST_SECURITY_HELPERS,
+  REQUEST_SECURITY_HELPERS_ONLY_PROFILE, REQUEST_SECURITY_REFERENCE_COMMIT, REQUEST_SECURITY_CANDIDATE_HASHES,
   REQUEST_SECURITY_HELPER_INSERTION, REQUIRED_COUNTEREXAMPLES, requiredInvariantVerdicts,
   ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
@@ -307,7 +308,7 @@ test('probe source preserves independent attribution, observable edit metadata a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI runs ONLY the fixed request-security profile in three independent contexts, not the normal gate', () => {
+test('CI runs ONLY the fixed helpers-only diagnostic in three independent contexts, not the normal gate', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
@@ -316,11 +317,11 @@ test('CI runs ONLY the fixed request-security profile in three independent conte
   assert.doesNotMatch(workflow, /--helper=/u);
   assert.ok(workflow.includes('fail-fast: false'));
   assert.ok(workflow.includes('context: [baseline, missing-approval-signature, missing-replay-consumption]'));
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-with-helpers "--context=${{ matrix.context }}"'));
+  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --profile=request-security-helpers-only "--context=${{ matrix.context }}"'));
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-request-security-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-security-helpers-only-${{ matrix.context }}-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
   assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);
@@ -528,14 +529,125 @@ test('security evidence remains explicitly isolated, context-attributed and hone
   assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
   assert.ok(probeSource.includes('requiredExpected: requiredInvariantVerdicts(selected, context)'));
   assert.ok(probeSource.includes("'required-counterexample-selected'"));
-  assert.ok(probeSource.includes('selectedHelper: securityProfile ? null'));
+  assert.ok(probeSource.includes('selectedHelper: securityProfile || helpersOnlyProfile ? null'));
   assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
   assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
   assert.ok(probeSource.includes("'tools/protocol-invariant-probe.test.mjs', 'tools/protocol-security.mjs'"));
   assert.ok(probeSource.includes("unselectedLemmas: profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)).map((name) => ({ name, status: 'not-selected' }))"));
-  assert.doesNotMatch(workflow, /--profile=request-opened-with-building|--prove=|--reuse|--bound=|continue-on-error/u);
+  assert.doesNotMatch(workflow, /--profile=request-opened-with-building|--profile=request-security-with-helpers|--prove=|--reuse|--bound=|continue-on-error/u);
   assert.ok(workflow.includes('timeout-minutes: 15'));
   assert.equal((workflow.match(/run: node tools\/protocol-invariant-probe\.mjs /gu) ?? []).length, 1);
+});
+
+function helpersOnlyInput(context, invocation = 'fixture') {
+  return resolve('SYNTHETIC-invariant-probe', `INVARIANT_PROBE_ONLY-${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}-${context}-${invocation}`, 'request.input.spthy');
+}
+
+function helpersOnlyOutput(context, verdicts = {}, invocation = 'fixture') {
+  const path = helpersOnlyInput(context, invocation), profile = invariantProfile(REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context);
+  return { status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
+    stdout: `summary of summaries:\n analyzed: ${path}\n${profile.candidateLemmas.map((name) => {
+      const trace = REQUEST_WITNESS_NAMES.includes(name) ? 'exists-trace' : 'all-traces';
+      return ` ${name} (${trace}): ${verdicts[name] ?? (REQUEST_SECURITY_HELPERS.includes(name) ? 'verified (14 steps)' : 'analysis incomplete (0 steps)')}`;
+    }).join('\n')}\n` };
+}
+
+test('helpers-only CLI is fixed and does not accept property, mutation, reuse or context overrides', () => {
+  for (const context of CONTEXT_NAMES) {
+    assert.deepEqual(selectInvariantRunArguments([`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, `--context=${context}`]), { selected: REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context });
+  }
+  for (const args of [
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`], [`--helper=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=constructor'],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=__proto__'],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=baseline', '--prove=honest_approve_trace'],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=baseline', '--reuse'],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=baseline', '--mutation=other'],
+    [`--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`, '--context=baseline', '--context=missing-replay-consumption'],
+    ['--context=baseline', `--profile=${REQUEST_SECURITY_HELPERS_ONLY_PROFILE}`],
+  ]) assert.throws(() => selectInvariantRunArguments(args));
+});
+
+for (const context of CONTEXT_NAMES) {
+  test(`${context} helpers-only candidate is byte-identical to 8629bac full-profile input and erases to the original`, () => {
+    const oldProfile = insertInvariantHelpers(source, REQUEST_SECURITY_PROFILE, context, manifest);
+    const diagnostic = insertInvariantHelpers(source, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest);
+    assert.deepEqual(diagnostic, oldProfile);
+    assert.ok(Object.isFrozen(REQUEST_SECURITY_CANDIDATE_HASHES));
+    assert.equal(REQUEST_SECURITY_REFERENCE_COMMIT, '8629bac07c27d86641f9ba2e8f8faaa99726a444');
+    assert.equal(digest(diagnostic.candidate), REQUEST_SECURITY_CANDIDATE_HASHES[context]);
+    assert.equal(eraseInvariantCandidate(diagnostic.candidate, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest), diagnostic.normalized);
+    assert.equal(digest(diagnostic.normalized), ORIGIN_HASH);
+    assert.deepEqual(admitInvariantCandidate(source, oldProfile.candidate, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest), diagnostic);
+    for (const altered of [
+      diagnostic.candidate + '\n',
+      diagnostic.candidate.replace('lemma enrolled_revision_unique [reuse]:', 'lemma enrolled_revision_unique:'),
+      diagnostic.candidate.replace('lemma request_opened_unique [reuse]:', 'lemma request_opened_unique:'),
+      diagnostic.candidate.replace(BUILDING_ACTION_EDITS[0].to, BUILDING_ACTION_EDITS[0].from),
+      diagnostic.candidate + '\nrestriction no_duplicate_captures: "All #i. False()@i ==> F"\n',
+    ]) {
+      assert.throws(() => admitInvariantCandidate(source, altered, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest));
+      assert.throws(() => eraseInvariantCandidate(altered, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context, manifest));
+    }
+    const profile = invariantProfile(REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context);
+    assert.deepEqual(profile.requiredLemmas, REQUEST_SECURITY_HELPERS);
+    assert.deepEqual(profile.reusedHelpers, REQUEST_SECURITY_HELPERS);
+    assert.deepEqual(profile.candidateLemmas.filter((name) => !profile.requiredLemmas.includes(name)), ORIGINAL_NAMES);
+    const expected = Object.fromEntries(REQUEST_SECURITY_HELPERS.map((name) => [name, { trace: 'all-traces', verdict: 'verified' }]));
+    assert.deepEqual(requiredInvariantVerdicts(REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context), expected);
+    assert.deepEqual(invariantArguments(helpersOnlyInput(context), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context), [
+      helpersOnlyInput(context), '--quit-on-warning', ...REQUEST_SECURITY_HELPERS.map((name) => `--prove=${name}`), '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS',
+    ]);
+    assert.equal(PROBE_TIMEOUT_MS, 120_000);
+    assert.equal(PROBE_OUTPUT_BYTES, 4 * 1024 * 1024);
+  });
+
+  test(`${context} helpers-only counts no partial helper stack or crossed invocation even with identical candidate bytes`, () => {
+    const path = helpersOnlyInput(context), valid = helpersOnlyOutput(context);
+    const expected = requiredInvariantVerdicts(REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context);
+    const observed = selectedInvariantSummary(valid, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context);
+    assert.equal(observed.ok, true);
+    assert.deepEqual(observed.requiredVerdicts, expected);
+    for (const name of REQUEST_SECURITY_HELPERS) {
+      for (const verdict of ['falsified (7 steps)', 'analysis incomplete (0 steps)', 'verified', 'verified (14 steps) extra']) {
+        assert.equal(selectedInvariantSummary(helpersOnlyOutput(context, { [name]: verdict }), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+      }
+      const row = ` ${name} (all-traces): verified (14 steps)\n`;
+      const missing = valid.stdout.replace(row, '');
+      assert.notEqual(missing, valid.stdout);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: missing, requiredVerdicts: expected, candidateSha256: REQUEST_SECURITY_CANDIDATE_HASHES[context] }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false, 'reference hashes or imported verdict fields supply no missing proof');
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + row }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+      assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout.replace(`${name} (all-traces)`, `${name} (exists-trace)`) }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+    }
+    for (const other of CONTEXT_NAMES.filter((name) => name !== context)) {
+      assert.equal(selectedInvariantSummary(helpersOnlyOutput(other), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+      assert.throws(() => invariantArguments(helpersOnlyInput(other), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context));
+    }
+    assert.equal(selectedInvariantSummary(helpersOnlyOutput(context, {}, 'old-run'), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+    assert.throws(() => invariantArguments(securityInput(context), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, context));
+    assert.equal(selectedInvariantSummary(securityOutput(context), REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+    const relabeledOldScope = securityOutput(context).stdout.replace(securityInput(context), path);
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: relabeledOldScope }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false, 'full-property verdicts cannot be relabeled as a helpers-only invocation');
+    assert.equal(selectedInvariantSummary({ ...valid, stdout: valid.stdout + valid.stdout }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+    assert.equal(selectedInvariantSummary({ ...valid, stderr: '\u001b[33mWARNING\u001b[0m: dependency' }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, context).ok, false);
+    for (const delta of [{ status: 1 }, { signal: 'SIGTERM' }, { error: new Error('Prover timed out.') }, { cancelled: true }, { cleanupIncomplete: true }]) {
+      const result = invariantRunSummary({ ...valid, ...delta }, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, true, context);
+      assert.equal(result.completed, false);
+      assert.equal(result.selectedProof.ok, false);
+    }
+    assert.equal(invariantRunSummary(valid, REQUEST_SECURITY_HELPERS_ONLY_PROFILE, path, false, context).selectedProof.ok, false);
+  });
+}
+
+test('helpers-only report never attributes original obligations or prior candidate identities as proof', () => {
+  assert.ok(probeSource.includes("proofAuthority: 'none-source-identity-only'"));
+  assert.ok(probeSource.includes("helperProofScope: 'same-invocation-same-context-only', importedProofs: false"));
+  assert.ok(probeSource.includes('ALL original nine obligations, including existential witnesses and required mutant counterexamples, are unselected'));
+  assert.ok(probeSource.includes('selectedSecurityProperties: securityProfile ?'));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run'"));
+  assert.ok(probeSource.includes('eligibleAsNormalGate: false'));
+  assert.ok(probeSource.includes('hash(candidate) !== REQUEST_SECURITY_CANDIDATE_HASHES[context]'));
+  assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
 });
 
 function dependentInput(context) {
