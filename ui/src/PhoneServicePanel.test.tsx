@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, NotificationPolicy, PhoneServiceView, ServiceAction } from './contracts';
-import { ko, phoneServiceStateText } from './messages.ko';
+import { ko, phoneServiceStateText, serviceActionText } from './messages.ko';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 import { useController } from './useController';
 
@@ -34,7 +34,7 @@ describe('Android service controls from actual snapshot capabilities', () => {
     expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.phoneActivity })).not.toBeInTheDocument();
     expect(screen.queryByText(ko.noActivity)).not.toBeInTheDocument();
-    for (const name of ['서비스 설치', '서비스 제거', '서비스 다시 시작']) {
+    for (const name of [serviceActionText.install, serviceActionText.uninstall, serviceActionText.restart]) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
     }
   });
@@ -98,10 +98,20 @@ describe('Android service controls from actual snapshot capabilities', () => {
 
   it('keeps native error copy and a native-enabled recovery action while policy is null', async () => {
     render(<App bridge={bridgeFor(qaCase('phone-service-error').snapshot)} initialPage="schedule" />);
-    expect(await screen.findByText('휴대폰 서비스를 시작하지 못했어요.')).toBeInTheDocument();
+    expect(await screen.findByText('휴대폰 승인을 켜지 못했어요.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: ko.phoneStartAction })).toBeEnabled();
     expect(screen.queryByText('synthetic_service_start_rejected')).not.toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+  });
+
+  it('labels local activation without claiming that phone requests or a PC connection are ready', async () => {
+    render(<App bridge={bridgeFor(qaCase('phone-service-ready').snapshot)} initialPage="schedule" />);
+    const panel = await screen.findByRole('region', { name: '휴대폰 승인' });
+    expect(within(panel).getByText('휴대폰 승인 켜짐')).toBeInTheDocument();
+    expect(within(panel).getByText(ko.phoneServiceReadyBody)).toBeInTheDocument();
+    expect(within(panel).getByText('휴대폰을 켤 때 자동 실행')).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/서비스|PC 요청을 휴대폰으로 보낼 준비가 됐어요/u);
+    expect(within(panel).getByRole('button', { name: '휴대폰 승인 끄기' })).toBeEnabled();
   });
 
   it('keeps a failed service reply stale and disabled without exposing exception text', async () => {

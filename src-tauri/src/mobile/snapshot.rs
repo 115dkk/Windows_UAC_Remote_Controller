@@ -29,7 +29,7 @@ pub(super) trait OwnerPort {
 pub(super) const fn service_issue() -> AppIssue {
     AppIssue {
         code: "phone_service_unavailable",
-        message: "휴대폰 서비스 상태를 확인하지 못했어요.",
+        message: "휴대폰 승인이 켜져 있는지 확인하지 못했어요.",
         next_action: Some("현재 상태를 새로 확인해 주세요."),
     }
 }
@@ -37,7 +37,7 @@ pub(super) const fn service_issue() -> AppIssue {
 const fn control_issue() -> AppIssue {
     AppIssue {
         code: "phone_service_change_unconfirmed",
-        message: "휴대폰 서비스 변경 결과를 확인하지 못했어요.",
+        message: "휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요.",
         next_action: Some("현재 상태와 자동 시작 설정을 확인한 뒤 다시 시도해 주세요."),
     }
 }

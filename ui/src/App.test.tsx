@@ -4,8 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import type { AppSnapshot, ControllerBridge } from './contracts';
-import { ko } from './messages.ko';
+import type { AppSnapshot, ControllerBridge, ServiceAction } from './contracts';
+import { ko, serviceActionText, serviceStateText } from './messages.ko';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 
 function deferred<T>() {
@@ -18,6 +18,7 @@ function deferred<T>() {
 function bridgeFor(snapshot: AppSnapshot, overrides: Partial<ControllerBridge> = {}): ControllerBridge {
   return { ...createQaBridge(snapshot), ...overrides };
 }
+const serviceActions: readonly ServiceAction[] = ['install', 'start', 'restart', 'stop', 'uninstall'];
 
 describe('native snapshot truth in the client', () => {
   it('starts with neutral loading, not a missing-lock warning', async () => {
@@ -39,17 +40,48 @@ describe('native snapshot truth in the client', () => {
     expect(screen.queryByRole('button', { name: ko.phones })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.activity })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '서비스 설치' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: serviceActionText.install })).not.toBeInTheDocument();
     expect(screen.queryByText(ko.noPhones)).not.toBeInTheDocument();
     expect(screen.getByText(ko.devicesUnavailableBody)).toBeInTheDocument();
   });
 
   it('does not equate a running service with remote readiness', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
-    expect(await screen.findByRole('heading', { name: '서비스 실행 중' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'PC 승인을 휴대폰에서' })).toBeInTheDocument();
+    expect(screen.getByText(ko.homePurpose)).toBeInTheDocument();
+    expect(screen.getByText('이 PC에서 실행')).toBeInTheDocument();
     expect(screen.getByText(ko.remoteNotReady)).toBeInTheDocument();
+    expect(screen.getByText('지금은 PC의 관리자 권한 창에서 직접 선택해 주세요.')).toBeInTheDocument();
     expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '서비스 시작' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
+    expect(screen.queryByText(/서비스/u)).not.toBeInTheDocument();
+  });
+
+  it('uses the separate native readiness flag, not the renamed on state', async () => {
+    const fixture = qaCase('desktop-running').snapshot;
+    const ready: AppSnapshot = { ...fixture, service: { ...fixture.service!, remoteRequestsReady: true } };
+    render(<App bridge={bridgeFor(ready)} />);
+    expect(await screen.findByText(ko.remoteReady)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
+    expect(screen.getByText(ko.remoteReadyBody)).toBeInTheDocument();
+    expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
+  });
+
+  it.each(serviceActions)('renames %s without adding an action beyond the native list', async (action) => {
+    const snapshot: AppSnapshot = { ...exampleSnapshot(), service: {
+      installed: action !== 'install', state: action === 'install' ? null : action === 'start' ? 'stopped' : 'running',
+      allowedActions: [action], controlHint: 'available', remoteRequestsReady: false,
+    } };
+    render(<App bridge={bridgeFor(snapshot)} />);
+    expect(await screen.findByRole('button', { name: serviceActionText[action] })).toBeEnabled();
+    for (const other of (['install', 'start', 'restart', 'stop', 'uninstall'] as const).filter((item) => item !== action)) {
+      expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
+    }
+    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByText(ko.remoteNotReady)).toBeInTheDocument();
   });
 
   it('offers lock setup only for an explicitly missing lock with native capability', async () => {
@@ -129,6 +161,20 @@ describe('native snapshot truth in the client', () => {
 });
 
 describe('request interaction boundaries', () => {
+  it('preserves the service word when it belongs to original request or terminal text', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-pending').snapshot;
+    const original = '서비스 확인.exe';
+    const path = 'C:\\서비스 원문\\서비스 확인.exe';
+    const details = 'Write-Output "서비스 원문 그대로"';
+    const snapshot = { ...fixture, requests: fixture.requests.map((request) => ({ ...request, programName: original, executablePath: path, details })) };
+    render(<App bridge={bridgeFor(snapshot)} />);
+    expect(await screen.findByRole('heading', { name: original })).toBeInTheDocument();
+    expect(screen.getByText(path)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.details }));
+    expect(screen.getByRole('region', { name: ko.commandDetails })).toHaveTextContent(details);
+  });
+
   it('reveals untrusted details as inert text and respects per-decision availability', async () => {
     const user = userEvent.setup();
     const fixture = qaCase('phone-pending').snapshot;
@@ -225,9 +271,10 @@ describe('destructive action confirmation', () => {
     const pending = deferred<AppSnapshot>();
     const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
     render(<App bridge={bridgeFor(snapshot, { controlService })} />);
-    const stop = await screen.findByRole('button', { name: '서비스 중지' });
+    const stop = await screen.findByRole('button', { name: serviceActionText.stop });
     await user.click(stop);
     let dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('자동 실행 설정은 바뀌지 않아요.');
     expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
     await user.click(within(dialog).getByRole('button', { name: ko.cancel }));
     expect(stop).toHaveFocus();
@@ -238,10 +285,34 @@ describe('destructive action confirmation', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(stop).toHaveFocus();
     await user.click(stop);
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '서비스 중지' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: serviceActionText.stop }));
     expect(controlService).toHaveBeenCalledExactlyOnceWith('stop');
     expect(stop).toBeDisabled();
     await act(async () => { pending.resolve({ ...snapshot, service: { installed: true, state: 'stopped', allowedActions: ['start'], controlHint: 'available', remoteRequestsReady: false } }); await pending.promise; });
-    await waitFor(() => { expect(screen.getByRole('button', { name: '서비스 시작' })).toBeEnabled(); });
+    await waitFor(() => { expect(screen.getByRole('button', { name: serviceActionText.start })).toBeEnabled(); });
+  });
+
+  it('explains that removing the PC connection feature leaves the settings app, and waits for the owner', async () => {
+    const user = userEvent.setup();
+    const snapshot = qaCase('desktop-running').snapshot;
+    const pending = deferred<AppSnapshot>();
+    const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
+    render(<App bridge={bridgeFor(snapshot, { controlService })} />);
+    await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거할까요?' });
+    expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
+    expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
+    expect(controlService).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'PC 연결 기능 제거' }));
+    expect(controlService).toHaveBeenCalledExactlyOnceWith('uninstall');
+    expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'PC 연결 기능 제거' })).toBeDisabled();
+    await act(async () => {
+      pending.resolve({ ...snapshot, service: { installed: false, state: null, allowedActions: ['install'], controlHint: 'available', remoteRequestsReady: false } });
+      await pending.promise;
+    });
+    expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'PC 연결 기능 설치' })).toBeEnabled();
   });
 });

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { phoneServiceGalleryCases } from './phone-service-cases';
-export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings';
+export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings' | 'remove-feature';
 export interface GalleryCase {
   readonly id: string;
   readonly fixture: string;
@@ -8,6 +8,7 @@ export interface GalleryCase {
   readonly colorScheme: 'light' | 'dark';
   readonly forcedColors: 'none' | 'active';
   readonly action: GalleryAction;
+  readonly rootTextSizePercent?: 200;
 }
 
 function row(id: string, fixture: string, width: number, height: number,
@@ -22,6 +23,9 @@ export const galleryCases: readonly GalleryCase[] = [
   row('desktop-empty-980', 'desktop-empty', 980, 740),
   row('desktop-unavailable-minimum-760', 'desktop-unavailable', 760, 580),
   row('desktop-running-980', 'desktop-running', 980, 740),
+  row('desktop-running-minimum-760', 'desktop-running', 760, 580),
+  row('desktop-remove-dialog-760', 'desktop-running', 760, 580, 'remove-feature'),
+  { ...row('desktop-running-text-size-200-760', 'desktop-running', 760, 580), rootTextSizePercent: 200 },
   row('desktop-running-dark-1280', 'desktop-running', 1280, 900, 'overview', 'dark'),
   row('desktop-devices-768', 'desktop-devices', 768, 900),
   row('desktop-devices-narrow-390', 'desktop-devices', 390, 844),

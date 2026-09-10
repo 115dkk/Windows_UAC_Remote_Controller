@@ -1,15 +1,15 @@
 <resources>
     <string name="app_name">"휴대폰 승인"</string>
     <string name="main_activity_title">"휴대폰 승인"</string>
-    <string name="controller_service_channel">서비스 실행 알림</string>
-    <string name="controller_service_channel_description">서비스 실행 상태와 앱 준비 상태를 표시합니다.</string>
-    <string name="controller_service_title">휴대폰 승인 서비스</string>
+    <string name="controller_service_channel">휴대폰 승인 실행 상태</string>
+    <string name="controller_service_channel_description">휴대폰 승인이 켜져 있는지, 앱 준비가 끝났는지 알려 줍니다.</string>
+    <string name="controller_service_title">휴대폰 승인</string>
     <string name="controller_service_locked">잠금을 풀면 앱을 준비합니다.</string>
     <string name="controller_service_preparing">앱을 준비하고 있습니다.</string>
     <string name="controller_service_ready">앱 설정을 사용할 수 있습니다.</string>
     <string name="controller_service_cleanup">이전 작업을 정리하고 있습니다.</string>
     <string name="controller_service_unavailable">앱을 준비하지 못했습니다. 앱에서 상태를 확인하세요.</string>
-    <string name="controller_service_stopping">서비스를 중지하고 있습니다.</string>
+    <string name="controller_service_stopping">휴대폰 승인을 끄고 있습니다.</string>
     <string name="request_channel_sound">요청 알림 · 소리</string>
     <string name="request_channel_vibration">요청 알림 · 진동</string>
     <string name="request_channel_silent">요청 알림 · 무음</string>

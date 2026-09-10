@@ -3,10 +3,12 @@ package dev.dkk115.uacremote.background
 
 import android.app.Activity
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.widget.TextView
@@ -29,17 +31,24 @@ class GalleryActivity : Activity() {
         val nonce = intent.getStringExtra("nonce") ?: return
         require(nonce.length == 36 && nonce.all { it in '0'..'9' || it in 'a'..'f' || it == '-' })
         val selected = intent.getStringExtra("case") ?: "sound"
-        require(selected in setOf("sound", "vibration", "silent", "restore", "withdrawn"))
+        require(selected in setOf("sound", "vibration", "silent", "restore", "withdrawn",
+            "status-preparing", "status-ready", "status-stopping"))
         val renderer = RequestNotificationRenderer(this)
         renderer.ensureChannels()
+        val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
         trace("clear")
         renderer.clearOwned()
+        manager.cancel(ControllerStatusNotificationRenderer.NOTIFICATION_ID)
+        var statusObservation: JSONObject? = null
         val mode = when (selected) {
             "vibration" -> RequestNotificationMode.VIBRATION_ONLY
             "silent" -> RequestNotificationMode.SILENT
             else -> RequestNotificationMode.SOUND
         }
-        if (selected != "withdrawn") {
+        if (selected.startsWith("status-")) {
+            statusObservation = postStatus(selected, manager)
+            trace("post")
+        } else if (selected != "withdrawn") {
             val pending = { action: String ->
                 PendingIntent.getActivity(this, 0,
                     Intent(this, GalleryActivity::class.java).setAction("gallery.$action")
@@ -62,7 +71,72 @@ class GalleryActivity : Activity() {
         }
         filesDir.resolve("gallery-result.json").writeText(JSONObject()
             .put("case", selected).put("nonce", nonce).put("scope", "shared-renderer-only; no production owner/authentication")
+            .put("sourceReceipt", sourceReceipt())
+            .put("statusNotification", statusObservation ?: JSONObject.NULL)
             .put("completed", true).toString())
+    }
+
+    /** Ordinary notify only: exercises the shared builder, never startForeground,
+     * a real service state transition, boot startup or a production owner. */
+    private fun postStatus(selected: String, manager: NotificationManager): JSONObject {
+        val state = when (selected) {
+            "status-preparing" -> ControllerServiceState.PREPARING
+            "status-ready" -> ControllerServiceState.LOCAL_SETTINGS_READY
+            "status-stopping" -> ControllerServiceState.STOPPED
+            else -> throw IllegalArgumentException()
+        }
+        val pending = PendingIntent.getActivity(this, ControllerStatusNotificationRenderer.NOTIFICATION_ID,
+            Intent(this, GalleryActivity::class.java).setAction("gallery.status")
+                .setData(Uri.parse("gallery://example/status")),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val renderer = ControllerStatusNotificationRenderer(this)
+        renderer.ensureChannel()
+        val notification = renderer.build(state, pending)
+        val channel = manager.getNotificationChannel(ControllerStatusNotificationRenderer.CHANNEL_ID)
+            ?: throw IllegalStateException()
+        val ongoing = (notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
+        val onlyAlertOnce = (notification.flags and Notification.FLAG_ONLY_ALERT_ONCE) != 0
+        val localOnly = (notification.flags and Notification.FLAG_LOCAL_ONLY) != 0
+        val showWhen = notification.extras.getBoolean(Notification.EXTRA_SHOW_WHEN, true)
+        check(notification.channelId == ControllerStatusNotificationRenderer.CHANNEL_ID)
+        check(notification.category == Notification.CATEGORY_SERVICE && notification.actions.isNullOrEmpty())
+        check(notification.contentIntent == pending && notification.fullScreenIntent == null)
+        check(ongoing && onlyAlertOnce && localOnly && !showWhen && notification.timeoutAfter == 0L)
+        check((notification.flags and Notification.FLAG_FOREGROUND_SERVICE) == 0)
+        check(channel.importance == NotificationManager.IMPORTANCE_LOW && channel.sound == null && !channel.shouldVibrate() && !channel.canShowBadge())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) check(pending.isImmutable)
+        manager.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification)
+        return JSONObject().put("state", state.wireValue)
+            .put("notificationId", ControllerStatusNotificationRenderer.NOTIFICATION_ID)
+            .put("channelId", notification.channelId)
+            .put("title", notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString())
+            .put("body", notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString())
+            .put("actions", JSONArray()).put("category", notification.category)
+            .put("ongoing", ongoing).put("onlyAlertOnce", onlyAlertOnce).put("localOnly", localOnly)
+            .put("showWhen", showWhen).put("timeoutAfter", notification.timeoutAfter)
+            .put("fullScreen", false).put("foregroundServicePromotionPerformed", false)
+            .put("contentIntentImmutable", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) pending.isImmutable else JSONObject.NULL)
+            .put("channel", JSONObject().put("name", channel.name.toString()).put("description", channel.description)
+                .put("importance", channel.importance).put("sound", channel.sound != null)
+                .put("vibration", channel.shouldVibrate()).put("badge", channel.canShowBadge()))
+    }
+
+    /** Actual copied build inputs packaged with this isolated APK, not hashes
+     * asserted by its launch Intent or a duplicate notification implementation. */
+    private fun sourceReceipt(): JSONObject = assets.open("gallery-source-receipt.json").use { stream ->
+        val bytes = ByteArray(65_537)
+        var used = 0
+        while (used < bytes.size) {
+            val count = stream.read(bytes, used, bytes.size - used)
+            if (count < 0) break
+            check(count > 0)
+            used += count
+        }
+        check(used in 1..65_536)
+        JSONObject(String(bytes, 0, used, Charsets.UTF_8)).also {
+            check(it.getInt("schema") == 1 && it.getString("scope") == "exact-shared-renderer-inputs")
+            check(it.getJSONArray("files").length() == 12)
+        }
     }
 
     // Bounded test-only lifecycle evidence; no body, key or production owner.

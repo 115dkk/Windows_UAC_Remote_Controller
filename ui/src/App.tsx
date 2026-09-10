@@ -63,7 +63,8 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
   if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main></div>;
 
   const items = navigationFor(snapshot);
-  const title = items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
+  const title = !phone && page === 'status' ? ko.homeTitle
+    : items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
   const navigation = <aside className="navigation-shell">
     <div className="app-brand"><span className="brand-symbol"><Icon name="link" /></span><span>{ko.appName}</span></div>
     <nav aria-label={ko.navigation}>{items.map((item) => item.available
@@ -74,7 +75,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
 
   const main = <main id="main-content" className="main-scroll" tabIndex={-1}>
     <div className="page-content">
-      <header className="page-header"><div><h1 tabIndex={-1}>{title}</h1>{page === 'requests' && snapshot.requests.some((request) => request.state === 'pending') && snapshot.dataAvailability.requests === 'available' && <p>{ko.requestIntro}</p>}{page === 'schedule' && <p>{ko.scheduleIntro}</p>}</div>{refreshButton}</header>
+      <header className="page-header"><div><h1 tabIndex={-1}>{title}</h1>{!phone && page === 'status' && <p>{ko.homePurpose}</p>}{page === 'requests' && snapshot.requests.some((request) => request.state === 'pending') && snapshot.dataAvailability.requests === 'available' && <p>{ko.requestIntro}</p>}{page === 'schedule' && <p>{ko.scheduleIntro}</p>}</div>{refreshButton}</header>
       {stale && <p className="stale-label"><Icon name="alert" />{ko.stale}</p>}
       {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{error}</p></section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{snapshot.issue.message}</p>{snapshot.issue.nextAction && <p className="supporting-text">{snapshot.issue.nextAction}</p>}</div></section>}

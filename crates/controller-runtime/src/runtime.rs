@@ -52,23 +52,23 @@ impl From<PlatformError> for AppIssue {
         match error {
             PlatformError::Unsupported => Self {
                 code: "service_control_unsupported",
-                message: "이 기기에서는 Windows 서비스를 관리할 수 없습니다.",
+                message: "이 기기에서는 PC의 휴대폰 승인을 켜거나 끌 수 없습니다.",
                 next_action: Some("Windows PC에서 앱을 열어 주세요."),
             },
             PlatformError::StatusUnavailable => Self {
                 code: "service_status_unavailable",
-                message: "Windows 서비스 상태를 확인하지 못했습니다.",
+                message: "PC에서 휴대폰 승인이 켜져 있는지 확인하지 못했습니다.",
                 next_action: Some("PC의 설치 상태를 확인한 뒤 새로고침해 주세요."),
             },
             PlatformError::HelperUnavailable => Self {
                 code: "service_helper_unavailable",
-                message: "Windows 서비스 관리 도구를 확인하지 못했습니다.",
+                message: "휴대폰 승인을 켜고 끄는 데 필요한 앱 파일을 확인하지 못했습니다.",
                 next_action: Some("설치 프로그램으로 앱의 설치 상태를 확인해 주세요."),
             },
             PlatformError::ControlFailed => Self {
                 code: "service_control_failed",
-                message: "요청한 서비스 작업이 완료됐는지 확인하지 못했습니다.",
-                next_action: Some("서비스 상태를 새로고침한 뒤 설치 상태를 확인해 주세요."),
+                message: "요청한 작업이 완료됐는지 확인하지 못했습니다.",
+                next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
             },
         }
     }
@@ -190,7 +190,7 @@ impl AppRuntime {
                     self.service_issue = Some(if stale {
                         AppIssue {
                             code: "service_status_stale",
-                            message: "서비스 상태를 새로 확인하지 못해 이전 상태를 표시합니다.",
+                            message: "휴대폰 승인의 현재 상태를 확인하지 못했습니다. 이전 상태를 표시합니다.",
                             next_action: Some("새로고침해 현재 상태를 확인해 주세요."),
                         }
                     } else {
@@ -231,15 +231,15 @@ impl AppRuntime {
         if service.control_hint != ControlHint::Available {
             return Err(AppIssue {
                 code: "service_installer_required",
-                message: "서비스 관리 도구가 설치되어 있지 않아 작업을 시작하지 않았습니다.",
+                message: "휴대폰 승인을 켜고 끄는 데 필요한 파일이 설치되지 않아 작업을 시작하지 않았습니다.",
                 next_action: Some("Windows 설치 프로그램으로 앱을 설치해 주세요."),
             });
         }
         if !service.allowed_actions.contains(&action) {
             return Err(AppIssue {
                 code: "service_action_unavailable",
-                message: "현재 서비스 상태에서는 이 작업을 시작할 수 없습니다.",
-                next_action: Some("서비스 상태를 새로고침해 주세요."),
+                message: "휴대폰 승인의 현재 상태에서는 이 작업을 시작할 수 없습니다.",
+                next_action: Some("새로고침해 현재 상태를 확인해 주세요."),
             });
         }
         match self
@@ -268,8 +268,8 @@ impl AppRuntime {
                 self.disable_service_actions();
                 self.service_issue = Some(AppIssue {
                     code: "service_helper_failed",
-                    message: "서비스 관리 도구가 작업을 완료하지 못했습니다.",
-                    next_action: Some("서비스 상태를 새로고침한 뒤 설치 상태를 확인해 주세요."),
+                    message: "휴대폰 승인 설정을 변경하는 작업을 완료하지 못했습니다.",
+                    next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
                 });
                 Ok(self.present())
             }
@@ -353,12 +353,12 @@ impl AppRuntime {
             ControlProgress::Idle => None,
             ControlProgress::StillRunning => Some(AppIssue {
                 code: "service_control_pending",
-                message: "서비스 관리 도구가 아직 실행 중일 수 있습니다. 완료 여부는 확인되지 않았습니다.",
+                message: "휴대폰 승인 설정 변경이 아직 진행 중일 수 있습니다. 완료 여부는 확인되지 않았습니다.",
                 next_action: Some("Windows에서 작업이 끝난 것을 확인한 뒤 앱을 다시 열어 주세요."),
             }),
             ControlProgress::CompletionUnknown => Some(AppIssue {
                 code: "service_control_completion_unknown",
-                message: "서비스 작업의 완료 여부를 확인하지 못했습니다.",
+                message: "휴대폰 승인 설정 변경이 끝났는지 확인하지 못했습니다.",
                 next_action: Some("Windows에서 작업 상태를 확인한 뒤 앱을 다시 열어 주세요."),
             }),
         }
@@ -367,7 +367,7 @@ impl AppRuntime {
     fn present(&self) -> AppSnapshot {
         let progress_issue = self.progress_issue().map(|mut issue| {
             if self.service_issue.is_some_and(|status| status.code == "service_status_stale") {
-                issue.message = "서비스 상태를 새로 확인하지 못해 이전 상태를 표시합니다. 관리 도구의 완료 여부도 확인되지 않았습니다.";
+                issue.message = "휴대폰 승인의 현재 상태를 확인하지 못했습니다. 이전 상태를 표시하며 설정 변경이 끝났는지도 확인되지 않았습니다.";
             }
             issue
         });

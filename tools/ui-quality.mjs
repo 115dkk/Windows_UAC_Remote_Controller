@@ -16,6 +16,7 @@ if (process.argv.length !== 2) {
 const commands = [
   ['Production/QA build boundary', ['--test', 'tools/ui-build-policy.test.mjs']],
   ['Bundled Korean font contracts', ['--test', 'tools/ui-fonts.test.mjs']],
+  ['Native-authored consumer copy policy', ['--test', 'tools/consumer-copy.test.mjs']],
   ['Strict TypeScript project checks', ['node_modules/typescript/bin/tsc', '-b', '--pretty', 'false']],
   ['ESLint (warnings fail)', ['node_modules/eslint/bin/eslint.js', 'ui', '--max-warnings', '0']],
   ['Vitest client behavior tests', ['node_modules/vitest/vitest.mjs', 'run']],

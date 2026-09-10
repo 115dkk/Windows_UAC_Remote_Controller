@@ -286,7 +286,7 @@ fn failed_control_can_still_have_changed_native_state_without_claiming_rollback(
     assert_eq!(issue.code, "phone_service_change_unconfirmed");
     assert_eq!(
         issue.message,
-        "휴대폰 서비스 변경 결과를 확인하지 못했어요."
+        "휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요."
     );
     assert_eq!(port.count("stop"), 1);
     assert_eq!(port.count("policy") + port.count("history"), 0);

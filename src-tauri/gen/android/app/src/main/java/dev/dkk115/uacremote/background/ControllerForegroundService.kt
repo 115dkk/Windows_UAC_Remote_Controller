@@ -2,7 +2,6 @@
 package dev.dkk115.uacremote.background
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
@@ -19,7 +18,6 @@ import android.os.Looper
 import android.os.UserManager
 import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.MainActivity
-import dev.dkk115.uacremote.R
 
 /** Foreground lifetime only; no socket, approval action, key or CE store at boot. */
 class ControllerForegroundService : Service() {
@@ -54,15 +52,9 @@ class ControllerForegroundService : Service() {
             UserUnlockObservation.UNAVAILABLE -> ControllerServiceState.UNAVAILABLE
         }
         try {
-            val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
-            val channel = NotificationChannel(CHANNEL_ID, getString(R.string.controller_service_channel), NotificationManager.IMPORTANCE_LOW)
-            channel.description = getString(R.string.controller_service_channel_description)
-            channel.setSound(null, null)
-            channel.enableVibration(false)
-            channel.setShowBadge(false)
-            manager.createNotificationChannel(channel)
+            ControllerStatusNotificationRenderer(this).ensureChannel()
             // Promote promptly BEFORE any Rust/CE/key-owner construction.
-            startForeground(NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            startForeground(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             promoted = true
         } catch (_: Exception) {
             owner.controllerServiceStartRejected(token = ownerToken)
@@ -150,7 +142,7 @@ class ControllerForegroundService : Service() {
         if (!promoted || destroyed) return
         try {
             val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
-            manager.notify(NOTIFICATION_ID, notification(state))
+            manager.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(state))
         } catch (_: Exception) {
             // No invisible replacement/background worker is started on failure.
             (application as? ControllerApplication)?.controllerServiceStartRejected(activatedGeneration, ownerToken)
@@ -159,28 +151,9 @@ class ControllerForegroundService : Service() {
     }
 
     private fun notification(state: ControllerServiceState): Notification {
-        val body = when (state) {
-            ControllerServiceState.WAITING_FOR_UNLOCK -> R.string.controller_service_locked
-            ControllerServiceState.PREPARING -> R.string.controller_service_preparing
-            ControllerServiceState.LOCAL_SETTINGS_READY -> R.string.controller_service_ready
-            ControllerServiceState.CLEANUP_PENDING -> R.string.controller_service_cleanup
-            ControllerServiceState.UNAVAILABLE -> R.string.controller_service_unavailable
-            ControllerServiceState.STOPPED -> R.string.controller_service_stopping
-        }
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val pending = PendingIntent.getActivity(this, NOTIFICATION_ID, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val builder = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_controller_service)
-            .setContentTitle(getString(R.string.controller_service_title))
-            .setContentText(getString(body))
-            .setContentIntent(pending)
-            .setCategory(Notification.CATEGORY_SERVICE)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setLocalOnly(true)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
-        return builder.build()
+        val pending = PendingIntent.getActivity(this, ControllerStatusNotificationRenderer.NOTIFICATION_ID, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return ControllerStatusNotificationRenderer(this).build(state, pending)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -196,8 +169,6 @@ class ControllerForegroundService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "controller_service_status_v1"
-        private const val NOTIFICATION_ID = 0x554143
         private const val ACTION_START = "dev.dkk115.uacremote.service.START"
         private const val ACTION_EXPLICIT_START = "dev.dkk115.uacremote.service.EXPLICIT_START"
         private const val EXTRA_GENERATION = "dev.dkk115.uacremote.service.NATIVE_GENERATION"

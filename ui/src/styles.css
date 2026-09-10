@@ -142,6 +142,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .page-content { max-width: var(--content-max); margin-inline: auto; padding: var(--space-8); }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-8); }
 .page-header > div { min-width: 0; }
+.desktop-shell .page-header { flex-wrap: wrap; }
 .page-header p { color: var(--muted); margin-top: var(--space-2); }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-width: var(--target-desktop); min-height: var(--target-desktop); padding: var(--space-2) var(--space-5); border: 1px solid transparent; border-radius: var(--radius-control); font-weight: 600; line-height: 1.5; text-align: center; transition: transform var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard); }
 .button:active:not(:disabled), button.navigation-item:active, .disclosure-button:active { transform: scale(.96); }
@@ -160,7 +161,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .eyebrow { color: var(--muted); font-size: var(--text-small); margin-bottom: var(--space-1); font-weight: 500; }
 .service-description { color: var(--muted); margin-block: var(--space-5) var(--space-6); }
 .status-facts { padding-block: var(--space-4); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.status-facts > div { display: grid; grid-template-columns: minmax(4rem, .4fr) minmax(0, 1fr); gap: var(--space-4); }
+.status-facts > div { display: grid; grid-template-columns: minmax(0, .4fr) minmax(0, 1fr); gap: var(--space-4); }
 .status-facts dt { color: var(--muted); word-break: keep-all; overflow-wrap: anywhere; }
 .status-facts dd { font-weight: 500; }
 .state-line { display: flex; align-items: center; gap: var(--space-2); color: var(--muted); }

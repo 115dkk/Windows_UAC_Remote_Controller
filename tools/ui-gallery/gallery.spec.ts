@@ -10,20 +10,28 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
   test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
+    if (fixture.startsWith('desktop-') && fixture !== 'desktop-devices' && fixture !== 'desktop-history') {
+      const purpose = page.getByRole('heading', { level: 1, name: 'PC 승인을 휴대폰에서', exact: true });
+      await expect(purpose).toBeVisible();
+      if (!selected.rootTextSizePercent) await expect(purpose).toBeInViewport({ ratio: 1 });
+      await expect(page.getByText('PC에 표시되는 관리자 권한 요청을 휴대폰에서 승인하거나 거부하기 위한 앱이에요.', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: /서비스/u })).toHaveCount(0);
+    }
     if (fixture === 'desktop-empty' || fixture === 'desktop-unavailable') {
-      await expect(page.getByRole('heading', { name: '서비스가 설치되지 않았어요', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: /^서비스 /u })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 설정이 필요해요', exact: true })).toBeVisible();
+      await expect(page.getByRole('region', { name: '휴대폰 승인 설정이 필요해요', exact: true }).getByRole('button')).toHaveCount(0);
     }
     if (fixture === 'desktop-unavailable') await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(1);
     if (fixture === 'desktop-running') {
-      await expect(page.getByRole('heading', { name: '서비스 실행 중', exact: true })).toBeVisible();
-      await expect(page.getByText('원격 요청을 받을 준비는 아직 되지 않았어요.', { exact: true })).toBeVisible();
-      await expect(page.getByText('원격 요청을 받을 준비가 됐어요.', { exact: true })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: '서비스 중지', exact: true })).toBeEnabled();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
+      await expect(page.getByText('PC 요청을 휴대폰으로 보낼 준비가 아직 되지 않았어요.', { exact: true })).toBeVisible();
+      await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택해 주세요.', { exact: true })).toBeVisible();
+      await expect(page.getByText('PC 요청을 휴대폰으로 보낼 준비가 됐어요.', { exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '휴대폰 승인 끄기', exact: true })).toBeEnabled();
     }
     if (fixture === 'desktop-devices') await expect(page.getByRole('heading', { name: '화면 예시 휴대폰', exact: true })).toBeVisible();
     if (fixture === 'desktop-history') {
-      await expect(page.getByRole('heading', { name: '서비스 시작됨', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
     }
@@ -95,6 +103,52 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
     if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
       await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
+    }
+
+    if (selected.id === 'desktop-running-minimum-760' || selected.rootTextSizePercent === 200) {
+      if (selected.rootTextSizePercent === 200) {
+        await expect(page.locator('html')).toHaveCSS('font-size', '32px');
+      }
+      for (const name of ['휴대폰 승인 다시 켜기', '휴대폰 승인 끄기', 'PC 연결 기능 제거']) {
+        const action = page.getByRole('button', { name, exact: true });
+        await action.scrollIntoViewIfNeeded();
+        await action.focus();
+        await expect(action).toBeInViewport({ ratio: 1 });
+        await expect(action).toBeFocused();
+        const box = await action.boundingBox();
+        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        const dimensions = await action.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+          clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+        expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
+        expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.clientHeight + 1);
+      }
+      await gallery.capture('activation-actions', selected.rootTextSizePercent === 200
+        ? 'CLIENT 200% 루트 글자 크기 스트레스 · 실제 브라우저 확대/OS 배율 증거 아님'
+        : '최소 데스크톱 크기에서 동작 접근 · 실제 Windows 실행 아님');
+    }
+
+    if (selected.action === 'remove-feature') {
+      const trigger = page.getByRole('button', { name: 'PC 연결 기능 제거', exact: true });
+      await trigger.scrollIntoViewIfNeeded();
+      await trigger.focus();
+      await page.keyboard.press('Enter');
+      const dialog = page.getByRole('dialog', { name: 'PC 연결 기능을 제거할까요?', exact: true });
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
+      await expect(dialog).not.toContainText(/키|데이터|기록/u);
+      const cancel = dialog.getByRole('button', { name: '취소', exact: true });
+      await expect(cancel).toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(dialog.getByRole('button', { name: 'PC 연결 기능 제거', exact: true })).toBeFocused();
+      await page.keyboard.press('Shift+Tab');
+      await expect(cancel).toBeFocused();
+      await gallery.capture('remove-feature-confirmation', 'PC 연결 기능만 제거하는 범위 · 설정 앱 유지 · 실제 제거 아님');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
+      await gallery.capture('remove-feature-cancelled', 'Escape 취소와 초점 복귀 · 제거 명령 실행 없음');
     }
 
     if (selected.action === 'notification-settings') {

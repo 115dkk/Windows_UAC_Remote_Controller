@@ -11,21 +11,87 @@ const application = 'dev.dkk115.uacremote.gallery';
 const component = `${application}/dev.dkk115.uacremote.background.GalleryActivity`;
 const serial = 'emulator-5554';
 const source = 'src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/background/RequestNotificationRenderer.kt';
+const background = 'src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/background';
+const resources = 'src-tauri/gen/android/app/src/main/res';
+const productServiceSource = `${background}/ControllerForegroundService.kt`;
+export const sharedRendererInputs = Object.freeze([
+  ...['RequestNotificationRenderer.kt', 'ControllerStatusNotificationRenderer.kt', 'BootServicePolicy.kt', 'PolicyOwnerRules.kt'].map((name) => `${background}/${name}`),
+  ...['values/strings.xml', 'values/request_colors.xml', 'values-night/request_colors.xml', 'drawable/ic_request_notice.xml',
+    'drawable/ic_request_approve.xml', 'drawable/ic_request_deny.xml', 'drawable/ic_request_details.xml', 'drawable/ic_controller_service.xml'].map((name) => `${resources}/${name}`),
+]);
 const apk = 'tools/android-notification-gallery/build/outputs/apk/debug/notification-renderer-gallery-only-debug.apk';
-const cases = ['sound', 'vibration', 'silent', 'restore', 'withdrawn'];
+export const statusCases = Object.freeze({
+  'status-preparing': Object.freeze({ state: 'preparing', resource: 'controller_service_preparing' }),
+  'status-ready': Object.freeze({ state: 'local_settings_ready', resource: 'controller_service_ready' }),
+  'status-stopping': Object.freeze({ state: 'stopped', resource: 'controller_service_stopping' }),
+});
+export const cases = Object.freeze(['sound', 'vibration', 'silent', 'restore', 'withdrawn', ...Object.keys(statusCases)]);
+const actionLabels = ['승인', '거부', '자세히 보기'];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const statusCase = (selected) => Object.hasOwn(statusCases, selected);
+const xmlAttribute = (text) => text.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll("'", '&apos;');
+const hasUiText = (xml, text) => xml.includes(`text="${xmlAttribute(text)}"`);
+
+export function statusResourceExpectations(xml) {
+  if (typeof xml !== 'string' || Buffer.byteLength(xml) > 1024 * 1024) throw new Error('Missing bounded product resources.');
+  const read = (name) => {
+    const found = [...xml.matchAll(new RegExp(`<string name="${name}">([^<]*)</string>`, 'gu'))];
+    if (found.length !== 1) throw new Error('Missing or duplicate status resource.');
+    const text = found[0][1].trim();
+    // These are fixed flat status labels. Refuse unsupported Android escaping
+    // instead of guessing what getString would display after a future edit.
+    if (!text || text.length > 512 || /[\\\r\n"]|&/u.test(text)) throw new Error('Unsupported status resource encoding.');
+    return text;
+  };
+  const shared = { title: read('controller_service_title'), channelName: read('controller_service_channel'),
+    channelDescription: read('controller_service_channel_description') };
+  return Object.fromEntries(Object.entries(statusCases).map(([selected, value]) => [selected, { ...shared, body: read(value.resource) }]));
+}
+
+export function notificationActionsMatch(xml, selected) {
+  if (!cases.includes(selected)) throw new Error('Unknown gallery case.');
+  return statusCase(selected) ? !actionLabels.some((label) => hasUiText(xml, label))
+    : selected === 'withdrawn' || actionLabels.every((label) => hasUiText(xml, label));
+}
+
+export function matchesRendererSourceReceipt(value, expected) {
+  return value?.schema === 1 && value?.scope === 'exact-shared-renderer-inputs'
+    && Array.isArray(value.files) && Array.isArray(expected) && value.files.length === sharedRendererInputs.length && expected.length === sharedRendererInputs.length
+    && sharedRendererInputs.every((path, index) => {
+      const file = value.files[index];
+      return file?.path === path && expected[index]?.path === path
+        && /^[0-9a-f]{64}$/u.test(file.sha256 ?? '') && file.sha256 === expected[index].sha256;
+    });
+}
+
+export function checkStatusNativeReceipt(value, selected, expected) {
+  if (!statusCase(selected) || !expected || !value || value.state !== statusCases[selected].state
+      || value.notificationId !== 0x554143 || value.channelId !== 'controller_service_status_v1'
+      || value.title !== expected.title || value.body !== expected.body || value.category !== 'service'
+      || !Array.isArray(value.actions) || value.actions.length !== 0
+      || value.ongoing !== true || value.onlyAlertOnce !== true || value.localOnly !== true || value.showWhen !== false
+      || value.timeoutAfter !== 0 || value.fullScreen !== false || value.foregroundServicePromotionPerformed !== false
+      || value.contentIntentImmutable !== true || value.channel?.importance !== 2 || value.channel?.sound !== false
+      || value.channel?.vibration !== false || value.channel?.badge !== false
+      || value.channel?.name !== expected.channelName || value.channel?.description !== expected.channelDescription) {
+    throw new Error('Actual shared status renderer fields did not match the selected state.');
+  }
+}
 
 export function onlyIsolatedEmulator(list) {
   const devices = list.trim().split(/\r?\n/u).slice(1).filter((line) => line.trim());
   return devices.length === 1 && devices[0].trim() === `${serial}\tdevice`;
 }
 
-export function checkNotificationUi(xml, selected) {
-  if (xml.length > 1024 * 1024 || !xml.includes('<hierarchy')) throw new Error('Missing bounded actual UI dump.');
+export function checkNotificationUi(xml, selected, expectedStatus) {
+  if (!cases.includes(selected) || typeof xml !== 'string' || xml.length > 1024 * 1024 || !xml.includes('<hierarchy')) throw new Error('Missing bounded actual UI dump.');
   const rootNode = xml.match(/<node\b[^>]*>/u)?.[0];
   if (!rootNode?.includes('package="com.android.systemui"')) throw new Error('The notification shade is not the observed UI.');
   const present = xml.includes('UAC 인증 요청');
-  if (selected === 'withdrawn') {
+  if (statusCase(selected)) {
+    if (!expectedStatus || !hasUiText(xml, expectedStatus.title) || !hasUiText(xml, expectedStatus.body)
+        || present || !notificationActionsMatch(xml, selected)) throw new Error('The selected action-free status notification is not visible.');
+  } else if (selected === 'withdrawn') {
     if (present) throw new Error('Withdrawn test notification is still visible.');
   } else if (!present || !xml.includes('PowerShell')) {
     throw new Error('The actual system notification is not visible.');
@@ -33,7 +99,7 @@ export function checkNotificationUi(xml, selected) {
 }
 
 export function matchesNativeReceipt(value, selected, nonce) {
-  return value?.case === selected && value?.nonce === nonce && value?.completed === true
+  return cases.includes(selected) && value?.case === selected && value?.nonce === nonce && value?.completed === true
     && value?.scope === 'shared-renderer-only; no production owner/authentication';
 }
 
@@ -85,7 +151,8 @@ async function main() {
   mkdirSync(output, { recursive: true });
   const receipt = { scope: 'actual Android renderer in isolated test APK; NOT production owner, auth, connection or UAC',
     commit: process.env.GITHUB_SHA, source, sourceSha256: null,
-    apk, apkSha256: null, serial, sdk: null, abi: null, setupBarrier: null, captures: [], completed: false, failure: null };
+    sharedSources: [], productServiceSource, productServiceSourceSha256: null, productServiceLinked: false,
+    apk, apkSha256: null, serial, sdk: null, abi: null, setupBarrier: null, captures: [], inputsUnchanged: false, completed: false, failure: null };
   const pause = () => new Promise((done) => setTimeout(done, 500));
   const diagnostics = (stage) => {
     // Read-only package-scoped OS state. Do not restart the Activity to observe
@@ -95,6 +162,9 @@ async function main() {
   };
   try {
     receipt.sourceSha256 = hash(readFileSync(resolve(root, source)));
+    receipt.sharedSources = sharedRendererInputs.map((path) => ({ path, sha256: hash(readFileSync(resolve(root, path))) }));
+    receipt.productServiceSourceSha256 = hash(readFileSync(resolve(root, productServiceSource)));
+    const statusExpectations = statusResourceExpectations(readFileSync(resolve(root, `${resources}/values/strings.xml`), 'utf8'));
     receipt.apkSha256 = hash(readFileSync(resolve(root, apk)));
     receipt.sdk = run(['shell', 'getprop', 'ro.build.version.sdk']).trim();
     receipt.abi = run(['shell', 'getprop', 'ro.product.cpu.abi']).trim();
@@ -125,6 +195,8 @@ async function main() {
         await pause();
       }
       if (!matchesNativeReceipt(native, selected, nonce)) throw new Error('Native renderer checks did not finish for this exact launch.');
+      if (!matchesRendererSourceReceipt(native.sourceReceipt, receipt.sharedSources)) throw new Error('The installed gallery APK does not contain the exact current renderer/resource inputs.');
+      if (statusCase(selected)) checkStatusNativeReceipt(native.statusNotification, selected, statusExpectations[selected]);
       diagnostics(`${selected}-posted`);
       run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
       // App.onCreate/notify returning does not mean SystemUI finished its first
@@ -138,15 +210,16 @@ async function main() {
         run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
         xml = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
         let shown = false;
-        try { checkNotificationUi(xml, selected); shown = true; } catch { /* Retain actual failed observation. */ }
-        const actionsShown = selected === 'withdrawn' || ['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`));
-        consecutive = shown && actionsShown ? consecutive + 1 : 0;
-        observations.push({ attempt, shade: xml.includes('package="com.android.systemui"'), shown, actionsShown, xmlSha256: hash(xml) });
+        try { checkNotificationUi(xml, selected, statusExpectations[selected]); shown = true; } catch { /* Retain actual failed observation. */ }
+        const actionsMatch = notificationActionsMatch(xml, selected);
+        consecutive = shown && actionsMatch ? consecutive + 1 : 0;
+        observations.push({ attempt, shade: xml.includes('package="com.android.systemui"'), shown, actionsMatch,
+          expectedActionCount: statusCase(selected) || selected === 'withdrawn' ? 0 : 3, xmlSha256: hash(xml) });
         diagnostics(`${selected}-observation-${attempt}`);
         if (consecutive >= 2) break;
         if (!xml.includes('package="com.android.systemui"')) {
           run(['shell', 'cmd', 'statusbar', 'expand-notifications']);
-        } else if (shown && !actionsShown) {
+        } else if (shown && !actionsMatch && !statusCase(selected)) {
           // Expand only an observed system control; never guess a blind position.
           const controls = [...xml.matchAll(/<node\b[^>]*content-desc="Expand"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*>/gu)];
           if (controls.length === 1) {
@@ -162,22 +235,26 @@ async function main() {
       diagnostics(`${selected}-captured`);
       receipt.captures.push({ case: selected, native, observations, pngSha256: hash(png), actualUiChecked: false });
       if (consecutive < 2) throw new Error('The actual notification did not remain visible across two observations.');
-      checkNotificationUi(xml, selected);
-      if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => xml.includes(`text="${label}"`))) {
-        throw new Error('All three native notification actions were not visible in the actual UI.');
+      checkNotificationUi(xml, selected, statusExpectations[selected]);
+      if (!notificationActionsMatch(xml, selected)) {
+        throw new Error('Actual notification actions did not match the selected case.');
       }
       // Accessibility can update before the compositor. Keep each image between
       // actual UI observations. ROOT must still inspect pixels independently.
       run(['shell', 'uiautomator', 'dump', '/sdcard/gallery-window.xml']);
       const after = run(['exec-out', 'cat', '/sdcard/gallery-window.xml']);
       writeFileSync(resolve(output, `${selected}-after.xml`), after);
-      checkNotificationUi(after, selected);
-      if (selected !== 'withdrawn' && !['승인', '거부', '자세히 보기'].every((label) => after.includes(`text="${label}"`))) {
-        throw new Error('Native actions disappeared during the actual screenshot capture.');
+      checkNotificationUi(after, selected, statusExpectations[selected]);
+      if (!notificationActionsMatch(after, selected)) {
+        throw new Error('Native action visibility changed during the actual screenshot capture.');
       }
       receipt.captures.at(-1).afterXmlSha256 = hash(after);
       receipt.captures.at(-1).actualUiChecked = true;
     }
+    receipt.inputsUnchanged = receipt.sharedSources.every((file) => hash(readFileSync(resolve(root, file.path))) === file.sha256)
+      && hash(readFileSync(resolve(root, productServiceSource))) === receipt.productServiceSourceSha256
+      && hash(readFileSync(resolve(root, apk))) === receipt.apkSha256;
+    if (!receipt.inputsUnchanged) throw new Error('Renderer, resource, service callsite or APK changed during capture.');
     receipt.completed = true;
   } catch (error) {
     receipt.failure = String(error.message).slice(0, 2000);

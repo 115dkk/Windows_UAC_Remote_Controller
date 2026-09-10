@@ -14,6 +14,7 @@ export function PhoneServicePanel({ service, disabled, onAction }: {
     <div className="service-heading-row"><Icon name="phone" /><h2 id={heading}>{ko.phoneServiceLabel}</h2></div>
     <p className="state-line" role="status" aria-live="polite" aria-atomic="true"><span className="state-dot" aria-hidden="true" />{service ? phoneServiceStateText[service.state] : ko.serviceUnknown}</p>
     <dl className="status-facts"><div><dt>{ko.phoneBootLabel}</dt><dd>{service?.bootEnabled === true ? ko.phoneBootOn : service?.bootEnabled === false ? ko.phoneBootOff : ko.phoneBootUnknown}</dd></div></dl>
+    {service?.state === 'local_settings_ready' && service.policyOwnerReady && <p className="supporting-text">{ko.phoneServiceReadyBody}</p>}
     {!service && <p className="supporting-text">{ko.phoneServiceUnknownBody}</p>}
     {service && (service.canStart || service.canStop) && <>
       <p className="supporting-text" id={consequence}>{service.canStart ? ko.phoneStartConsequence : ko.phoneStopConsequence}</p>

@@ -18,16 +18,17 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
   const serviceTitle = !service ? ko.serviceUnknown : !service.installed ? ko.serviceMissing
     : service.state ? serviceStateText[service.state] : ko.serviceUnknown;
   const description = !service ? ko.serviceUnknownBody : !service.installed ? ko.serviceMissingBody
-    : service.state === 'running' ? ko.serviceRunningBody : service.state === 'stopped' ? ko.serviceStoppedBody
+    : service.state === 'running' ? (service.remoteRequestsReady ? ko.remoteReadyBody : ko.serviceRunningBody)
+      : service.state === 'stopped' ? (service.allowedActions.includes('start') ? ko.serviceStoppedBody : ko.serviceUnknownBody)
       : service.state === 'paused' ? ko.servicePausedBody : service.state ? ko.servicePendingBody : ko.serviceUnknownBody;
   const actions: readonly ServiceAction[] = ['install', 'start', 'restart', 'stop', 'uninstall'];
   const primary = actions.find((action) => service?.allowedActions.includes(action) && (action === 'install' || action === 'start'));
   return <>
     <section className="surface service-card" aria-labelledby="service-heading">
       <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><p className="eyebrow">{ko.serviceLabel}</p><h2 id="service-heading">{serviceTitle}</h2></div></div>
+      {service && <p className={`state-line ${service.remoteRequestsReady ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{service.remoteRequestsReady ? ko.remoteReady : ko.remoteNotReady}</p>}
       <p className="service-description">{description}</p>
       <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi>{snapshot.computerName || '—'}</bdi></dd></div></dl>
-      {service && <p className={`state-line ${service.remoteRequestsReady ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{service.remoteRequestsReady ? ko.remoteReady : ko.remoteNotReady}</p>}
       {service?.controlHint === 'needs_installer' && <p className="supporting-text">{ko.serviceNeedsInstaller}</p>}
       {service?.controlHint === 'unsupported' && <p className="supporting-text">{ko.serviceUnsupported}</p>}
       {service && service.allowedActions.length > 0 && <div className="service-actions">{actions.filter((action) => service.allowedActions.includes(action)).map((action) =>

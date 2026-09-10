@@ -50,10 +50,15 @@ export class GallerySession {
     });
     const response = await this.page.goto(`/qa.html?case=${encodeURIComponent(selected.fixture)}`, { waitUntil: 'load' });
     expect(response?.status()).toBe(200);
+    if (selected.rootTextSizePercent === 200) {
+      // Explicit QA-only text-size stress. No production switch, browser zoom,
+      // native scaling claim, content masking or screenshot modification.
+      await this.page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+    }
     const heading = selected.fixture === 'desktop-devices' ? '연결된 휴대폰'
       : selected.fixture === 'desktop-history' ? '활동 기록'
         : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
-        : selected.fixture.startsWith('desktop-') ? 'PC 상태'
+        : selected.fixture.startsWith('desktop-') ? 'PC 승인을 휴대폰에서'
           : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' || selected.fixture.startsWith('phone-service-') ? '알림 시간' : '요청';
     await expect(this.page.getByRole('heading', { name: heading, exact: true, level: 1 })).toBeVisible();
     await expect(this.page.getByRole('button', { name: '다시 확인', exact: true })).toBeEnabled();
@@ -95,11 +100,14 @@ export class GallerySession {
       userAgent: navigator.userAgent, language: navigator.language,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       fontsStatus: document.fonts.status, declaredFontFamily: getComputedStyle(document.body).fontFamily,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
       devicePixelRatio: window.devicePixelRatio,
     })).catch(() => null);
     const data = {
       scope: 'CLIENT / SYNTHETIC', visualReview: 'not-performed-by-harness',
       fixture: this.selected, browserName: 'chromium', browserVersion: this.browser.version(),
+      textSizeStress: this.selected?.rootTextSizePercent === 200
+        ? { rootPercent: 200, scope: 'CLIENT QA ONLY; not browser zoom or native OS scaling' } : null,
       context, captures: this.captures, layoutMeasurements: this.measurements,
       console: this.consoleMessages, consoleTruncated: this.consoleTruncated,
       hasConsoleProblem: this.hasConsoleProblem, pageErrors: this.pageErrors, failedRequests: this.failedRequests,

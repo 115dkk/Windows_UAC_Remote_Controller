@@ -90,10 +90,30 @@ contrast after rendering; values above are design intent, not a passed audit.
 
 ## Components and states
 
-- Desktop: native caption, compact task navigation, PC state, connected phones,
-  activity. One setup/manage action where the native owner permits it.
+- Desktop: native caption, compact task navigation, connected phones and
+  activity. Home leads with `PC 승인을 휴대폰에서` and a short explanation of
+  the administrator-request approval/denial purpose, before local execution.
+  Keep the installed product name `휴대폰 승인`.
+- Consumer controls name the product/job, not the implementation's service:
+  `휴대폰 승인 켜기 / 끄기 / 다시 켜기`, and `PC 연결 기능 설치 / 제거`.
+  Local on/off state is scoped by `이 PC에서 실행`; it is not remote readiness.
+  Show the separately owned remote-readiness fact before computer metadata and
+  provide the applicable next action. An unready runtime directs the user to
+  the existing Windows prompt on the PC, without claiming phone availability.
+  Only native `allowedActions` creates controls. Removing the PC connection
+  feature removes the background Windows registration, not this settings app;
+  confirmations make no unsupported key/data-deletion or retention promise.
+  Windows off does not change its automatic-start setting; Android off does.
+  Do not present an observed Windows boot setting when the snapshot lacks it.
+- At enlarged client text sizes, the desktop header may wrap the refresh action
+  below its purpose text. Metadata columns may shrink/wrap instead of enforcing
+  a fixed minimum label width. Main scrolling and action targets are preserved.
+  QA additionally exercises 200% root text size; this is an explicit client
+  stress transform, not evidence of native browser zoom or OS text scaling.
 - Phone: request-first layout, connected PCs, notification schedule, activity.
-  Secure-lock-missing is distinct from readiness unknown/error.
+  The activation panel names `휴대폰 승인`, explains the persisted automatic-
+  start consequence of on/off and distinguishes local settings readiness from
+  a connected PC. Secure-lock-missing is distinct from readiness unknown/error.
 - Request: PC + program + executable; optional command disclosure labelled
   `더 보기`. Approval and denial labels are `승인` / `거부`. No editable Windows
   credentials in WebView; eventual credential entry is native-owned.
