@@ -2,8 +2,8 @@
 // One selected isolated witness-search experiment. NEVER a normal security gate.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, parse, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mutateExactlyOnce, parseProofSummary, proofArguments } from './protocol-security.mjs';
 import { runProver } from './prover-process.mjs';
@@ -104,6 +104,16 @@ export const WITNESS_VARIANTS = Object.freeze({
   'two-approvers': Object.freeze({ lemma: 'honest_two_approvers_single_winner_trace', original: TWO_APPROVERS_ORIGINAL, shaped: TWO_APPROVERS_SHAPED }),
 });
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+export const STORED_CHECK_CONTEXTS = Object.freeze(['good', 'sorry', 'contradiction']);
+const STORED_CLASSIFICATION = 'STORED_SHAPED_PROOF_CHECK_ONLY';
+const STORED_LEMMA = 'honest_approve_trace';
+const STORED_NEXT_LEMMA = '\nlemma honest_deny_without_approval_auth_trace:';
+const MAX_SOURCE = 1024 * 1024;
+
+function storedContext(context) {
+  assert.ok(typeof context === 'string' && STORED_CHECK_CONTEXTS.includes(context), 'Unknown fixed stored-proof check context.');
+  return context;
+}
 
 function variantDefinition(variant) {
   assert.ok(typeof variant === 'string' && Object.hasOwn(WITNESS_VARIANTS, variant), 'Unknown fixed witness variant.');
@@ -117,7 +127,8 @@ export function selectWitnessArguments(args) {
   if (args[0] === '--variant=approve-tight') return { variant: 'approve-tight', replay: false };
   if (args[0] === '--variant=deny') return { variant: 'deny', replay: false };
   if (args[0] === '--variant=two-approvers') return { variant: 'two-approvers', replay: false };
-  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=approve-tight|--variant=deny|--variant=two-approvers]');
+  for (const context of STORED_CHECK_CONTEXTS) if (args[0] === `--check-stored=${context}`) return { variant: 'approve', replay: true, checkStored: context };
+  throw new Error('usage: node tools/protocol-witness-shape.mjs [--replay|--variant=approve-tight|--variant=deny|--variant=two-approvers|--check-stored=good|--check-stored=sorry|--check-stored=contradiction]');
 }
 
 export function selectedExpectation(variant) {
@@ -162,11 +173,189 @@ export function admitStoredProof(base, stored) {
   return stored;
 }
 
+export function storedCheckInput(source, stored, context) {
+  storedContext(context);
+  assert.equal(typeof stored, 'string');
+  assert.ok(Buffer.byteLength(stored) <= MAX_SOURCE);
+  const shaped = shapeWitness(source, 'approve');
+  const base = shaped.candidate.trimEnd() + '\n';
+  const admitted = admitStoredProof(base, stored);
+  const beginning = base.indexOf(STORED_NEXT_LEMMA), ending = admitted.indexOf(STORED_NEXT_LEMMA);
+  const originalBody = admitted.slice(beginning, ending);
+  const replacement = context === 'good' ? originalBody : `\nby ${context}\n`;
+  const candidate = admitted.slice(0, beginning) + replacement + admitted.slice(ending);
+  // Exact body removal, not a formula/parser rewrite: every rule, restriction,
+  // other lemma and the already-strengthened approve formula stays identical.
+  assert.equal(candidate.slice(0, beginning) + candidate.slice(beginning + replacement.length), base);
+  assert.doesNotMatch(base, /\[\s*(?:[^\]]*,\s*)?(?:reuse|sources)\b/u);
+  return { ...shaped, shaped: base, admitted, candidate,
+    originalBodySha256: hash(originalBody), replacementBodySha256: hash(replacement) };
+}
+
+export function storedCheckArguments(input) {
+  assert.ok(typeof input === 'string' && input.length <= 4096 && !/[\u0000-\u001f\u007f]/u.test(input) &&
+    posix.isAbsolute(input) && posix.normalize(input) === input && posix.basename(input) === 'request.input.spthy');
+  return [input, '--quit-on-warning', '+RTS', '-N2', '-M2G', '-RTS'];
+}
+
+export function storedCheckSummary(result, context, known, input) {
+  storedContext(context);
+  const expected = { [STORED_LEMMA]: { trace: 'exists-trace', verdict: context === 'good' ? 'verified' : 'inconclusive' } };
+  // Reuse exact-input/single-summary/known-name/process ownership checks. For
+  // negatives, the parser's broad inconclusive category is NEVER sufficient.
+  const parsed = parseProofSummary(result, expected, known, input);
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
+  const reasons = [...parsed.reasons];
+  if (Object.hasOwn(result, 'classification') || Object.hasOwn(result, 'selectedWitness')) reasons.push('stored result metadata is not a current raw prover result');
+  if (Buffer.byteLength(output) > 4 * 1024 * 1024 + 1) reasons.push('stored-proof check output exceeds its bound');
+  if (/\bwarn(?:ing|ings)?\b|returned unsupported version/i.test(output)) reasons.push('prover warning or unsupported dependency');
+  const summary = output.slice(Math.max(0, output.lastIndexOf('summary of summaries:')));
+  const rows = [...summary.matchAll(/^\s*honest_approve_trace\s+\(exists-trace\):\s*([^\r\n]+)$/gm)];
+  const exact = context === 'good' ? /^verified \(\d+ steps\)\s*$/ : /^analysis incomplete \(\d+ steps\)\s*$/;
+  if (rows.length !== 1 || !exact.test(rows[0][1])) reasons.push('selected check did not produce its exact required verdict row');
+  return { ok: reasons.length === 0, reasons, selectedLemma: STORED_LEMMA,
+    expected: context === 'good' ? 'verified' : 'analysis incomplete', observedRow: rows.length === 1 ? rows[0][1].trim() : null };
+}
+
+function plainParents(path) {
+  let cursor = parse(path).root;
+  for (const part of relative(cursor, dirname(path)).split(sep).filter(Boolean)) {
+    cursor = resolve(cursor, part);
+    const metadata = lstatSync(cursor);
+    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink(), 'Linked/non-directory evidence parent.');
+  }
+}
+
+// Bounded open-handle snapshot. Binary mode retains only its digest/size, not
+// the installed 150MiB executable in an uploaded artifact.
+function storedFile(path, maximum = MAX_SOURCE, capture = true) {
+  plainParents(path);
+  const before = lstatSync(path);
+  assert.ok(before.isFile() && !before.isSymbolicLink() && before.size > 0 && before.size <= maximum);
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const opened = fstatSync(fd);
+    assert.ok(opened.isFile() && opened.dev === before.dev && opened.ino === before.ino && opened.size === before.size);
+    const digest = createHash('sha256'), chunks = [], buffer = Buffer.alloc(Math.min(maximum + 1, 64 * 1024));
+    let size = 0;
+    for (;;) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, maximum + 1 - size), null);
+      if (!count) break;
+      size += count; assert.ok(size <= maximum);
+      digest.update(buffer.subarray(0, count));
+      if (capture) chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    const after = fstatSync(fd), leaf = lstatSync(path);
+    assert.ok(size === opened.size && after.size === size && after.mtimeMs === opened.mtimeMs && after.ctimeMs === opened.ctimeMs &&
+      leaf.isFile() && !leaf.isSymbolicLink() && leaf.dev === opened.dev && leaf.ino === opened.ino);
+    return { size, sha256: digest.digest('hex'), ...(capture ? { bytes: Buffer.concat(chunks, size) } : {}) };
+  } finally { closeSync(fd); }
+}
+
+async function runStoredCheck(context) {
+  storedContext(context);
+  const commit = process.env.GITHUB_SHA, binary = process.env.TAMARIN_BIN;
+  assert.ok(/^[0-9a-f]{40}$/.test(commit ?? '') && Number(process.versions.node.split('.')[0]) === 24);
+  assert.ok(typeof binary === 'string' && isAbsolute(binary) && realpathSync(root) === root);
+  for (const child of ['artifacts', 'artifacts/protocol-witness-shape']) {
+    const path = resolve(root, child); plainParents(path);
+    try { mkdirSync(path, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    assert.ok(lstatSync(path).isDirectory() && !lstatSync(path).isSymbolicLink());
+  }
+  const directory = mkdtempSync(resolve(root, 'artifacts/protocol-witness-shape', `${STORED_CLASSIFICATION}-${context}-`));
+  const controller = new AbortController(), stop = () => controller.abort(new Error('Stored-proof check interrupted.'));
+  process.on('SIGINT', stop); process.on('SIGTERM', stop);
+  let report = { classification: STORED_CLASSIFICATION, eligibleAsNormalGate: false, normalGateStatus: 'not-run',
+    commit, context, variant: 'approve', selectedLemma: STORED_LEMMA, helpers: [],
+    originalWeakerWitnessDirectlyVerified: false, storedProofReplayedAndVerified: false,
+    expected: context === 'good' ? 'verified' : 'analysis incomplete',
+    bounds: { invocations: 1, timeoutMs: 120000, outputBytes: 4 * 1024 * 1024, maxSourceFiles: 48, sourceBytesEach: MAX_SOURCE, heapGiB: 2, runtimeThreads: 2 },
+    attempted: false, completed: false, inputsUnchanged: false, passed: false };
+  const save = () => writeFileSync(resolve(directory, 'result.json'), JSON.stringify(report, null, 2));
+  save();
+  try {
+    const snapshots = new Map();
+    const capture = (name) => {
+      assert.ok(typeof name === 'string' && /^[A-Za-z0-9_./-]+$/.test(name) && !isAbsolute(name) &&
+        name.split('/').every((part) => part && part !== '.' && part !== '..'));
+      if (snapshots.has(name)) return snapshots.get(name);
+      assert.ok(snapshots.size < 48);
+      const file = storedFile(resolve(root, name));
+      const snapshot = `source-${String(snapshots.size).padStart(2, '0')}.txt`;
+      writeFileSync(resolve(directory, snapshot), file.bytes, { flag: 'wx', mode: 0o400 });
+      const entry = { path: name, snapshot, ...file }; snapshots.set(name, entry); return entry;
+    };
+    const original = capture('security/tamarin/RequestAuthorization.spthy');
+    const stored = capture('security/tamarin/candidates/HonestApproveShapedProof.spthy');
+    const manifest = JSON.parse(capture('security/tamarin/manifest.json').bytes.toString('utf8'));
+    assert.equal(manifest.version, 1); assert.equal(manifest.toolVersion, '1.12.0');
+    const models = manifest.models.filter((model) => model.id === 'request-authorization');
+    assert.equal(models.length, 1); assert.ok(!Object.hasOwn(models[0], 'helpers'));
+    assert.deepEqual(models[0].expected[STORED_LEMMA], selectedExpectation('approve')[STORED_LEMMA]);
+    const known = Object.keys(models[0].expected);
+    assert.deepEqual(known, [...original.bytes.toString('utf8').matchAll(/^lemma ([A-Za-z0-9_]+):/gm)].map((match) => match[1]));
+    assert.ok(Array.isArray(manifest.sourceBindings) && manifest.sourceBindings.length > 0 && manifest.sourceBindings.length <= 32);
+    const bound = new Set();
+    for (const binding of manifest.sourceBindings) {
+      assert.ok(/^crates\/[A-Za-z0-9_./-]+\.rs$/.test(binding?.path ?? '') && /^[0-9a-f]{64}$/.test(binding?.sha256 ?? '') && !bound.has(binding.path));
+      bound.add(binding.path);
+      assert.equal(hash(capture(binding.path).bytes.toString('utf8').replace(/\r\n/g, '\n')), binding.sha256);
+    }
+    for (const name of ['tools/protocol-witness-shape.mjs', 'tools/protocol-witness-shape.test.mjs', 'tools/protocol-security.mjs',
+      'tools/prover-process.mjs', 'tools/install-tamarin.mjs', '.github/workflows/protocol-witness-shape.yml', '.node-version']) capture(name);
+    const candidate = storedCheckInput(original.bytes.toString('utf8'), stored.bytes.toString('utf8'), context);
+    const input = resolve(directory, 'request.input.spthy'), args = storedCheckArguments(input);
+    writeFileSync(input, candidate.candidate, { flag: 'wx', mode: 0o400 });
+    writeFileSync(resolve(directory, 'shaped-without-proof.spthy'), candidate.shaped, { flag: 'wx', mode: 0o400 });
+    const tool = storedFile(binary, 150 * 1024 * 1024, false), inputHash = hash(candidate.candidate);
+    const unchanged = () => {
+      for (const entry of snapshots.values()) {
+        assert.equal(storedFile(resolve(root, entry.path), MAX_SOURCE, false).sha256, entry.sha256);
+        assert.equal(storedFile(resolve(directory, entry.snapshot), MAX_SOURCE, false).sha256, entry.sha256);
+      }
+      assert.equal(storedFile(binary, 150 * 1024 * 1024, false).sha256, tool.sha256);
+      assert.equal(storedFile(input).sha256, inputHash);
+      assert.equal(storedFile(resolve(directory, 'shaped-without-proof.spthy')).sha256, hash(candidate.shaped));
+      assert.equal(process.env.GITHUB_SHA, commit);
+      return true;
+    };
+    report = { ...report, sources: [...snapshots.values()].map(({ path, snapshot, size, sha256 }) => ({ path, snapshot, size, sha256 })),
+      binary, binaryMetadata: tool, sourceBindings: manifest.sourceBindings, arguments: args,
+      originSha256: hash(candidate.normalized), shapedWithoutProofSha256: hash(candidate.shaped),
+      storedProofSha256: stored.sha256, inputSha256: inputHash, originalBodySha256: candidate.originalBodySha256,
+      replacementBodySha256: candidate.replacementBodySha256, exactProofBodyErasureMatchesShapedSource: true,
+      originalRulesRestrictionsAndOtherLemmasUnchanged: true, originalShapedFormulaUnchanged: true,
+      unselectedLemmas: known.filter((name) => name !== STORED_LEMMA).map((name) => ({ name, status: 'not-required-by-this-experiment' })) };
+    unchanged(); controller.signal.throwIfAborted();
+    writeFileSync(resolve(directory, 'invocation.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
+    report.attempted = true; save();
+    const result = await runProver(binary, args, { cwd: directory, logPath: resolve(directory, 'prover.log'),
+      timeoutMs: 120000, maxOutputBytes: 4 * 1024 * 1024, signal: controller.signal });
+    const selectedCheck = storedCheckSummary(result, context, known, input);
+    report = { ...report, selectedCheck,
+      completed: !result.error && !result.signal && result.status === 0 && !result.cancelled && !result.cleanupIncomplete,
+      process: { status: result.status, signal: result.signal, error: result.error?.message ?? null,
+        cancelled: result.cancelled, cleanupIncomplete: result.cleanupIncomplete } };
+    report.inputsUnchanged = unchanged(); controller.signal.throwIfAborted();
+    report.passed = report.completed && report.inputsUnchanged && selectedCheck.ok;
+    report.storedProofReplayedAndVerified = context === 'good' && report.passed;
+    if (!report.passed) process.exitCode = 1;
+  } catch {
+    report.passed = false; report.failure = 'Stored shaped-proof check or input validation failed.'; process.exitCode = 1;
+  } finally {
+    if (controller.signal.aborted) { report.passed = false; report.storedProofReplayedAndVerified = false; process.exitCode = 1; }
+    report.cancelled = controller.signal.aborted;
+    save(); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  }
+}
+
 async function main() {
   assert.equal(process.platform, 'linux');
   assert.equal(process.env.CI, 'true');
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
-  const { variant, replay } = selectWitnessArguments(process.argv.slice(2));
+  const { variant, replay, checkStored } = selectWitnessArguments(process.argv.slice(2));
+  if (checkStored !== undefined) return runStoredCheck(checkStored);
   const expected = selectedExpectation(variant);
   const binary = process.env.TAMARIN_BIN;
   assert.ok(typeof binary === 'string' && isAbsolute(binary));

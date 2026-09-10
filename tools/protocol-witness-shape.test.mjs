@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   ORIGINAL, SHAPED, APPROVE_TIGHT_SHAPED, DENY_SHAPED, TWO_APPROVERS_SHAPED, WITNESS_VARIANTS,
   admitStoredProof, shapeWitness, selectWitnessArguments, selectedExpectation, selectedWitnessSummary,
+  STORED_CHECK_CONTEXTS, storedCheckInput, storedCheckArguments, storedCheckSummary,
 } from './protocol-witness-shape.mjs';
 import { proofArguments } from './protocol-security.mjs';
 
@@ -149,12 +150,87 @@ test('summary accepts only the selected verified witness, never unselected or in
   }
 });
 
-test('CI runs only the three tight witnesses independently, while legacy replay remains a CLI choice', () => {
+test('CI runs only three stored-proof contexts independently, while legacy variants remain CLI choices', () => {
   const workflow = readFileSync(new URL('../.github/workflows/protocol-witness-shape.yml', import.meta.url), 'utf8');
   assert.match(workflow, /fail-fast: false/u);
-  for (const name of ['approve-tight', 'deny', 'two-approvers']) assert.ok(workflow.includes(`variant: ${name}`));
-  for (const argument of ['--variant=approve-tight', '--variant=deny', '--variant=two-approvers']) assert.ok(workflow.includes(`argument: ${argument}`));
-  assert.doesNotMatch(workflow, /variant: approve-replay|argument: --replay/u);
-  assert.ok(workflow.includes('protocol-witness-shape-${{ matrix.variant }}-${{ github.sha }}'));
+  for (const context of STORED_CHECK_CONTEXTS) {
+    assert.ok(workflow.includes(`context: ${context}`));
+    assert.ok(workflow.includes(`argument: --check-stored=${context}`));
+  }
+  assert.doesNotMatch(workflow, /argument: --replay|argument: --variant=/u);
+  assert.ok(workflow.includes('protocol-witness-shape-check-${{ matrix.context }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('if: ${{ always() }}'));
   assert.doesNotMatch(workflow, /continue-on-error|protocol-security\.mjs\s*$/mu);
+});
+
+test('stored check CLI is closed, separate from unchanged legacy replay, and strictly file-only', () => {
+  assert.ok(Object.isFrozen(STORED_CHECK_CONTEXTS));
+  assert.deepEqual(STORED_CHECK_CONTEXTS, ['good', 'sorry', 'contradiction']);
+  for (const context of STORED_CHECK_CONTEXTS) {
+    assert.deepEqual(selectWitnessArguments([`--check-stored=${context}`]), { variant: 'approve', replay: true, checkStored: context });
+  }
+  for (const args of [['--check-stored'], ['--check-stored='], ['--check-stored=SOLVED'], ['--check-stored=unknown'],
+    ['--check-stored=constructor'], ['--check-stored=__proto__'], ['--check-stored=good\n'],
+    ['--check-stored=good', '--replay'], ['--check-stored=sorry', '--variant=deny'],
+    ['--check-stored=good', '--prove'], ['--check-stored=good', '--check-stored=contradiction']]) assert.throws(() => selectWitnessArguments(args));
+  const input = '/isolated/request.input.spthy';
+  assert.deepEqual(storedCheckArguments(input), [input, '--quit-on-warning', '+RTS', '-N2', '-M2G', '-RTS']);
+  for (const argument of storedCheckArguments(input)) assert.doesNotMatch(argument, /^--(?:prove|lemma|parse-only|precompute-only|auto-sources|bound|output-module)/u);
+  for (const input of ['relative/request.input.spthy', '/isolated/../request.input.spthy', '/isolated/other.spthy']) assert.throws(() => storedCheckArguments(input));
+  assert.deepEqual(selectWitnessArguments(['--replay']), { variant: 'approve', replay: true });
+});
+
+test('stored checks alter only the entire target proof body and erase exactly to the unchanged shaped theory', () => {
+  const stored = readFileSync(new URL('../security/tamarin/candidates/HonestApproveShapedProof.spthy', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const base = shapeWitness(source).candidate.trimEnd() + '\n';
+  const marker = '\nlemma honest_deny_without_approval_auth_trace:', beginning = base.indexOf(marker);
+  for (const context of STORED_CHECK_CONTEXTS) {
+    const prepared = storedCheckInput(source, stored, context), ending = prepared.candidate.indexOf(marker);
+    assert.equal(prepared.shaped, base);
+    assert.equal(prepared.candidate.slice(0, beginning) + prepared.candidate.slice(ending), base);
+    assert.equal(prepared.candidate.slice(0, beginning), base.slice(0, beginning));
+    assert.equal(prepared.candidate.slice(ending), base.slice(beginning));
+    assert.ok(prepared.candidate.includes(SHAPED));
+    assert.equal(prepared.candidate.split('lemma ').length, base.split('lemma ').length);
+    assert.doesNotMatch(prepared.candidate, /\[reuse\]|\[sources\]/u);
+    if (context === 'good') assert.equal(prepared.candidate, admitStoredProof(base, stored));
+    else assert.equal(prepared.candidate.slice(beginning, ending), `\nby ${context}\n`);
+  }
+  for (const context of [null, 'approve', 'replay', 'unknown', '__proto__']) assert.throws(() => storedCheckInput(source, stored, context));
+  for (const altered of [stored.replace('builtins: signing', 'builtins: signing, hashing'),
+    stored.replace(SHAPED, ORIGINAL), stored.replace('==> #i = #j', '==> #i < #j'),
+    stored.replace('simplify\n', 'simplify\nlemma attacker [reuse]: "T"\n'),
+    stored + '\nlemma injected: "T"\n', 'x'.repeat(1024 * 1024 + 1)]) {
+    assert.throws(() => storedCheckInput(source, altered, 'sorry'));
+  }
+  assert.throws(() => storedCheckInput(source.replace('builtins: signing', 'builtins: signing, hashing'), stored, 'good'));
+});
+
+test('stored proof checks distinguish verified replay from exact incomplete negative controls', () => {
+  const input = '/isolated/request.input.spthy', known = ['honest_approve_trace', 'honest_deny_without_approval_auth_trace'];
+  const result = (verdict = 'verified (500 steps)') => ({ status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false,
+    stderr: '', stdout: `summary of summaries:\n analyzed: ${input}\n honest_approve_trace (exists-trace): ${verdict}\n honest_deny_without_approval_auth_trace (exists-trace): analysis incomplete (1 steps)\n` });
+  assert.equal(storedCheckSummary(result(), 'good', known, input).ok, true);
+  assert.equal(storedCheckSummary(result('analysis incomplete (2 steps)'), 'good', known, input).ok, false);
+  for (const context of ['sorry', 'contradiction']) {
+    assert.equal(storedCheckSummary(result('analysis incomplete (2 steps)'), context, known, input).ok, true);
+    for (const verdict of ['verified (500 steps)', 'analysis undetermined (2 steps)', 'unknown (2 steps)',
+      'analysis incomplete', 'analysis incomplete (many steps)', 'analysis incomplete (2 steps) extra', 'falsified - found trace (2 steps)']) {
+      assert.equal(storedCheckSummary(result(verdict), context, known, input).ok, false);
+    }
+  }
+  for (const context of STORED_CHECK_CONTEXTS) {
+    const complete = result(context === 'good' ? 'verified (500 steps)' : 'analysis incomplete (2 steps)');
+    for (const changed of [{ status: 1 }, { status: null }, { signal: 'SIGTERM' }, { error: new Error('timeout') },
+      { cancelled: true }, { cleanupIncomplete: true }, { stderr: 'WARNING model check failed' }, { stderr: 'Warning: detail' },
+      { classification: 'WITNESS_SHAPE_EXPERIMENT_ONLY' },
+      { stdout: complete.stdout.replace(input, '/old/request.input.spthy') },
+      { stdout: complete.stdout + complete.stdout }, { stdout: complete.stdout + '\n analyzed: /other/model.spthy\n' },
+      { stdout: complete.stdout.replace('(exists-trace)', '(all-traces)') },
+      { stdout: complete.stdout.replace('honest_approve_trace', 'other_lemma') },
+      { stdout: complete.stdout + '\n unknown_helper (all-traces): verified (1 steps)\n' }]) {
+      assert.equal(storedCheckSummary({ ...complete, ...changed }, context, known, input).ok, false);
+    }
+  }
+  assert.throws(() => storedCheckSummary(result(), 'replay', known, input));
 });
