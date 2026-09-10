@@ -232,7 +232,10 @@ solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #o )
                                           'building'
                              ) ▶₀ #vr.2 )
                         case OpenActualRequest
-                        by sorry /* UNVERIFIED: ROOT must expose the state after this base open */
+                        solve( RegistrySlot( ~device.2, ~pc, revision.2, 'active' ) ▶₂ #vr.2 )
+                          case TrustedEnrollment
+                          by sorry /* UNVERIFIED: ROOT must expose this enrollment subtree */
+                        qed
                       qed
                     qed
                   qed
