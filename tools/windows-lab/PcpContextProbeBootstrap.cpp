@@ -238,7 +238,7 @@ int run() {
     adminOnly();
     wchar_t own[1024]{}, system[1024]{};
     DWORD count = GetModuleFileNameW(nullptr, own, 1024);
-    if (!count || count >= 1024 || std::wstring(own) != Stage || GetSystemDirectoryW(system, 1024) == 0 || std::wstring(system) != L"C:\\Windows\\System32") fail();
+    if (!count || count >= 1024 || std::wstring(own) != Stage || GetSystemDirectoryW(system, 1024) == 0 || CompareStringOrdinal(system, -1, L"C:\\Windows\\System32", -1, TRUE) != CSTR_EQUAL) fail();
     checked(SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32));
     HMODULE module = GetModuleHandleW(nullptr); HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10));
     if (!resource) fail(GetLastError());
@@ -305,5 +305,6 @@ int run() {
 } // namespace
 int wmain(int argc, wchar_t** argv) {
     try { if (argc != 2 || std::wstring(argv[1]) != L"install-run-remove") fail(); return run(); }
+    catch (const Failure& error) { return static_cast<int>(0xE5000000u | (error.code & 0xffffu)); }
     catch (...) { return 1; }
 }
