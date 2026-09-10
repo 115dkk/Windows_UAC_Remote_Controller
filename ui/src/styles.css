@@ -115,7 +115,7 @@ h1, h2, h3 { text-wrap: balance; overflow-wrap: anywhere; }
 h1 { font-size: var(--text-title); line-height: 1.35; font-weight: var(--weight-title); }
 h2 { font-size: var(--text-section); line-height: 1.45; font-weight: 600; }
 h3 { font-size: var(--text-body); font-weight: 600; }
-p { text-wrap: pretty; overflow-wrap: anywhere; }
+p { text-wrap: pretty; word-break: keep-all; overflow-wrap: anywhere; }
 button, label, bdi, dd, li { overflow-wrap: anywhere; }
 button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
   outline: 3px solid var(--accent);

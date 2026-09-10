@@ -61,6 +61,9 @@ contrast after rendering; values above are design intent, not a passed audit.
   smaller than 0.8125rem. Sizes, line heights, tracking and spacing are unchanged.
 - No fixed-height text clipping. Balance short headings, pretty-wrap short
   descriptions, use tabular figures for time, and wrap long paths/commands.
+- Ordinary descriptions keep Korean words together (`word-break: keep-all`),
+  with `overflow-wrap: anywhere` retained for a token wider than its container.
+  The more-specific path/command rules keep their existing break behavior.
 - Preserve system text scaling/zoom; do not force a minimum browser font size.
 - Native window chrome, Android SystemUI and authentication typography remain
   OS-owned. A client font change does not replace them. Browser evidence must
