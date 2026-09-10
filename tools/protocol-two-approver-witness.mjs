@@ -95,7 +95,8 @@ export function admitTwoApproverEnvironment(args, env, platform, version) {
 
 export function twoApproverArguments(input) {
   assert.ok(typeof input === 'string' && posix.isAbsolute(input) && posix.normalize(input) === input && posix.basename(input) === 'request.input.spthy');
-  return proofArguments(input, { [CHECKED_LEMMA]: { trace: 'exists-trace', verdict: 'verified' } });
+  return proofArguments(input, { [CHECKED_LEMMA]: { trace: 'exists-trace', verdict: 'verified' } })
+    .map(arg => arg === '--stop-on-trace=BFS' ? '--stop-on-trace=DFS' : arg);
 }
 
 export function twoApproverSummary(result, input) {
@@ -149,7 +150,7 @@ async function main() {
   const controller = new AbortController(), stop = () => controller.abort(new Error('Two-approver experiment cancelled.'));
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = { classification: CLASSIFICATION, eligibleAsNormalGate: false, normalGateStatus: 'not-run', commit,
-    profile: 'ordered-observed-producers-v1', selectedLemma: CHECKED_LEMMA,
+    profile: 'ordered-observed-producers-dfs-v1', selectedLemma: CHECKED_LEMMA,
     mappedMainCommit: MAPPED_MAIN_COMMIT, mappedMainTheory: 'security/tamarin/RequestAuthorization.spthy', mappedMainTheorySha256: CURRENT_SOURCE_HASH,
     helpers: [], originalConjunctsPreserved: false, originalDirectlyVerified: false, implementationRefinementVerified: false,
     bounds: { invocations: 1, timeoutMs: 120000, outputBytes: MAX_OUTPUT, sourceBytesEach: MAX_SOURCE, heapGiB: 2, runtimeThreads: 2 },

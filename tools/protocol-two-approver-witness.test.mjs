@@ -68,7 +68,7 @@ test('runner admits only fixed Linux Node24 Actions environment and one bounded 
   assert.throws(() => admitTwoApproverEnvironment([], env, 'win32', '24.17.0'));
   assert.throws(() => admitTwoApproverEnvironment([], env, 'linux', '22.0.0'));
   assert.deepEqual(twoApproverArguments('/isolated/request.input.spthy'), ['/isolated/request.input.spthy', '--quit-on-warning',
-    `--prove=${CHECKED_LEMMA}`, '--stop-on-trace=BFS', '+RTS', '-N2', '-M2G', '-RTS']);
+    `--prove=${CHECKED_LEMMA}`, '--stop-on-trace=DFS', '+RTS', '-N2', '-M2G', '-RTS']);
 });
 
 test('only actual selected complete existential verdict on the exact input can succeed', () => {

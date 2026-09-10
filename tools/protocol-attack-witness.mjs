@@ -99,6 +99,14 @@ export function selectAttack(args) {
   return { variant, context };
 }
 
+export function attackArguments(input, expected, variant) {
+  assert.ok(VARIANTS.includes(variant));
+  const args = proofArguments(input, expected);
+  // Producer/timepoint bounds already make this one trace finite; try its
+  // branches depth-first after the unchanged replay shape exhausted BFS.
+  return variant === 'replay' ? args.map(arg => arg === '--stop-on-trace=BFS' ? '--stop-on-trace=DFS' : arg) : args;
+}
+
 function capture(path, limit = 1024 * 1024) {
   const info = lstatSync(path);
   assert.ok(info.isFile() && !info.isSymbolicLink() && info.size > 0 && info.size <= limit);
@@ -129,7 +137,7 @@ async function main() {
   const directory = mkdtempSync(resolve(base, `${variant}-${context}-`));
   const input = resolve(directory, 'input.spthy'); writeFileSync(input, prepared.candidate, { flag: 'wx' });
   for (const [index, file] of snapshots.entries()) writeFileSync(resolve(directory, `source-${index}.txt`), file.bytes, { flag: 'wx' });
-  const inputHash = hash(prepared.candidate), args = proofArguments(input, prepared.expected);
+  const inputHash = hash(prepared.candidate), args = attackArguments(input, prepared.expected, variant);
   const controller = new AbortController(), stop = () => controller.abort(new Error('Experiment interrupted.'));
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = { classification: 'ATTACK_WITNESS_EXPERIMENT_ONLY', normalGateEligible: false, commit: process.env.GITHUB_SHA,

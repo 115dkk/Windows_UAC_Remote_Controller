@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { CONTEXTS, SOURCE_PATH, VARIANTS, prepareAttack, selectAttack } from './protocol-attack-witness.mjs';
+import { CONTEXTS, SOURCE_PATH, VARIANTS, prepareAttack, selectAttack, attackArguments } from './protocol-attack-witness.mjs';
 import { parseProofSummary } from './protocol-security.mjs';
 const source = readFileSync(new URL(`../${SOURCE_PATH}`, import.meta.url), 'utf8');
 
@@ -61,5 +61,13 @@ test('absence of an existential attack is distinct from finding a universal coun
       { error: new Error('timeout') }, { stdout: result(trace, correct).stdout.replace(input, '/other.spthy') }]) {
       assert.equal(parseProofSummary({ ...result(trace, correct), ...changed }, expected, ['attack'], input).ok, false);
     }
+  }
+});
+
+test('replay depth-first search changes no formula, resource bound or proof selection', () => {
+  for (const variant of VARIANTS) {
+    const prepared = prepareAttack(source, variant, 'mutant');
+    assert.deepEqual(attackArguments('/fixed.spthy', prepared.expected, variant), ['/fixed.spthy', '--quit-on-warning',
+      `--prove=${prepared.lemma}`, `--stop-on-trace=${variant === 'replay' ? 'DFS' : 'BFS'}`, '+RTS', '-N2', '-M2G', '-RTS']);
   }
 });
