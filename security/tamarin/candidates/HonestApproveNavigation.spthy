@@ -240,7 +240,14 @@ solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #o )
                                               'building'
                                  ) ▶₀ #vr.4 )
                             case OpenActualRequest
-                            by sorry /* UNVERIFIED: observed second capture base */
+                            solve( RequestSlot( ~request_id, ~pc,
+                                                <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                                 ~content_digest, ~expiry>,
+                                                'building'
+                                   ) ▶₀ #vr.5 )
+                              case OpenActualRequest
+                              by sorry /* UNVERIFIED: ROOT must expose this observed base-open subtree */
+                            qed
                           qed
                         qed
                       qed
