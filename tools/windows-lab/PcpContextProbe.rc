@@ -1,0 +1,3 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include <windows.h>
+101 RCDATA "PcpContextProbe.Service.exe"

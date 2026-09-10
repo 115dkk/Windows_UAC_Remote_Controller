@@ -1,0 +1,81 @@
+name: Build isolated PCP context diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/pcp-context-probe']
+    paths:
+      - 'tools/windows-lab/PcpContextProbe.cs'
+      - 'tools/windows-lab/PcpContextProbeBootstrap.cpp'
+      - 'tools/windows-lab/PcpContextProbe.rc'
+      - 'tools/windows-lab/PCP_CONTEXT_PROBE.md'
+      - '.github/workflows/pcp-context-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pcp-context-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact isolated diagnostic source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node24
+        with:
+          persist-credentials: false
+      - name: Compile service payload and native embedded bootstrap
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'tools\windows-lab'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'artifacts\pcp-context-probe'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $payload = Join-Path $out 'PcpContextProbe.Service.exe'
+          & $compiler /nologo /noconfig /target:exe /unsafe- /warnaserror+ /platform:x64 /optimize+ "/out:$payload" /reference:System.dll /reference:System.Core.dll /reference:System.ServiceProcess.dll (Join-Path $source 'PcpContextProbe.cs')
+          if ($LASTEXITCODE -ne 0) { throw "Service CSC failed: $LASTEXITCODE" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vs)) { throw 'Installed MSVC toolchain unavailable' }
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Push-Location $out
+          try {
+            & rc.exe /nologo /fo PcpContextProbe.res (Join-Path $source 'PcpContextProbe.rc')
+            if ($LASTEXITCODE -ne 0) { throw "Embedded payload resource failed: $LASTEXITCODE" }
+            & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /MT /O2 /utf-8 /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /guard:cf /Fe:PcpContextProbe.exe /Fo:PcpContextProbeBootstrap.obj (Join-Path $source 'PcpContextProbeBootstrap.cpp') PcpContextProbe.res /link advapi32.lib /MACHINE:X64 /SUBSYSTEM:CONSOLE /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF /DEPENDENTLOADFLAG:0x800 /MANIFEST:EMBED "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+            if ($LASTEXITCODE -ne 0) { throw "Native bootstrap CL/link failed: $LASTEXITCODE" }
+            foreach ($name in @('PcpContextProbe.exe', 'PcpContextProbe.Service.exe')) {
+              foreach ($view in @('headers', 'imports', 'loadconfig')) {
+                $dump = & dumpbin.exe /nologo "/$view" $name
+                if ($LASTEXITCODE -ne 0) { throw "Passive PE inspection failed: $name/$view" }
+                $dump | Set-Content -LiteralPath "$name.$view.txt" -Encoding utf8
+              }
+            }
+            $imports = Get-Content -LiteralPath 'PcpContextProbe.exe.imports.txt' -Raw
+            $dlls = @([regex]::Matches($imports, '(?im)^\s+([A-Za-z0-9_.-]+\.dll)\s*$') | ForEach-Object { $_.Groups[1].Value })
+            if ($dlls.Count -eq 0 -or @($dlls | Where-Object { $_ -notmatch '^(KERNEL32|ADVAPI32)\.dll$' }).Count -ne 0) { throw 'Unexpected native bootstrap DLL dependency; review required' }
+            $load = Get-Content -LiteralPath 'PcpContextProbe.exe.loadconfig.txt' -Raw
+            if ($load -notmatch '(?im)^\s*0*800\s+Dependent Load Flags?\s*$') { throw 'System32-only dependent load flags not observed' }
+            & mt.exe -nologo '-inputresource:PcpContextProbe.exe;#1' '-out:PcpContextProbe.manifest.xml'
+            if ($LASTEXITCODE -ne 0) { throw 'Embedded elevation manifest extraction failed' }
+            [xml]$manifest = Get-Content -LiteralPath 'PcpContextProbe.manifest.xml' -Raw
+            $requested = $manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
+            if ($null -eq $requested -or $requested.level -ne 'requireAdministrator' -or $requested.uiAccess -ne 'false') { throw 'Unexpected elevation manifest' }
+            $files = @('PcpContextProbe.exe', 'PcpContextProbe.Service.exe', 'PcpContextProbe.res')
+            $hashes = @($files | ForEach-Object { [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $_).Length } })
+            $sourceHashes = @('PcpContextProbe.cs', 'PcpContextProbeBootstrap.cpp', 'PcpContextProbe.rc', 'PCP_CONTEXT_PROBE.md') | ForEach-Object { [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $source $_) -Algorithm SHA256).Hash.ToLowerInvariant() } }
+            [ordered]@{ commit = $env:GITHUB_SHA; purpose = 'one-time PCP context diagnostic'; execution = 'compile-and-passive-PE-inspection-only'; installed = $false; providerOpened = $false; files = $hashes; sources = @($sourceHashes); bootstrapImports = $dlls } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath 'build-provenance.json' -Encoding utf8
+          } finally { Pop-Location }
+      - name: Retain diagnostic binary and passive provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
+        with:
+          name: pcp-context-probe-${{ github.sha }}
+          path: artifacts/pcp-context-probe/
+          if-no-files-found: error
+          retention-days: 14
