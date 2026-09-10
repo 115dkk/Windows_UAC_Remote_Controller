@@ -965,9 +965,10 @@ impl Window {
       #[cfg(feature = "x11")]
       if let Ok(xlib) = x11_dl::xlib::Xlib::open() {
         unsafe {
-          let display = (xlib.XOpenDisplay)(std::ptr::null());
-          let screen = (xlib.XDefaultScreen)(display) as _;
-          let display = std::ptr::NonNull::new_unchecked(display as _);
+          let native_display: *mut x11_dl::xlib::Display = (xlib.XOpenDisplay)(std::ptr::null());
+          let screen: std::os::raw::c_int = (xlib.XDefaultScreen)(native_display);
+          let display: std::ptr::NonNull<std::ffi::c_void> =
+            std::ptr::NonNull::new_unchecked(native_display.cast::<std::ffi::c_void>());
           let display_handle = rwh_06::XlibDisplayHandle::new(Some(display), screen);
           Ok(rwh_06::RawDisplayHandle::Xlib(display_handle))
         }

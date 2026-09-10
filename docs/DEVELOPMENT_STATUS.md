@@ -1,11 +1,35 @@
-# Development handoff — 2026-09-10
+# Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `01ab810b72014eebb57fdc6eb4e2daf3f0d049bf` on
+Last checked implementation revision: `9e8e37fdb33246e603fd02e71f4563ae76257ff3` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
-## Latest evidence — September 10 evening
+## Latest evidence — September 11
+
+The vendored SDK changes have now compiled in actual Android product APKs and
+Windows packages. At85354bf and9e8e37f, real Android instrumentation passed initial
+document load, Activity recreation, close/relaunch, explicit stop/restart, and
+both retired-versus-current physical-view IPC comparisons. Each initial phase
+ran one real instrumentation test with every required receipt fact true.
+
+At9e8e37f, actual reboot delivered LOCKED_BOOT_COMPLETED and BOOT_COMPLETED,
+promoted the private foreground component and created a READY native owner before
+any post-reboot Activity/instrumentation. The host test then rejected a global
+historical ANR record for Android System UI, despite the target's active service
+record being valid. The parser needs to distinguish historical and active user
+sections, then rerun the full sequence. This partial observation is not a passing
+whole reboot/update lifecycle run. The earlier85354bf reboot timeout had no
+active target service at capture; its exact cause remains unestablished.
+
+At9e8e37f, all Rust tests/Clippy and the16-obligation protocol job passed. Linux
+and Windows Quality remained red on actual Analyzer diagnostics in newly
+vendored upstream code (15 and14 respectively). Source fixes are in progress;
+the warning/error gate is unchanged. Windows packaging, ARM64 APK/Kotlin and
+notification rendering passed. No additional Windows elevation has run.
+
+The following older checkpoints are historical; their pending SDK/protocol work
+has been superseded by the evidence above and the01ab810 formal result below.
 
 At01ab810 the entire Quality run34501026437 passed: protocol6m51, Linux9m17,
 Windows15m48 and Androidcore2m55. All16 original protocol obligations passed,

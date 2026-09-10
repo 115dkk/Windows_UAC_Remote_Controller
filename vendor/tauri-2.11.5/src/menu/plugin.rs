@@ -673,6 +673,19 @@ async fn popup<R: Runtime>(
   window: Option<String>,
   at: Option<Position>,
 ) -> crate::Result<()> {
+  popup_with_resources(webview, current_window, rid, kind, window, at)
+}
+
+// Keep the resource guard inside a synchronous call, outside the command
+// future's state. The async command and the original lock/operation order remain.
+fn popup_with_resources<R: Runtime>(
+  webview: Webview<R>,
+  current_window: Window<R>,
+  rid: ResourceId,
+  kind: ItemKind,
+  window: Option<String>,
+  at: Option<Position>,
+) -> crate::Result<()> {
   let window = window
     .map(|w| webview.manager().get_window(&w))
     .unwrap_or(Some(current_window));
@@ -712,6 +725,13 @@ async fn set_as_app_menu<R: Runtime>(
   webview: Webview<R>,
   rid: ResourceId,
 ) -> crate::Result<Option<(ResourceId, MenuId)>> {
+  set_as_app_menu_with_resources(webview, rid)
+}
+
+fn set_as_app_menu_with_resources<R: Runtime>(
+  webview: Webview<R>,
+  rid: ResourceId,
+) -> crate::Result<Option<(ResourceId, MenuId)>> {
   let mut resources_table = webview.resources_table();
   let menu = resources_table.get::<Menu<R>>(rid)?;
   if let Some(menu) = menu.set_as_app_menu()? {
@@ -724,6 +744,15 @@ async fn set_as_app_menu<R: Runtime>(
 
 #[command(root = "crate")]
 async fn set_as_window_menu<R: Runtime>(
+  webview: Webview<R>,
+  current_window: Window<R>,
+  rid: ResourceId,
+  window: Option<String>,
+) -> crate::Result<Option<(ResourceId, MenuId)>> {
+  set_as_window_menu_with_resources(webview, current_window, rid, window)
+}
+
+fn set_as_window_menu_with_resources<R: Runtime>(
   webview: Webview<R>,
   current_window: Window<R>,
   rid: ResourceId,

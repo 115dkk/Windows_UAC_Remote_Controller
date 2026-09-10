@@ -237,10 +237,9 @@ pub(crate) fn make_key_event(
         key_without_modifiers,
       },
     });
-  } else {
-    #[cfg(debug_assertions)]
-    eprintln!("Couldn't get key from code: {physical_key:?}");
   }
+  #[cfg(debug_assertions)]
+  eprintln!("Couldn't get key from code: {physical_key:?}");
   None
 }
 

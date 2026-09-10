@@ -113,19 +113,97 @@ test('passive readiness requires all actual owner and FGS facts, not launch acce
   assert.throws(() => parsePassiveDump(dump({ ...fields, owner_phase: 'FAKE_READY' })));
 });
 
-test('OS service result requires actual connected-device foreground state and fixed notification ID', () => {
-  const header = 'ACTIVITY MANAGER SERVICES (dumpsys activity services)\n';
-  const service = `${header}  * ServiceRecord{abc u0 ${PACKAGE}/.background.ControllerForegroundService}\n`;
-  assert.equal(servicePresence(`${service}isForeground=true foregroundId=5587267 types=0x00000010 foregroundNoti=Notification\n`), 'foreground');
-  assert.equal(servicePresence(`${service}isForeground=false foregroundId=5587267 types=0x00000010\n`), 'other');
-  assert.equal(servicePresence(header), 'absent');
-  const other = '  * ServiceRecord{other u0 other.package/.ForegroundService}\nisForeground=true foregroundId=5587267 types=0x00000010\n';
-  assert.equal(servicePresence(`${service}isForeground=false foregroundId=0 types=0x00000000\n${other}`), 'other');
-  assert.equal(servicePresence(`${header}${other}  * ServiceRecord{target u0 ${PACKAGE}/.background.ControllerForegroundService}\nisForeground=false foregroundId=0 types=0x00000000\n`), 'other');
-  assert.equal(servicePresence(`${service.replace('u0', 'u10')}isForeground=true foregroundId=5587267 types=0x00000010\n`), 'other');
-  assert.equal(servicePresence(`${service}isForeground=true foregroundId=5587267 types=0x00000010\nisForeground=false foregroundId=0 types=0x00000000\n`), 'other');
-  assert.equal(servicePresence(`${service}isForeground=true foregroundId=5587267 types=0x00000010\n${service.slice(header.length)}isForeground=true foregroundId=5587267 types=0x00000010\n`), 'other');
-  for (const text of ['', 'Permission Denial', `${header}Last ANR service: stale`, 'No arbitrary service result']) assert.throws(() => servicePresence(text));
+const osHeader = 'ACTIVITY MANAGER SERVICES (dumpsys activity services)\n';
+const foregroundFacts = '    isForeground=true foregroundId=5587267 types=0x00000010 foregroundNoti=Notification\n';
+const osRecord = ({ user = 0, component = `${PACKAGE}/.background.ControllerForegroundService`, facts = foregroundFacts, id = 'abc' } = {}) =>
+  `  * ServiceRecord{${id} u${user} ${component} c:${component.split('/')[0]}}\n${facts}`;
+const activeServices = (records = osRecord(), user = 0) => `  User ${user} active services:\n${records}`;
+const historicalService = (component = 'com.android.systemui/.SystemUIService') =>
+  `  Last ANR service:\nServiceRecord{e8d6513 u0 ${component} c:android}\n    intent={cmp=${component}}\n    startForegroundCount=0\n startCommandResult=0\n\n`;
+
+test('OS service result requires one active user0 target with exact connected-device type and notification ID', () => {
+  const source = `${osHeader}${activeServices()}`;
+  assert.equal(servicePresence(source), 'foreground');
+  assert.equal(servicePresence(source.replaceAll('\n', '\r\n')), 'foreground');
+  for (const facts of [foregroundFacts.replace('true', 'false'), foregroundFacts.replace('5587267', '1'),
+    foregroundFacts.replace('5587267', '05587267'), foregroundFacts.replace('0x00000010', '0x00000020'),
+    foregroundFacts.replace('0x00000010', '16'), foregroundFacts.replace('0x00000010', '0x100000010'),
+    '', `${foregroundFacts}${foregroundFacts}`, `${foregroundFacts}    isForeground=false foregroundId=0 types=0x00000000\n`]) {
+    assert.equal(servicePresence(`${osHeader}${activeServices(osRecord({ facts }))}`), 'other');
+  }
+});
+
+test('actual API36 historical SystemUI ANR preamble does not veto the valid active controller record', () => {
+  // Shape from 9e8e37f/111.log, shortened to fixed synthetic metadata. The ANR
+  // record is global/unstarred; the current target has its own active heading.
+  const current = osRecord({ id: '2e0727f', facts: `    packageName=${PACKAGE}\n    mAllowStart_noBinding=LOCKED_BOOT_COMPLETED\n${foregroundFacts} startCommandResult=1\n` });
+  const source = `${osHeader}${historicalService()}${activeServices(current)}`;
+  assert.equal(servicePresence(source), 'foreground');
+});
+
+test('normal launch keeps the real Chromium sandbox record and connection section separate', () => {
+  // Companion structure from 9e8e37f/052.log, without paths or process identifiers.
+  const sandboxName = `${PACKAGE}/org.chromium.content.app.SandboxedProcessService0:0`;
+  const sandbox = osRecord({ component: sandboxName, id: 'def', facts: '    startRequested=false\n' });
+  const connections = `  Connection bindings to services:\n  * ConnectionRecord{abc u0 CR WPRI ${sandboxName}:@abc flags=0x80000021}\n`;
+  assert.equal(servicePresence(`${osHeader}${activeServices(sandbox + osRecord())}${connections}`), 'foreground');
+});
+
+test('history alone is neither active presence nor a completed absence observation', () => {
+  const history = historicalService(`${PACKAGE}/.background.ControllerForegroundService`);
+  assert.throws(() => servicePresence(`${osHeader}${history}`));
+  assert.throws(() => servicePresence(`${osHeader}${historicalService()}`));
+  assert.throws(() => servicePresence(osHeader));
+  // Actual 85354bf/200.log empty shape, also valid after an independent ANR preamble.
+  assert.equal(servicePresence(`${osHeader}  (nothing)\n`), 'absent');
+  assert.equal(servicePresence(`${osHeader}${history}  (nothing)\n`), 'absent');
+  assert.throws(() => servicePresence(`${osHeader}${activeServices()}  (nothing)\n`));
+  assert.throws(() => servicePresence(`${osHeader}  (nothing)\n${activeServices()}`));
+});
+
+test('target-looking historical and global records cannot supply another active record foreground facts', () => {
+  const target = `${PACKAGE}/.background.ControllerForegroundService`;
+  const history = historicalService(target).replace('    startForegroundCount=0\n', foregroundFacts);
+  const other = osRecord({ component: 'other.package/.ForegroundService', id: 'def' });
+  assert.equal(servicePresence(`${osHeader}${history}${activeServices(other)}`), 'absent');
+  const unready = osRecord({ facts: '    isForeground=false foregroundId=0 types=0x00000000\n' });
+  assert.equal(servicePresence(`${osHeader}${history}${activeServices(unready + other)}`), 'other');
+  assert.equal(servicePresence(`${osHeader}${activeServices(other + unready)}`), 'other');
+  for (const name of ['Pending services', 'Restarting services', 'Destroying services', 'Connection bindings to services']) {
+    const global = `  ${name}:\n${osRecord()}`;
+    assert.equal(servicePresence(`${osHeader}${global}`), 'other');
+    assert.equal(servicePresence(`${osHeader}${activeServices(other)}${global}`), 'other');
+    assert.equal(servicePresence(`${osHeader}${activeServices(unready)}${global}`), 'other');
+  }
+  // Even convincing fields after a section boundary cannot be borrowed.
+  assert.equal(servicePresence(`${osHeader}${activeServices(unready)}  Connection bindings to services:\n${other}`), 'other');
+  assert.equal(servicePresence(`${osHeader}${activeServices()}  Connection bindings to services:\n${other}`), 'foreground');
+});
+
+test('active user sections cannot lend target identity or facts across users or duplicates', () => {
+  const foreignTarget = activeServices(osRecord({ user: 10 }), 10);
+  assert.equal(servicePresence(`${osHeader}${foreignTarget}`), 'other');
+  assert.equal(servicePresence(`${osHeader}${activeServices()}${foreignTarget}`), 'other');
+  const foreignOther = activeServices(osRecord({ user: 10, component: 'other.package/.ForegroundService' }), 10);
+  assert.equal(servicePresence(`${osHeader}${foreignOther}${activeServices()}`), 'foreground');
+  assert.equal(servicePresence(`${osHeader}${activeServices(osRecord() + osRecord({ id: 'def' }))}`), 'other');
+  assert.throws(() => servicePresence(`${osHeader}${activeServices()}${activeServices()}`));
+  assert.throws(() => servicePresence(`${osHeader}${activeServices(osRecord({ user: 10 }))}`));
+  assert.throws(() => servicePresence(`${osHeader}${activeServices(osRecord(), 10)}`));
+});
+
+test('OS dump errors and malformed or truncated structure remain fail closed', () => {
+  const valid = `${osHeader}${activeServices()}`;
+  for (const source of ['', 'Permission Denial', 'No arbitrary service result', `${osHeader}${osRecord()}`,
+    `${osHeader}  User 0 active services:\n`, valid.trimEnd(), valid.replace('ServiceRecord{abc', 'ServiceRecord{malformed'),
+    valid.replace('User 0 active services:', 'User 00 active services:'), `${valid}${osHeader}`,
+    `${valid}  Unknown service section:\n${osRecord()}`, `${valid}\0\n`, `${osHeader}${' '.repeat(512 * 1024)}\n`]) {
+    assert.throws(() => servicePresence(source));
+  }
+  for (const failure of ['Permission Denial', 'java.lang.Exception', 'DUMP TIMEOUT', 'Failure while dumping the service', 'Error dumping service']) {
+    assert.throws(() => servicePresence(`${valid}    ${failure}\n`));
+    assert.throws(() => servicePresence(`${osHeader}  (nothing)\n${failure}\n`));
+  }
 });
 
 const expected = { phase: 'initial', nonce: 'a'.repeat(32), appSha256: 'b'.repeat(64), testSha256: 'c'.repeat(64) };

@@ -15,7 +15,7 @@ use http::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
     CONTENT_TYPE,
   },
-  HeaderValue, Method, Request, StatusCode,
+  HeaderValue, Request, StatusCode,
 };
 use url::Url;
 
@@ -51,8 +51,8 @@ pub fn get<R: Runtime>(manager: Arc<AppManager<R>>) -> UriSchemeProtocolHandler 
       responder.respond(response);
     };
 
-    match *request.method() {
-      Method::POST => {
+    match request.method().as_str() {
+      "POST" => {
         if let Some(webview) = manager.get_webview(label) {
           match parse_invoke_request(&manager, request) {
             Ok(request) => {
@@ -148,7 +148,7 @@ pub fn get<R: Runtime>(manager: Arc<AppManager<R>>) -> UriSchemeProtocolHandler 
         }
       }
 
-      Method::OPTIONS => {
+      "OPTIONS" => {
         let mut r = http::Response::new(Vec::new().into());
         r.headers_mut()
           .insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("*"));
@@ -427,7 +427,9 @@ fn handle_ipc_message<R: Runtime>(request: Request<String>, manager: &AppManager
     }
     Err(_) => {
       #[cfg(feature = "tracing")]
-      tracing::trace!("IPC request rejected during parsing");
+      {
+        tracing::trace!("IPC request rejected during parsing");
+      }
 
       let script = "console.error('IPC request rejected during parsing')".to_string();
       #[cfg(all(target_os = "android", feature = "wry"))]

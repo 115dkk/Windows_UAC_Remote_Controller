@@ -109,14 +109,67 @@ export function isPassiveReady(fields) {
 }
 
 export function servicePresence(text) {
-  requireThat(text.startsWith('ACTIVITY MANAGER SERVICES (dumpsys activity services)') &&
-    !/Permission Denial|Exception|DUMP TIMEOUT|Last ANR service:/.test(text), 'Missing/failed OS service dump.');
-  if (!text.includes(`${PACKAGE}/.background.ControllerForegroundService`)) return 'absent';
-  const records = [...text.matchAll(/^\s*\* ServiceRecord\{([^}\r\n]+)\}[^\r\n]*\r?\n([\s\S]*?)(?=^\s*\* ServiceRecord\{|$(?![\s\S]))/gm)];
-  const target = records.filter((match) => match[1].split(/\s+/).includes('u0') &&
-    match[1].split(/\s+/).includes(`${PACKAGE}/.background.ControllerForegroundService`));
-  if (target.length !== 1) return 'other';
-  const facts = [...target[0][2].matchAll(/\bisForeground=(true|false) foregroundId=(\d+) types=(0x[0-9a-fA-F]+)\b/g)];
+  const header = 'ACTIVITY MANAGER SERVICES (dumpsys activity services)';
+  requireThat(typeof text === 'string' && Buffer.byteLength(text) <= 512 * 1024 &&
+    !/Permission Denial|Exception|DUMP TIMEOUT|Failure while dumping|Error dumping/.test(text), 'Missing/failed OS service dump.');
+  const lines = text.replaceAll('\r\n', '\n').split('\n');
+  requireThat(lines[0] === header && lines.at(-1) === '' && !text.includes('\0') &&
+    !lines.some((line) => line.includes('\r')), 'Malformed/incomplete OS service dump.');
+  const sections = [], users = new Set();
+  let section = null, historical = false, nothing = false;
+  for (const line of lines.slice(1)) {
+    if (line.trim() === '') continue;
+    requireThat(!nothing, 'Content after OS empty-service marker.');
+    const active = /^  User (0|[1-9]\d*) active services:$/.exec(line);
+    if (active) {
+      requireThat(!users.has(active[1]), 'Duplicate active service user section.');
+      users.add(active[1]);
+      section = { kind: 'active', user: active[1], lines: [] };
+      sections.push(section);
+    } else if (line === '  Last ANR service:') {
+      requireThat(!historical && sections.length === 0, 'Misplaced/duplicate historical service section.');
+      historical = true;
+      section = { kind: 'history', lines: [] };
+    } else if (line === '  (nothing)') {
+      // AOSP prints this explicit marker after a completed empty enumeration,
+      // even when its independent Last ANR preamble contains an old record.
+      requireThat(sections.length === 0, 'Empty-service marker conflicts with current sections.');
+      nothing = true;
+    } else if (/^(?:  User (?:0|[1-9]\d*) (?:delayed start services|starting in background)|  (?:Pending services|Restarting services|Destroying services|Connection bindings to services)|Active foreground apps - user (?:0|[1-9]\d*)|  Handler - user (?:0|[1-9]\d*)):$/.test(line)) {
+      section = { kind: 'other', lines: [] };
+      sections.push(section);
+    } else {
+      requireThat(section !== null && line !== header && !/^ {0,2}\S.*:\s*$/.test(line), 'Unscoped/malformed OS service section.');
+      section.lines.push(line);
+    }
+  }
+  if (nothing) return 'absent';
+  requireThat(sections.length > 0, 'Missing active or explicit empty-service enumeration.');
+  const records = [];
+  for (const active of sections.filter((entry) => entry.kind === 'active')) {
+    let record = null;
+    for (const line of active.lines) {
+      const start = /^  \* ServiceRecord\{([0-9a-fA-F]+) u(0|[1-9]\d*) ([A-Za-z0-9_.$]+\/[A-Za-z0-9_.$:]+)(?: c:[A-Za-z0-9_.$:-]+)?\}$/.exec(line);
+      if (start) {
+        requireThat(start[2] === active.user, 'Service record user differs from its active section.');
+        record = { user: start[2], component: start[3], lines: [] };
+        records.push(record);
+      } else {
+        requireThat(record !== null && /^\s+\S/.test(line) && !/^ {0,2}(?:\*|ServiceRecord\{)/.test(line), 'Malformed active service record.');
+        record.lines.push(line);
+      }
+    }
+    requireThat(record !== null, 'Empty/truncated active service section.');
+  }
+  // Non-active current sections (pending/restarting/destroying/bindings) cannot
+  // supply active facts or turn an uncertain target lifetime into absence.
+  if (sections.some((entry) => entry.kind === 'other' && entry.lines.some((line) => line.includes(SERVICE)))) return 'other';
+  const target = records.filter((record) => record.component === SERVICE);
+  if (!users.has('0') || target.some((record) => record.user !== '0') || target.length > 1) return 'other';
+  if (target.length === 0) return 'absent';
+  const body = target[0].lines.join('\n');
+  const facts = [...body.matchAll(/^    isForeground=(true|false) foregroundId=(\d+) types=(0x[0-9a-fA-F]{1,8})(?: .*)?$/gm)];
+  if (['isForeground=', 'foregroundId=', 'types='].some((field) => body.split(field).length !== 2)) return 'other';
   return facts.length === 1 && facts[0][1] === 'true' && facts[0][2] === '5587267' &&
     Number(facts[0][3]) === 0x10 ? 'foreground' : 'other';
 }

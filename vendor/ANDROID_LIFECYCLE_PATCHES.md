@@ -65,3 +65,14 @@ See [Apache's GPL compatibility explanation](https://www.apache.org/licenses/GPL
 
 Patch file inventory and final root verification are added when implementation
 is frozen; this document currently grants no passing lifecycle criterion.
+
+## Host Analyzer compatibility
+
+The path-vendored crates are included in the same strict real Analyzer scan as
+the application. Upstream synchronous menu/icon resource work is kept in private
+synchronous callees of the original async commands, retaining lock spans and
+native operation order. HTTP method matching borrows the method text; tracing
+statements use feature-gated blocks. Native Xlib pointer types are explicit and
+divergent branches are flattened without changing event dispatch. These changes
+address concrete Linux/Windows diagnostics without disabling diagnostic classes
+or excluding third-party paths. ROOT runs a fresh scan after changes.

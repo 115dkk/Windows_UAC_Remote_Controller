@@ -405,9 +405,10 @@ fn wait_thread(parent_thread_id: u32, msg_window_id: HWND) {
           let _ = TranslateMessage(&msg);
           DispatchMessageW(&msg);
         }
-      } else if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
-        break 'main;
       } else {
+        if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+          break 'main;
+        }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
       }

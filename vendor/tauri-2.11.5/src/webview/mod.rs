@@ -396,17 +396,21 @@ async fn create_window(app: tauri::AppHandle) {
       let resolve_data_dir_res = dirs::data_local_dir()
         .or({
           #[cfg(feature = "tracing")]
-          tracing::error!("failed to resolve data directory");
+          {
+            tracing::error!("failed to resolve data directory");
+          }
           None
         })
         .and_then(|local_dir| {
           SafePathBuf::new(data_directory.clone())
             .inspect_err(|_err| {
               #[cfg(feature = "tracing")]
-              tracing::error!(
-                "data_directory `{}` is not a safe path, ignoring config. Validation error was: {_err}",
-                data_directory.display()
-              );
+              {
+                tracing::error!(
+                  "data_directory `{}` is not a safe path, ignoring config. Validation error was: {_err}",
+                  data_directory.display()
+                );
+              }
             })
             .map(|p| (local_dir, p))
             .ok()
@@ -416,10 +420,12 @@ async fn create_window(app: tauri::AppHandle) {
             Some(local_dir.join(&config.label).join(data_directory.as_ref()))
             } else {
               #[cfg(feature = "tracing")]
-              tracing::error!(
-                "data_directory `{}` is not a relative path, ignoring config.",
-                data_directory.display()
-              );
+              {
+                tracing::error!(
+                  "data_directory `{}` is not a relative path, ignoring config.",
+                  data_directory.display()
+                );
+              }
               None
             }
         });
@@ -1750,7 +1756,9 @@ tauri::Builder::default()
     let expected = manager.invoke_key();
     if request.invoke_key != expected {
       #[cfg(feature = "tracing")]
-      tracing::error!("IPC invoke key rejected");
+      {
+        tracing::error!("IPC invoke key rejected");
+      }
 
       #[cfg(not(feature = "tracing"))]
       eprintln!("IPC invoke key rejected");

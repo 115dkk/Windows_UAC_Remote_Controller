@@ -179,6 +179,18 @@ mod desktop_commands {
     label: Option<String>,
     value: Option<crate::image::JsImage>,
   ) -> crate::Result<()> {
+    set_overlay_icon_with_resources(webview, window, label, value)
+  }
+
+  // Keep the Windows resource guard in a synchronous scope, not in the async
+  // command future. Preserve both icon lookup and the None/clear operation.
+  #[cfg(target_os = "windows")]
+  fn set_overlay_icon_with_resources<R: Runtime>(
+    webview: Webview<R>,
+    window: Window<R>,
+    label: Option<String>,
+    value: Option<crate::image::JsImage>,
+  ) -> crate::Result<()> {
     let window = get_window(window, label)?;
     let resources_table = webview.resources_table();
 
@@ -192,6 +204,17 @@ mod desktop_commands {
 
   #[command(root = "crate")]
   pub async fn set_icon<R: Runtime>(
+    webview: Webview<R>,
+    window: Window<R>,
+    label: Option<String>,
+    value: crate::image::JsImage,
+  ) -> crate::Result<()> {
+    set_icon_with_resources(webview, window, label, value)
+  }
+
+  // This synchronous callee owns the guard through the unchanged image lookup
+  // and native setter. No MutexGuard is part of the async command's future.
+  fn set_icon_with_resources<R: Runtime>(
     webview: Webview<R>,
     window: Window<R>,
     label: Option<String>,
