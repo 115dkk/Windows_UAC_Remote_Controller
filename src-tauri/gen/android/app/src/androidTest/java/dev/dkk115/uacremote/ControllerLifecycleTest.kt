@@ -89,7 +89,7 @@ class ControllerLifecycleTest {
             checks.put("initialWebViewReady", true)
             when (phase) {
                 "initial" -> {
-                    val original = await(scenario, "initial native READY") { it.ready }
+                    val original = await(scenario, "initial native READY with active foreground notification") { it.ready && it.notification }
                     assertEquals(BootComponentState.DEFAULT, original.component)
                     assertNotNull(original.actor)
                     assertTrue(original.notification)
@@ -120,7 +120,7 @@ class ControllerLifecycleTest {
                     checks.put("explicitStartCreatedOwnerAfterClose", true)
                     stalePostMessageProbe(scenario, checks)
                 }
-                "verify-enabled" -> assertTrue(await(scenario, "enabled native READY") { it.ready }.notification)
+                "verify-enabled" -> assertTrue(await(scenario, "enabled native READY with active foreground notification") { it.ready && it.notification }.notification)
                 "stop" -> {
                     await(scenario, "native READY before stop") { it.ready }
                     stop(scenario)
@@ -157,9 +157,11 @@ class ControllerLifecycleTest {
 
     private fun start(scenario: ActivityScenario<MainActivity>) {
         onHost(scenario) { assertEquals(ServiceControlResult.REQUESTED, ControllerForegroundService.startExplicit(it)) }
-        val observed = await(scenario, "explicit native READY") { it.ready }
+        // Owner READY and the OS active-notification list are separate
+        // observations. Require both in the same snapshot and deadline.
+        val observed = await(scenario, "explicit start: native READY and active foreground notification required") { it.ready && it.notification }
         assertEquals(BootComponentState.ENABLED, observed.component)
-        assertTrue(observed.notification)
+        assertTrue("Explicit start must expose its actual foreground notification", observed.notification)
     }
 
     private fun stop(scenario: ActivityScenario<MainActivity>) {
