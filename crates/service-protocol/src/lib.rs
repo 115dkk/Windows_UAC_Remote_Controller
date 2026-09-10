@@ -28,3 +28,8 @@ pub use pairing::{
     PairingNonce, PhoneKeyDigest, SignedEnrollmentAcceptance, UnsignedEnrollmentAcceptance,
     VerifiedEnrollmentAcceptance,
 };
+pub use pairing::{
+    FrozenCandidateContext, FrozenCandidateError, FrozenCandidateFields, InvitationContextDigest,
+    MAX_FROZEN_CANDIDATE_BYTES, MatchedFrozenCandidate, PairingComparisonCode,
+    SignedFrozenCandidate, UnsignedFrozenCandidate, VerifiedFrozenCandidate,
+};

@@ -1,28 +1,50 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `c4bd81c2788c0bd599fd00cefb675abaf81eba38` on
+Last checked implementation revision: `2941d942e1f47e8e191693cf74004637d9130ae4` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
 
-Atc4bd81c, all five CI workflows passed. Full host/Android quality, both packages,
+At2941d94, all five CI workflows passed. Full host/Android quality, both packages,
 notification rendering and the genuine unlocked-emulator lifecycle are green.
-[Actual lifecycle34514602784](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34514602784)
-completed five instrumentation phases and eight host observations: document
+[Actual lifecycle34519328370](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34519328370)
+completed seven instrumentation phases and twelve host observations: document
 load/recreation/close-relaunch, exact current-versus-retired IPC, enabled reboot
 and package update before app launch, explicit stop, disabled reopen/reboot/update,
-and final explicit restart. ROOT retained and hash-checked all272 command logs.
+and explicit restart. A subsequent real file-based-encryption reboot remained
+locked with a foreground notification and WAITING_FOR_UNLOCK but no native owner.
+Ordinary System UI entry of a public synthetic CI PIN then produced full READY
+on that same boot before any target Activity/instrumentation launch. ROOT retained
+and hash-checked all540 command logs, reparsed seven instrumentation receipts,
+and checked six actual System UI hierarchies/tap coordinates. APKs were not
+downloaded again; bounded log extraction kept the ZIP only in memory.
 
 The earlier cold-plugin initialization and premature notification assertion no
-longer prevent this full sequence. First unlock is a separate pending CI extension;
+longer prevent this full sequence. Emulator first unlock is now observed;
 physical-phone authentication, provisioning/pairing, real network delivery and
 Windows UAC application remain unverified. A passing build/lifecycle is not a
 release or a finished remote approval product.
 
-The checkpoints below are historical; thec4bd81c result above is the current
-completed unlocked-lifecycle and quality baseline.
+The corrected5137e76 Windows diagnostic was independently authorized for exactly
+one further attempt. ROOT verified its exact CI artifact and announced UAC before
+launch at05:46:10KST onSeptember11. Windows returned user cancellation; no
+bootstrap/provider observation was obtained. At05:48:50 the temporary service,
+process, installation and result directories were absent. That one-shot permission
+is consumed. Production service/key/security policy were unchanged.
+
+New source work separates early SCM Running from actual initialization, adds a
+one-use running acknowledgement before platform-key calls, and keeps the original
+deadline through Ready. Product status remains StartPending until both readiness
+controls are present. A distinct signed frozen-candidate codec binds the original
+pairing context and three role-labelled phone keys before exposing a comparison
+code. These source additions require fresh CI; they are neither a TPM fix nor
+completed native pairing. Native pipe-peer authentication and the Android frozen-
+candidate owner integration are separate in-progress slices.
+
+The checkpoints below are historical; the2941d94 result above is the current
+completed lifecycle/first-unlock and quality baseline.
 
 At0713333 the full Quality run34510391762 passed: Windows15m00, Linux8m54,
 protocol6m48, Android Rust/core3m22. Both actual Analyzer scans reported zero

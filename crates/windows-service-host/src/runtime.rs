@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
+use crate::startup_phase::{RunningRequest, run_platform_step, running_handshake};
 use crate::{
     ProbeSupervisorError, ServiceProbeSupervisor,
     diagnostic::{
@@ -22,9 +23,10 @@ use windows_identity::{IdentityError, PcIdentityKey};
 
 pub(crate) static PROBE_REQUESTS: ProbeAdmission = ProbeAdmission::new();
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) enum WorkerEvent {
     Progress,
+    ScmRunningRequired(RunningRequest),
     Ready,
     Finished(Result<(), ServiceError>),
 }
@@ -38,14 +40,14 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn spawn() -> Result<Self, ServiceError> {
+    pub(crate) fn spawn(startup_began: Instant) -> Result<Self, ServiceError> {
         let (stop, requests) = mpsc::channel();
         let (sender, events) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("service-lifecycle".into())
             .spawn(move || {
                 // No unwind reaches SCM or disappears as a falsely successful stop.
-                let outcome = std::panic::catch_unwind(|| run(&requests, &sender))
+                let outcome = std::panic::catch_unwind(|| run(&requests, &sender, startup_began))
                     .unwrap_or(Err(ServiceError::WorkerFailed));
                 let _ = sender.send(WorkerEvent::Finished(outcome));
             })
@@ -111,10 +113,15 @@ fn append(journal: &mut Journal, event: ActivityEvent) -> Result<(), ServiceErro
 }
 
 fn cancellation_requested(stop: &Receiver<()>) -> bool {
-    matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
+    crate::entry::stop_requested()
+        || matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
 }
 
-fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceError> {
+fn run(
+    stop: &Receiver<()>,
+    events: &Sender<WorkerEvent>,
+    startup_began: Instant,
+) -> Result<(), ServiceError> {
     // Identity and future transport/prompt workers belong at this trusted Rust seam.
     // They must initialize genuinely before claiming any additional readiness,
     // obey cancellation, and never expose their credentials through presentation.
@@ -151,13 +158,27 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     let registry_absent = trust_directory
         .is_empty_registry_absent()
         .map_err(|error| error.at_startup(5))?;
+    // Keep every protected preflight before SCM Running, but defer the first
+    // platform-provider/key call until this exact entry thread has successfully
+    // reported Running with NO accepted controls. This one-use in-process gate
+    // retains the original startup deadline and does not advertise real Ready.
+    let (request, gate) = running_handshake();
+    events
+        .send(WorkerEvent::ScmRunningRequired(request))
+        .map_err(|_| ServiceError::WorkerFailed)?;
+    gate.wait(startup_began, || cancellation_requested(stop))?;
     // This private disposition is produced only here by the actual key API,
     // never supplied by a renderer, file, phone or caller freshness boolean.
     enum IdentityOrigin {
         Existing,
         CreatedNow,
     }
-    let (identity, origin) = match PcIdentityKey::open_existing_for_service() {
+    let opened = run_platform_step(
+        startup_began,
+        || cancellation_requested(stop),
+        PcIdentityKey::open_existing_for_service,
+    )?;
+    let (identity, origin) = match opened {
         Ok(identity) => {
             if registry_absent {
                 return Err(ServiceError::RegistryUnavailable);
@@ -170,10 +191,15 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
             if !registry_absent {
                 return Err(ServiceError::RegistryUnavailable);
             }
-            (
-                PcIdentityKey::create_for_service().map_err(ServiceError::from_identity)?,
-                IdentityOrigin::CreatedNow,
-            )
+            // Opening may have blocked through Stop or the original deadline.
+            // Absence is not permission to start a late creation attempt.
+            let created = run_platform_step(
+                startup_began,
+                || cancellation_requested(stop),
+                PcIdentityKey::create_for_service,
+            )?
+            .map_err(ServiceError::from_identity)?;
+            (created, IdentityOrigin::CreatedNow)
         }
         Err(error) => return Err(ServiceError::from_identity(error)),
     };

@@ -8,6 +8,7 @@ use crate::{
     ffi::win_error,
     native::scm_error,
     runtime::{Worker, WorkerEvent},
+    startup_phase::{ReportPhase, complete_ready_report, worker_finished_outcome},
 };
 use std::{
     ffi::c_void,
@@ -27,9 +28,8 @@ use windows::{
         System::Services::{
             RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
             SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
-            SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE,
-            SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED,
-            SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
+            SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE,
+            SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
         },
     },
     core::w,
@@ -39,6 +39,10 @@ static DISPATCHED: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONTROLS: OnceLock<SyncSender<()>> = OnceLock::new();
 static OUTCOME: OnceLock<Result<(), ServiceError>> = OnceLock::new();
+
+pub(crate) fn stop_requested() -> bool {
+    STOP_REQUESTED.load(Ordering::Acquire)
+}
 
 pub(crate) fn dispatch() -> Result<(), ServiceError> {
     if DISPATCHED.swap(true, Ordering::AcqRel) {
@@ -102,6 +106,7 @@ fn handle_control(control: u32) -> u32 {
 struct Reporter {
     handle: SERVICE_STATUS_HANDLE,
     last: SERVICE_STATUS,
+    phase: ReportPhase,
 }
 
 impl Reporter {
@@ -119,20 +124,40 @@ impl Reporter {
                 dwServiceType: SERVICE_WIN32_OWN_PROCESS,
                 ..Default::default()
             },
+            phase: ReportPhase::Starting,
         })
     }
 
     fn report(
         &mut self,
-        state: SERVICE_STATUS_CURRENT_STATE,
+        phase: ReportPhase,
         checkpoint: u32,
         failure: Option<ServiceError>,
     ) -> Result<(), ServiceError> {
-        let pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
-        self.last = SERVICE_STATUS {
+        let status = Self::status_for(phase, checkpoint, failure);
+        self.send_status(&status)?;
+        // Interrogation/progress repeat only a status actually accepted by SCM.
+        self.last = status;
+        self.phase = phase;
+        Ok(())
+    }
+
+    fn status_for(
+        phase: ReportPhase,
+        checkpoint: u32,
+        failure: Option<ServiceError>,
+    ) -> SERVICE_STATUS {
+        let state = match phase {
+            ReportPhase::Starting => SERVICE_START_PENDING,
+            ReportPhase::PlatformInitializing | ReportPhase::Ready => SERVICE_RUNNING,
+            ReportPhase::Stopping => SERVICE_STOP_PENDING,
+            ReportPhase::Stopped => SERVICE_STOPPED,
+        };
+        let pending = phase.pending();
+        SERVICE_STATUS {
             dwServiceType: SERVICE_WIN32_OWN_PROCESS,
             dwCurrentState: state,
-            dwControlsAccepted: if state == SERVICE_RUNNING {
+            dwControlsAccepted: if phase.accepts_controls() {
                 SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
             } else {
                 0
@@ -149,14 +174,17 @@ impl Reporter {
             } else {
                 0
             },
-        };
-        self.repeat()
+        }
     }
 
     fn repeat(&self) -> Result<(), ServiceError> {
+        self.send_status(&self.last)
+    }
+
+    fn send_status(&self, status: &SERVICE_STATUS) -> Result<(), ServiceError> {
         // SAFETY: handle belongs to this registered SCM service; initialized
         // status is borrowed for one synchronous call, and never held by Windows.
-        unsafe { SetServiceStatus(self.handle, &self.last) }
+        unsafe { SetServiceStatus(self.handle, status) }
             .map_err(|e| win_error(ServiceOperation::ReportStatus, e))
     }
 }
@@ -167,27 +195,33 @@ fn service_main(argument_count: u32) -> Result<(), ServiceError> {
         .set(sender)
         .map_err(|_| ServiceError::AlreadyDispatched)?;
     let mut reporter = Reporter::register()?;
-    reporter.report(SERVICE_START_PENDING, 1, None)?;
+    reporter.report(ReportPhase::Starting, 1, None)?;
     if argument_count != 1 {
-        reporter.report(SERVICE_STOPPED, 0, Some(ServiceError::InvalidArguments))?;
+        reporter.report(
+            ReportPhase::Stopped,
+            0,
+            Some(ServiceError::InvalidArguments),
+        )?;
         return Err(ServiceError::InvalidArguments);
     }
-    let mut worker = match Worker::spawn() {
+    let startup_began = Instant::now();
+    let mut worker = match Worker::spawn(startup_began) {
         Ok(worker) => worker,
         Err(error) => {
-            reporter.report(SERVICE_STOPPED, 0, Some(error))?;
+            reporter.report(ReportPhase::Stopped, 0, Some(error))?;
             return Err(error);
         }
     };
-    lifecycle(&mut reporter, &mut worker, &controls)
+    lifecycle(&mut reporter, &mut worker, &controls, startup_began)
 }
 
 fn lifecycle(
     reporter: &mut Reporter,
     worker: &mut Worker,
     controls: &Receiver<()>,
+    startup_began: Instant,
 ) -> Result<(), ServiceError> {
-    let mut pending_since = Some(Instant::now());
+    let mut pending_since = Some(startup_began);
     let mut stopping = false;
     let mut checkpoint = 1u32;
     let mut finished = None;
@@ -195,33 +229,41 @@ fn lifecycle(
         if let Some(began) = pending_since {
             remaining_budget(began.elapsed())?;
         }
-        if STOP_REQUESTED.load(Ordering::Acquire) && !stopping {
+        if stop_requested() && !stopping {
             stopping = true;
-            pending_since = Some(Instant::now());
+            pending_since = Some(continuing_pending_start(pending_since, Instant::now()));
             checkpoint = 1;
-            reporter.report(SERVICE_STOP_PENDING, checkpoint, None)?;
+            reporter.report(ReportPhase::Stopping, checkpoint, None)?;
             worker.request_stop();
         }
         if finished.is_none() {
             match worker.next_event()? {
                 Some(WorkerEvent::Progress) if !stopping => {
                     checkpoint = checkpoint.saturating_add(1);
-                    reporter.report(SERVICE_START_PENDING, checkpoint, None)?;
+                    // Initialization progress cannot regress an accepted Running
+                    // report or advertise readiness before the actual Ready event.
+                    reporter.report(reporter.phase.progress()?, checkpoint, None)?;
+                }
+                Some(WorkerEvent::ScmRunningRequired(request)) if !stopping => {
+                    let phase = reporter.phase.platform_initializing()?;
+                    request.complete_after_report(startup_began, stop_requested, || {
+                        reporter.report(phase, 0, None)
+                    })?;
+                    // Only platform initialization is released. The original
+                    // pending deadline and closed probe/control admission remain.
                 }
                 Some(WorkerEvent::Ready) if !stopping => {
-                    reporter.report(SERVICE_RUNNING, 0, None)?;
+                    let phase = reporter.phase.ready()?;
+                    complete_ready_report(startup_began, stop_requested, || {
+                        reporter.report(phase, 0, None)
+                    })?;
                     crate::runtime::PROBE_REQUESTS.enable_after_scm_running();
                     pending_since = None;
                 }
                 Some(WorkerEvent::Finished(result)) => {
-                    let result = if !stopping && result.is_ok() {
-                        Err(ServiceError::WorkerFailed)
-                    } else {
-                        result
-                    };
-                    finished = Some(result);
+                    finished = Some(worker_finished_outcome(result, stopping));
                     pending_since = Some(continuing_pending_start(pending_since, Instant::now()));
-                    reporter.report(SERVICE_STOP_PENDING, 1, None)?;
+                    reporter.report(ReportPhase::Stopping, 1, None)?;
                 }
                 Some(_) | None => (),
             }
@@ -231,7 +273,7 @@ fn lifecycle(
         {
             let joined = worker.join_finished();
             let outcome = outcome.and(joined);
-            reporter.report(SERVICE_STOPPED, 0, outcome.err())?;
+            reporter.report(ReportPhase::Stopped, 0, outcome.err())?;
             return outcome;
         }
         match controls.recv_timeout(POLL_INTERVAL) {
@@ -239,5 +281,47 @@ fn lifecycle(
             Err(mpsc::RecvTimeoutError::Timeout) => (),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(ServiceError::WorkerFailed),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reported_running_has_no_controls_until_worker_ready() {
+        let platform = ReportPhase::Starting.platform_initializing().unwrap();
+        for phase in [platform, platform.progress().unwrap()] {
+            let status = Reporter::status_for(phase, 9, None);
+            assert_eq!(status.dwCurrentState, SERVICE_RUNNING);
+            assert_eq!(status.dwControlsAccepted, 0);
+            assert_eq!(status.dwCheckPoint, 0);
+            assert_eq!(status.dwWaitHint, 0);
+        }
+        let ready = Reporter::status_for(platform.ready().unwrap(), 9, None);
+        assert_eq!(ready.dwCurrentState, SERVICE_RUNNING);
+        assert_eq!(
+            ready.dwControlsAccepted,
+            SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
+        );
+    }
+
+    #[test]
+    fn failed_startup_reports_real_error_without_readiness_controls() {
+        let stopping = Reporter::status_for(ReportPhase::Stopping, 1, None);
+        assert_eq!(stopping.dwCurrentState, SERVICE_STOP_PENDING);
+        assert_eq!(stopping.dwControlsAccepted, 0);
+        let stopped = Reporter::status_for(
+            ReportPhase::Stopped,
+            0,
+            Some(ServiceError::IdentityUnavailable),
+        );
+        assert_eq!(stopped.dwCurrentState, SERVICE_STOPPED);
+        assert_eq!(stopped.dwControlsAccepted, 0);
+        assert_eq!(stopped.dwWin32ExitCode, ERROR_SERVICE_SPECIFIC_ERROR.0);
+        assert_eq!(
+            stopped.dwServiceSpecificExitCode,
+            ServiceError::IdentityUnavailable.service_diagnostic_code()
+        );
     }
 }

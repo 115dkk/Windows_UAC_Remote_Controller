@@ -4,6 +4,13 @@
 //! The receiving owner must enforce those independent conditions exactly once.
 #![forbid(unsafe_code)]
 
+mod frozen;
+pub use frozen::{
+    FrozenCandidateContext, FrozenCandidateError, FrozenCandidateFields, InvitationContextDigest,
+    MAX_FROZEN_CANDIDATE_BYTES, MatchedFrozenCandidate, PairingComparisonCode,
+    SignedFrozenCandidate, UnsignedFrozenCandidate, VerifiedFrozenCandidate,
+};
+
 use approval_protocol::{DeviceId, MAX_DER_SIGNATURE_BYTES, MIN_DER_SIGNATURE_BYTES, PcIdentity};
 use secure_channel::{CertificateVerifySignature, TlsPublicKey};
 use sha2::{Digest, Sha256};

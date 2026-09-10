@@ -4,7 +4,9 @@
 //! Read-only status is callable by presentation. Mutations require a real
 //! elevated Windows token and validated protected installation; no caller can
 //! supply a service name, executable, account, credential or command line.
-//! Running means only SCM lifecycle operation. Windows prompt, phone, pairing,
+//! Running means completed local service bootstrap, not remote readiness. Raw
+//! SCM Running without readiness controls projects as product StartPending.
+//! Windows prompt, phone, pairing,
 //! credential entry and encrypted transport integrations remain unimplemented.
 
 #![deny(unsafe_code)]
@@ -39,6 +41,8 @@ mod ffi;
 mod native;
 #[cfg(windows)]
 mod runtime;
+#[cfg(any(windows, test))]
+mod startup_phase;
 
 pub use contract::{
     Command, ControlOutcome, InstallationState, RuntimeCapabilities, ServiceControlIntent,
