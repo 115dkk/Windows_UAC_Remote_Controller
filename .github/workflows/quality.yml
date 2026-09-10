@@ -17,9 +17,10 @@ jobs:
   protocol-security:
     name: Protocol security (Tamarin)
     runs-on: ubuntu-24.04
-    # Twenty independently bounded invocations can consume forty minutes;
+    # Independently bounded proof and integrity-control invocations can consume
+    # more than forty minutes in the worst case;
     # reserve installation, artifact and failure-diagnostic time as well.
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - name: Check out this revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24

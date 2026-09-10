@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { mutateExactlyOnce, proofArguments, proofRequirements } from './protocol-security.mjs';
 import { WITNESS_CONTEXTS, deriveWitness, witnessArguments, witnessBindingPaths, witnessCoverage, witnessProfile } from './protocol-witness-discharge.mjs';
+import { COUNTEREXAMPLE_CONTEXTS, counterexampleArguments, counterexampleBindingPaths, counterexampleCoverage,
+  counterexampleProfile, deriveCounterexample } from './protocol-counterexample-discharge.mjs';
 import { admitDiagnostic, diagnosticArguments, diagnosticResult, DIAGNOSTIC_OUTPUT_BYTES, DIAGNOSTIC_TIMEOUT_MS,
   inspectDiagnosticLog, loadDiagnosticInputs } from './protocol-diagnostic.mjs';
 
@@ -17,7 +19,7 @@ const property = (trace = 'all-traces', verdict = 'verified') => ({ trace, verdi
 const helpers = { enrolled_revision_unique: property(), building_precedes_open: property(),
   request_opened_unique: property(), active_registry_production_precedes_revocation: property() };
 
-function fixture(t, auxiliary, withDischarges = false) {
+function fixture(t, auxiliary, withDischarges = false, withCounterexamples = false) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-diagnostic-test-'));
   t.after(() => {
     // Only this exact newly-created fixture. Never old diagnostic/proof artifacts.
@@ -38,6 +40,10 @@ function fixture(t, auxiliary, withDischarges = false) {
   manifest.models[1].canaries.push({ id: 'request-replay-canary', mutation: { from: 'GUARD_request-authorization', to: 'REPLAY_BROKEN' },
     expected: { property_3: property('all-traces', 'falsified') } });
   if (auxiliary !== undefined) manifest.models[1].helpers = auxiliary;
+  if (withCounterexamples) {
+    const reviewed = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8')).models.find(model => model.id === 'request-authorization');
+    Object.assign(manifest.models[1], { expected: reviewed.expected, canaries: reviewed.canaries, helpers: reviewed.helpers });
+  }
   if (withDischarges) {
     const request = manifest.models[1];
     request.expected = { honest_approve_trace: property('exists-trace'), honest_deny_without_approval_auth_trace: property('exists-trace'),
@@ -53,15 +59,16 @@ function fixture(t, auxiliary, withDischarges = false) {
   };
   write('crates/fixture/src/lib.rs', '// SYNTHETIC source binding\r\n');
   write(`${normalDirectory}/tool-version.log`, 'SYNTHETIC FIXTURE ONLY\ntamarin-prover 1.12.0\n');
-  if (withDischarges) {
+  if (withDischarges || withCounterexamples) {
     write('fake-tamarin', 'SYNTHETIC BINARY IDENTITY, NEVER EXECUTED\n');
-    for (const path of ['tools/protocol-security.mjs', 'tools/protocol-witness-discharge.mjs', 'tools/prover-process.mjs']) write(path, '// synthetic code identity only\n');
-    for (const profile of Object.values(manifest.models[1].witnessDischarges)) write(profile.proof, readFileSync(new URL(`../${profile.proof}`, import.meta.url)));
+    for (const path of ['tools/protocol-security.mjs', 'tools/protocol-witness-discharge.mjs', 'tools/protocol-counterexample-discharge.mjs', 'tools/prover-process.mjs']) write(path, '// synthetic code identity only\n');
+    for (const profile of Object.values(manifest.models[1].witnessDischarges ?? {})) write(profile.proof, readFileSync(new URL(`../${profile.proof}`, import.meta.url)));
   }
   for (const value of manifest.models) write(value.path, `theory RequestAuthorization\nbegin\n// SYNTHETIC MODEL, NEVER EXECUTED\n// GUARD_${value.id}\n` +
     Object.keys(value.helpers ?? {}).map((name) => `lemma ${name} [reuse]: all-traces "synthetic statement"\n`).join('') +
     Object.entries(value.expected).map(([name, result]) => withDischarges && value.witnessDischarges?.[name]
       ? `${witnessProfile(name).original}\n\n` : `lemma ${name}: ${result.trace} "synthetic statement"\n`).join('') + '\nend\n');
+  if (withCounterexamples) write(manifest.models[1].path, readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url)));
   let summary;
   const refresh = () => {
     const runs = [];
@@ -70,6 +77,30 @@ function fixture(t, auxiliary, withDischarges = false) {
       const bytes = readFileSync(join(root, value.path)), text = bytes.toString('utf8');
       const push = (id, input, selected, mutation) => {
         const obligation = Object.keys(selected)[0];
+        const canary = value.canaries.find(canary => canary.id === id);
+        if (mutation && canary?.counterexampleDischarge) {
+          const profile = counterexampleProfile(id); let structural;
+          const checks = COUNTEREXAMPLE_CONTEXTS.map(context => {
+            const derived = deriveCounterexample(text, id, context), path = join(root, normalDirectory, `${id}-${context}.spthy`);
+            structural = derived.structural; write(`${normalDirectory}/${id}-${context}.spthy`, derived.input);
+            return { context, id: `${id}-${context}`, model: basename(path), modelSha256: sha256(derived.input),
+              arguments: counterexampleArguments(path, id), status: 0, signal: null, cancelled: false, cleanupIncomplete: false, ok: true,
+              expectedRow: context === 'mutant' ? 'verified' : 'falsified - no trace found',
+              observedRow: context === 'mutant' ? 'verified (35 steps)' : 'falsified - no trace found (26 steps)',
+              verdicts: { [profile.checkedLemma]: property('exists-trace', context === 'mutant' ? 'verified' : 'falsified') }, reasons: [] };
+          });
+          const mutant = checks[0], binary = join(root, 'fake-tamarin'), binaryBytes = readFileSync(binary);
+          runs.push({ id, mode: 'checked-counterexample', model: mutant.model, modelSha256: mutant.modelSha256,
+            origin: { source: value.path, sha256: sha256(bytes), mutation }, helperLemmas: [], targetLemmas: [obligation], selectedLemmas: [profile.checkedLemma],
+            arguments: mutant.arguments, status: mutant.status, signal: mutant.signal, cancelled: false, cleanupIncomplete: false,
+            ok: true, reasons: [], verdicts: mutant.verdicts,
+            counterexampleDischarge: { profile: profile.profile, checks, coverage: counterexampleCoverage(structural, checks),
+              binary, binaryMetadata: { size: binaryBytes.length, sha256: sha256(binaryBytes) },
+              sourceBindings: counterexampleBindingPaths(value, manifest.sourceBindings).map(path => {
+                const bytes = readFileSync(join(root, path)); return { path, size: bytes.length, sha256: sha256(bytes) };
+              }) } });
+          return;
+        }
         if (!mutation && value.witnessDischarges?.[obligation]) {
           const profile = witnessProfile(obligation), proofBytes = readFileSync(join(root, profile.proof)), proof = proofBytes.toString('utf8');
           const proofSnapshot = `${id}-proof.txt`;
@@ -132,6 +163,74 @@ test('complete normal failure selects first request baseline in manifest order',
   const loaded = loadDiagnosticInputs(f.root);
   assert.equal(loaded.selected.row, 'request-authorization-1');
   assert.equal(loaded.selected.inputSha256, sha256(loaded.selected.bytes));
+});
+
+test('attack-discharge diagnostic admission keeps sixteen originals and never selects a canary attack as baseline', (t) => {
+  const f = fixture(t, undefined, false, true);
+  const admitted = admitDiagnostic(f.manifest, f.summary, f.root);
+  assert.equal(admitted.plans.length, 16);
+  assert.equal(admitted.plans.filter(plan => plan.counterexample).length, 2);
+  assert.equal(loadDiagnosticInputs(f.root).selected.lemma, 'honest_approve_trace');
+  for (const row of f.summary.runs) row.ok = true;
+  const row = f.summary.runs.find(row => row.id === 'missing-replay-consumption'), attack = row.counterexampleDischarge;
+  attack.checks[1].ok = false;
+  attack.checks[1].observedRow = 'analysis incomplete (1 steps)';
+  attack.checks[1].verdicts[row.selectedLemmas[0]] = property('exists-trace', 'inconclusive');
+  attack.coverage = counterexampleCoverage(attack.coverage, attack.checks); row.ok = false;
+  f.write(`${normalDirectory}/summary.json`, JSON.stringify(f.summary));
+  assert.equal(admitDiagnostic(f.manifest, f.summary, f.root).selected, null);
+  assert.equal(loadDiagnosticInputs(f.root).selected, null);
+});
+
+test('attack diagnostic admission rejects skipped baseline, fabricated universal verdicts, crossed contexts and strategy drift', (t) => {
+  const f = fixture(t, undefined, false, true);
+  for (const change of [
+    row => { row.counterexampleDischarge.checks.pop(); },
+    row => { row.counterexampleDischarge.checks.reverse(); },
+    row => { row.counterexampleDischarge.checks[1].observedRow = 'falsified - found trace (1 steps)'; },
+    row => { row.counterexampleDischarge.checks[1].verdicts[row.selectedLemmas[0]].trace = 'all-traces'; },
+    row => { row.counterexampleDischarge.checks[1].status = 1; },
+    row => { row.counterexampleDischarge.checks[1].reasons = ['prover warning']; },
+    row => { row.counterexampleDischarge.checks[1].cancelled = true; },
+    row => { row.counterexampleDischarge.checks[1].cleanupIncomplete = true; },
+    row => { row.counterexampleDischarge.checks[1].modelSha256 = 'invalid'; },
+    row => { row.counterexampleDischarge.checks[1].arguments = [...row.counterexampleDischarge.checks[0].arguments]; },
+    row => { row.counterexampleDischarge.checks[0].arguments.push('--prove=request_accepted_at_most_once'); },
+    row => { row.counterexampleDischarge.coverage.originalUniversalDirectlyChecked = true; },
+    row => { row.counterexampleDischarge.coverage.baselineNoTraceDoesNotProveOriginalUniversal = false; },
+    row => { row.counterexampleDischarge.coverage.assumedHelpers = ['enrolled_revision_unique']; },
+    row => { row.verdicts[row.targetLemmas[0]] = property('all-traces', 'falsified'); },
+    row => { row.selectedLemmas = [...row.targetLemmas]; },
+    row => { row.helperLemmas = ['enrolled_revision_unique']; },
+    row => { delete row.helperLemmas; delete row.targetLemmas; },
+    row => { row.arguments = row.arguments.map(arg => arg === '--stop-on-trace=DFS' ? '--stop-on-trace=BFS' : arg); },
+  ]) {
+    const summary = structuredClone(f.summary);
+    change(summary.runs.find(row => row.id === 'missing-replay-consumption'));
+    assert.throws(() => admitDiagnostic(f.manifest, summary, f.root));
+  }
+});
+
+test('attack diagnostic filesystem admission rejects mutant/baseline substitution and source-code-tool drift', async (t) => {
+  for (const target of ['crossed-input', 'formula', 'source', 'code', 'binary', 'mutation']) await t.test(target, (t) => {
+    const f = fixture(t, undefined, false, true), id = 'missing-approval-signature';
+    const sourcePath = f.manifest.models[1].path;
+    if (target === 'crossed-input') f.write(`${normalDirectory}/${id}-baseline.spthy`, readFileSync(join(f.root, normalDirectory, `${id}-mutant.spthy`)));
+    if (target === 'formula') {
+      const path = `${normalDirectory}/${id}-mutant.spthy`, text = readFileSync(join(f.root, path), 'utf8');
+      f.write(path, text.replace('& not (Ex #u.', '& (Ex #u.'));
+    }
+    if (target === 'source') f.write(sourcePath, readFileSync(join(f.root, sourcePath), 'utf8') + '\n// changed current source\n');
+    if (target === 'code') f.write('tools/protocol-counterexample-discharge.mjs', '// different checker\n');
+    if (target === 'binary') f.write('fake-tamarin', 'different tool\n');
+    if (target === 'mutation') {
+      const changed = structuredClone(f.summary);
+      changed.runs.find(row => row.id === id).counterexampleDischarge.coverage.mutation.to = 'other mutation';
+      f.write(`${normalDirectory}/summary.json`, JSON.stringify(changed));
+    }
+    assert.throws(() => loadDiagnosticInputs(f.root));
+    assert.equal(existsSync(join(f.root, 'artifacts/protocol-diagnostic')), false);
+  });
 });
 
 test('discharge diagnostics retain sixteen original rows and select the actual stronger input without claiming original replay', (t) => {

@@ -8,6 +8,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { mutateExactlyOnce, proofArguments, proofRequirements, validateTheoryRequirements } from './protocol-security.mjs';
 import { runProver } from './prover-process.mjs';
 import { WITNESS_CONTEXTS, deriveWitness, witnessArguments, witnessBindingPaths, witnessCoverage, witnessDischarges } from './protocol-witness-discharge.mjs';
+import { COUNTEREXAMPLE_CONTEXTS, counterexampleArguments, counterexampleBindingPaths, counterexampleCoverage,
+  counterexampleDischarge, deriveCounterexample } from './protocol-counterexample-discharge.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const NORMAL = 'artifacts/protocol-security';
@@ -128,6 +130,18 @@ export function admitDiagnostic(manifest, summary, root) {
       inputs.add(canary.id);
       const selected = expectedNames(canary.expected, false);
       if (selected.some((name) => !names.includes(name))) reject();
+      const counterexample = counterexampleDischarge(model, canary);
+      if (counterexample) {
+        for (const context of COUNTEREXAMPLE_CONTEXTS) {
+          const inputId = `${canary.id}-${context}`;
+          if (!id(inputId) || inputs.has(inputId) || runIds.has(inputId)) reject();
+          inputs.add(inputId); runIds.add(inputId);
+        }
+        add({ id: canary.id, input: `${canary.id}-mutant`, model, names: [counterexample.checkedLemma],
+          targetLemmas: [counterexample.obligation], helperLemmas: [], expected: canary.expected,
+          mutation: canary.mutation, counterexample });
+        continue;
+      }
       const required = proofRequirements(canary.expected, model.helpers);
       add({ id: canary.id, input: canary.id, model, names: required.selectedLemmas,
         targetLemmas: required.targetLemmas, helperLemmas: required.helperLemmas,
@@ -150,11 +164,40 @@ export function admitDiagnostic(manifest, summary, root) {
     same(row.selectedLemmas, plan.names);
     // Legacy no-helper rows may lack the two new attribution fields. A helper
     // plan always requires both; partial or conflicting metadata never passes.
-    if (plan.helperLemmas.length || Object.hasOwn(row, 'helperLemmas') || Object.hasOwn(row, 'targetLemmas')) {
+    if (plan.counterexample || plan.discharge || plan.helperLemmas.length || Object.hasOwn(row, 'helperLemmas') || Object.hasOwn(row, 'targetLemmas')) {
       same(row.helperLemmas, plan.helperLemmas);
       same(row.targetLemmas, plan.targetLemmas);
     }
-    if (plan.discharge) {
+    if (plan.counterexample) {
+      same(row.mode, 'checked-counterexample');
+      if (Object.hasOwn(row, 'witnessDischarge')) reject();
+      same(row.arguments, counterexampleArguments(snapshot, plan.id));
+      const attack = row.counterexampleDischarge;
+      if (!attack || !Array.isArray(attack.checks) || attack.checks.length !== COUNTEREXAMPLE_CONTEXTS.length) reject();
+      same(attack.profile, plan.counterexample.profile);
+      same(attack.sourceBindings?.map(binding => binding.path), counterexampleBindingPaths(plan.model, manifest.sourceBindings));
+      for (const [index, context] of COUNTEREXAMPLE_CONTEXTS.entries()) {
+        const check = attack.checks[index], input = owned(root, `${NORMAL}/${plan.id}-${context}.spthy`);
+        if (!check || !hash(check.modelSha256) || typeof check.ok !== 'boolean' || check.cancelled !== false || check.cleanupIncomplete !== false) reject();
+        same(check.context, context); same(check.id, `${plan.id}-${context}`); same(check.model, basename(input));
+        same(check.arguments, counterexampleArguments(input, plan.id));
+        same(check.expectedRow, context === 'mutant' ? 'verified' : 'falsified - no trace found');
+        if (Object.hasOwn(check.verdicts ?? {}, plan.targetLemmas[0])) reject();
+        if (check.ok) {
+          if (check.status !== 0 || check.signal || check.processError) reject();
+          same(check.verdicts, { [plan.counterexample.checkedLemma]: { trace: 'exists-trace', verdict: context === 'mutant' ? 'verified' : 'falsified' } });
+          const exact = context === 'mutant' ? /^verified \(\d+ steps\)$/ : /^falsified - no trace found \(\d+ steps\)$/;
+          if (!exact.test(check.observedRow ?? '')) reject();
+        }
+      }
+      const mutant = attack.checks[0];
+      same(row.modelSha256, mutant.modelSha256); same(row.verdicts, mutant.verdicts);
+      same(row.status, mutant.status); same(row.signal, mutant.signal); same(row.processError, mutant.processError);
+      same(row.ok, attack.checks.every(check => check.ok));
+      same(attack.coverage, counterexampleCoverage(attack.coverage, attack.checks));
+      same(attack.coverage.discharged, row.ok);
+    } else if (plan.discharge) {
+      if (Object.hasOwn(row, 'counterexampleDischarge')) reject();
       same(row.mode, 'checked-strengthening');
       same(row.arguments, witnessArguments(snapshot));
       const witness = row.witnessDischarge;
@@ -182,7 +225,7 @@ export function admitDiagnostic(manifest, summary, root) {
       same(row.ok, witness.checks.every(check => check.ok));
       same(witness.coverage?.discharged, row.ok);
     } else {
-      if (Object.hasOwn(row, 'mode') || Object.hasOwn(row, 'witnessDischarge')) reject();
+      if (Object.hasOwn(row, 'mode') || Object.hasOwn(row, 'witnessDischarge') || Object.hasOwn(row, 'counterexampleDischarge')) reject();
       same(row.arguments, proofArguments(snapshot, plan.expected, plan.model.helpers));
     }
     same(row.origin, { source: plan.model.path, sha256: row.origin.sha256, ...(plan.mutation ? { mutation: plan.mutation } : {}) });
@@ -212,6 +255,26 @@ export function loadDiagnosticInputs(root) {
     if (!source) { source = read(plan.model.path); sources.set(plan.model.path, source); }
     const text = utf8(source.bytes);
     validateTheoryRequirements(text, plan.model.expected, plan.model.helpers);
+    if (plan.counterexample) {
+      const row = summary.runs.find(candidate => candidate.id === plan.id), attack = row.counterexampleDischarge;
+      if (source.sha256 !== row.origin.sha256) reject();
+      for (const [index, context] of COUNTEREXAMPLE_CONTEXTS.entries()) {
+        const derived = deriveCounterexample(text, plan.id, context), inputId = `${plan.id}-${context}`;
+        const snapshot = read(`${NORMAL}/${inputId}.spthy`);
+        if (!snapshot.bytes.equals(Buffer.from(derived.input)) || snapshot.sha256 !== attack.checks[index].modelSha256) reject();
+        snapshots.set(inputId, snapshot);
+        same(attack.coverage, counterexampleCoverage(derived.structural, attack.checks));
+      }
+      for (const binding of attack.sourceBindings) {
+        if (!hash(binding.sha256) || !Number.isSafeInteger(binding.size) || binding.size <= 0 || binding.size > 1024 * 1024) reject();
+        const current = read(binding.path, 1024 * 1024);
+        if (current.sha256 !== binding.sha256 || current.size !== binding.size) reject();
+      }
+      if (!isAbsolute(attack.binary) || !hash(attack.binaryMetadata?.sha256) || !Number.isSafeInteger(attack.binaryMetadata?.size)) reject();
+      const binary = regular(attack.binary, 150 * 1024 * 1024, false);
+      if (binary.sha256 !== attack.binaryMetadata.sha256 || binary.size !== attack.binaryMetadata.size) reject();
+      continue;
+    }
     if (plan.discharge) {
       const row = summary.runs.find(candidate => candidate.id === plan.id), witness = row.witnessDischarge;
       const proof = read(plan.discharge.proof, 1024 * 1024), retained = read(`${NORMAL}/${witness.proofSnapshot}`, 1024 * 1024);

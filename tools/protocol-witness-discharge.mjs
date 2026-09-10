@@ -51,11 +51,67 @@ const strongerDeny = `lemma checked_denial_witness:
     & (All d r b #x. SnapshotCaptured(pc, d, r, b) @x ==> #x = #c)
     & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==> #x = #e)"`;
 
+const originalTwoApprovers = `lemma honest_two_approvers_single_winner_trace:
+  exists-trace
+  "Ex pc first_device second_device first_revision second_revision binding
+      #c1 #c2 #o #s1 #s2 #a.
+    SnapshotCaptured(pc, first_device, first_revision, binding) @c1
+    & SnapshotCaptured(pc, second_device, second_revision, binding) @c2
+    & RequestOpened(pc, binding) @o
+    & ApprovalSigned(first_device, binding) @s1
+    & ApprovalSigned(second_device, binding) @s2
+    & RequestAccepted(pc, first_device, first_revision, binding, 'approve') @a
+    & not (first_device = second_device)
+    & c1 < o & c2 < o & o < s1 & o < s2 & s1 < a & s2 < a
+    & not (Ex purpose #other.
+      RequestAccepted(pc, second_device, second_revision, binding, purpose) @other)"`;
+const strongerTwoApprovers = `lemma two_approvers_ordered_observed_witness:
+  exists-trace
+  "Ex pc first_device second_device first_revision second_revision binding request_id
+      first_approval_key first_denial_key second_approval_key second_denial_key
+      #e1 #e2 #b #c1 #c2 #o #u1 #u2 #s1 #s2 #a.
+    SnapshotCaptured(pc, first_device, first_revision, binding) @c1
+    & SnapshotCaptured(pc, second_device, second_revision, binding) @c2
+    & RequestOpened(pc, binding) @o
+    & ApprovalSigned(first_device, binding) @s1
+    & ApprovalSigned(second_device, binding) @s2
+    & RequestAccepted(pc, first_device, first_revision, binding, 'approve') @a
+    & not (first_device = second_device)
+    & c1 < o & c2 < o & o < s1 & o < s2 & s1 < a & s2 < a
+    & not (Ex purpose #other.
+      RequestAccepted(pc, second_device, second_revision, binding, purpose) @other)
+    & Enrolled(pc, first_device, first_revision, first_approval_key, first_denial_key) @e1
+    & Enrolled(pc, second_device, second_revision, second_approval_key, second_denial_key) @e2
+    & BuildingProduced(request_id, pc, binding) @b
+    & UserAuthenticated(first_device, binding) @u1
+    & UserAuthenticated(second_device, binding) @u2
+    & e1 < e2 & e2 < b & b < c1 & c1 < c2 & c2 < o
+    & o < u1 & u1 < s1 & s1 < u2 & u2 < s2 & s2 < a
+    & (All d r ak dk #x. Enrolled(pc, d, r, ak, dk) @x ==>
+      ((d = first_device & r = first_revision & ak = first_approval_key & dk = first_denial_key & #x = #e1)
+       | (d = second_device & r = second_revision & ak = second_approval_key & dk = second_denial_key & #x = #e2)))
+    & (All d r other_binding #x. SnapshotCaptured(pc, d, r, other_binding) @x ==>
+      ((d = first_device & r = first_revision & other_binding = binding & #x = #c1)
+       | (d = second_device & r = second_revision & other_binding = binding & #x = #c2)))
+    & (All rid other_binding #x. BuildingProduced(rid, pc, other_binding) @x ==>
+      (rid = request_id & other_binding = binding & (#x = #b | #x = #c1 | #x = #c2)))
+    & (All d r #x. ActiveRegistryProduced(pc, d, r) @x ==>
+      ((d = first_device & r = first_revision & (#x = #e1 | #x = #c1 | #x = #a))
+       | (d = second_device & r = second_revision & (#x = #e2 | #x = #c2))))
+    & (All other_binding #x. RequestOpened(pc, other_binding) @x ==> (other_binding = binding & #x = #o))
+    & (All d r other_binding purpose #x. RequestAccepted(pc, d, r, other_binding, purpose) @x ==>
+      (d = first_device & r = first_revision & other_binding = binding & purpose = 'approve' & #x = #a))
+    & (All #x. UserAuthenticated(first_device, binding) @x ==> #x = #u1)
+    & (All #x. UserAuthenticated(second_device, binding) @x ==> #x = #u2)
+    & (All #x. ApprovalSigned(first_device, binding) @x ==> #x = #s1)
+    & (All #x. ApprovalSigned(second_device, binding) @x ==> #x = #s2)"`;
 const PROFILES = Object.freeze({
   honest_approve_trace: Object.freeze({ profile: 'approval-conjunction-v1', proof: 'security/tamarin/witnesses/Approve.proof',
     checkedLemma: 'checked_approval_witness', original: originalApprove, stronger: strongerApprove }),
   honest_deny_without_approval_auth_trace: Object.freeze({ profile: 'denial-be8-conjunction-v1', proof: 'security/tamarin/witnesses/Deny.proof',
     checkedLemma: 'checked_denial_witness', original: originalDeny, stronger: strongerDeny }),
+  honest_two_approvers_single_winner_trace: Object.freeze({ profile: 'two-approver-observed-conjunction-v1', proof: 'security/tamarin/witnesses/TwoApprovers.proof',
+    checkedLemma: 'two_approvers_ordered_observed_witness', original: originalTwoApprovers, stronger: strongerTwoApprovers }),
 });
 const dictionary = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -65,7 +121,7 @@ export function witnessDischarges(model) {
   assert.equal(model.id, 'request-authorization');
   assert.ok(dictionary(model.witnessDischarges));
   const entries = Object.entries(model.witnessDischarges);
-  assert.ok(entries.length > 0 && entries.length <= 2 && Reflect.ownKeys(model.witnessDischarges).length === entries.length);
+  assert.ok(entries.length > 0 && entries.length <= 3 && Reflect.ownKeys(model.witnessDischarges).length === entries.length);
   return Object.fromEntries(entries.map(([name, value]) => {
     assert.ok(Object.hasOwn(PROFILES, name));
     const profile = PROFILES[name];

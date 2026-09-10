@@ -37,7 +37,8 @@
       "path": "security/tamarin/RequestAuthorization.spthy",
       "witnessDischarges": {
         "honest_approve_trace": { "profile": "approval-conjunction-v1", "proof": "security/tamarin/witnesses/Approve.proof" },
-        "honest_deny_without_approval_auth_trace": { "profile": "denial-be8-conjunction-v1", "proof": "security/tamarin/witnesses/Deny.proof" }
+        "honest_deny_without_approval_auth_trace": { "profile": "denial-be8-conjunction-v1", "proof": "security/tamarin/witnesses/Deny.proof" },
+        "honest_two_approvers_single_winner_trace": { "profile": "two-approver-observed-conjunction-v1", "proof": "security/tamarin/witnesses/TwoApprovers.proof" }
       },
       "helpers": {
         "enrolled_revision_unique": { "trace": "all-traces", "verdict": "verified" },
@@ -59,6 +60,7 @@
       "canaries": [
         {
           "id": "missing-approval-signature",
+          "counterexampleDischarge": { "profile": "signature-attack-existence-v1" },
           "mutation": {
             "from": "Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE",
             "to": "Eq('unchecked-signature', 'unchecked-signature'), // CANARY_APPROVAL_SIGNATURE_DISABLED"
@@ -67,6 +69,7 @@
         },
         {
           "id": "missing-replay-consumption",
+          "counterexampleDischarge": { "profile": "replay-attack-existence-v1" },
           "mutation": { "from": "// CANARY_REPLAY_GUARD", "to": ", RequestSlot(request_id, pc, binding, 'pending')" },
           "expected": { "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "falsified" } }
         }

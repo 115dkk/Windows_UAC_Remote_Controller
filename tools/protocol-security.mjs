@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { runProver } from './prover-process.mjs';
 import { WITNESS_CONTEXTS, WITNESS_OUTPUT_LIMIT, deriveWitness, exactWitnessResult, readWitnessFile,
   witnessArguments, witnessBindingPaths, witnessCoverage, witnessDischarges, witnessExpected } from './protocol-witness-discharge.mjs';
+import { COUNTEREXAMPLE_CONTEXTS, COUNTEREXAMPLE_OUTPUT_LIMIT, counterexampleArguments, counterexampleBindingPaths,
+  counterexampleCoverage, counterexampleDischarge, counterexampleExpected, deriveCounterexample,
+  exactCounterexampleResult } from './protocol-counterexample-discharge.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -68,8 +71,12 @@ export function parseProofSummary(result, expected, knownNames = Object.keys(exp
     const [, name, trace, text] = match;
     if (Object.hasOwn(verdicts, name)) reasons.push(`duplicate lemma ${name}`);
     if (!knownNames.includes(name)) reasons.push(`unregistered lemma ${name}`);
+    // A false existential has NO trace; it is not a universal counterexample.
+    const falsified = trace === 'exists-trace'
+      ? /^falsified(?: - no trace found)? \(\d+ steps\)\s*$/.test(text)
+      : /^falsified(?: - found trace)? \(\d+ steps\)\s*$/.test(text);
     const verdict = /^verified \(\d+ steps\)\s*$/.test(text) ? 'verified'
-      : /^falsified(?: - found trace)? \(\d+ steps\)\s*$/.test(text) ? 'falsified' : 'inconclusive';
+      : falsified ? 'falsified' : 'inconclusive';
     verdicts[name] = { trace, verdict };
   }
   for (const [name, wanted] of Object.entries(expected)) {
@@ -196,6 +203,12 @@ async function runProtocolSecurityImpl(root, cancellation) {
       if (Object.keys(canary.expected).some((name) => !names.includes(name))) throw new Error('Canary must falsify a production property.');
       reserve(inputIds, canary.id);
       reserve(plannedRuns, canary.id);
+      if (counterexampleDischarge(model, canary)) {
+        for (const context of COUNTEREXAMPLE_CONTEXTS) {
+          reserve(inputIds, `${canary.id}-${context}`);
+          reserve(plannedRuns, `${canary.id}-${context}`);
+        }
+      }
     }
   }
   // The helper's Windows unit fixtures own direct children only. Actual formal
@@ -207,11 +220,11 @@ async function runProtocolSecurityImpl(root, cancellation) {
   const version = await runProver(binary, ['--version'], { cwd: root,
     logPath: resolve(directory, 'tool-version.log'), timeoutMs: 30_000, maxOutputBytes: 1024 * 1024, signal: cancellation });
   cancellation.throwIfAborted();
-  if (version.status !== 0 || version.error || version.signal || /\bwarn(?:ing|ings)?\b|unsupported/i.test(version.stdout + version.stderr) || !/tamarin[- ]prover\s+1\.12\.0\b/i.test(version.stdout + version.stderr)) throw new Error('Pinned Tamarin 1.12.0 and supported Maude are required; missing/unsupported tools never pass.');
+  if (version.status !== 0 || version.error || version.signal || version.cancelled || version.cleanupIncomplete || /\bwarn(?:ing|ings)?\b|unsupported/i.test(version.stdout + version.stderr) || !/tamarin[- ]prover\s+1\.12\.0\b/i.test(version.stdout + version.stderr)) throw new Error('Pinned Tamarin 1.12.0 and supported Maude are required; missing/unsupported tools never pass.');
   const runs = [];
   const ids = new Set();
   const saveRuns = () => writeFileSync(resolve(directory, 'summary.json'), JSON.stringify({ toolVersion: config.toolVersion, passed: false, status: 'incomplete', runs }, null, 2));
-  async function invoke(id, path, expected, knownNames, args, expectedInputHash, witness) {
+  async function invoke(id, path, expected, knownNames, args, expectedInputHash, witness, counterexample) {
     cancellation.throwIfAborted();
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(id) || ids.has(id)) throw new Error('Invalid/duplicate protocol evidence id.');
     ids.add(id);
@@ -220,9 +233,11 @@ async function runProtocolSecurityImpl(root, cancellation) {
     if (inputHash !== expectedInputHash) throw new Error('Immutable prover snapshot changed before invocation.');
     process.stdout.write(`Protocol security: ${id}\n`);
     const result = await runProver(binary, args, { cwd: root, logPath: joinEvidence(id, 'log'), signal: cancellation,
-      ...(witness ? { timeoutMs: 120_000, maxOutputBytes: WITNESS_OUTPUT_LIMIT } : {}) });
+      ...(witness ? { timeoutMs: 120_000, maxOutputBytes: WITNESS_OUTPUT_LIMIT }
+        : counterexample ? { timeoutMs: 120_000, maxOutputBytes: COUNTEREXAMPLE_OUTPUT_LIMIT } : {}) });
     let proof = parseProofSummary(result, expected, knownNames, path);
     if (witness) proof = exactWitnessResult(proof, result, witness.obligation, witness.context);
+    if (counterexample) proof = exactCounterexampleResult(proof, result, counterexample.canaryId, counterexample.context);
     try {
       if (sha256(readFileSync(path)) !== inputHash) { proof.ok = false; proof.reasons.push('prover input changed during execution'); }
     } catch { proof.ok = false; proof.reasons.push('prover input could not be re-read after execution'); }
@@ -300,6 +315,59 @@ async function runProtocolSecurityImpl(root, cancellation) {
     process.stdout.write(`${JSON.stringify(row)}\n`); saveRuns();
     return row.ok;
   }
+  async function executeCounterexample(source, model, canary, profile, sourceHash) {
+    cancellation.throwIfAborted();
+    if (!isAbsolute(binary)) throw new Error('Counterexample discharge requires the explicitly pinned absolute Tamarin binary.');
+    const bindings = counterexampleBindingPaths(model, config.sourceBindings).map(path => {
+      const file = readWitnessFile(ownedPath(root, path));
+      const reviewed = config.sourceBindings.find(binding => binding.path === path);
+      if (reviewed && sha256(file.bytes.toString('utf8').replace(/\r\n/g, '\n')) !== reviewed.sha256) throw new Error('Reviewed protocol binding changed before counterexample planning.');
+      return { path, size: file.size, sha256: file.sha256 };
+    });
+    if (bindings.find(binding => binding.path === model.path).sha256 !== sourceHash ||
+        bindings.find(binding => binding.path === 'security/tamarin/manifest.json').sha256 !== sha256(configBytes)) throw new Error('Counterexample source changed before planning.');
+    const tool = readWitnessFile(binary, 150 * 1024 * 1024, false);
+    const derived = COUNTEREXAMPLE_CONTEXTS.map(context => {
+      const candidate = deriveCounterexample(source, canary.id, context), path = joinEvidence(`${canary.id}-${context}`, 'spthy');
+      writeFileSync(path, candidate.input);
+      return { context, path, sha256: sha256(candidate.input), ...candidate };
+    });
+    const unchanged = () => {
+      for (const binding of bindings) if (readWitnessFile(ownedPath(root, binding.path), undefined, false).sha256 !== binding.sha256) throw new Error('Counterexample source/code binding changed.');
+      if (readWitnessFile(binary, 150 * 1024 * 1024, false).sha256 !== tool.sha256) throw new Error('Counterexample tool binding changed.');
+      for (const candidate of derived) if (readWitnessFile(candidate.path).sha256 !== candidate.sha256) throw new Error('Counterexample derived input changed.');
+    };
+    const checks = [], mutant = derived[0];
+    const row = { id: canary.id, mode: 'checked-counterexample', model: basename(mutant.path), modelSha256: mutant.sha256,
+      origin: { source: model.path, sha256: sourceHash, mutation: canary.mutation },
+      helperLemmas: [], targetLemmas: [profile.obligation], selectedLemmas: [profile.checkedLemma],
+      arguments: counterexampleArguments(mutant.path, canary.id), status: null, signal: null, cancelled: false, cleanupIncomplete: false,
+      ok: false, reasons: ['counterexample discharge incomplete'], verdicts: {},
+      counterexampleDischarge: { profile: profile.profile, sourceBindings: bindings, binary, binaryMetadata: tool,
+        checks, coverage: { ...mutant.structural, discharged: false } } };
+    runs.push(row); saveRuns();
+    for (const candidate of derived) {
+      unchanged(); cancellation.throwIfAborted();
+      const check = await invoke(`${canary.id}-${candidate.context}`, candidate.path,
+        counterexampleExpected(canary.id, candidate.context), [profile.checkedLemma],
+        counterexampleArguments(candidate.path, canary.id), candidate.sha256, undefined,
+        { canaryId: canary.id, context: candidate.context });
+      checks.push({ context: candidate.context, ...check });
+      if (candidate.context === 'mutant') {
+        row.status = check.status; row.signal = check.signal; row.processError = check.processError; row.verdicts = check.verdicts;
+      }
+      row.cancelled ||= check.cancelled; row.cleanupIncomplete ||= check.cleanupIncomplete;
+      saveRuns(); cancellation.throwIfAborted();
+      if (check.cleanupIncomplete) throw new Error('Prover cleanup is uncertain; no further proof groups may start.');
+      unchanged();
+    }
+    cancellation.throwIfAborted();
+    row.counterexampleDischarge.coverage = counterexampleCoverage(mutant.structural, checks);
+    row.ok = row.counterexampleDischarge.coverage.discharged;
+    row.reasons = checks.flatMap(check => check.reasons.map(reason => `${check.context}: ${reason}`));
+    process.stdout.write(`${JSON.stringify(row)}\n`); saveRuns();
+    return row.ok;
+  }
   let passed = true;
   for (const model of config.models) {
     validateExpected(model.expected, true);
@@ -331,7 +399,10 @@ async function runProtocolSecurityImpl(root, cancellation) {
       if (!/^[a-z][a-z0-9-]{0,47}$/.test(canary.id)) throw new Error('Invalid canary id.');
       writeFileSync(path, modified);
       validateTheoryRequirements(modified, model.expected, model.helpers);
-      passed = await execute(canary.id, path, canary.expected, model.helpers, registered.selectedLemmas, { source: model.path, sha256: sourceHash, mutation: canary.mutation }, sha256(modified)) && passed;
+      const counterexample = counterexampleDischarge(model, canary);
+      passed = (counterexample
+        ? await executeCounterexample(source, model, canary, counterexample, sourceHash)
+        : await execute(canary.id, path, canary.expected, model.helpers, registered.selectedLemmas, { source: model.path, sha256: sourceHash, mutation: canary.mutation }, sha256(modified))) && passed;
     }
   }
   cancellation.throwIfAborted();

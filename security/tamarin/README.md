@@ -7,7 +7,7 @@ Tamarin was selected for this slice's mutable registration and one-shot state. T
 
 CI pins both Tamarin1.12.0 and its supported Maude3.5.1 distribution by SHA-256,
 including Maude's sibling prelude/modules. Automatic positive-lemma rows run in
-their own bounded process with all registered helpers for that model. The two
+their own bounded process with all registered helpers for that model. The
 explicit checked-strengthening rows described below instead run three bounded
 file-only checks with no assumed helpers (120 seconds each, 2GiB GHC heap).
 All13 positive lemmas and all3 broken-model controls remain mandatory. A timeout,
@@ -46,7 +46,7 @@ retained; the isolated experiment's older identity binding was not copied.
 
 The manifest keeps all 13 original positives and three canary rows. Helpers are
 an additional bounded dictionary, not replacements or separate successful rows.
-Every automatic request baseline/canary invocation selects all four helpers plus
+Every ordinary automatic request baseline/canary invocation selects all four helpers plus
 its original target(s). Missing, wrong-kind, falsified or incomplete helper results,
 warnings, bad process outcomes and input drift fail the entire row even when its
 original target reports the desired verdict. Evidence records helper names,
@@ -56,10 +56,15 @@ universal helpers; universal positive searches remain DFS. Existing time, heap
 and output budgets are unchanged. No full protocol or native security claim is
 made by this integration.
 
-### Checked-strengthening discharge for two honest existentials
+The closed witness and attack-existence discharge profiles below use independent
+inputs without helper declarations; their fresh checks are attributed separately
+to the unchanged original obligations.
 
-`manifest.json` explicitly selects `approval-conjunction-v1` and
-`denial-be8-conjunction-v1` for the existing approve and deny non-vacuity
+### Checked-strengthening discharge for three honest existentials
+
+`manifest.json` explicitly selects `approval-conjunction-v1`,
+`denial-be8-conjunction-v1` and `two-approver-observed-conjunction-v1` for the
+existing approve, deny and two-approver non-vacuity
 obligations. The original nine request formulas remain unchanged. Each approved
 stronger formula retains every original conjunct and original binder identity,
 adding existential variables and conjuncts; the added nested uniqueness
@@ -70,10 +75,16 @@ existential by conjunction elimination. It does not establish all honest flows.
 The normal runner derives each checker input from the **current** theory's exact
 non-lemma prefix, including every rule, restriction and observation action. All
 lemma declarations are omitted from that independent input, so no `[reuse]` or
-`[sources]` assumption is available. A distinct `checked_approval_witness` or
-`checked_denial_witness` declaration receives only the admitted proof-only
+`[sources]` assumption is available. A distinct `checked_approval_witness`,
+`checked_denial_witness` or `two_approvers_ordered_observed_witness` declaration
+receives only the admitted proof-only
 fixture. The denial template is the exact earlier `be8a31b` shape, not the later
 variant with an additional DenialSigned uniqueness conjunct.
+The two-approver template retains both eligible devices, both signatures and the
+single accepted winner, then orders its concrete enrollment/capture/auth/sign
+events and bounds only that witness's producer observations. Its retained proof
+comes from ROOT's actual DFS run at b018f20; the normal gate rechecks the proof
+file-only against current source and does not import that old result.
 
 Every row freshly invokes the pinned prover file-only, with no `--prove` or
 automatic completion: good must report the distinct stronger existential as
@@ -87,9 +98,9 @@ canaries. There are still exactly 16 original obligation rows.
 Evidence retains raw stronger-name verdicts separately from the original
 obligation's `existential-conjunction-elimination` coverage receipt. It never
 fabricates a raw original-lemma verdict, and `originalDirectlyVerified` remains
-false. All other safety, two-approver and protocol-canary rows retain their
+false. All other safety and protocol-canary rows retain their
 existing requirements. Default model/proof injection rejection is unchanged
-outside the two closed profiles; existing experiment success is not imported as
+outside the three closed profiles; existing experiment success is not imported as
 normal proof authority. The new current-source-derived checks require fresh
 ROOT validation before claiming normal-gate success.
 
@@ -97,6 +108,44 @@ Proof-only fixtures live in `security/tamarin/witnesses/`; they are untrusted
 instructions to the checker, not assumed theorems. Diagnostic admission checks
 the nested contexts and exact derived inputs while continuing to use
 `eligibleAsProof:false`; a diagnostic cannot discharge an obligation.
+
+### Checked attack-existence discharge for two request canaries
+
+The original `missing-approval-signature` and `missing-replay-consumption` rows
+remain mandatory all-traces/falsified obligations. Their closed profiles are
+`signature-attack-existence-v1` and `replay-attack-existence-v1`. Each now requires
+two fresh automatic checks of one fixed stronger attack predicate: its existence
+in the exact registered mutant must be **verified**, and the same predicate over
+the untouched current transition prefix must be **falsified - no trace found**.
+Signature search uses BFS; replay search uses DFS. Each process retains the
+120-second, 2GiB heap and 4MiB output limits. Both contexts must complete without
+warnings, cancellation, uncertain cleanup or source/code/tool/input drift.
+
+The signature predicate contains the exact negation of
+`accepted_approval_requires_same_binding_auth`: an accepted approval and no
+earlier same-binding authentication. The replay predicate instantiates both
+device/revision/purpose tuples in `request_accepted_at_most_once` with the same
+device/revision/approve and sets `i=a1`, `j=a2`; its `a1<a2` contradicts `i=j`.
+Additional ordered enrollment/capture/signing and uniqueness conjuncts constrain
+only the searched attack witness. They do not weaken either original universal
+formula or restrict the model's rules.
+
+The runner checks the exact original formula/binders, copies the **current**
+non-lemma prefix byte-for-byte, and applies exactly the registered mutation only
+for the mutant. Independent inputs contain one attack lemma and no helpers,
+stored proofs, source assumptions or added restrictions. Raw existential verdicts
+remain under their actual attack lemma names; a separate implication receipt
+records coverage of the original canary. No raw original-universal verdict is
+manufactured. The baseline no-trace result concerns this stronger predicate
+only: it does **not** prove the original universal, whose positive row is still
+required separately.
+
+All16 original rows remain: 13 positives and three protocol canaries. The honest
+witnesses' `sorry`/`contradiction` integrity controls are additionally mandatory;
+they are not these baseline sensitivity checks. Isolated experiment success is
+not imported into the normal gate. Diagnostic admission checks both contexts and
+their exact bindings, but failed-canary-only results remain not applicable to
+baseline diagnostics, and diagnostics are never proof evidence.
 
 ## What the models mean
 
@@ -331,11 +380,12 @@ with:
 Eq('unchecked-signature', 'unchecked-signature'), // CANARY_APPROVAL_SIGNATURE_DISABLED
 ```
 
-```text
-tamarin-prover RequestAuthorization.no-approval-signature.spthy --quit-on-warning --prove=enrolled_revision_unique --prove=building_precedes_open --prove=request_opened_unique --prove=active_registry_production_precedes_revocation --prove=accepted_approval_requires_same_binding_auth --stop-on-trace=BFS
-```
-
-The original selected lemma must be **falsified**, and all four helpers must be **verified in this same mutant invocation**: observe the public opened binding and inject a forged approval/signature without any matching UserAuthenticated event. No secret nonce or encrypted channel is needed for this attack.
+The normal row retains `accepted_approval_requires_same_binding_auth` as its
+original obligation. Its independent `attack_approval_without_auth` predicate
+must verify over the mutant and produce the exact no-trace result over the
+untouched prefix, as described above. The attack observes the public opened
+binding and injects a forged approval/signature without matching authentication.
+No secret nonce or encrypted channel is needed; no helper is assumed or imported.
 
 ### Consumed-Pending replay-guard omission
 
@@ -351,10 +401,13 @@ with:
 , RequestSlot(request_id, pc, binding, 'pending')
 ```
 
-```text
-tamarin-prover RequestAuthorization.retain-pending.spthy --quit-on-warning --prove=enrolled_revision_unique --prove=building_precedes_open --prove=request_opened_unique --prove=active_registry_production_precedes_revocation --prove=request_accepted_at_most_once --stop-on-trace=BFS
-```
-
-The original selected lemma must be **falsified**, and all four helpers must be **verified in this same mutant invocation**: obtain one genuine request-bound approval, then replay that same public decision after the first acceptance. Alternatively, two already-eligible devices can both be accepted when this shared guard is wrongly retained. Signature verification remains enabled. The mutation restores the very same global pending RequestSlot, including its consumed `request_id`; it does not create a per-device slot, inject a fake violation event or change the cross-device at-most-once lemma.
+The normal row retains the cross-device `request_accepted_at_most_once`
+obligation. Its independent `attack_replay_single_approval` predicate must verify
+over the mutant and produce the exact no-trace result over the untouched prefix.
+It obtains one genuine request-bound approval and replays that same public
+decision after the first acceptance. Signature verification remains enabled.
+The mutation restores the same global pending RequestSlot, including its consumed
+`request_id`; it creates no per-device slot or fake violation event and does not
+change the original cross-device formula.
 
 The canaries test the model/runner's sensitivity to the specified missing mechanisms. They are not vulnerabilities asserted in the secure product. If ROOT's real prover cannot produce the required positive and negative verdicts, keep this work unverified and inspect the model/trace rather than weakening the lemmas or silently skipping a control.
