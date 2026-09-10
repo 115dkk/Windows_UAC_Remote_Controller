@@ -31,11 +31,13 @@ pub type ActivityId = i32;
 
 type Envelope = (ActivityId, Option<AndroidActivityOrigin>, WebViewMessage);
 const QUEUE_CAPACITY: usize = 8;
-static QUEUE: Lazy<Mutex<VecDeque<Envelope>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+static QUEUE: Lazy<Mutex<VecDeque<Envelope>>> =
+  Lazy::new(|| Mutex::new(VecDeque::with_capacity(QUEUE_CAPACITY)));
 static QUEUE_CLOSED: AtomicBool = AtomicBool::new(false);
 pub static MAIN_PIPE: Lazy<[OwnedFd; 2]> = Lazy::new(|| {
   let mut pipe: [RawFd; 2] = [-1; 2];
-  // Both queue admission and its wake must be nonblocking on Android main.
+  // Neither full-capacity admission nor this wake waits for the UI consumer.
+  // Only the short, callback-free queue metadata critical section is serialized.
   // No OwnedFd is constructed unless both pipe descriptors were initialized.
   let result = unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
   assert_eq!(result, 0, "Wry main pipe initialization failed");
@@ -348,10 +350,22 @@ impl<'a> MainPipe<'a> {
     stamp: Option<AndroidActivityOrigin>,
     message: WebViewMessage,
   ) -> crate::Result<()> {
-    // Never block the thread which consumes this queue. On every rejection the
-    // captures are dropped outside the lock and can never execute afterwards.
-    let Ok(mut queue) = QUEUE.try_lock() else {
-      return Err(Error::ActivityNotFound);
+    // Resolve the descriptor before taking the metadata lock. Its lazy setup
+    // must not run under QUEUE, even for an unexpected early caller.
+    let wake_fd = MAIN_PIPE[1].as_raw_fd();
+    // Wait only for another finite metadata operation, NEVER for queue space
+    // or for Android main to execute a job. This preallocated queue's guards
+    // cover only len/push/pop/take and a nonblocking pipe write; no JNI,
+    // callbacks, registry locks or captured-value destructors run under them.
+    // try_lock incorrectly treated a concurrent (even empty) receive pop as
+    // failed admission. In particular, PathPlugin completion can wake Rust's
+    // next AppPlugin registration while the UI loop is still draining pops.
+    let mut queue = match QUEUE.lock() {
+      Ok(queue) => queue,
+      Err(poisoned) => {
+        drop(poisoned);
+        return Err(Error::ActivityNotFound);
+      }
     };
     if QUEUE_CLOSED.load(Ordering::Acquire) || queue.len() >= QUEUE_CAPACITY {
       drop(queue);
@@ -359,8 +373,7 @@ impl<'a> MainPipe<'a> {
     }
     queue.push_back((activity_id, stamp, message));
     let wake: u8 = 1;
-    let written =
-      unsafe { libc::write(MAIN_PIPE[1].as_raw_fd(), &wake as *const _ as *const _, 1) };
+    let written = unsafe { libc::write(wake_fd, &wake as *const _ as *const _, 1) };
     if written != 1 {
       let error = std::io::Error::last_os_error();
       if error.kind() != std::io::ErrorKind::WouldBlock {

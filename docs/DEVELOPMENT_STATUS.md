@@ -1,11 +1,29 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `9e8e37fdb33246e603fd02e71f4563ae76257ff3` on
+Last checked implementation revision: `071333333b8f235b6abdd48683dac564a2ffcc66` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
+
+At0713333 the full Quality run34510391762 passed: Windows15m00, Linux8m54,
+protocol6m48, Android Rust/core3m22. Both actual Analyzer scans reported zero
+errors/warnings and their real clean/error/warning canaries passed. Windows
+package34510391766, Android APK/Kotlin34510391776 and renderer34510391729 passed.
+
+Genuine lifecycle34510391633 passed initial document/recreate/relaunch and both
+physical-origin IPC comparisons; enabled actual reboot and package replacement
+each produced a READY native owner before Activity/instrumentation. Explicit stop
+closed the owner and removed its notification. Manual reopen and a second actual
+reboot preserved DISABLED/absence. The next verify-stopped cold Activity launch
+crashed during Tauri's built-in app-plugin initialization with a disconnected
+reply channel. Thus the final disabled-update/restart phases remain unverified.
+The active-service parser fix passed those earlier observations; it was not this
+run's failure. A narrow Wry queue-metadata contention fix is being reviewed.
+
+The following9e8e37f and85354bf checkpoints are historical and retain their exact
+scope; their Analyzer failures are resolved by0713333 above.
 
 The vendored SDK changes have now compiled in actual Android product APKs and
 Windows packages. At85354bf and9e8e37f, real Android instrumentation passed initial

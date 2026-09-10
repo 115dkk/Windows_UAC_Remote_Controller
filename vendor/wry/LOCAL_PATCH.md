@@ -44,3 +44,19 @@ Original template SHA-256:
 
 Re-evaluate/remove this fork when a compatible upstream release contains both
 fixes. Do not upgrade the engine's minor version merely to hide compiler output.
+
+## Subsequent Android lifecycle patches
+
+The larger exact-Activity/physical-origin changes added later are documented in
+`../ANDROID_LIFECYCLE_PATCHES.md`; the original compatibility-only scope above
+describes the earlier patch, not the current full tree.
+
+The Android work queue keeps capacity8 and a nonblocking wake pipe. It now
+preallocates storage and serializes short metadata operations, rather than
+rejecting an otherwise available slot when a consumer's pop briefly holds the
+mutex. This prevents a completed PathPlugin callback from racing the following
+AppPlugin registration into an artificial admission failure. The lock never
+waits for consumer capacity and covers no callbacks/JNI/registry locks/captured
+destructors. Full/closed/poisoned queues and genuine wake errors still fail;
+origin checks and rollback remain intact. ROOT native/host validation is separate
+from this source-level explanation.

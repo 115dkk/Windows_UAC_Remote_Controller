@@ -700,9 +700,20 @@ mod tests {
         }
         let pipe = compact(include_str!("../../vendor/wry/src/android/main_pipe.rs"));
         assert!(pipe.contains("constQUEUE_CAPACITY:usize=8"));
-        assert!(pipe.contains("QUEUE.try_lock()"));
+        assert!(pipe.contains("VecDeque::with_capacity(QUEUE_CAPACITY)"));
+        assert!(pipe.contains("QUEUE.lock()"));
+        assert!(!pipe.contains("QUEUE.try_lock()"));
+        let enqueue = pipe.split("fnenqueue(").nth(1).unwrap();
+        assert!(
+            enqueue
+                .find("letwake_fd=MAIN_PIPE[1].as_raw_fd();")
+                .unwrap()
+                < enqueue.find("letmutqueue=matchQUEUE.lock()").unwrap()
+        );
+        assert!(enqueue.contains("queue.len()>=QUEUE_CAPACITY{drop(queue);returnErr("));
         assert!(pipe.contains("libc::O_NONBLOCK|libc::O_CLOEXEC"));
         assert!(pipe.contains("letrejected=queue.pop_back();drop(queue);drop(rejected);"));
+        assert!(pipe.contains("letnext=QUEUE.lock().unwrap().pop_front();ifletSome("));
         assert!(pipe.contains("QUEUE_CLOSED.store(true,Ordering::Release)"));
         assert!(pipe.contains("handlers::rollback(&attributes.registration)"));
         assert!(!pipe.contains("CHANNEL.0.send"));
