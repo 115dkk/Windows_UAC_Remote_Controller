@@ -15,8 +15,9 @@ use windows::Win32::Foundation::{
 };
 use windows_service::{
     service::{
-        Service, ServiceAccess, ServiceConfig, ServiceErrorControl, ServiceInfo, ServiceSidType,
-        ServiceStartType, ServiceState as NativeState, ServiceStatus, ServiceType, UserEventCode,
+        Service, ServiceAccess, ServiceConfig, ServiceControlAccept, ServiceErrorControl,
+        ServiceInfo, ServiceSidType, ServiceStartType, ServiceState as NativeState, ServiceStatus,
+        ServiceType, UserEventCode,
     },
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
@@ -210,9 +211,9 @@ pub(crate) fn request_probe_once() -> Result<crate::ProbeRequestAccepted, Servic
     Ok(crate::ProbeRequestAccepted::new(pid))
 }
 
-/// Startup admission check only: the worker is still START_PENDING here. The
-/// callback is enabled only after entry reports Running; every actual probe
-/// independently verifies the running registration and its own service PID.
+/// Startup admission check only: Running may still advertise no accepted controls.
+/// The callback is enabled only after the worker's full Ready event; every actual
+/// probe independently verifies the running registration and its own service PID.
 pub(crate) fn probe_control_registration_ready(executable: &Path) -> Result<(), ServiceError> {
     let service = open(
         &manager(false)?,
@@ -373,21 +374,33 @@ fn delay(began: Instant) -> Result<(), ServiceError> {
 fn wait_for(service: &Service, target: NativeState, began: Instant) -> Result<(), ServiceError> {
     loop {
         remaining_budget(began.elapsed())?;
-        let current = status(service)?.current_state;
-        if current == target {
+        let current = status(service)?;
+        remaining_budget(began.elapsed())?;
+        if reached_target(&current, target)? {
             return Ok(());
-        }
-        if target == NativeState::Running && current == NativeState::Stopped {
-            return Err(ServiceError::ServiceStopped);
         }
         delay(began)?;
     }
 }
 
+fn reached_target(current: &ServiceStatus, target: NativeState) -> Result<bool, ServiceError> {
+    if target == NativeState::Running && current.current_state == NativeState::Stopped {
+        return Err(ServiceError::ServiceStopped);
+    }
+    // This mask is bootstrap completion only, NOT authentication or remote UAC
+    // readiness. SCM Running/no-controls is still pending for CLI/NSIS Start.
+    Ok(current.current_state == target
+        && (target != NativeState::Running
+            || current
+                .controls_accepted
+                .contains(ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN)))
+}
+
 fn start(service: &Service, began: Instant) -> Result<(), ServiceError> {
     match status(service)?.current_state {
-        NativeState::Running => return Ok(()),
-        NativeState::StartPending => return wait_for(service, NativeState::Running, began),
+        NativeState::Running | NativeState::StartPending => {
+            return wait_for(service, NativeState::Running, began);
+        }
         NativeState::StopPending => wait_for(service, NativeState::Stopped, began)?,
         NativeState::Stopped => (),
         _ => return Err(ServiceError::UnexpectedState),
@@ -402,21 +415,21 @@ fn start(service: &Service, began: Instant) -> Result<(), ServiceError> {
 }
 
 fn stop(service: &Service, began: Instant) -> Result<(), ServiceError> {
-    match status(service)?.current_state {
-        NativeState::Stopped => return Ok(()),
-        NativeState::StopPending => return wait_for(service, NativeState::Stopped, began),
-        NativeState::StartPending => loop {
-            remaining_budget(began.elapsed())?;
-            match status(service)?.current_state {
-                NativeState::Stopped => return Ok(()),
-                NativeState::Running => break,
-                NativeState::StartPending => delay(began)?,
-                NativeState::StopPending => return wait_for(service, NativeState::Stopped, began),
-                _ => return Err(ServiceError::UnexpectedState),
+    loop {
+        remaining_budget(began.elapsed())?;
+        let current = status(service)?;
+        match current.current_state {
+            NativeState::Stopped => return Ok(()),
+            NativeState::StopPending => return wait_for(service, NativeState::Stopped, began),
+            NativeState::StartPending => delay(began)?,
+            NativeState::Running if !reached_target(&current, NativeState::Running)? => {
+                // Early Running still refuses STOP. Preserve the old bounded
+                // wait-for-initialization behavior for Stop/Restart/Uninstall.
+                delay(began)?;
             }
-        },
-        NativeState::Running | NativeState::Paused => (),
-        _ => return Err(ServiceError::UnexpectedState),
+            NativeState::Running | NativeState::Paused => break,
+            _ => return Err(ServiceError::UnexpectedState),
+        }
     }
     remaining_budget(began.elapsed())?;
     match service.stop() {
@@ -437,5 +450,68 @@ fn wait_absent(manager: &ServiceManager, began: Instant) -> Result<(), ServiceEr
             Ok(service) => drop(service),
         }
         delay(began)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use windows_service::service::ServiceExitCode;
+
+    fn observed(state: NativeState, controls: ServiceControlAccept) -> ServiceStatus {
+        ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: state,
+            controls_accepted: controls,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::ZERO,
+            process_id: Some(42),
+        }
+    }
+
+    #[test]
+    fn start_requires_both_controls_not_merely_scm_running() {
+        for controls in [
+            ServiceControlAccept::empty(),
+            ServiceControlAccept::STOP,
+            ServiceControlAccept::SHUTDOWN,
+        ] {
+            assert_eq!(
+                reached_target(
+                    &observed(NativeState::Running, controls),
+                    NativeState::Running
+                ),
+                Ok(false)
+            );
+        }
+        assert_eq!(
+            reached_target(
+                &observed(
+                    NativeState::Running,
+                    ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                ),
+                NativeState::Running,
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn stopped_during_start_is_failure_and_stop_completion_is_unchanged() {
+        let stopped = observed(NativeState::Stopped, ServiceControlAccept::empty());
+        assert_eq!(
+            reached_target(&stopped, NativeState::Running),
+            Err(ServiceError::ServiceStopped)
+        );
+        assert_eq!(reached_target(&stopped, NativeState::Stopped), Ok(true));
+        assert_eq!(
+            reached_target(
+                &observed(NativeState::StartPending, ServiceControlAccept::empty()),
+                NativeState::Running,
+            ),
+            Ok(false)
+        );
     }
 }

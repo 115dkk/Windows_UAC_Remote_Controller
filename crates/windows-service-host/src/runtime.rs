@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
+use crate::startup_phase::{RunningRequest, running_handshake};
 use crate::{
     ProbeSupervisorError, ServiceProbeSupervisor,
     diagnostic::{
@@ -22,9 +23,10 @@ use windows_identity::{IdentityError, PcIdentityKey};
 
 pub(crate) static PROBE_REQUESTS: ProbeAdmission = ProbeAdmission::new();
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) enum WorkerEvent {
     Progress,
+    ScmRunningRequired(RunningRequest),
     Ready,
     Finished(Result<(), ServiceError>),
 }
@@ -38,14 +40,14 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn spawn() -> Result<Self, ServiceError> {
+    pub(crate) fn spawn(startup_began: Instant) -> Result<Self, ServiceError> {
         let (stop, requests) = mpsc::channel();
         let (sender, events) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("service-lifecycle".into())
             .spawn(move || {
                 // No unwind reaches SCM or disappears as a falsely successful stop.
-                let outcome = std::panic::catch_unwind(|| run(&requests, &sender))
+                let outcome = std::panic::catch_unwind(|| run(&requests, &sender, startup_began))
                     .unwrap_or(Err(ServiceError::WorkerFailed));
                 let _ = sender.send(WorkerEvent::Finished(outcome));
             })
@@ -111,10 +113,15 @@ fn append(journal: &mut Journal, event: ActivityEvent) -> Result<(), ServiceErro
 }
 
 fn cancellation_requested(stop: &Receiver<()>) -> bool {
-    matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
+    crate::entry::stop_requested()
+        || matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
 }
 
-fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceError> {
+fn run(
+    stop: &Receiver<()>,
+    events: &Sender<WorkerEvent>,
+    startup_began: Instant,
+) -> Result<(), ServiceError> {
     // Identity and future transport/prompt workers belong at this trusted Rust seam.
     // They must initialize genuinely before claiming any additional readiness,
     // obey cancellation, and never expose their credentials through presentation.
@@ -151,6 +158,15 @@ fn run(stop: &Receiver<()>, events: &Sender<WorkerEvent>) -> Result<(), ServiceE
     let registry_absent = trust_directory
         .is_empty_registry_absent()
         .map_err(|error| error.at_startup(5))?;
+    // Diagnostic startup-order branch: keep every protected preflight above,
+    // but make the first platform-provider/key call wait for this EXACT entry
+    // thread's successful SCM Running/no-controls report. The channel is private,
+    // one-use, stop-aware and charged to the original startup deadline.
+    let (request, gate) = running_handshake();
+    events
+        .send(WorkerEvent::ScmRunningRequired(request))
+        .map_err(|_| ServiceError::WorkerFailed)?;
+    gate.wait(startup_began, || cancellation_requested(stop))?;
     // This private disposition is produced only here by the actual key API,
     // never supplied by a renderer, file, phone or caller freshness boolean.
     enum IdentityOrigin {

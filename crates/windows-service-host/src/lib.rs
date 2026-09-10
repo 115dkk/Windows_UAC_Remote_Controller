@@ -39,6 +39,8 @@ mod ffi;
 mod native;
 #[cfg(windows)]
 mod runtime;
+#[cfg(any(windows, test))]
+mod startup_phase;
 
 pub use contract::{
     Command, ControlOutcome, InstallationState, RuntimeCapabilities, ServiceControlIntent,
