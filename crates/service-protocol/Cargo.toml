@@ -10,6 +10,8 @@ description = "Bounded signed PC request and lifecycle messages"
 
 [dependencies]
 approval-protocol = { path = "../approval-protocol" }
+secure-channel = { path = "../secure-channel" }
+sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
 thiserror.workspace = true
 getrandom.workspace = true

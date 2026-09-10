@@ -16,6 +16,9 @@
 //! private-key, FFI or application-runtime implementation. The optional peer
 //! socket owner binds the existing TLS/socket pipeline to a recorded association;
 //! it does not establish pairing or activate Application intake/authentication.
+//! The pairing-acceptance receiver only commits a signed PC claim against an
+//! independently supplied original native context; the actual ceremony remains
+//! unwired, and a local receipt is not proof of a remote or native success.
 
 #![forbid(unsafe_code)]
 
@@ -26,6 +29,7 @@ mod denial;
 mod liveness;
 mod local_keys;
 mod owner;
+mod pairing;
 mod peer_associations;
 mod peer_socket;
 mod types;
@@ -47,6 +51,10 @@ pub use local_keys::{
     LocalKeySetDescriptor, LocalKeySetPhase, MAX_LOCAL_KEY_LEDGER_BYTES, MAX_LOCAL_KEY_SETS,
 };
 pub use owner::DurableInbox;
+pub use pairing::{
+    CommittedPairingAcceptance, MAX_PAIRING_ACCEPTANCE_LIFETIME, MAX_PENDING_PAIRING_ACCEPTANCES,
+    PairingAcceptanceContext, PairingAcceptanceError, PendingPairingAcceptance,
+};
 pub use peer_associations::{
     MAX_PEER_ASSOCIATION_LEDGER_BYTES, MAX_PEER_ASSOCIATIONS, PeerAssociation,
     PeerAssociationDescriptor, PeerAssociationError, PeerAssociationLedger,

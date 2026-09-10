@@ -11,6 +11,7 @@ mod clock_request;
 mod codec;
 mod frame;
 mod message;
+mod pairing;
 
 pub use clock::{
     ClockCorrelation, ClockError, ClockProbe, MAX_CLOCK_CORRELATION_AGE_NANOS,
@@ -21,4 +22,9 @@ pub use frame::{FrameDecoder, FrameError, FrameFeed, MAX_STREAM_CHUNK_BYTES, enc
 pub use message::{
     ClockProbeNonce, MAX_PC_EVENT_BYTES, MAX_REQUEST_LIFETIME_NANOS, PcEvent, PcEventError,
     PcPublicKey, RequestResolution, ServiceTick, SignedPcEvent, UnsignedPcEvent, VerifiedPcEvent,
+};
+pub use pairing::{
+    EnrollmentAcceptanceFields, MAX_ENROLLMENT_ACCEPTANCE_BYTES, PairingChallenge, PairingError,
+    PairingNonce, PhoneKeyDigest, SignedEnrollmentAcceptance, UnsignedEnrollmentAcceptance,
+    VerifiedEnrollmentAcceptance,
 };

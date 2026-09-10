@@ -199,10 +199,19 @@ impl PcPublicKey {
             .map_err(|_| PcEventError::InvalidKey)
     }
     fn verify(&self, body: &[u8], der: &[u8]) -> Result<(), PcEventError> {
+        self.verify_transcript(&signing_record(body), der)
+    }
+    /// Crate-private public-key verification of an already domain-separated
+    /// transcript. This does not sign bytes or select any private-key owner.
+    pub(crate) fn verify_transcript(
+        &self,
+        transcript: &[u8],
+        der: &[u8],
+    ) -> Result<(), PcEventError> {
         let signature = signature(der)?;
         let normalized = signature.normalize_s().unwrap_or(signature);
         self.0
-            .verify(&signing_record(body), &normalized)
+            .verify(transcript, &normalized)
             .map_err(|_| PcEventError::InvalidSignature)
     }
 }

@@ -14,14 +14,16 @@ use phone_state_store::{
 use service_protocol::{ClockCorrelation, VerifiedPcEvent};
 
 use crate::liveness::LeaseRegistry;
+use crate::pairing::PairingRegistry;
 use crate::types::PeerAssociationMutationError;
 use crate::{
     AssociatedPendingRequest, CommittedCheck, CommittedHistoryMutation,
     CommittedOutcomeAcknowledgment, CommittedUpdate, ControllerCheckpoint, DurableFailure,
     DurableFault, InboxCounts, LocalAttestationChallenge, LocalKeyHandle, LocalKeyLedger,
     LocalKeyMutationError, LocalKeyObservation, LocalKeySetDescriptor, NativePeerLease,
-    PeerAssociationDescriptor, PeerAssociationLedger, PeerAssociationMutation, PeerAssociationRef,
-    PeerAssociationRemoval, PeerLeaseError,
+    PairingAcceptanceError, PeerAssociationDescriptor, PeerAssociationLedger,
+    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval, PeerLeaseError,
+    PendingPairingAcceptance,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +72,7 @@ pub struct DurableInbox {
     // bytes, and retaining this Arc does not keep this owner alive/healthy.
     owner_epoch: Arc<()>,
     liveness: LeaseRegistry,
+    pairing_reservations: PairingRegistry,
     required_durability: RequiredDurability,
     fault: Option<DurableFault>,
 }
@@ -400,6 +403,50 @@ impl DurableInbox {
         &mut self,
         descriptor: PeerAssociationDescriptor,
     ) -> Result<(CommitReceipt, PeerAssociationMutation), PeerAssociationMutationError> {
+        let (candidate, bytes, mutation) = self.prepare_peer_association(descriptor)?;
+        let receipt = self
+            .commit_peer_candidate(candidate, &bytes)
+            .map_err(PeerAssociationMutationError::Owner)?;
+        Ok((receipt, mutation))
+    }
+
+    pub(crate) fn reserve_pairing_acceptance(
+        &mut self,
+        pending: &PendingPairingAcceptance,
+    ) -> Result<(), PairingAcceptanceError> {
+        self.pairing_reservations.register(pending)
+    }
+
+    /// Only the owner-bound pairing receiver invokes this internal seam. All
+    /// codec/composite preparation precedes its final original-context/time
+    /// check; no other owner mutation can interleave under this exclusive borrow.
+    pub(crate) fn commit_pairing_association(
+        &mut self,
+        descriptor: PeerAssociationDescriptor,
+        precommit: impl FnOnce(&Self) -> Result<(), PairingAcceptanceError>,
+    ) -> Result<(CommitReceipt, PeerAssociationRef), PairingAcceptanceError> {
+        let (candidate, bytes, mutation) = self
+            .prepare_peer_association(descriptor)
+            .map_err(PairingAcceptanceError::Association)?;
+        let PeerAssociationMutation::Recorded(reference) = mutation else {
+            return Err(PairingAcceptanceError::AlreadyAssociated);
+        };
+        precommit(self)?;
+        let receipt = self
+            .commit_peer_candidate(candidate, &bytes)
+            .map_err(|error| {
+                PairingAcceptanceError::Association(PeerAssociationMutationError::Owner(error))
+            })?;
+        Ok((receipt, reference))
+    }
+
+    fn prepare_peer_association(
+        &mut self,
+        descriptor: PeerAssociationDescriptor,
+    ) -> Result<
+        (PeerAssociationLedger, Vec<u8>, PeerAssociationMutation),
+        PeerAssociationMutationError,
+    > {
         self.ensure_healthy()
             .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
         let (candidate, mutation) =
@@ -412,10 +459,7 @@ impl DurableInbox {
                     Ok((candidate, mutation))
                 })?;
         let bytes = self.prevalidate_peer_candidate(&candidate)?;
-        let receipt = self
-            .commit_peer_candidate(candidate, &bytes)
-            .map_err(PeerAssociationMutationError::Owner)?;
-        Ok((receipt, mutation))
+        Ok((candidate, bytes, mutation))
     }
 
     /// Exact-generation removal only. A stale reference cannot remove a later
@@ -504,6 +548,11 @@ impl DurableInbox {
         match result {
             Ok(receipt) => {
                 self.peer_associations = candidate;
+                self.pairing_reservations.reconcile(
+                    &self.local_keys,
+                    &self.peer_associations,
+                    self.inbox.fault(),
+                );
                 leases.reconcile(&self.inbox, &self.peer_associations, &self.local_keys);
                 self.fault = None;
                 Ok(receipt)
@@ -785,6 +834,7 @@ impl DurableInbox {
             peer_associations,
             owner_epoch: Arc::new(()),
             liveness: LeaseRegistry::default(),
+            pairing_reservations: PairingRegistry::default(),
             required_durability,
             fault: None,
         };
@@ -858,6 +908,7 @@ impl DurableInbox {
                 peer_associations,
                 owner_epoch: Arc::new(()),
                 liveness: LeaseRegistry::default(),
+                pairing_reservations: PairingRegistry::default(),
                 required_durability,
                 fault: None,
             },
@@ -868,6 +919,7 @@ impl DurableInbox {
     fn ensure_healthy(&self) -> Result<(), DurableFault> {
         if self.fault.is_some() {
             self.liveness.invalidate_all();
+            self.pairing_reservations.invalidate_all();
         }
         self.fault.map_or(Ok(()), Err)
     }
@@ -910,6 +962,11 @@ impl DurableInbox {
         );
         match result {
             Ok(committed) => {
+                self.pairing_reservations.reconcile(
+                    &self.local_keys,
+                    &self.peer_associations,
+                    self.inbox.fault(),
+                );
                 leases.reconcile(&self.inbox, &self.peer_associations, &self.local_keys);
                 self.fault = None;
                 Ok(committed)
@@ -926,6 +983,7 @@ impl Drop for DurableInbox {
     fn drop(&mut self) {
         // Revoke before the locked store/native-owner fields begin dropping.
         self.liveness.invalidate_all();
+        self.pairing_reservations.invalidate_all();
     }
 }
 

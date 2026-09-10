@@ -3475,6 +3475,8 @@ dependencies = [
  "getrandom 0.3.4",
  "notification-policy",
  "p256",
+ "secure-channel",
+ "sha2",
  "thiserror 2.0.20",
 ]
 
