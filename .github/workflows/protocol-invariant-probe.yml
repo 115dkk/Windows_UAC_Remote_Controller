@@ -1,0 +1,60 @@
+name: Protocol invariant feasibility probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/protocol-witness-shape']
+    paths:
+      - 'tools/protocol-invariant-probe.mjs'
+      - 'tools/protocol-invariant-probe.test.mjs'
+      - '.github/workflows/protocol-invariant-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protocol-invariant-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.helper }} only (not the normal security gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        helper: [enrolled_revision_unique, request_opened_unique]
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out the exact isolated experiment
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install prover distribution dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends graphviz unzip
+      - name: Install the same pinned Tamarin and Maude
+        id: tamarin
+        run: node tools/install-tamarin.mjs
+      - name: Check exact insertion, selection and existing process controls
+        run: node --test tools/protocol-invariant-probe.test.mjs tools/prover-process.test.mjs
+      - name: Independently try only the selected helper without reuse
+        env:
+          TAMARIN_BIN: ${{ steps.tamarin.outputs.binary }}
+        run: node tools/protocol-invariant-probe.mjs "--helper=${{ matrix.helper }}"
+      - name: Retain source-mapped experiment evidence even after failed proofs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node24
+        with:
+          name: protocol-invariant-probe-${{ matrix.helper }}-${{ github.sha }}
+          path: artifacts/protocol-invariant-probe/
+          if-no-files-found: error
+          retention-days: 14
