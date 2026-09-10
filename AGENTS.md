@@ -65,10 +65,11 @@
   Missing, falsified or inconclusive required proofs fail CI. A symbolic proof is
   not evidence of native isolation, hardware authentication or implementation refinement.
 
-## After all programming is complete
+## Cleanup only after prerelease publication
 
-- The user requested a substantial C: and E: drive cleanup after implementation,
-  final refactoring and validation finish. This is not authorization to begin
+- The user requires C: and E: drive cleanup only after a prerelease has actually
+  been published, following implementation, final refactoring and validation.
+  A draft release or successful build is not publication. This is not authorization to begin
   deleting files during the ongoing programming work to relieve disk pressure.
 - First inventory exact absolute candidates, sizes, ownership and active use.
   Remove only confirmed reproducible build outputs/caches or clearly disposable

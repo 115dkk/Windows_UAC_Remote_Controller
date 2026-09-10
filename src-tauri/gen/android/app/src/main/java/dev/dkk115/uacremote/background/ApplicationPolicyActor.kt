@@ -306,7 +306,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
         val resumed = cleanupWake.getAndSet(false)
         if (explicitRetry) platform.requests.retryCleanup()
         denials.prepareShutdownCleanup(explicitRetry)
-        if (explicitRetry) platform.retryUnboundDenialCleanup()
+        if (explicitRetry) {
+            platform.retryUnboundDenialCleanup()
+            platform.retryCreationArgumentCleanup()
+        }
         val owner = controller
         if (owner != null) {
             val action = cleanup.next(explicitRetry, resumed)

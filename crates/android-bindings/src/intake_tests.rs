@@ -149,6 +149,13 @@ impl Platform {
     }
 }
 impl NativePlatform for Platform {
+    fn create_local_key_set(
+        &self,
+        _request: std::sync::Arc<crate::NativeKeyCreationRequest>,
+    ) -> Result<crate::NativeCreatedKeyEvidence, BridgeError> {
+        Err(BridgeError::LifecycleIntegrationRequired)
+    }
+
     fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError> {
         assert!(
             !self.panic_presentation.swap(false, Ordering::AcqRel),
@@ -511,6 +518,7 @@ fn fixture() -> Fixture {
         projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
         intake: Arc::new(crate::intake::IntakeOwner::default()),
         state: Mutex::new(Some(owner)),
+        creation_slot: Mutex::new(std::sync::Weak::new()),
         approval_alive: Arc::new(AtomicBool::new(true)),
         active: AtomicBool::new(false),
         cleanup_pending: AtomicBool::new(false),

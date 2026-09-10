@@ -153,6 +153,13 @@ impl SyntheticNativePlatform {
     }
 }
 impl NativePlatform for SyntheticNativePlatform {
+    fn create_local_key_set(
+        &self,
+        _request: std::sync::Arc<uac_android_controller::NativeKeyCreationRequest>,
+    ) -> Result<uac_android_controller::NativeCreatedKeyEvidence, BridgeError> {
+        Err(BridgeError::LifecycleIntegrationRequired)
+    }
+
     fn intake_progress(&self) -> Result<(), BridgeError> {
         self.unused()
     }

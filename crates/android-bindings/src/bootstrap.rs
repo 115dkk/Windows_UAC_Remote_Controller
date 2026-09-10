@@ -157,6 +157,13 @@ mod tests {
         legacy: Result<Option<String>, BridgeError>,
     }
     impl NativePlatform for Platform {
+        fn create_local_key_set(
+            &self,
+            _request: std::sync::Arc<crate::NativeKeyCreationRequest>,
+        ) -> Result<crate::NativeCreatedKeyEvidence, BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+
         fn intake_progress(&self) -> Result<(), BridgeError> {
             Err(BridgeError::NativeUnavailable)
         }

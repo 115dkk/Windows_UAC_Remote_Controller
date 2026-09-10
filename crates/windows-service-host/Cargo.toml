@@ -20,9 +20,7 @@ approval-protocol = { path = "../approval-protocol" }
 android-attestation = { path = "../android-attestation" }
 secure-channel = { path = "../secure-channel" }
 sha2.workspace = true
-
-[dev-dependencies]
-p256.workspace = true
+p256 = { workspace = true, features = ["pkcs8"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }

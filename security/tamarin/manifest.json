@@ -2,7 +2,7 @@
   "version": 1,
   "toolVersion": "1.12.0",
   "sourceBindings": [
-    { "path": "crates/secure-channel/src/identity.rs", "sha256": "6c30a9e75b242d1cee6db460aa496828d448180de670ee2dbcaa7e9405c220bb" },
+    { "path": "crates/secure-channel/src/identity.rs", "sha256": "76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195" },
     { "path": "crates/secure-channel/src/config.rs", "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d" },
     { "path": "crates/secure-channel/src/channel.rs", "sha256": "910667dc62db172835763f250227c6690aaa7ca39b43a6ed8237f7e9482ffa80" },
     { "path": "crates/approval-protocol/src/lib.rs", "sha256": "4434b763dd5864e93f81b1e6644a0a23c59989c3303fdc78735243090a55c0bd" },

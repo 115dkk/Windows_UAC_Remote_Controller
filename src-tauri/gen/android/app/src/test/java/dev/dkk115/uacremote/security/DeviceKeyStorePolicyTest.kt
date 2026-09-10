@@ -112,7 +112,8 @@ class DeviceKeyStorePolicyTest {
     @Test fun trustedRequestInputsAreBoundedCopiedAndConsumedOnce() {
         val handle = ByteArray(32) { 0x31 }
         val challenge = ByteArray(32) { 0x42 }
-        val result = KeyCreationRequest.fromTrustedRust(handle, challenge)
+        var observations = 0
+        val result = KeyCreationRequest.fromTrustedRust(handle, challenge) { observations += 1 }
         assertTrue(result is KeyStoreOutcome.Value)
         val request = when (result) {
             is KeyStoreOutcome.Value -> result.value
@@ -121,6 +122,8 @@ class DeviceKeyStorePolicyTest {
         handle.fill(0)
         challenge.fill(0)
         val consumed = request.consumeForKeyOwner()!!
+        consumed.checkCurrent()
+        assertEquals(1, observations)
         assertTrue(consumed.handle.all { it == 0x31.toByte() })
         assertTrue(consumed.challenge.all { it == 0x42.toByte() })
         assertNull(request.consumeForKeyOwner())
@@ -146,6 +149,38 @@ class DeviceKeyStorePolicyTest {
         assertFalse(DeviceKeyPolicy.canonicalP256Spki(first.copyOf().also { it.fill(0, 27, 91) }))
         assertFalse(DeviceKeyPolicy.distinctPublicKeys(listOf(first, second, first.copyOf())))
         assertFalse(DeviceKeyPolicy.distinctPublicKeys(listOf(first, second)))
+    }
+
+    @Test fun originalFreshnessObservationSurvivesConsumptionAndCannotRearmAfterFailure() {
+        var observations = 0
+        var current = true
+        val result = KeyCreationRequest.fromTrustedRust(ByteArray(32) { 1 }, ByteArray(32) { 2 }) {
+            observations += 1
+            check(current) { "Synthetic original observation expired" }
+        }
+        val request = when (result) {
+            is KeyStoreOutcome.Value -> result.value
+            is KeyStoreOutcome.Failure -> throw AssertionError("Synthetic shape rejected")
+        }
+        val consumed = request.consumeForKeyOwner()!!
+        consumed.checkCurrent() // Model the observation AFTER owner/provider preflight.
+        consumed.checkCurrent() // Model first generation admission; no Android call.
+        assertEquals(2, observations)
+        current = false
+        fun mustReject() {
+            var failed = false
+            try { consumed.checkCurrent() } catch (_: RuntimeException) { failed = true }
+            assertTrue(failed)
+        }
+        mustReject() // A later role cannot use the old successful observation.
+        assertEquals(3, observations)
+        current = true
+        mustReject() // A failed attempt cannot be rearmed by a later callback.
+        assertEquals(3, observations)
+        consumed.clear()
+        mustReject()
+        assertEquals(3, observations)
+        assertNull(request.consumeForKeyOwner())
     }
 
     @Test fun attestationOutputsHaveCountPerCertificateAndTotalBounds() {

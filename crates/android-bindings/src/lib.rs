@@ -18,6 +18,7 @@ mod intake_delivery;
 mod intake_tests;
 mod local_keys;
 mod native_clock;
+mod pairing;
 mod request_projection;
 mod transport;
 pub use approval::{
@@ -31,6 +32,11 @@ pub use intake::IntakePeerId;
 pub use intake_delivery::NativeDecisionProgress;
 pub use local_keys::NativeLocalKeySet;
 pub use native_clock::NativePresentationClock;
+pub use pairing::{
+    CreatedPairingCommitError, CreatedPairingKeys, KeyCreationContext, KeyCreationIntent,
+    NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
+    NativeKeyCreationRequest,
+};
 pub use request_projection::{
     NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
     NativeRequestCatalogStatus, NativeRequestDetails, NativeRequestNotPosted,
@@ -109,6 +115,13 @@ impl fmt::Debug for NativeClock {
 
 #[uniffi::export(foreign)]
 pub trait NativePlatform: Send + Sync {
+    /// Only a privately minted, one-shot request after durable Preparing may
+    /// reach the existing Application key owner. Synchronous completion only;
+    /// bound public evidence before callback conversion, retain no key wrapper.
+    fn create_local_key_set(
+        &self,
+        request: Arc<NativeKeyCreationRequest>,
+    ) -> Result<NativeCreatedKeyEvidence, BridgeError>;
     /// Lightweight real temporal bookends. No storage/key/UI work or synchronous
     /// owner reentry. Each returned local field uses the same wall-after sample.
     fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError>;
@@ -214,6 +227,7 @@ pub struct MobileController {
     platform: Arc<dyn NativePlatform>,
     boot: PhoneBootId,
     state: Mutex<Option<DurableInbox>>,
+    creation_slot: Mutex<std::sync::Weak<pairing::CreationState>>,
     approval_owner: Mutex<Option<android_controller::ApprovalPlanOwner>>,
     approval_native_plan: Mutex<Option<Arc<NativeApprovalPlan>>>,
     denial_state: Mutex<denial::DenialState>,
@@ -251,7 +265,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    8
+    9
 }
 
 #[uniffi::export]
@@ -532,6 +546,7 @@ impl MobileController {
                     platform,
                     boot,
                     state: Mutex::new(Some(owner)),
+                    creation_slot: Mutex::new(std::sync::Weak::new()),
                     approval_owner: Mutex::new(Some(approval_owner)),
                     approval_native_plan: Mutex::new(None),
                     denial_state: Mutex::new(denial_state),
@@ -783,6 +798,13 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn create_local_key_set(
+            &self,
+            _request: Arc<NativeKeyCreationRequest>,
+        ) -> Result<NativeCreatedKeyEvidence, BridgeError> {
+            Err(BridgeError::LifecycleIntegrationRequired)
+        }
+
         fn intake_progress(&self) -> Result<(), BridgeError> {
             if let Some(sender) = self.intake_notices.lock().unwrap().as_ref() {
                 sender.try_send(()).expect("bounded fixture intake notices");
@@ -942,6 +964,7 @@ mod tests {
             projections: Mutex::new(request_projection::ProjectionRegistry::default()),
             intake: Arc::new(intake::IntakeOwner::default()),
             state: Mutex::new(Some(owner)),
+            creation_slot: Mutex::new(std::sync::Weak::new()),
             active: AtomicBool::new(false),
             cleanup_pending: AtomicBool::new(false),
             notification_cleanup_failed: AtomicBool::new(false),

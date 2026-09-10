@@ -22,6 +22,9 @@ import dev.dkk115.uacremote.nativecore.NativePresentationClock
 import dev.dkk115.uacremote.nativecore.NativeRequestPresentation
 import dev.dkk115.uacremote.nativecore.NativeRequestAlert
 import dev.dkk115.uacremote.nativecore.NativeRequestSinkOutcome
+import dev.dkk115.uacremote.nativecore.NativeKeyCreationRequest
+import dev.dkk115.uacremote.nativecore.NativeKeyCreationInput
+import dev.dkk115.uacremote.nativecore.NativeCreatedKeyEvidence
 import dev.dkk115.uacremote.security.DeviceKeyStore
 import dev.dkk115.uacremote.security.KeyStoreOutcome
 import dev.dkk115.uacremote.security.ReopenKeySetDescriptor
@@ -29,6 +32,9 @@ import dev.dkk115.uacremote.security.ClientCertificateVerifyPolicy
 import dev.dkk115.uacremote.security.NativeTransportSigner
 import dev.dkk115.uacremote.security.TransportSignerOutcome
 import dev.dkk115.uacremote.security.NativeDenialOperation
+import dev.dkk115.uacremote.security.KeyCreationRequest
+import dev.dkk115.uacremote.security.DeviceKeyRole
+import dev.dkk115.uacremote.security.NativeCreationEvidence
 
 /**
  * Generated-trait adapter only. The Application owner calls it from a bounded
@@ -40,6 +46,10 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     private val environment = NativeEnvironment(application)
     private val legacy = LegacyPolicyObservation(application)
     private val keyStore = DeviceKeyStore(application)
+    private val creationActive = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Reuse existing bounded generated-wrapper cleanup accounting. The only
+    // native key/reference registry remains DeviceKeyStore's original owner.
+    private val creationArguments = DenialCloseCursor(2)
     @Volatile private var requestProgress: (() -> Unit)? = null
     @Volatile private var requestChanged: (() -> Unit)? = null
     @Volatile private var timeChanged: (() -> Unit)? = null
@@ -321,6 +331,46 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     override fun legacyPolicyDocument(): String? = legacy.legacyPolicyDocument()
     override fun hasDeviceKeys(): Boolean = legacy.hasDeviceKeys()
 
+    override fun createLocalKeySet(request: NativeKeyCreationRequest): NativeCreatedKeyEvidence {
+        if (!creationActive.compareAndSet(false, true)) {
+            try { creationArguments.closeOrRetain(request) } catch (_: Exception) { }
+            throw BridgeException.LocalKeysReconciliationRequired()
+        }
+        var input: NativeKeyCreationInput? = null
+        try {
+            if (Looper.myLooper() == Looper.getMainLooper() || !creationArguments.complete()) {
+                throw BridgeException.LocalKeysReconciliationRequired()
+            }
+            // Rust minted this opaque one-shot request only AFTER its actual
+            // Preparing commit. takeInput freshly checks original owner/time;
+            // a delayed callback cannot convert a closed/expired bool to a grant.
+            val original = request.takeInput()
+            input = original
+            if (!NativeCreationEvidence.validInput(original)) throw BridgeException.InvalidObservation()
+            val creation = keyValue(KeyCreationRequest.fromTrustedRust(original.handle, original.challenge, request::checkCurrent))
+            request.checkCurrent()
+            val created = keyValue(keyStore.createKeySet(creation))
+            // Only re-inspect the exact just-created registered references.
+            // No reopen/create/retry fallback, and no native wrapper in reply.
+            val material = DeviceKeyRole.values().associateWith { role ->
+                keyValue(keyStore.inspectPublicMaterial(created.reference(role)))
+            }
+            request.checkCurrent()
+            return NativeCreationEvidence.copyObserved(original, created.registration.descriptor, material)
+        } catch (_: Exception) {
+            // Rust retains Preparing/reconciliation and the existing Application
+            // cleanup owner. Never delete aliases after uncertain callback/IO.
+            throw BridgeException.LocalKeysReconciliationRequired()
+        } finally {
+            input?.handle?.fill(0)
+            input?.challenge?.fill(0)
+            input?.ceremonyNonce?.fill(0)
+            try { creationArguments.closeOrRetain(request) }
+            catch (_: Exception) { throw BridgeException.LocalKeysReconciliationRequired() }
+            finally { creationActive.set(false) }
+        }
+    }
+
     override fun reopenLocalKeySets(keys: List<NativeLocalKeySet>) {
         if (Looper.myLooper() == Looper.getMainLooper() || keys.isEmpty() || keys.size > 32) {
             throw BridgeException.LocalKeysUnavailable()
@@ -347,11 +397,20 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     }
 
     override fun releaseLocalKeyReferences() {
+        if (!CreationArgumentCleanupPolicy.ready(creationActive, creationArguments)) {
+            throw BridgeException.NativeUnavailable()
+        }
         if (denials?.permitsKeyReferenceCleanup() == false || !unboundDenialArguments.complete()) {
             throw BridgeException.NativeUnavailable()
         }
         closeAllTransportSigners()
         keyValue(keyStore.closeReferences())
+    }
+
+    /** Only the Application's existing EXPLICIT shutdown/retry branch calls
+     * this. Ordinary Rust failure cleanup may observe, never grant this retry. */
+    internal fun retryCreationArgumentCleanup(): Boolean {
+        return CreationArgumentCleanupPolicy.retryExplicitly(creationActive, creationArguments)
     }
 
     private fun <T> keyValue(result: KeyStoreOutcome<T>): T = when (result) {

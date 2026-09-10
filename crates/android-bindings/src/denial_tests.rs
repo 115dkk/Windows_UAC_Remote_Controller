@@ -80,6 +80,13 @@ impl Platform {
     }
 }
 impl NativePlatform for Platform {
+    fn create_local_key_set(
+        &self,
+        _request: std::sync::Arc<crate::NativeKeyCreationRequest>,
+    ) -> Result<crate::NativeCreatedKeyEvidence, BridgeError> {
+        Err(BridgeError::LifecycleIntegrationRequired)
+    }
+
     fn intake_progress(&self) -> Result<(), BridgeError> {
         Ok(())
     }
@@ -266,6 +273,7 @@ fn with_fixture_deadlines(
         intake: Arc::new(crate::intake::IntakeOwner::default()),
         approval_alive: Arc::new(AtomicBool::new(true)),
         state: Mutex::new(Some(owner)),
+        creation_slot: Mutex::new(std::sync::Weak::new()),
         active: AtomicBool::new(false),
         cleanup_pending: AtomicBool::new(false),
         notification_cleanup_failed: AtomicBool::new(false),
@@ -310,7 +318,7 @@ fn cancel_and_release(
 #[test]
 fn genuine_request_fence_and_one_shot_bytes_produce_only_prepared_unsent_denial() {
     with_fixture(1, |controller, platform, requests| {
-        assert_eq!(bridge_version(), 8);
+        assert_eq!(bridge_version(), 9);
         let scope = controller.reserve_denial(requests[0].clone()).unwrap();
         assert!(scope.same_scope(controller.reserve_denial(requests[0].clone()).unwrap()));
         assert_eq!(

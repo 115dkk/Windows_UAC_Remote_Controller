@@ -12,6 +12,8 @@
 mod contract;
 mod diagnostic;
 mod probe_supervisor;
+#[cfg(any(windows, test))]
+pub mod tls_signer;
 mod trust_registry;
 pub use diagnostic::{
     MAX_PROBE_DIAGNOSTIC_BYTES, PROBE_CONTROL_CODE, PROBE_DIAGNOSTIC_FILES, ProbeRequestAccepted,

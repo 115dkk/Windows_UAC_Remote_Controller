@@ -100,12 +100,13 @@ internal sealed class KeyStoreOutcome<out T> {
 internal class KeyCreationRequest private constructor(
     private val handle: ByteArray,
     private val challenge: ByteArray,
+    private val observeCurrent: () -> Unit,
 ) {
     private val consumed = AtomicBoolean(false)
 
     internal fun consumeForKeyOwner(): ConsumedKeyRequest? {
         if (!consumed.compareAndSet(false, true)) return null
-        val request = ConsumedKeyRequest(handle.copyOf(), challenge.copyOf())
+        val request = ConsumedKeyRequest(handle.copyOf(), challenge.copyOf(), observeCurrent)
         handle.fill(0)
         challenge.fill(0)
         return request
@@ -114,10 +115,10 @@ internal class KeyCreationRequest private constructor(
     override fun toString(): String = "KeyCreationRequest([redacted])"
 
     companion object {
-        fun fromTrustedRust(handle: ByteArray, challenge: ByteArray): KeyStoreOutcome<KeyCreationRequest> {
+        fun fromTrustedRust(handle: ByteArray, challenge: ByteArray, observeCurrent: () -> Unit): KeyStoreOutcome<KeyCreationRequest> {
             if (!DeviceKeyPolicy.validHandle(handle)) return KeyStoreOutcome.Failure(DeviceKeyError.INVALID_ENROLLMENT_HANDLE)
             if (!DeviceKeyPolicy.validChallenge(challenge)) return KeyStoreOutcome.Failure(DeviceKeyError.INVALID_ATTESTATION_CHALLENGE)
-            return KeyStoreOutcome.Value(KeyCreationRequest(handle.copyOf(), challenge.copyOf()))
+            return KeyStoreOutcome.Value(KeyCreationRequest(handle.copyOf(), challenge.copyOf(), observeCurrent))
         }
     }
 }
@@ -125,10 +126,26 @@ internal class KeyCreationRequest private constructor(
 internal class ConsumedKeyRequest internal constructor(
     internal val handle: ByteArray,
     internal val challenge: ByteArray,
+    private val observeCurrent: () -> Unit,
 ) {
-    internal fun clear() { handle.fill(0); challenge.fill(0) }
+    private val interrupted = AtomicBoolean(false)
+    /** Same original native observation, mandatory after owner/provider waits
+     * and before EACH generation. Failure cannot be rearmed by a later read. */
+    internal fun checkCurrent() {
+        if (interrupted.get()) throw CreationObservationFailure()
+        try { observeCurrent() }
+        catch (_: Exception) {
+            interrupted.set(true)
+            throw CreationObservationFailure()
+        }
+        if (interrupted.get()) throw CreationObservationFailure()
+    }
+    internal fun clear() { interrupted.set(true); handle.fill(0); challenge.fill(0) }
     override fun toString(): String = "ConsumedKeyRequest([redacted])"
 }
+
+/** Fixed local category only: never retain provider/clock exception details. */
+private class CreationObservationFailure : RuntimeException("Original creation observation unavailable")
 
 /**
  * Identity-scoped opaque reference. Constructing a lookalike does not register
@@ -640,6 +657,9 @@ internal class DeviceKeyStore(context: Context) {
             val aliases = DeviceKeyRole.values().associateWith { aliasFor(input.handle, it) }
             // No generator is created until every alias was observed absent.
             if (aliases.values.any { currentStore.containsAlias(it) }) fail(DeviceKeyError.ALIAS_COLLISION)
+            // OWNER_LOCK acquisition, keystore/provider open and complete alias
+            // preflight may block. Repeat the ORIGINAL request observation here.
+            input.checkCurrent()
             val material = LinkedHashMap<DeviceKeyRole, UnverifiedKeyMaterial>()
             for (role in DeviceKeyRole.values()) {
                 requireDeviceSecure()
@@ -662,6 +682,9 @@ internal class DeviceKeyStore(context: Context) {
                 // must actually be >=TEE; software output is rejected/rolled back.
                 val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER)
                 generator.initialize(spec.build())
+                // Provider initialization can also block. This is the final
+                // admission for THIS generation, not a cached entry-time flag.
+                input.checkCurrent()
                 generation.alias = alias
                 val pair = generator.generateKeyPair()
                 val publicSpki = publicSpki(pair.public)
@@ -684,6 +707,12 @@ internal class DeviceKeyStore(context: Context) {
             ))
             val registered = registryValue(REFERENCES.publish(owner, descriptor, material))
             KeyStoreOutcome.Value(UncommittedDeviceKeySet(registered, material))
+        } catch (_: CreationObservationFailure) {
+            // Do not start another role or delete already generated aliases.
+            // An already-entered native generation was not preempted. The Rust
+            // Preparing record/native artifacts require explicit reconciliation.
+            KeyStoreOutcome.Failure(DeviceKeyError.CREATION_FAILED,
+                if (created.isEmpty() && generation.alias == null) RollbackState.NOT_NEEDED else RollbackState.UNCERTAIN)
         } catch (failure: OwnerFailure) {
             KeyStoreOutcome.Failure(failure.error, rollback(store, created, generation.alias))
         } catch (failure: Exception) {

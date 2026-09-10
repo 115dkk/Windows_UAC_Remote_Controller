@@ -37,7 +37,8 @@ mod tests;
 
 pub use channel::{Channel, ChannelError, ChannelStatus, EofDisposition, PlaintextRead};
 pub use identity::{
-    CertificateVerifyInput, EndpointRole, PlatformTlsSigner, SignerError, TlsIdentity,
+    CertificateVerifyInput, EndpointRole, OwnedCertificateVerifyInput, PlatformTlsSigner,
+    SignerError, TlsIdentity,
 };
 pub use key::{CertificateVerifySignature, KeyError, SignatureError, TlsPublicKey};
 
