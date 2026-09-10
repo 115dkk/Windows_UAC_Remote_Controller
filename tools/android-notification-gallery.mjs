@@ -37,10 +37,24 @@ export function matchesNativeReceipt(value, selected, nonce) {
     && value?.scope === 'shared-renderer-only; no production owner/authentication';
 }
 
-export function requireBroadcastIdle(text) {
-  if (text.length > 64 * 1024 || text.trim().split(/\r?\n/u).at(-1) !== 'All broadcast queues are idle!') {
-    throw new Error('Android did not confirm setup broadcast completion.');
+export function requireBroadcastBarrier(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 64 * 1024) {
+    throw new Error('Missing bounded Android setup barrier output.');
   }
+  // Android36: dispatch-looper barrier, pre-enqueued broadcast barrier, then
+  // application-thread barrier. The final stage can give up and still return0;
+  // only these exact ordered completion messages permit the FIRST launch.
+  let stage = 0;
+  for (const line of text.trim().split(/\r?\n/u)) {
+    if (stage === 0 && /^Waiting for \d+ loopers to drain\.\.\.$/u.test(line)) continue;
+    if (stage === 0 && line === 'Loopers drained!') { stage = 1; continue; }
+    if (stage === 1 && /^Test barrier failed due to .+$/u.test(line)) continue;
+    if (stage === 1 && line === 'Test barrier passed') { stage = 2; continue; }
+    if (stage === 2 && /^Waiting for application barriers, at \d+ of \d+\.\.\.$/u.test(line)) continue;
+    if (stage === 2 && line === 'Finished application barriers!') { stage = 3; continue; }
+    throw new Error('Android did not confirm the exact setup barrier sequence.');
+  }
+  if (stage !== 3) throw new Error('Android did not finish the setup barriers.');
 }
 
 async function main() {
@@ -71,7 +85,7 @@ async function main() {
   mkdirSync(output, { recursive: true });
   const receipt = { scope: 'actual Android renderer in isolated test APK; NOT production owner, auth, connection or UAC',
     commit: process.env.GITHUB_SHA, source, sourceSha256: null,
-    apk, apkSha256: null, serial, sdk: null, abi: null, captures: [], completed: false, failure: null };
+    apk, apkSha256: null, serial, sdk: null, abi: null, setupBarrier: null, captures: [], completed: false, failure: null };
   const pause = () => new Promise((done) => setTimeout(done, 500));
   const diagnostics = (stage) => {
     // Read-only package-scoped OS state. Do not restart the Activity to observe
@@ -86,16 +100,17 @@ async function main() {
     receipt.abi = run(['shell', 'getprop', 'ro.product.cpu.abi']).trim();
     run(['install', '-r', resolve(root, apk)]);
     run(['shell', 'pm', 'grant', application, 'android.permission.POST_NOTIFICATIONS']);
-    // Package installation/permission setup dispatches asynchronous package
-    // changes. The observed cold notification was canceled with Android reason5
-    // (PACKAGE_CHANGED), not by our renderer or its60s lifetime. Drain that setup
-    // work before FIRST Activity launch; no warmup/repost or timeout extension.
-    // Cold OS setup can outlast a normal adb operation. This separate one-shot
-    // setup budget begins BEFORE any test notification exists; it does not
-    // change the product request or test notification's original60s lifetime.
-    const idle = run(['shell', 'am', 'wait-for-broadcast-idle', '--flush-broadcast-loopers'], false, 60_000);
-    writeFileSync(resolve(output, 'setup-broadcast-idle.txt'), idle);
-    requireBroadcastIdle(idle);
+    // Preserve the causal setup barrier against late PACKAGE_CHANGED reason5
+    // cancellation, before the FIRST Activity/notification. Android36's fixed
+    // barrier drains already-enqueued non-deferred work, unlike global idle
+    // which can chase unrelated future Bluetooth/GMS/system broadcasts forever.
+    // Flush dispatch loopers before taking that barrier and application threads
+    // afterwards. No warmup, repost, fallback or notification lifetime change.
+    const barrier = run(['shell', 'am', 'wait-for-broadcast-barrier', '--flush-broadcast-loopers', '--flush-application-threads'], false, 60_000);
+    writeFileSync(resolve(output, 'setup-broadcast-barrier.txt'), barrier);
+    requireBroadcastBarrier(barrier);
+    receipt.setupBarrier = { kind: 'already-enqueued-broadcast-and-application-barriers',
+      timeoutMs: 60_000, outputSha256: hash(barrier), completed: true };
     for (const selected of cases) {
       const nonce = randomUUID();
       run(['shell', 'cmd', 'statusbar', 'collapse']);
