@@ -6,8 +6,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import {
-  ORIGIN_PATH, ORIGIN_HASH, HELPER_NAMES, ORIGINAL_NAMES, HELPER_INSERTION,
+  ORIGIN_PATH, ORIGIN_HASH, HELPER_NAMES, DIRECT_HELPER_NAMES, BUILDING_HELPER,
+  ORIGINAL_NAMES, HELPER_INSERTION, BUILDING_HELPER_INSERTION, BUILDING_ACTION_EDITS,
   PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES, insertInvariantHelpers, admitInvariantCandidate,
+  eraseInvariantCandidate, invariantProfile,
   selectInvariantArguments, admitInvariantEnvironment, invariantArguments,
   selectedInvariantSummary, invariantRunSummary, validateInvariantManifest,
 } from './protocol-invariant-probe.mjs';
@@ -27,7 +29,7 @@ test('inserts only two independent helpers before unchanged original lemmas, wit
   assert.ok(originalFirst > 0);
   assert.equal(candidate.slice(0, originalFirst), normalized.slice(0, originalFirst));
   assert.equal(candidate.slice(originalFirst + HELPER_INSERTION.length), normalized.slice(originalFirst));
-  assert.deepEqual([...candidate.matchAll(/^lemma (\w+):$/gm)].map((match) => match[1]), [...HELPER_NAMES, ...ORIGINAL_NAMES]);
+  assert.deepEqual([...candidate.matchAll(/^lemma (\w+):$/gm)].map((match) => match[1]), [...DIRECT_HELPER_NAMES, ...ORIGINAL_NAMES]);
   assert.doesNotMatch(candidate, /^lemma\s+\w+\s*\[|\bBuildingProduced\b|\buse_induction\b/mu);
   assert.doesNotMatch(HELPER_INSERTION, /\b(?:restriction|rule|axiom|sources|sorry|SOLVED)\b/u);
   assert.equal((HELPER_INSERTION.match(/all-traces/gu) ?? []).length, 2);
@@ -36,6 +38,84 @@ test('inserts only two independent helpers before unchanged original lemmas, wit
   assert.ok(HELPER_INSERTION.includes('RequestOpened(pc,binding)@i'));
   assert.ok(HELPER_INSERTION.includes('RequestOpened(pc,binding)@j'));
   assert.deepEqual(admitInvariantCandidate(source, candidate), { normalized, candidate });
+});
+
+test('both legacy direct CLI profiles retain the previous exact candidate with no observations or induction', () => {
+  const expected = insertInvariantHelpers(source);
+  for (const selected of DIRECT_HELPER_NAMES) {
+    assert.deepEqual(insertInvariantHelpers(source, selected), expected);
+    assert.equal(eraseInvariantCandidate(expected.candidate, selected), expected.normalized);
+    assert.deepEqual(invariantProfile(selected), {
+      observationalEventsAdded: false, inductionHelpers: [], candidateLemmas: [...DIRECT_HELPER_NAMES, ...ORIGINAL_NAMES],
+    });
+  }
+});
+
+test('building profile adds exactly two production observations and one independent induction helper', () => {
+  const direct = insertInvariantHelpers(source);
+  const observed = insertInvariantHelpers(source, BUILDING_HELPER);
+  assert.deepEqual(invariantProfile(BUILDING_HELPER), {
+    observationalEventsAdded: true, inductionHelpers: [BUILDING_HELPER], candidateLemmas: [...HELPER_NAMES, ...ORIGINAL_NAMES],
+  });
+  assert.equal(eraseInvariantCandidate(observed.candidate, BUILDING_HELPER), direct.normalized);
+  assert.deepEqual(admitInvariantCandidate(source, observed.candidate, BUILDING_HELPER), observed);
+  let restoredDirect = observed.candidate.replace(BUILDING_HELPER_INSERTION, '');
+  assert.ok(Object.isFrozen(BUILDING_ACTION_EDITS));
+  assert.equal(BUILDING_ACTION_EDITS.length, 2);
+  for (const edit of BUILDING_ACTION_EDITS) {
+    assert.ok(Object.isFrozen(edit));
+    assert.equal(observed.candidate.split(edit.to).length, 2, 'each exact producer appears once');
+    restoredDirect = restoredDirect.replace(edit.to, edit.from);
+  }
+  assert.equal(restoredDirect, direct.candidate, 'all original rules and original/helper formulas recover exactly');
+  assert.equal(BUILDING_ACTION_EDITS[0].rule, 'OpenActualRequest');
+  assert.equal(BUILDING_ACTION_EDITS[0].to.replace('  --[ BuildingProduced(~request_id, pc, binding) ]->', '  -->'), BUILDING_ACTION_EDITS[0].from);
+  assert.equal(BUILDING_ACTION_EDITS[1].rule, 'CaptureEligibleDevice');
+  assert.equal(BUILDING_ACTION_EDITS[1].to.replace(',\n       BuildingProduced(request_id, pc, binding)', ''), BUILDING_ACTION_EDITS[1].from);
+  assert.equal((observed.candidate.match(/\bBuildingProduced\(/gu) ?? []).length, 3, 'two action observations and one formula premise only');
+  assert.deepEqual([...observed.candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]), [
+    'lemma building_precedes_open [use_induction]:',
+  ]);
+  assert.ok(BUILDING_HELPER_INSERTION.includes('BuildingProduced(request_id,pc,binding)@b'));
+  assert.ok(BUILDING_HELPER_INSERTION.includes('& RequestOpened(pc,binding)@o'));
+  assert.ok(BUILDING_HELPER_INSERTION.includes('==> b < o'));
+  assert.doesNotMatch(observed.candidate, /^lemma[^\r\n]*\b(?:reuse|sources)\b/mu);
+  assert.deepEqual(insertInvariantHelpers(source.replace(/\r?\n/g, '\r\n'), BUILDING_HELPER), observed);
+});
+
+test('building admission rejects missing/duplicate/wrong production markers, attributes and unrelated rule edits', () => {
+  const { candidate } = insertInvariantHelpers(source, BUILDING_HELPER);
+  const [open, capture] = BUILDING_ACTION_EDITS;
+  const changes = [
+    candidate.replace(open.to, open.from),
+    candidate.replace(capture.to, capture.from),
+    candidate.replace('BuildingProduced(~request_id, pc, binding)', 'BuildingProduced(~request_id, pc, binding), BuildingProduced(~request_id, pc, binding)'),
+    candidate.replace('BuildingProduced(request_id, pc, binding)', 'BuildingProduced(request_id, pc, wrong_binding)'),
+    candidate.replace('rule CaptureEligibleDevice:', 'rule UnexpectedCapture:'),
+    candidate.replace('  --[ RequestOpened(pc, binding) ]->', '  --[ RequestOpened(pc, binding), BuildingProduced(request_id, pc, binding) ]->'),
+    candidate.replace('lemma building_precedes_open [use_induction]:', 'lemma building_precedes_open:'),
+    candidate.replace('[use_induction]', '[use_induction,reuse]'),
+    candidate.replace('[use_induction]', '[sources]'),
+    candidate.replace('[use_induction]', '[use_induction,use_induction]'),
+    candidate.replace('lemma enrolled_revision_unique:', 'lemma enrolled_revision_unique [reuse]:'),
+    candidate.replace('     ==> b < o"', '     ==> #b = #o"'),
+    candidate.replace(BUILDING_HELPER_INSERTION, BUILDING_HELPER_INSERTION + BUILDING_HELPER_INSERTION),
+    candidate + '\n' + open.to,
+    candidate.replace("RegistrySlot(device, pc, revision, 'active'),", "!RegistrySlot(device, pc, revision, 'active'),"),
+    candidate.replace('    ==> #i = #j"\n\nlemma no_accept_after_revision_revoked:', '    ==> #i < #j"\n\nlemma no_accept_after_revision_revoked:'),
+  ];
+  for (const altered of changes) {
+    assert.notEqual(altered, candidate);
+    assert.throws(() => admitInvariantCandidate(source, altered, BUILDING_HELPER));
+    assert.throws(() => eraseInvariantCandidate(altered, BUILDING_HELPER));
+  }
+  assert.throws(() => admitInvariantCandidate(source, candidate, DIRECT_HELPER_NAMES[0]));
+  assert.throws(() => admitInvariantCandidate(source, insertInvariantHelpers(source).candidate, BUILDING_HELPER));
+  for (const altered of [source + '\n' + open.from, source.replace(capture.from, ''),
+    source.replace('SnapshotCaptured(pc, device, revision, binding)', 'SnapshotCaptured(pc, device, revision, other)')]) {
+    assert.notEqual(altered, source);
+    assert.throws(() => insertInvariantHelpers(altered, BUILDING_HELPER));
+  }
 });
 
 test('normalizes CRLF only without accepting other whitespace or malformed-source changes', () => {
@@ -87,10 +167,11 @@ test('candidate admission rejects helper weakening, attributes, duplication, ext
 });
 
 test('selection requires exactly one fixed helper and refuses overrides, inherited names and combined runs', () => {
-  assert.ok(Object.isFrozen(HELPER_NAMES) && Object.isFrozen(ORIGINAL_NAMES));
+  assert.ok(Object.isFrozen(HELPER_NAMES) && Object.isFrozen(DIRECT_HELPER_NAMES) && Object.isFrozen(ORIGINAL_NAMES));
   for (const name of HELPER_NAMES) assert.equal(selectInvariantArguments([`--helper=${name}`]), name);
   for (const args of [[], ['--helper=__proto__'], ['--helper=constructor'], ['--helper=unknown'],
-    ['--helper=request_accepted_at_most_once'], ['--helper=request_opened_unique', '--bound=1'],
+    ['--helper=request_accepted_at_most_once'], ['--helper=BuildingProduced'], ['--helper=building_precedes_open --reuse'],
+    ['--helper=building_precedes_open', '--reuse'], ['--helper=request_opened_unique', '--bound=1'],
     ['--helper=request_opened_unique', '--helper=enrolled_revision_unique'], ['--helper=request_opened_unique --reuse'],
     ['--helper=request_opened_unique\n'], ['--helper=request_opened_unique', '--helper=request_opened_unique'],
     ['--model=elsewhere'], [null], 'request_opened_unique']) {
@@ -122,13 +203,16 @@ for (const name of HELPER_NAMES) {
 test('argument construction refuses arbitrary proof names even with a valid input path', () => {
   for (const name of ['constructor', '__proto__', 'honest_approve_trace', '--prove=all', null]) {
     assert.throws(() => invariantArguments(input, name));
+    assert.throws(() => insertInvariantHelpers(source, name));
+    assert.throws(() => invariantProfile(name));
   }
 });
 
 function output(selected, verdict = 'verified (12 steps)') {
+  const names = invariantProfile(HELPER_NAMES.includes(selected) ? selected : DIRECT_HELPER_NAMES[0]).candidateLemmas;
   return {
     status: 0, signal: null, error: null, cancelled: false, cleanupIncomplete: false, stderr: '',
-    stdout: `summary of summaries:\n analyzed: ${input}\n${[...HELPER_NAMES, ...ORIGINAL_NAMES].map((name) =>
+    stdout: `summary of summaries:\n analyzed: ${input}\n${names.map((name) =>
       ` ${name} (${ORIGINAL_NAMES.indexOf(name) >= 0 && ORIGINAL_NAMES.indexOf(name) < 3 ? 'exists-trace' : 'all-traces'}): ${name === selected ? verdict : 'analysis incomplete (0 steps)'}`).join('\n')}\n`,
   };
 }
@@ -199,10 +283,13 @@ test('manifest source mapping retains the original nine obligations and rejects 
   ]) assert.throws(() => validateInvariantManifest(altered));
 });
 
-test('probe source preserves independent attribution, bounded single execution and immutable separate artifacts', () => {
+test('probe source preserves independent attribution, observable edit metadata and immutable separate artifacts', () => {
   assert.equal((probeSource.match(/await runProver\(/gu) ?? []).length, 1);
   assert.ok(probeSource.includes("eligibleAsNormalGate: false, baselineOnly: true"));
-  assert.ok(probeSource.includes("normalGateStatus: 'not-run', helperReuse: false, observationalEventsAdded: false"));
+  assert.ok(probeSource.includes("normalGateStatus: 'not-run', helperReuse: false, ...profile"));
+  assert.ok(probeSource.includes('observationalEdits: profile.observationalEventsAdded ? BUILDING_ACTION_EDITS.map'));
+  assert.ok(probeSource.includes('originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded'));
+  assert.ok(probeSource.includes('originalPremisesConclusionsAndPublicMessagesUnchanged: true, originalRestrictionsAndLemmasUnchanged: true'));
   assert.ok(probeSource.includes("status: 'not-selected'"));
   assert.ok(probeSource.includes("'INVARIANT_PROBE_ONLY") || probeSource.includes('`INVARIANT_PROBE_ONLY-'));
   assert.ok(probeSource.includes("flag: 'wx', mode: 0o400"));
@@ -213,19 +300,18 @@ test('probe source preserves independent attribution, bounded single execution a
   assert.doesNotMatch(probeSource, /artifacts\/protocol-security|--output|--bound=|spawnSync\(|execSync\(/u);
 });
 
-test('CI has two independent selected-helper jobs, fixed pins, narrow triggers and no normal-gate mutation', () => {
+test('CI runs ONLY the new building helper, retaining narrow triggers, fixed pins and no normal-gate mutation', () => {
   assert.ok(workflow.includes("branches: ['codex/protocol-witness-shape']"));
   for (const file of ['tools/protocol-invariant-probe.mjs', 'tools/protocol-invariant-probe.test.mjs', '.github/workflows/protocol-invariant-probe.yml']) {
     assert.ok(workflow.includes(`- '${file}'`));
   }
   assert.ok(workflow.includes('workflow_dispatch:'));
-  assert.ok(workflow.includes('fail-fast: false'));
-  assert.ok(workflow.includes('helper: [enrolled_revision_unique, request_opened_unique]'));
-  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs "--helper=${{ matrix.helper }}"'));
+  assert.doesNotMatch(workflow, /matrix:|--helper=enrolled_revision_unique|--helper=request_opened_unique/u);
+  assert.ok(workflow.includes('node tools/protocol-invariant-probe.mjs --helper=building_precedes_open'));
   assert.ok(workflow.includes('node tools/install-tamarin.mjs'));
   assert.ok(workflow.includes('persist-credentials: false'));
   assert.ok(workflow.includes('contents: read'));
-  assert.ok(workflow.includes('protocol-invariant-probe-${{ matrix.helper }}-${{ github.sha }}'));
+  assert.ok(workflow.includes('protocol-invariant-probe-building_precedes_open-${{ github.sha }}'));
   assert.ok(workflow.includes('if: ${{ !cancelled() }}'));
   assert.ok(workflow.includes('if-no-files-found: error'));
   assert.doesNotMatch(workflow, /continue-on-error|pull_request_target|contents: write|security\/tamarin\/|artifacts\/protocol-security|--bound=/u);

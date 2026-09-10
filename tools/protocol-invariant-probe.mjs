@@ -17,14 +17,15 @@ const MAX_SOURCE_BYTES = 1024 * 1024;
 const MANIFEST_PATH = 'security/tamarin/manifest.json';
 const ANCHOR = '\nlemma honest_approve_trace:\n';
 const CLASSIFICATION = 'BASELINE_INVARIANT_PROBE_ONLY';
-export const HELPER_NAMES = Object.freeze(['enrolled_revision_unique', 'request_opened_unique']);
+export const DIRECT_HELPER_NAMES = Object.freeze(['enrolled_revision_unique', 'request_opened_unique']);
+export const BUILDING_HELPER = 'building_precedes_open';
+export const HELPER_NAMES = Object.freeze([...DIRECT_HELPER_NAMES, BUILDING_HELPER]);
 export const ORIGINAL_NAMES = Object.freeze([
   'honest_approve_trace', 'honest_deny_without_approval_auth_trace', 'honest_two_approvers_single_winner_trace',
   'accepted_approval_requires_same_binding_auth', 'accepted_decision_matches_opened_request',
   'request_accepted_at_most_once', 'no_accept_after_revision_revoked',
   'no_accept_after_request_cancelled', 'no_accept_after_request_expired',
 ]);
-const KNOWN_NAMES = Object.freeze([...HELPER_NAMES, ...ORIGINAL_NAMES]);
 export const HELPER_INSERTION = `
 // INVARIANT_PROBE_ONLY: two independent direct helpers, no proof reuse.
 lemma enrolled_revision_unique:
@@ -41,6 +42,38 @@ lemma request_opened_unique:
      & RequestOpened(pc,binding)@j
      ==> #i = #j"
 `;
+export const BUILDING_HELPER_INSERTION = `
+// BUILDING_INVARIANT_PROBE_ONLY: observational production points, no proof reuse.
+lemma building_precedes_open [use_induction]:
+  all-traces
+  "All request_id pc binding #b #o.
+     BuildingProduced(request_id,pc,binding)@b
+     & RequestOpened(pc,binding)@o
+     ==> b < o"
+`;
+const OPEN_PRODUCER = `rule OpenActualRequest:
+  let binding = <pc, epoch, session_id, logon_luid, ~request_id, ~nonce,
+        ~content_digest, ~expiry>
+  in
+  [ !HostContext(pc, epoch, session_id, logon_luid),
+    Fr(~request_id), Fr(~nonce), Fr(~content_digest), Fr(~expiry) ]
+  -->
+  [ RequestSlot(~request_id, pc, binding, 'building'), !RequestOrigin(~request_id, pc, binding) ]`;
+const CAPTURE_PRODUCER = `rule CaptureEligibleDevice:
+  [ RequestSlot(request_id, pc, binding, 'building'), !RequestOrigin(request_id, pc, binding)[+],
+    RegistrySlot(device, pc, revision, 'active'),
+    !EnrollmentKeys(pc, device, approval_key, denial_key) ]
+  --[ SnapshotCaptured(pc, device, revision, binding) ]->
+  [ RequestSlot(request_id, pc, binding, 'building'),
+    RegistrySlot(device, pc, revision, 'active'),
+    !Snapshot(pc, device, revision, approval_key, denial_key, binding) ]`;
+export const BUILDING_ACTION_EDITS = Object.freeze([
+  Object.freeze({ rule: 'OpenActualRequest', from: OPEN_PRODUCER,
+    to: OPEN_PRODUCER.replace('\n  -->\n', '\n  --[ BuildingProduced(~request_id, pc, binding) ]->\n') }),
+  Object.freeze({ rule: 'CaptureEligibleDevice', from: CAPTURE_PRODUCER,
+    to: CAPTURE_PRODUCER.replace('SnapshotCaptured(pc, device, revision, binding) ]->',
+      'SnapshotCaptured(pc, device, revision, binding),\n       BuildingProduced(request_id, pc, binding) ]->') }),
+]);
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const reject = () => { throw new Error('Invariant probe source, selection or evidence admission rejected.'); };
 const same = (left, right) => { if (!isDeepStrictEqual(left, right)) reject(); };
@@ -56,24 +89,58 @@ function helper(name) {
   return name;
 }
 
+export function invariantProfile(selected) {
+  const observationalEventsAdded = helper(selected) === BUILDING_HELPER;
+  return {
+    observationalEventsAdded,
+    inductionHelpers: observationalEventsAdded ? [BUILDING_HELPER] : [],
+    candidateLemmas: [...DIRECT_HELPER_NAMES, ...(observationalEventsAdded ? [BUILDING_HELPER] : []), ...ORIGINAL_NAMES],
+  };
+}
+
+function insertion(selected) {
+  return HELPER_INSERTION + (helper(selected) === BUILDING_HELPER ? BUILDING_HELPER_INSERTION : '');
+}
+
+/** Erase ONLY this profile's exact additions; any unrelated change rejects. */
+export function eraseInvariantCandidate(candidate, selected = DIRECT_HELPER_NAMES[0]) {
+  helper(selected);
+  if (typeof candidate !== 'string' || Buffer.byteLength(candidate) > MAX_SOURCE_BYTES) reject();
+  let restored = mutateExactlyOnce(candidate, { from: insertion(selected) + ANCHOR, to: ANCHOR });
+  if (selected === BUILDING_HELPER) {
+    for (const edit of [...BUILDING_ACTION_EDITS].reverse()) {
+      restored = mutateExactlyOnce(restored, { from: edit.to, to: edit.from });
+    }
+  }
+  if (hash(restored) !== ORIGIN_HASH) reject();
+  return restored;
+}
+
 /** Text admission, not a substitute Tamarin parser or a proved invariant. */
-export function insertInvariantHelpers(source) {
+export function insertInvariantHelpers(source, selected = DIRECT_HELPER_NAMES[0]) {
+  const profile = invariantProfile(selected);
   const normalized = normalize(source);
   if (hash(normalized) !== ORIGIN_HASH) reject();
-  const candidate = mutateExactlyOnce(normalized, { from: ANCHOR, to: HELPER_INSERTION + ANCHOR });
-  if (mutateExactlyOnce(candidate, { from: HELPER_INSERTION + ANCHOR, to: ANCHOR }) !== normalized) reject();
-  const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*):$/gm)].map((match) => match[1]);
-  same(names, KNOWN_NAMES);
-  // Exact insertion above is the primary guard. These checks document that this
-  // experiment supplies no reuse/sources/induction attribute or stored proof.
-  if (/^lemma\s+\w+\s*\[/m.test(candidate) || /\b(?:BuildingProduced|use_induction)\b/.test(candidate)) reject();
+  let candidate = normalized;
+  if (profile.observationalEventsAdded) {
+    for (const edit of BUILDING_ACTION_EDITS) candidate = mutateExactlyOnce(candidate, edit);
+  }
+  candidate = mutateExactlyOnce(candidate, { from: ANCHOR, to: insertion(selected) + ANCHOR });
+  if (eraseInvariantCandidate(candidate, selected) !== normalized) reject();
+  const names = [...candidate.matchAll(/^lemma ([A-Za-z][A-Za-z0-9_]*)(?: \[use_induction\])?:$/gm)].map((match) => match[1]);
+  same(names, profile.candidateLemmas);
+  const attributes = [...candidate.matchAll(/^lemma\s+\w+\s*\[[^\r\n]*\]:$/gm)].map((match) => match[0]);
+  same(attributes, profile.observationalEventsAdded ? ['lemma building_precedes_open [use_induction]:'] : []);
+  const observations = candidate.match(/\bBuildingProduced\(/g) ?? [];
+  if (observations.length !== (profile.observationalEventsAdded ? 3 : 0)) reject(); // two actions + one helper premise
+  if (/^lemma[^\r\n]*\b(?:reuse|sources)\b/m.test(candidate)) reject();
   return { normalized, candidate };
 }
 
-export function admitInvariantCandidate(source, candidate) {
-  const expected = insertInvariantHelpers(source);
+export function admitInvariantCandidate(source, candidate, selected = DIRECT_HELPER_NAMES[0]) {
+  const expected = insertInvariantHelpers(source, selected);
   if (typeof candidate !== 'string' || candidate !== expected.candidate ||
-      mutateExactlyOnce(candidate, { from: HELPER_INSERTION + ANCHOR, to: ANCHOR }) !== expected.normalized) reject();
+      eraseInvariantCandidate(candidate, selected) !== expected.normalized) reject();
   return expected;
 }
 
@@ -96,7 +163,7 @@ export function invariantArguments(input, selected) {
 }
 
 export function selectedInvariantSummary(result, selected, input) {
-  const parsed = parseProofSummary(result, { [helper(selected)]: { trace: 'all-traces', verdict: 'verified' } }, KNOWN_NAMES, input);
+  const parsed = parseProofSummary(result, { [helper(selected)]: { trace: 'all-traces', verdict: 'verified' } }, invariantProfile(selected).candidateLemmas, input);
   // --quit-on-warning must be honored; an exit-zero fixture cannot turn a
   // dependency/wellformedness warning into successful experiment evidence.
   if (/\bWARNING\b|returned unsupported version/i.test(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)) {
@@ -205,6 +272,7 @@ function freshDirectory(root, selected) {
 
 export async function runInvariantProbe(args = process.argv.slice(2), root = ROOT) {
   const { selected, binary, commit } = admitInvariantEnvironment(args, process.env, process.platform);
+  const profile = invariantProfile(selected);
   root = realpathSync(root);
   const directory = freshDirectory(root, selected);
   const cancellation = new AbortController();
@@ -214,9 +282,9 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let report = {
     classification: CLASSIFICATION, eligibleAsNormalGate: false, baselineOnly: true,
-    normalGateStatus: 'not-run', helperReuse: false, observationalEventsAdded: false,
+    normalGateStatus: 'not-run', helperReuse: false, ...profile,
     selectedHelper: selected, commit, toolVersion: '1.12.0',
-    unselectedLemmas: KNOWN_NAMES.filter((name) => name !== selected).map((name) => ({ name, status: 'not-selected' })),
+    unselectedLemmas: profile.candidateLemmas.filter((name) => name !== selected).map((name) => ({ name, status: 'not-selected' })),
     negativeControls: ['missing-approval-signature', 'missing-replay-consumption'].map((name) => ({ name, status: 'not-selected' })),
     bounds: { proofInvocations: 1, timeoutMs: PROBE_TIMEOUT_MS, combinedOutputBytes: PROBE_OUTPUT_BYTES, heapGiB: 2, runtimeThreads: 2 },
     attempted: false, completed: false, inputsUnchanged: false, selectedProof: null, status: 'not-started',
@@ -232,8 +300,8 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
     const origin = read(ORIGIN_PATH), manifestFile = read(MANIFEST_PATH);
     const manifest = JSON.parse(utf8(manifestFile.bytes));
     const bindings = validateInvariantManifest(manifest);
-    const { normalized, candidate } = insertInvariantHelpers(utf8(origin.bytes));
-    admitInvariantCandidate(utf8(origin.bytes), candidate);
+    const { normalized, candidate } = insertInvariantHelpers(utf8(origin.bytes), selected);
+    admitInvariantCandidate(utf8(origin.bytes), candidate, selected);
     for (const binding of bindings) {
       if (hash(utf8(read(binding.path).bytes).replace(/\r\n/g, '\n')) !== binding.sha256) reject();
     }
@@ -252,8 +320,14 @@ export async function runInvariantProbe(args = process.argv.slice(2), root = ROO
       regular(binary, 150 * 1024 * 1024, false).sha256 === tool.sha256 &&
       sources.every((file) => regular(owned(root, file.path)).sha256 === file.sha256 && regular(join(directory, file.snapshot)).sha256 === file.sha256);
     report = { ...report, origin: { path: ORIGIN_PATH, rawSha256: origin.sha256, normalizedSha256: hash(normalized) },
-      candidateSha256: candidateHash, insertionSha256: hash(HELPER_INSERTION), reverseErasureSha256: ORIGIN_HASH,
-      originalRulesRestrictionsAndLemmasUnchanged: true, manifestSha256: manifestFile.sha256, sourceBindings: bindings,
+      candidateSha256: candidateHash, insertionSha256: hash(insertion(selected)), reverseErasureSha256: ORIGIN_HASH,
+      observationalEdits: profile.observationalEventsAdded ? BUILDING_ACTION_EDITS.map((edit) => ({
+        rule: edit.rule, event: 'BuildingProduced', beforeSha256: hash(edit.from), afterSha256: hash(edit.to),
+      })) : [],
+      originalRulesRestrictionsAndLemmasUnchanged: !profile.observationalEventsAdded,
+      originalPremisesConclusionsAndPublicMessagesUnchanged: true, originalRestrictionsAndLemmasUnchanged: true,
+      traceScope: profile.observationalEventsAdded ? 'Erase only BuildingProduced action labels to recover the original transition traces; no new restrictions.' : 'Original transition/action traces unchanged.',
+      manifestSha256: manifestFile.sha256, sourceBindings: bindings,
       sources, binary, binaryMetadata: tool, arguments: argv,
       toolchainAuthority: 'fixed workflow install-tamarin.mjs validates pinned Tamarin and Maude distributions; this run retains the binary digest',
       scope: 'Independent symbolic helper feasibility on this baseline only, not mutant proofs, reuse approval, implementation refinement or native security.' };
