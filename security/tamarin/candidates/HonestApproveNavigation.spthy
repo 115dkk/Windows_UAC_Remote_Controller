@@ -234,7 +234,14 @@ solve( !RequestOrigin( request_id, pc, binding )[+] ▶₁ #o )
                         case OpenActualRequest
                         solve( RegistrySlot( ~device.2, ~pc, revision.2, 'active' ) ▶₂ #vr.2 )
                           case TrustedEnrollment
-                          by sorry /* UNVERIFIED: ROOT must expose this enrollment subtree */
+                          solve( RequestSlot( ~request_id, ~pc,
+                                              <~pc, ~epoch, ~session_id, ~logon_luid, ~request_id, ~nonce,
+                                               ~content_digest, ~expiry>,
+                                              'building'
+                                 ) ▶₀ #vr.4 )
+                            case OpenActualRequest
+                            by sorry /* UNVERIFIED: observed second capture base */
+                          qed
                         qed
                       qed
                     qed
