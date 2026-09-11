@@ -9,7 +9,7 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{ERROR_OPERATION_ABORTED, HANDLE},
-        System::Threading::CreateEventW,
+        System::{Pipes::PeekNamedPipe, Threading::CreateEventW},
     },
     core::{HRESULT, PCWSTR},
 };
@@ -20,6 +20,7 @@ use super::super::overlapped_pipe::{
 use super::{
     BOUNDARY_HEALTH, Handle, PairingPeer, PairingPeerError as Error, PairingPeerRole,
     PairingPeerStage as Stage, PairingServerEndpoint, cleanup_state, native_error,
+    service_positive,
 };
 
 const MAX_MESSAGE: usize = 4096;
@@ -28,6 +29,11 @@ const MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const LIMITS: BufferLimits = BufferLimits {
     max_read: READ_CAPACITY,
     max_write: MAX_MESSAGE,
+};
+
+mod listener;
+pub(crate) use listener::{
+    AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener,
 };
 
 impl EventHandle for Handle {
@@ -150,6 +156,66 @@ impl PairingPipe {
             Some(Connection::Peer(peer)) => Ok(peer.session_id()),
             _ => Err(inner.fail(Error::InvalidPhase)),
         }
+    }
+    pub(crate) fn check_live(&mut self) -> Result<(), Error> {
+        self.inner_mut().fence()
+    }
+    /// The fixed protocol expects no further input after its one matched frame
+    /// until Close. Observe queued bytes without arming an unfinishable idle read.
+    pub(crate) fn check_input_quiet(&mut self) -> Result<(), Error> {
+        let inner = self.inner_mut();
+        inner.fence()?;
+        let pipe = inner.pipe()?;
+        let mut available = 0;
+        // SAFETY: retained OVERLAPPED pipe, zero-byte nonconsuming metadata
+        // query; one initialized scalar, no payload buffer or caller pointer.
+        unsafe { PeekNamedPipe(pipe, None, 0, None, Some(&mut available), None) }
+            .map_err(|error| inner.fail(native_error(Stage::QueryPeer, error)))?;
+        if available != 0 {
+            return Err(inner.fail(Error::InvalidMessage));
+        }
+        inner.fence()
+    }
+
+    /// Corroborates a tuple received on the ORIGINAL Starter pipe against this
+    /// actual Helper owner. No raw metadata/grant is returned or reconstructed.
+    pub(crate) fn match_launched_helper(
+        &mut self,
+        starter: &mut Self,
+        pid: u32,
+        created: u64,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            self.check_live()?;
+            starter.check_live()?;
+            let helper_inner = self.inner_ref();
+            let starter_inner = starter.inner_ref();
+            let (Some(Connection::Peer(helper)), Some(Connection::Peer(gui))) = (
+                helper_inner.connection.as_ref(),
+                starter_inner.connection.as_ref(),
+            ) else {
+                return Err(Error::InvalidPhase);
+            };
+            if helper.role() != PairingPeerRole::Helper
+                || gui.role() != PairingPeerRole::Starter
+                || !std::rc::Rc::ptr_eq(&helper.endpoint.context, &gui.endpoint.context)
+                || helper.interactive != gui.interactive
+                || helper.pid != pid
+                || helper.created != created
+                || helper_inner.budget.started_at != starter_inner.budget.started_at
+                || helper_inner.budget.deadline != starter_inner.budget.deadline
+            {
+                return Err(Error::Rejected);
+            }
+            self.check_live()?;
+            starter.check_live()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.inner_mut().fail(error);
+            starter.inner_mut().fail(error);
+        }
+        result
     }
     fn inner_ref(&self) -> &Inner {
         self.inner
@@ -308,13 +374,13 @@ impl Inner {
         if let Some(error) = self.first_failure {
             return Err(error);
         }
-        let result = (|| {
+        let result = service_positive(|| {
             self.budget.observe(Instant::now())?;
             self.connection.as_mut().ok_or(Error::Closed)?.recheck()?;
             // Native metadata checks/allocation do not renew the original budget.
             self.budget.observe(Instant::now())?;
             cleanup_state()
-        })();
+        });
         result.map_err(|error| self.fail(error))
     }
     fn fail(&mut self, error: Error) -> Error {
@@ -366,12 +432,16 @@ impl Inner {
         // service-or-peer check. Never issue first and then discover expiry.
         self.fence()?;
         let pipe = self.pipe().map_err(|error| self.fail(error))?;
-        let issued = match self.operation.as_mut() {
-            Some(operation) => operation.pending.issue(pipe),
-            None => return Err(self.fail(Error::InvalidPhase)),
-        };
+        let issued = service_positive(|| {
+            self.operation
+                .as_mut()
+                .ok_or(Error::InvalidPhase)?
+                .pending
+                .issue(pipe)
+                .map_err(|error| io_error(operation_kind.stage(), error))
+        });
         if let Err(error) = issued {
-            return Err(self.fail(io_error(operation_kind.stage(), error)));
+            return Err(self.fail(error));
         }
         if operation_kind == OperationKind::Connect {
             self.phase = Phase::Connecting;

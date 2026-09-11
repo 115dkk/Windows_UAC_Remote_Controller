@@ -81,6 +81,51 @@ pub(crate) fn running_handshake() -> (RunningRequest, RunningGate) {
     )
 }
 
+/// Distinct from the early no-controls Running gate. Only this entry-reported
+/// full Ready acknowledgement permits native pairing endpoint activation.
+#[derive(Debug)]
+pub(crate) struct ReadyRequest(RunningRequest);
+pub(crate) struct ReadyGate(RunningGate);
+#[derive(Debug)]
+pub(crate) struct ScmReadyPermit {
+    _private: (),
+}
+
+pub(crate) fn ready_handshake() -> (ReadyRequest, ReadyGate) {
+    let (request, gate) = running_handshake();
+    (ReadyRequest(request), ReadyGate(gate))
+}
+impl ReadyRequest {
+    pub(crate) fn complete_after_report(
+        self,
+        began: Instant,
+        mut cancelled: impl FnMut() -> bool,
+        report: impl FnOnce() -> Result<(), ServiceError>,
+        after_report: impl FnOnce(),
+    ) -> Result<(), ServiceError> {
+        let outcome = complete_ready_report(began, &mut cancelled, report).and_then(|()| {
+            after_report();
+            within_startup(began.elapsed(), cancelled()).map(|_| ())
+        });
+        let delivered = self
+            .0
+            .acknowledgement
+            .try_send(outcome)
+            .map_err(|_| ServiceError::WorkerFailed);
+        outcome.and(delivered)
+    }
+}
+impl ReadyGate {
+    pub(crate) fn wait(
+        self,
+        began: Instant,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ScmReadyPermit, ServiceError> {
+        self.0.wait(began, cancelled)?;
+        Ok(ScmReadyPermit { _private: () })
+    }
+}
+
 fn within_startup(elapsed: Duration, cancelled: bool) -> Result<Duration, ServiceError> {
     if cancelled {
         return Err(ServiceError::WorkerFailed);
@@ -204,6 +249,78 @@ mod tests {
     enum SyntheticNativeError {
         KeyNotFound,
         CreationUncertain,
+    }
+
+    #[test]
+    fn full_ready_ack_follows_report_and_post_report_actions() {
+        let began = Instant::now();
+        let reported = Cell::new(false);
+        let actions = Cell::new(false);
+        let (request, gate) = ready_handshake();
+        request
+            .complete_after_report(
+                began,
+                || false,
+                || {
+                    reported.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(reported.get());
+                    actions.set(true);
+                },
+            )
+            .unwrap();
+        let _permit = gate.wait(began, || false).unwrap();
+        assert!(actions.get()); // Synthetic callbacks, not a native SCM claim.
+    }
+    #[test]
+    fn failed_closed_or_cancelled_ready_ack_cannot_release_a_factory() {
+        let began = Instant::now();
+        let failure = ServiceError::WindowsCall {
+            operation: crate::ServiceOperation::ReportStatus,
+            code: 5,
+        };
+        let (request, gate) = ready_handshake();
+        assert_eq!(
+            request.complete_after_report(
+                began,
+                || false,
+                || Err(failure),
+                || panic!("report failed")
+            ),
+            Err(failure)
+        );
+        assert!(matches!(gate.wait(began, || false), Err(error) if error == failure));
+        let (request, gate) = ready_handshake();
+        drop(request);
+        assert!(matches!(
+            gate.wait(began, || false),
+            Err(ServiceError::WorkerFailed)
+        ));
+        let cancelled = Cell::new(false);
+        let (request, gate) = ready_handshake();
+        assert_eq!(
+            request.complete_after_report(
+                began,
+                || cancelled.get(),
+                || Ok(()),
+                || cancelled.set(true)
+            ),
+            Err(ServiceError::WorkerFailed)
+        );
+        assert!(matches!(
+            gate.wait(began, || cancelled.get()),
+            Err(ServiceError::WorkerFailed)
+        ));
+        let (request, gate) = ready_handshake();
+        request
+            .complete_after_report(began, || false, || Ok(()), || ())
+            .unwrap();
+        assert!(matches!(
+            gate.wait(began, || true),
+            Err(ServiceError::WorkerFailed)
+        ));
     }
 
     #[test]

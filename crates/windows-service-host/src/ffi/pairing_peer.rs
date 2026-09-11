@@ -64,6 +64,7 @@ use super::{
 use crate::{ServiceError, native};
 
 mod io;
+pub(crate) use io::{AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener};
 pub use io::{PairingPipe, PairingPipeProgress};
 
 pub(super) const STARTER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingStarter.v1";
@@ -171,6 +172,28 @@ pub(super) fn cleanup_state() -> Result<(), PairingPeerError> {
     BOUNDARY_HEALTH.check()
 }
 
+/// Positive service work uses the actual immediate stop latch, not merely the
+/// later SCM state. Cleanup deliberately does not call this gate. Only unit
+/// fixtures can substitute its private stop observation.
+pub(super) fn service_positive(
+    operation: impl FnOnce() -> Result<(), PairingPeerError>,
+) -> Result<(), PairingPeerError> {
+    service_positive_with(crate::entry::stop_requested, operation)
+}
+fn service_positive_with(
+    mut stopped: impl FnMut() -> bool,
+    operation: impl FnOnce() -> Result<(), PairingPeerError>,
+) -> Result<(), PairingPeerError> {
+    if stopped() {
+        return Err(PairingPeerError::Cancelled);
+    }
+    operation()?; // Preserve an actual native failure ahead of a later Stop.
+    if stopped() {
+        return Err(PairingPeerError::Cancelled);
+    }
+    Ok(())
+}
+
 struct Handle(Option<HANDLE>);
 impl Handle {
     fn new(value: HANDLE, stage: PairingPeerStage) -> Result<Self, PairingPeerError> {
@@ -218,6 +241,7 @@ struct ServiceContext {
 }
 impl ServiceContext {
     fn observe() -> Result<Rc<Self>, PairingPeerError> {
+        service_positive(|| Ok(()))?;
         let reservation = Reservation::acquire()?;
         windows_identity::verify_service_context()
             .map_err(|e| PairingPeerError::Service(ServiceError::from_identity(e)))?;
@@ -233,6 +257,9 @@ impl ServiceContext {
         Ok(context)
     }
     fn recheck(&self) -> Result<(), PairingPeerError> {
+        service_positive(|| self.recheck_native())
+    }
+    fn recheck_native(&self) -> Result<(), PairingPeerError> {
         cleanup_state()?;
         windows_identity::verify_service_context()
             .map_err(|e| PairingPeerError::Service(ServiceError::from_identity(e)))?;
@@ -291,6 +318,9 @@ pub struct PairingServerEndpoint {
     context: Rc<ServiceContext>,
 }
 impl PairingServerEndpoint {
+    pub(crate) fn into_unbound_listener(self) -> Result<UnboundPairingListener, PairingPeerError> {
+        UnboundPairingListener::new(self)
+    }
     pub fn role(&self) -> PairingPeerRole {
         self.role
     }
@@ -451,6 +481,9 @@ fn create_server(
         bInheritHandle: false.into(),
     };
     let (open, mode) = pipe_modes();
+    // Metadata/allocation above cannot authorize entering CreateNamedPipe after
+    // the control callback has already latched Stop.
+    service_positive(|| Ok(()))?;
     // SAFETY: fixed local names, bounded buffers, first instance only, no remote
     // clients/inheritance. Private DACL exists AT creation, not patched afterward.
     let pipe = unsafe {
@@ -846,9 +879,105 @@ impl TokenFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use windows::Win32::Storage::FileSystem::{
         DELETE, FILE_APPEND_DATA, FILE_READ_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
     };
+
+    #[test]
+    fn immediate_stop_during_native_checks_prevents_the_next_issue() {
+        let stopped = Cell::new(false);
+        let inspected = Cell::new(false);
+        let issued = Cell::new(false);
+        let result = service_positive_with(
+            || stopped.get(),
+            || {
+                inspected.set(true);
+                stopped.set(true);
+                Ok(())
+            },
+        )
+        .and_then(|()| {
+            service_positive_with(
+                || stopped.get(),
+                || {
+                    issued.set(true);
+                    Ok(())
+                },
+            )
+        });
+        assert_eq!(result, Err(PairingPeerError::Cancelled));
+        assert!(inspected.get());
+        assert!(!issued.get());
+    }
+    #[test]
+    fn stop_after_successful_inspection_is_checked_again_at_preissue() {
+        let stopped = Cell::new(false);
+        service_positive_with(|| stopped.get(), || Ok(())).unwrap();
+        stopped.set(true);
+        let issued = Cell::new(false);
+        assert_eq!(
+            service_positive_with(
+                || stopped.get(),
+                || {
+                    issued.set(true);
+                    Ok(())
+                }
+            ),
+            Err(PairingPeerError::Cancelled)
+        );
+        assert!(!issued.get());
+    }
+    #[test]
+    fn stop_after_completion_discards_publication_without_claiming_drain() {
+        let stopped = Cell::new(false);
+        let completed = Cell::new(false);
+        let published = Cell::new(false);
+        let result = service_positive_with(
+            || stopped.get(),
+            || {
+                completed.set(true);
+                stopped.set(true);
+                Ok(())
+            },
+        )
+        .map(|()| published.set(true));
+        assert_eq!(result, Err(PairingPeerError::Cancelled));
+        assert!(completed.get());
+        assert!(!published.get());
+        // A stop during an entered issue similarly rejects success without
+        // removing the caller's retained operation; only explicit drain may do so.
+        stopped.set(false);
+        let operation_owned = Cell::new(false);
+        let result = service_positive_with(
+            || stopped.get(),
+            || {
+                operation_owned.set(true);
+                stopped.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(PairingPeerError::Cancelled));
+        assert!(operation_owned.get());
+    }
+    #[test]
+    fn native_failure_keeps_precedence_over_a_stop_observed_later() {
+        let stopped = Cell::new(false);
+        let failure = PairingPeerError::Native {
+            stage: PairingPeerStage::Read,
+            hresult: 0x8007_0005_u32 as i32,
+        };
+        assert_eq!(
+            service_positive_with(
+                || stopped.get(),
+                || {
+                    stopped.set(true);
+                    Err(failure)
+                }
+            ),
+            Err(failure)
+        );
+    }
 
     #[test]
     fn ordinary_test_executable_cannot_create_service_pairing_endpoints() {

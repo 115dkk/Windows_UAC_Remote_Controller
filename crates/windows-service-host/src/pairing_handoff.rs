@@ -41,6 +41,176 @@ pub(crate) enum HandoffError {
     Phase,
     Cancelled,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServiceSide {
+    Starter,
+    Helper,
+}
+impl ServiceSide {
+    fn index(self) -> usize {
+        match self {
+            Self::Starter => 0,
+            Self::Helper => 1,
+        }
+    }
+}
+
+/// Server FRAME phases only. The ServiceSession's actual native peer comparator
+/// must succeed before confirm_match, each Bound write and Bound publication.
+/// This pure structure is neither an authorization object nor a second engine.
+pub(crate) struct ServiceHandoff {
+    id: PendingElevationId,
+    offered: bool,
+    hello: bool,
+    launched: Option<(u32, u64)>,
+    matched: bool,
+    bound: [bool; 2],
+    closing: bool,
+    close_written: [bool; 2],
+    acknowledgements: [bool; 2],
+    failed: bool,
+}
+impl fmt::Debug for ServiceHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ServiceHandoff(rendezvous_only)")
+    }
+}
+impl ServiceHandoff {
+    pub(crate) fn new(id: PendingElevationId) -> Self {
+        Self {
+            id,
+            offered: false,
+            hello: false,
+            launched: None,
+            matched: false,
+            bound: [false; 2],
+            closing: false,
+            close_written: [false; 2],
+            acknowledgements: [false; 2],
+            failed: false,
+        }
+    }
+    fn reject<T>(&mut self) -> Result<T, HandoffError> {
+        self.failed = true;
+        Err(HandoffError::Phase)
+    }
+    pub(crate) fn offer(&self) -> Result<Frame, HandoffError> {
+        if self.failed || self.offered || self.closing {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Offer(self.id))
+        }
+    }
+    pub(crate) fn offer_written(&mut self) -> Result<(), HandoffError> {
+        if self.failed || self.offered || self.closing {
+            return self.reject();
+        }
+        self.offered = true;
+        Ok(())
+    }
+    pub(crate) fn receive(&mut self, side: ServiceSide, frame: Frame) -> Result<(), HandoffError> {
+        if self.failed {
+            return Err(HandoffError::Phase);
+        }
+        if self.closing {
+            let index = side.index();
+            return if frame == Frame::CloseAck(self.id)
+                && self.close_written[index]
+                && !self.acknowledgements[index]
+            {
+                self.acknowledgements[index] = true;
+                Ok(())
+            } else {
+                self.reject()
+            };
+        }
+        match (side, frame) {
+            (ServiceSide::Starter, Frame::HelperLaunched { id, pid, created })
+                if id == self.id
+                    && self.offered
+                    && self.launched.is_none()
+                    && !self.matched
+                    && pid != 0
+                    && created != 0 =>
+            {
+                self.launched = Some((pid, created));
+                Ok(())
+            }
+            (ServiceSide::Helper, Frame::Hello(id))
+                if id == self.id && !self.hello && !self.matched =>
+            {
+                self.hello = true;
+                Ok(())
+            }
+            _ => self.reject(),
+        }
+    }
+    pub(crate) fn candidate(&self) -> Option<(u32, u64)> {
+        if self.failed || self.closing || !self.offered || !self.hello {
+            None
+        } else {
+            self.launched
+        }
+    }
+    pub(crate) fn confirm_match(&mut self) -> Result<(), HandoffError> {
+        if self.matched || self.candidate().is_none() {
+            return self.reject();
+        }
+        self.matched = true;
+        Ok(())
+    }
+    pub(crate) fn is_matched(&self) -> bool {
+        self.matched && !self.failed
+    }
+    pub(crate) fn bound_frame(&self, side: ServiceSide) -> Result<Frame, HandoffError> {
+        if self.failed || self.closing || !self.matched || self.bound[side.index()] {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Bound(self.id))
+        }
+    }
+    pub(crate) fn bound_written(&mut self, side: ServiceSide) -> Result<(), HandoffError> {
+        if self.bound_frame(side).is_err() {
+            return self.reject();
+        }
+        self.bound[side.index()] = true;
+        Ok(())
+    }
+    pub(crate) fn is_bound(&self) -> bool {
+        !self.failed && !self.closing && self.bound == [true; 2]
+    }
+    pub(crate) fn start_close(&mut self) -> Result<(), HandoffError> {
+        if !self.is_bound() {
+            return self.reject();
+        }
+        self.closing = true;
+        Ok(())
+    }
+    pub(crate) fn close_frame(&self, side: ServiceSide) -> Result<Frame, HandoffError> {
+        if self.failed || !self.closing || self.close_written[side.index()] {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Close(self.id))
+        }
+    }
+    pub(crate) fn close_written(&mut self, side: ServiceSide) -> Result<(), HandoffError> {
+        if self.close_frame(side).is_err() {
+            return self.reject();
+        }
+        self.close_written[side.index()] = true;
+        Ok(())
+    }
+    pub(crate) fn both_acknowledged(&self) -> bool {
+        !self.failed && self.closing && self.acknowledgements == [true; 2]
+    }
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing
+    }
+    pub(crate) fn cancel(&mut self) {
+        self.failed = true;
+    }
+}
 impl Frame {
     fn kind(self) -> u8 {
         match self {
@@ -363,5 +533,104 @@ mod tests {
         cancelled.cancel();
         assert!(cancelled.launched(42, 99).is_err());
         assert!(cancelled.receive(Frame::Offer(id(2))).is_err());
+    }
+    fn matched_server(hello_first: bool) -> ServiceHandoff {
+        let mut server = ServiceHandoff::new(id(1));
+        assert_eq!(server.offer(), Ok(Frame::Offer(id(1))));
+        if hello_first {
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .unwrap();
+        }
+        server.offer_written().unwrap();
+        server
+            .receive(
+                ServiceSide::Starter,
+                Frame::HelperLaunched {
+                    id: id(1),
+                    pid: 42,
+                    created: 99,
+                },
+            )
+            .unwrap();
+        if !hello_first {
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .unwrap();
+        }
+        assert_eq!(server.candidate(), Some((42, 99)));
+        assert!(server.bound_frame(ServiceSide::Starter).is_err());
+        // Synthetic native-match success only. Production calls the original
+        // peer comparator before this phase transition and every Bound operation.
+        server.confirm_match().unwrap();
+        server
+    }
+    #[test]
+    fn server_accepts_both_message_orders_but_never_publishes_one_sided_bound() {
+        for hello_first in [true, false] {
+            let mut server = matched_server(hello_first);
+            assert!(server.is_matched());
+            assert!(!server.is_bound());
+            server.bound_written(ServiceSide::Starter).unwrap();
+            assert!(!server.is_bound());
+            server.bound_written(ServiceSide::Helper).unwrap();
+            assert!(server.is_bound());
+            assert!(server.candidate().is_some());
+            server.cancel();
+            assert!(!server.is_bound());
+            assert!(server.bound_frame(ServiceSide::Starter).is_err());
+        }
+    }
+    #[test]
+    fn server_cannot_close_either_peer_until_both_exact_acknowledgements() {
+        let mut server = matched_server(true);
+        server.bound_written(ServiceSide::Starter).unwrap();
+        server.bound_written(ServiceSide::Helper).unwrap();
+        server.start_close().unwrap();
+        assert!(!server.is_bound());
+        assert!(server.is_closing());
+        server.close_written(ServiceSide::Starter).unwrap();
+        server
+            .receive(ServiceSide::Starter, Frame::CloseAck(id(1)))
+            .unwrap();
+        assert!(!server.both_acknowledged());
+        server.close_written(ServiceSide::Helper).unwrap();
+        assert!(!server.both_acknowledged());
+        server
+            .receive(ServiceSide::Helper, Frame::CloseAck(id(1)))
+            .unwrap();
+        assert!(server.both_acknowledged());
+    }
+    #[test]
+    fn server_rejects_crossed_ids_duplicate_hello_and_ack_without_close() {
+        let mut server = ServiceHandoff::new(id(1));
+        server.offer_written().unwrap();
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(2)))
+                .is_err()
+        );
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .is_err()
+        );
+        let mut server = ServiceHandoff::new(id(1));
+        server
+            .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+            .unwrap();
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .is_err()
+        );
+        let mut server = matched_server(false);
+        assert!(
+            server
+                .receive(ServiceSide::Starter, Frame::CloseAck(id(1)))
+                .is_err()
+        );
+        assert!(!server.both_acknowledged());
+        assert!(!server.is_bound());
     }
 }

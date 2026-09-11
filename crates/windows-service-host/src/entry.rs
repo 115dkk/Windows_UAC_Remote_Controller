@@ -8,7 +8,7 @@ use crate::{
     ffi::win_error,
     native::scm_error,
     runtime::{Worker, WorkerEvent},
-    startup_phase::{ReportPhase, complete_ready_report, worker_finished_outcome},
+    startup_phase::{ReportPhase, worker_finished_outcome},
 };
 use std::{
     ffi::c_void,
@@ -252,12 +252,14 @@ fn lifecycle(
                     // Only platform initialization is released. The original
                     // pending deadline and closed probe/control admission remain.
                 }
-                Some(WorkerEvent::Ready) if !stopping => {
+                Some(WorkerEvent::Ready(request)) if !stopping => {
                     let phase = reporter.phase.ready()?;
-                    complete_ready_report(startup_began, stop_requested, || {
-                        reporter.report(phase, 0, None)
-                    })?;
-                    crate::runtime::PROBE_REQUESTS.enable_after_scm_running();
+                    request.complete_after_report(
+                        startup_began,
+                        stop_requested,
+                        || reporter.report(phase, 0, None),
+                        || crate::runtime::PROBE_REQUESTS.enable_after_scm_running(),
+                    )?;
                     pending_since = None;
                 }
                 Some(WorkerEvent::Finished(result)) => {

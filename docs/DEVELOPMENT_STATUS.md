@@ -7,6 +7,38 @@ experiments and unmerged protocol experiments. New edits require new ROOT checks
 
 ## Latest evidence — September 11
 
+At6fce71e, both complete Windows/Linux code-quality steps passed, including
+Rustfmt, Clippy, tests, real Analyzer and canaries. The overall Quality workflow
+34549153227 remains RED because the later notice collector stopped at block2
+on both hosts. Windows package34549153266, Android package34549153272,
+notification renderer34549153303 and native lifecycle34549153196 passed. No
+original6f native artifact has been downloaded/reparsed as a new review.
+
+The next source slice now implements a service-owned pairing rendezvous after
+the actual full SCM Ready acknowledgement: untimed idle listeners, one original
+five-minute admission window, exact helper identity matching and both CloseAck
+receipts before closing either pipe. The existing Session retains all native
+owners through stop/cancellation/drain. Independent review found a fresh-stop
+gap before SCM StopPending publication; the revised source checks the actual
+stop latch around positive work and retains cleanup availability. ROOT formatting
+passed; new compilation and behavior evidence are still required. This is an
+informational rendezvous, not QR issuance, enrollment or remote-UAC authority.
+
+Original upstream notice assets for UniFFI, NDK and UNIC are being integrated
+with exact package/version/license/source tuples. Further missing materials
+remain unresolved; a source notice inventory is not compatibility clearance.
+
+Latest user steering: if general Codex remaining usage reaches50% before the
+genuine final architecture pass starts, ROOT freezes implementation, preserves a
+committed Claude handoff, creates/runs the repository's desktop bridge, CLEANs
+confirmed reproducible C/E outputs and caches, then ends Codex work. This is an
+explicit exception to the ordinary post-prerelease cleanup timing. Source/Git,
+keys, user data, required evidence and active bridge/project dependencies remain.
+At11:23KST, actual general usage was18% used/82% remaining; no threshold action
+has occurred. The last reset was already redeemed and zero credits remain.
+
+The following591b937 checkpoint is historical and retains its exact scope.
+
 At591b937 the canonical `pair` CLI, original-client-owned helper launch and
 six-frame live rendezvous/terminal consumer are implemented, with ADR0023 and
 bounded-source static review. The actual service pending-slot/endpoint producer,

@@ -27,6 +27,10 @@ pub use pairing_client::{
     PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress,
 };
 #[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_peer::{
+    AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener,
+};
+#[cfg(target_pointer_width = "64")]
 pub use pairing_peer::{
     PairingPeer, PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe,
     PairingPipeProgress, PairingServerEndpoint, PairingServerEndpoints,

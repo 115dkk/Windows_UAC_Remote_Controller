@@ -65,16 +65,49 @@
   Missing, falsified or inconclusive required proofs fail CI. A symbolic proof is
   not evidence of native isolation, hardware authentication or implementation refinement.
 
-## Cleanup only after prerelease publication
+## Conditional Claude handoff and cleanup
 
-- The user requires C: and E: drive cleanup only after a prerelease has actually
+- User steering on 2026-09-11: if the general Codex account bucket reaches
+  50% remaining or less BEFORE the genuine final architecture-refactoring phase
+  starts, freeze this agent's implementation work, write a committed Claude
+  handoff plan, create and run a desktop Claude bridge following the existing
+  desktop bridge pattern, clean confirmed reproducible C:/E: artifacts, then
+  end Codex work. The later user correction explicitly requires CLEANING the
+  drives, not leaving them unchanged. This handoff cleanup is authorized even
+  before prerelease publication and supersedes the ordinary timing rule below.
+- ROOT checks the actual general `codex` usage windows (usedPercent >= 50), not
+  the separate Spark bucket. Missing usage is unknown, not zero. At the last
+  read, general usage was15% used/85% remaining. The final reset credit was
+  already redeemed; no additional reset is authorized/available under that grant.
+- If final architecture refactoring genuinely starts while more than50% remains,
+  ignore this handoff threshold and continue the normal completion workflow.
+  Routine code cleanup or partial-feature refactoring does not qualify. Record
+  a fresh usage observation at that phase boundary; never advance the phase early.
+- Before handoff, ROOT quiesces child writers and records exact branch/commit,
+  dirty state, last real CI/native results, unresolved work, authority limits and
+  ownership. Preserve the complete original objective; handoff is not a claim
+  that the remote-UAC product is complete. Existing one-shot UAC authorization
+  remains consumed/cancelled; Claude requires new authorization for another run.
+- Existing desktop `.cmd` bridges call
+  `C:/Users/32170336/.claude/tools/bridge-up.ps1` with a unique Name and exact Dir.
+  That tool starts Claude `remote-control` with worktree sessions. The new bridge
+  must target this repository, preserve its normal configured authentication and
+  not copy/extract credentials. Handoff instructions/evidence needed in a new
+  worktree must be committed or otherwise explicitly preserved. Do not launch
+  the new bridge early while the threshold is unmet.
+
+## Cleanup timing and safety
+
+- Outside the conditional handoff above, C: and E: drive cleanup follows a prerelease that has actually
   been published, following implementation, final refactoring and validation.
   A draft release or successful build is not publication. This is not authorization to begin
   deleting files during the ongoing programming work to relieve disk pressure.
 - First inventory exact absolute candidates, sizes, ownership and active use.
   Remove only confirmed reproducible build outputs/caches or clearly disposable
   task artifacts; preserve source, git history, keys/certificates, user data,
-  required release files and sufficient validation evidence.
+  required release files, handoff/bridge files and dependencies, and sufficient
+  validation evidence. Do not remove caches or outputs used by active builds,
+  other agents/projects or the newly running Claude bridge.
 - Never recursively delete a drive, home, repository/workspace root, an unverified
   computed target, or a reparse-point destination. Root reviews the exact targets
   and owns deletion verification. Unclear data requires a user decision.

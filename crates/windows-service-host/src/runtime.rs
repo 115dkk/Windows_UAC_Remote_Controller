@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Trusted service worker: lifecycle, protected identity and bounded journal.
-//! It contains no listener, pairing endpoint, prompt adapter or fake UAC.
+//! Pairing rendezvous endpoints are activated only after actual full SCM Ready;
+//! no prompt adapter, consent claim, enrollment or fake UAC is provided.
 #![forbid(unsafe_code)]
 
 use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
-use crate::startup_phase::{RunningRequest, run_platform_step, running_handshake};
+use crate::startup_phase::{
+    ReadyRequest, RunningRequest, ready_handshake, run_platform_step, running_handshake,
+};
 use crate::{
     ProbeSupervisorError, ServiceProbeSupervisor,
     diagnostic::{
@@ -27,7 +30,7 @@ pub(crate) static PROBE_REQUESTS: ProbeAdmission = ProbeAdmission::new();
 pub(crate) enum WorkerEvent {
     Progress,
     ScmRunningRequired(RunningRequest),
-    Ready,
+    Ready(ReadyRequest),
     Finished(Result<(), ServiceError>),
 }
 
@@ -247,9 +250,18 @@ fn run(
                 crate::native::probe_control_registration_ready(_installation.executable())
                     .and_then(|()| directory.probe_slot_available()),
             );
+            let (ready_request, ready_gate) = ready_handshake();
             events
-                .send(WorkerEvent::Ready)
+                .send(WorkerEvent::Ready(ready_request))
                 .map_err(|_| ServiceError::WorkerFailed)?;
+            let ready = ready_gate.wait(startup_began, || cancellation_requested(stop))?;
+            if cancellation_requested(stop) {
+                return Ok(());
+            }
+            session.activate_pairing(ready).map_err(session_error)?;
+            if cancellation_requested(stop) {
+                return Ok(());
+            }
             let mut last_purge = Instant::now();
             loop {
                 if cancellation_requested(stop) {

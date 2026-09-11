@@ -6,8 +6,8 @@
 //! supply a service name, executable, account, credential or freeform command line.
 //! Running means completed local service bootstrap, not remote readiness. Raw
 //! SCM Running without readiness controls projects as product StartPending.
-//! A closed pairing-helper rendezvous consumer exists, but has no GUI/service
-//! pending-slot producer or enrollment authority. Windows prompt, phone pairing,
+//! The service owns a bounded native pairing-helper rendezvous; GUI initiation
+//! and full ceremony/enrollment authority remain separate. Windows prompt, phone pairing,
 //! credential entry and encrypted transport activation remain unimplemented.
 
 #![deny(unsafe_code)]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! One service-worker session. No listener/dialer, carrier IPC, enrollment API,
-//! request-opening API or OS action. Native activation awaits a real carrier.
+//! One service-worker session. Native pairing rendezvous is owned here only
+//! after full SCM Ready; it confers no consent/enrollment/grant. No network
+//! listener/dialer, request-opening API or OS action is activated.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -34,6 +35,9 @@ use tokio::sync::mpsc as async_mpsc;
 use crate::tls_signer::{
     ServiceTlsSigner, ServiceTlsSigningWorker, TlsSigningBridgeError, TlsSigningProgress,
 };
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod pairing;
 
 const MAX_PEERS: usize = framed_transport::MAX_CONNECTIONS;
 const POLL: Duration = Duration::from_millis(25);
@@ -280,6 +284,8 @@ impl SocketClock for ServiceClock {
 /// violation, not an implicit detached shutdown or successful timeout cleanup.
 #[must_use = "retain the session until every actual I/O owner is joined"]
 pub struct ServiceSession<'key> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pairing: pairing::ServicePairing,
     registry: Option<RegistryOwner<'key>>,
     engine: ApprovalEngine,
     key: SessionKey<'key>,
@@ -350,6 +356,8 @@ impl<'key> ServiceSession<'key> {
             return Err(PeerRuntimeError::Identity);
         }
         Ok(Self {
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            pairing: pairing::ServicePairing::dormant(),
             registry: Some(registry),
             engine,
             key,
@@ -369,6 +377,27 @@ impl<'key> ServiceSession<'key> {
             closing: false,
             io_failed: false,
         })
+    }
+
+    /// Only the worker receiving entry's exact full-Ready acknowledgement may
+    /// activate these native endpoints. Shared/test constructors remain dormant.
+    #[cfg(windows)]
+    pub(crate) fn activate_pairing(
+        &mut self,
+        ready: crate::startup_phase::ScmReadyPermit,
+    ) -> Result<(), PeerRuntimeError> {
+        if self.closing {
+            return Err(PeerRuntimeError::Closed);
+        }
+        #[cfg(target_pointer_width = "64")]
+        {
+            self.pairing.activate(ready, self.engine.boot_epoch())
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            let _ = ready;
+            Err(PeerRuntimeError::Io)
+        }
     }
 
     /// Only a sealed native carrier can reach this point. This is not a
@@ -485,6 +514,11 @@ impl<'key> ServiceSession<'key> {
         result
     }
     fn process_live(&mut self) -> Result<SessionProgress, PeerRuntimeError> {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            let now = self.now()?;
+            self.pairing.poll(self.engine.boot_epoch(), now);
+        }
         self.revalidate_peers()?;
         if self.reap_finished() != 0 {
             return Ok(SessionProgress::PeerRetired);
@@ -769,6 +803,8 @@ impl<'key> ServiceSession<'key> {
     }
     pub fn begin_shutdown(&mut self) {
         self.closing = true;
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.pairing.shutdown();
         for peer in &self.peers {
             peer.state.retire();
         }
@@ -780,18 +816,22 @@ impl<'key> ServiceSession<'key> {
     pub fn poll_shutdown(&mut self) -> SessionCleanup {
         self.begin_shutdown();
         self.reap_finished();
-        if self.peers.is_empty() {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.pairing.poll_shutdown();
+            self.io_failed |= self.pairing.cleanup_failed();
+        }
+        let owners = self.peers.len() + self.pairing_owners();
+        if owners == 0 {
             SessionCleanup::Quiescent {
                 io_failed: self.io_failed,
             }
         } else {
-            SessionCleanup::CleanupPending {
-                owners: self.peers.len(),
-            }
+            SessionCleanup::CleanupPending { owners }
         }
     }
     pub fn finish_shutdown(&mut self) -> Result<(), PeerRuntimeError> {
-        if !self.closing || !self.peers.is_empty() {
+        if !self.closing || !self.peers.is_empty() || self.pairing_owners() != 0 {
             return Err(PeerRuntimeError::CleanupPending);
         }
         if let Some(registry) = self.registry.take() {
@@ -799,12 +839,24 @@ impl<'key> ServiceSession<'key> {
         }
         Ok(())
     }
+    fn pairing_owners(&self) -> usize {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.pairing.remaining_owners()
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            0
+        }
+    }
 }
 impl Drop for ServiceSession<'_> {
     fn drop(&mut self) {
         self.begin_shutdown();
         self.reap_finished();
-        if !self.peers.is_empty() {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.pairing.poll_shutdown();
+        if !self.peers.is_empty() || self.pairing_owners() != 0 {
             // Last-resort invariant failure ONLY. No detached reaper, forgotten
             // handle, blocking join, key release, or false quiescence receipt.
             // Actual runtime retains this session across catch/drain instead.
