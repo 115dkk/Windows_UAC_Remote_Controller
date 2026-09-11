@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pairing_scanner_bg">#101a1e</color>
+    <color name="pairing_scanner_surface">#1c2d34</color>
+    <color name="pairing_scanner_text">#edf5f7</color>
+    <color name="pairing_scanner_muted">#adc1c9</color>
+    <color name="pairing_scanner_accent">#75d6df</color>
+    <color name="pairing_scanner_on_accent">#0d282e</color>
+    <color name="pairing_scanner_ripple">#3375d6df</color>
+</resources>

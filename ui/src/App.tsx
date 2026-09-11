@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, ControllerBridge, PairedDeviceView, ServiceAction } from './contracts';
 import { ActivityPanel, DevicesPanel } from './CollectionPanels';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -39,8 +39,28 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
   const newReview = reviewKey !== null && reviewKey !== navigationState.reviewKey;
   if (newReview) setNavigationState({ page: 'requests', reviewKey });
   const page = newReview ? 'requests' : navigationState.page ?? (phone ? 'requests' : 'status');
-  function navigate(next: ClientPage) { setNavigationState({ page: next, reviewKey }); }
+  function navigate(next: ClientPage) {
+    controller.dismissScannerReturnFocus();
+    setNavigationState({ page: next, reviewKey });
+  }
   const disabled = stale || busy !== null;
+  const scannerButton = useRef<HTMLButtonElement>(null);
+  const scannerFocusHandled = useRef({ owner: bridge, revision: 0 });
+  useEffect(() => {
+    if (scannerFocusHandled.current.owner !== bridge) scannerFocusHandled.current = { owner: bridge, revision: 0 };
+    if (controller.scannerFocusRevision <= scannerFocusHandled.current.revision) return;
+    scannerFocusHandled.current.revision = controller.scannerFocusRevision;
+    if (!phone || page !== 'requests') return; // Navigation away consumes the old return intent.
+    const restore = () => {
+      const focused = document.activeElement;
+      if (focused !== document.body && focused !== document.documentElement && focused !== scannerButton.current) return;
+      if (document.visibilityState === 'visible' && document.hasFocus() && !disabled
+        && snapshot?.mobile?.canOpenPairingScanner === true) scannerButton.current?.focus();
+    };
+    restore();
+    window.addEventListener('focus', restore, { once: true });
+    return () => window.removeEventListener('focus', restore);
+  }, [bridge, controller.scannerFocusRevision, disabled, page, phone, snapshot?.mobile?.canOpenPairingScanner]);
   function serviceAction(action: ServiceAction) {
     if (phone) {
       if (action === 'stop') setConfirmation({ title: ko.phoneStopTitle, body: ko.phoneStopBody, confirmLabel: ko.phoneStopAction, onConfirm: () => { void controller.run({ kind: 'service', action: 'stop' }); } });
@@ -82,7 +102,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       <div className={`global-feedback ${busy || notice ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{busy ? (busy === 'policy' ? ko.saving : ko.pending) : notice}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} onAction={serviceAction} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
-      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} />}
+      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onRemove={removeDevice} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {

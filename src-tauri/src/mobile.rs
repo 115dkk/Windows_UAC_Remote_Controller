@@ -25,6 +25,25 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for CommandOrigin {
     }
 }
 
+/// No renderer payload participates in opening the fixed native input surface.
+/// Unlike a Deserialize argument, this checks the entire IPC body and retains none.
+pub(crate) struct ScannerArguments;
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ScannerArguments {
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        if scanner_arguments_empty(command.message.payload()) {
+            Ok(Self)
+        } else {
+            Err(pairing_scanner_issue().into())
+        }
+    }
+}
+fn scanner_arguments_empty(body: &tauri::ipc::InvokeBody) -> bool {
+    matches!(body, tauri::ipc::InvokeBody::Json(serde_json::Value::Null))
+        || matches!(body, tauri::ipc::InvokeBody::Json(serde_json::Value::Object(value)) if value.is_empty())
+}
+
 #[cfg(any(target_os = "android", test))]
 mod snapshot;
 
@@ -93,6 +112,62 @@ pub(crate) fn open_notification_settings(
     {
         let _ = (app, origin);
         Err(mobile_issue())
+    }
+}
+
+const fn pairing_scanner_issue() -> AppIssue {
+    AppIssue {
+        code: "pairing_scanner_unavailable",
+        message: "QR 읽기 화면을 열지 못했어요.",
+        next_action: Some("휴대폰 상태를 다시 확인한 뒤 시도해 주세요."),
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum ScannerLaunchReply {
+    Opened {},
+    Busy {},
+    Unavailable {},
+}
+#[cfg(any(target_os = "android", test))]
+impl ScannerLaunchReply {
+    fn opened(self) -> Result<(), AppIssue> {
+        match self {
+            Self::Opened {} => Ok(()), // Actual native Dialog acknowledgement only.
+            Self::Busy {} => Err(AppIssue {
+                code: "pairing_scanner_busy",
+                message: "앞서 요청한 작업이 아직 끝나지 않았어요.",
+                next_action: Some("작업이 끝난 뒤 QR 읽기를 다시 시도해 주세요."),
+            }),
+            Self::Unavailable {} => Err(pairing_scanner_issue()),
+        }
+    }
+}
+
+pub(crate) fn open_pairing_scanner(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<(), AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let reply: ScannerLaunchReply = app
+            .state::<DeviceState>()
+            .0
+            .run_mobile_plugin_from_origin(&origin.native, "openPairingScanner", ())
+            .map_err(|_| pairing_scanner_issue())?;
+        reply.opened()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, origin);
+        Err(AppIssue {
+            code: "pairing_scanner_unsupported",
+            message: "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있어요.",
+            next_action: Some("Android 휴대폰에서 앱을 열어 주세요."),
+        })
     }
 }
 
@@ -452,8 +527,64 @@ mod tests {
 
     use super::{
         HistoryReply, PolicyReply, RequestActionReply, RequestDetailsReply, RequestReviewReply,
-        RequestsReply, ServiceControlReply,
+        RequestsReply, ScannerLaunchReply, ServiceControlReply,
     };
+
+    #[test]
+    fn scanner_command_has_no_renderer_payload_or_result_authority() {
+        use tauri::ipc::InvokeBody;
+        for body in [
+            InvokeBody::Json(serde_json::Value::Null),
+            InvokeBody::Json(serde_json::json!({})),
+        ] {
+            assert!(super::scanner_arguments_empty(&body));
+        }
+        for body in [
+            InvokeBody::Raw(Vec::new()),
+            InvokeBody::Json(serde_json::json!([])),
+            InvokeBody::Json(serde_json::json!({"qr":"synthetic-input"})),
+            InvokeBody::Json(serde_json::json!({"origin":"current"})),
+            InvokeBody::Json(serde_json::json!({"host":1, "authenticated":true})),
+            InvokeBody::Json(serde_json::json!({"pins":[], "deadline":1})),
+        ] {
+            assert!(!super::scanner_arguments_empty(&body));
+        }
+        let opened: ScannerLaunchReply = serde_json::from_str(r#"{"status":"opened"}"#).unwrap();
+        assert_eq!(opened.opened(), Ok(()));
+        for status in ["busy", "unavailable"] {
+            let reply: ScannerLaunchReply =
+                serde_json::from_value(serde_json::json!({"status":status})).unwrap();
+            let issue = reply.opened().unwrap_err();
+            assert_eq!(
+                issue.code,
+                if status == "busy" {
+                    "pairing_scanner_busy"
+                } else {
+                    "pairing_scanner_unavailable"
+                }
+            );
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"status":"read"}),
+            serde_json::json!({"status":"paired"}),
+            serde_json::json!({"status":"opened", "qr":"synthetic-private-input"}),
+            serde_json::json!({"status":"opened", "pins":[]}),
+            serde_json::json!({"status":"opened", "authenticated":true}),
+            serde_json::json!({"status":"busy", "message":"synthetic-private-error"}),
+        ] {
+            assert!(serde_json::from_value::<ScannerLaunchReply>(body).is_err());
+        }
+        let commands = include_str!("commands.rs");
+        let declaration = commands
+            .split("pub(crate) async fn open_pairing_scanner(")
+            .nth(1)
+            .unwrap();
+        assert!(declaration.contains("origin: crate::mobile::CommandOrigin"));
+        assert!(declaration.contains("_arguments: crate::mobile::ScannerArguments"));
+        assert!(declaration.contains("state.admission.try_enter()"));
+        assert!(declaration.contains("spawn_blocking"));
+    }
 
     #[test]
     fn physical_origin_is_carried_at_both_native_ipc_entries_not_from_json() {

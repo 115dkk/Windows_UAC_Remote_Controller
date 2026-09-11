@@ -25,4 +25,5 @@ export const controllerBridge: ControllerBridge = {
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),
+  openPairingScanner: () => native<void>('open_pairing_scanner'),
 };

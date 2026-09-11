@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Native-only creation/frozen-candidate composition. No UI/startup caller, enrollment proof,
+//! Native-only scan-intent/creation/frozen-candidate composition. No enrollment proof,
 //! separate persistence owner, attestation adjudicator or key-generation retry.
 
 use std::{
@@ -27,13 +27,17 @@ use service_protocol::{
 
 use crate::{BridgeError, MobileController, native_clock::native_callback};
 
+mod native_scan;
+pub use native_scan::{NativePairingScan, NativePairingScanResult};
+
 pub const MAX_CREATION_CERTIFICATES: usize = 8;
 pub const MAX_CREATION_CERTIFICATE_BYTES: usize = 8 * 1024;
 pub const MAX_CREATION_CHAIN_BYTES: usize = 32 * 1024;
 
 /// ORIGINAL trusted-native ceremony inputs, NOT an enrollment witness.
-/// The missing real ceremony owner must establish consent/QR provenance, PC
-/// pins, fresh non-reused CSPRNG handle/nonce/challenge and the original lifetime.
+/// The native ceremony owner must establish QR provenance and retain the
+/// original PC invitation's nonce/challenge/pins and lifetime. Only the LOCAL
+/// key handle is freshly CSPRNG-generated here; PC fields are never regenerated.
 /// `recipient_device` is the fresh PC-selected ID from the ORIGINAL invitation,
 /// never a receipt assignment. `invitation_context` must be computed from that
 /// canonical original invitation, never replaced with a zero/default digest.
@@ -419,7 +423,8 @@ impl fmt::Debug for CreatedPairingCommitError {
 }
 
 // Deliberately NOT #[uniffi::export]: only future trusted native Rust ceremony
-// composition may start/finish this flow. No UI, boot or Activity caller exists.
+// composition may start/finish this flow. Native scan acceptance below composes
+// only its existing intent; boot/renderer input cannot activate key generation.
 impl MobileController {
     pub fn begin_key_creation_from_trusted_host(
         self: &Arc<Self>,

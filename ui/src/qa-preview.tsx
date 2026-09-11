@@ -11,6 +11,6 @@ if (import.meta.env.MODE !== 'qa' || '__TAURI_INTERNALS__' in window) {
 }
 
 const selected = qaCase(new URLSearchParams(window.location.search).get('case') ?? 'desktop-empty');
-const bridge = createQaBridge(selected.snapshot);
+const bridge = createQaBridge(selected.snapshot, selected.scannerFailure);
 const root = document.getElementById('root');
 if (root) createRoot(root).render(<div className="qa-frame"><aside className="qa-label" aria-label={ko.exampleDescription}>{ko.example}</aside><App bridge={bridge} initialPage={selected.page} /></div>);

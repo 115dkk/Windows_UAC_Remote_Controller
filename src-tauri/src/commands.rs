@@ -304,3 +304,21 @@ pub(crate) async fn open_notification_settings(
     .await
     .map_err(|_| worker_issue())?
 }
+
+#[tauri::command]
+pub(crate) async fn open_pairing_scanner(
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
+    _arguments: crate::mobile::ScannerArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<(), AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        // Released on the native Dialog's opened/busy/unavailable reply, not on
+        // camera completion. No QR, key, expected tuple or result body returns.
+        crate::mobile::open_pairing_scanner(&app, &origin)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}

@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { galleryCases } from './cases';
+import type { GalleryCase } from './cases';
 import { test, expect } from './session';
 import { registerPhoneServiceGallery } from './phone-service';
 import { recordClientFontProof } from './font-proof';
 
 registerPhoneServiceGallery(test);
 
-for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-service-'))) {
+// CLIENT/SYNTHETIC launch controls only. No camera preview, permission UI, QR or
+// native read result is rendered by this gallery adapter.
+const scannerLaunchCases: readonly GalleryCase[] = [
+  { id: 'client-scanner-launch-390', fixture: 'phone-scanner-launch', viewport: { width: 390, height: 844 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
+  { id: 'client-scanner-launch-unavailable-320', fixture: 'phone-scanner-unavailable-catalog', viewport: { width: 320, height: 740 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
+  { id: 'client-scanner-launch-landscape-844', fixture: 'phone-scanner-launch', viewport: { width: 844, height: 390 }, colorScheme: 'dark', forcedColors: 'none', action: 'overview' },
+  { id: 'client-scanner-launch-text-size-200-390', fixture: 'phone-scanner-launch', viewport: { width: 390, height: 844 }, colorScheme: 'light', forcedColors: 'none', action: 'overview', rootTextSizePercent: 200 },
+  { id: 'client-scanner-launch-error-320', fixture: 'phone-scanner-launch-error', viewport: { width: 320, height: 740 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
+];
+
+for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('phone-service-')), ...scannerLaunchCases]) {
   test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
@@ -100,12 +111,13 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
       await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toHaveCount(0);
     }
+    if (fixture.startsWith('desktop-')) await expect(page.locator('button[data-pairing-scanner="open"]')).toHaveCount(0);
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
     if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
       await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
     }
 
-    if (selected.id === 'desktop-running-minimum-760' || selected.rootTextSizePercent === 200) {
+    if (selected.id === 'desktop-running-minimum-760' || (selected.rootTextSizePercent === 200 && fixture.startsWith('desktop-'))) {
       if (selected.rootTextSizePercent === 200) {
         await expect(page.locator('html')).toHaveCSS('font-size', '32px');
         const rail = page.locator('.desktop-shell .navigation-shell');
@@ -273,6 +285,38 @@ for (const selected of galleryCases.filter((item) => !item.id.startsWith('phone-
     if (selected.id === 'phone-pending-landscape-844') {
       await page.getByRole('button', { name: '승인', exact: true }).scrollIntoViewIfNeeded();
       await gallery.capture('landscape-actions', '가로 클라이언트 화면에서 요청 동작 접근 · 실제 기기 아님');
+    }
+    if (selected.id.startsWith('client-scanner-launch-')) {
+      const entry = page.getByRole('button', { name: 'PC 연결 QR 읽기', exact: true });
+      await expect(entry).toHaveAttribute('data-pairing-scanner', 'open');
+      await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button', { name: '연결된 PC', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'PC 연결', exact: true })).toHaveCount(0);
+      await entry.scrollIntoViewIfNeeded();
+      await entry.focus();
+      await expect(entry).toBeFocused();
+      await expect(entry).toBeInViewport({ ratio: 1 });
+      const box = await entry.boundingBox();
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(48);
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(48);
+      const text = await entry.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth,
+        height: element.clientHeight, scrollHeight: element.scrollHeight }));
+      expect(text.scrollWidth).toBeLessThanOrEqual(text.width + 1);
+      expect(text.scrollHeight).toBeLessThanOrEqual(text.height + 1);
+      if (selected.rootTextSizePercent === 200) await expect(page.locator('html')).toHaveCSS('font-size', '32px');
+      await gallery.capture('client-scanner-entry', 'CLIENT/SYNTHETIC · QR 입력 화면 열기 제어, 실제 카메라 아님');
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('button', { name: '다시 확인', exact: true })).toBeEnabled();
+      await expect(entry).toBeEnabled();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await expect(page.getByText('PC 연결 QR을 읽었어요.', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('상태를 새로 확인했어요.', { exact: true })).toHaveCount(0);
+      if (fixture === 'phone-scanner-launch-error') {
+        const error = page.getByRole('alert').filter({ hasText: 'QR 읽기 화면을 열지 못했어요.' });
+        await expect(error).toContainText('휴대폰 상태를 다시 확인한 뒤 시도해 주세요.');
+        await error.scrollIntoViewIfNeeded();
+        await expect(error).toBeInViewport({ ratio: 1 });
+      }
+      await gallery.capture('client-scanner-launch-result', 'CLIENT/SYNTHETIC · 열기 응답/실패만 모의, QR 읽기·연결 완료 증거 아님');
     }
   });
 }

@@ -33,6 +33,8 @@ export interface MobileReadiness {
   readonly notifications: 'allowed' | 'denied' | 'unavailable';
   readonly canOpenLockSettings: boolean;
   readonly canOpenNotificationSettings: boolean;
+  /** Native camera-input entry only, not pairing or an already-granted permission. */
+  readonly canOpenPairingScanner: boolean;
 }
 export interface PairedDeviceView {
   readonly id: string;
@@ -105,4 +107,5 @@ export interface ControllerBridge {
   clearActivity(): Promise<AppSnapshot>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;
+  openPairingScanner(): Promise<void>;
 }

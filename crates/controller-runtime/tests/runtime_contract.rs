@@ -413,6 +413,7 @@ fn android_lock_configured_missing_and_unavailable_remain_distinct() {
             notifications: NotificationPermission::Denied,
             can_open_lock_settings: true,
             can_open_notification_settings: false,
+            can_open_pairing_scanner: false,
         };
         runtime
             .update_mobile_readiness_from_native(readiness)
@@ -499,6 +500,7 @@ fn native_mobile_readiness_input_is_rejected_on_windows() {
                 notifications: NotificationPermission::Allowed,
                 can_open_lock_settings: true,
                 can_open_notification_settings: true,
+                can_open_pairing_scanner: true,
             })
             .expect_err("not Android")
             .code,
@@ -536,18 +538,20 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
         notifications: NotificationPermission::Allowed,
         can_open_lock_settings: true,
         can_open_notification_settings: false,
+        can_open_pairing_scanner: true,
     };
     assert_eq!(
         serde_json::to_value(readiness).expect("readiness JSON"),
         json!({
             "screenLock": "configured", "notifications": "allowed", "canOpenLockSettings": true,
-            "canOpenNotificationSettings": false
+            "canOpenNotificationSettings": false, "canOpenPairingScanner": true
         })
     );
     assert!(
         serde_json::from_value::<MobileReadiness>(json!({
             "screenLock": "configured", "notifications": "allowed", "canOpenLockSettings": true,
             "canOpenNotificationSettings": false,
+            "canOpenPairingScanner": true,
             "authenticated": true
         }))
         .is_err()
@@ -558,6 +562,47 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
         }))
         .is_err()
     );
+}
+
+#[test]
+fn scanner_readiness_is_required_native_input_only_and_never_enables_pairing() {
+    let record = json!({
+        "screenLock": "configured", "notifications": "allowed",
+        "canOpenLockSettings": false, "canOpenNotificationSettings": false,
+        "canOpenPairingScanner": true
+    });
+    for available in [false, true] {
+        let mut input = record.clone();
+        input["canOpenPairingScanner"] = json!(available);
+        let readiness: MobileReadiness = serde_json::from_value(input).unwrap();
+        let snapshot = controller_runtime::AppSnapshot::from_android_policy(
+            controller_runtime::NotificationPolicy::default(),
+            readiness,
+        );
+        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.mobile.unwrap().can_open_pairing_scanner, available);
+        assert!(!snapshot.can_pair && !snapshot.can_unpair);
+        assert!(snapshot.devices.is_empty());
+        assert_eq!(
+            snapshot.data_availability.devices,
+            controller_runtime::Availability::Unavailable
+        );
+    }
+    let mut missing = record.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("canOpenPairingScanner");
+    assert!(serde_json::from_value::<MobileReadiness>(missing).is_err());
+    for invalid in [json!(null), json!("true"), json!(1), json!({})] {
+        let mut input = record.clone();
+        input["canOpenPairingScanner"] = invalid;
+        assert!(serde_json::from_value::<MobileReadiness>(input).is_err());
+    }
+    let mut extra = record;
+    extra["qr"] = json!("synthetic-untrusted-input");
+    assert!(serde_json::from_value::<MobileReadiness>(extra).is_err());
+    assert!(!MobileReadiness::UNAVAILABLE.can_open_pairing_scanner);
 }
 
 #[test]

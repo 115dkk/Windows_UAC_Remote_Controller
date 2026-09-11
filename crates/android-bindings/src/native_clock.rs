@@ -136,8 +136,14 @@ impl ProjectionAnchor {
             floor: AtomicU64::new(self.native),
         })
     }
+    /// Start coordinate belonging to this exact native observation. Only native
+    /// Rust owners use it to retain an original interval before external delays.
+    pub(crate) fn coordinate(self) -> Instant {
+        self.coordinate
+    }
 }
-/// ONE instance per socket. Never shares the business owner's serialized floor.
+/// ONE instance per socket or dedicated bounded native ceremony. Never shares
+/// another operation's clock floor or the business owner's serialized floor.
 pub(crate) struct NativeSocketClock {
     anchor: ProjectionAnchor,
     platform: Arc<dyn NativePlatform>,

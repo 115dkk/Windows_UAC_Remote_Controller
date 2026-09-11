@@ -135,6 +135,17 @@ contrast after rendering; values above are design intent, not a passed audit.
 - Every icon has one purpose; use local SVG shapes, not emoji or icon-only labels
   without accessible names. Decorative shapes have no focus/interaction role.
 
+## Native QR input mapping
+
+The Android camera input step is a native full-screen Dialog owned by the current
+MainActivity. It reuses the color roles above through scanner-specific Android
+resources, with wrapped text, system insets and48dp minimum labelled actions.
+Native controls follow Android text scaling and Korean-capable system typography;
+the embedded client continues to use the bundled IBM Plex Sans KR family.
+The preview may shrink while instructions and close/recovery stay reachable.
+No new animation, haptic, decorative palette or simulated connection state is
+introduced. A camera launch and a read QR are separate from a paired PC.
+
 ## Motion
 
 --motion-fast 140ms, --motion-normal 200ms, --ease-standard cubic-bezier(.2,0,0,1).

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useEffect, useId, useRef } from 'react';
+import type { Ref } from 'react';
 import type { AppSnapshot, ControllerBridge, RequestView } from './contracts';
 import { Icon } from './icons';
 import { ko, remainingLabel } from './messages.ko';
@@ -32,10 +33,12 @@ function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen
   </article>;
 }
 
-export function RequestPanel({ snapshot, disabled, onDecision, readDetails }: {
+interface RequestPanelProps {
   snapshot: AppSnapshot; disabled: boolean; onDecision: (requestId: string, decision: 'approve' | 'deny') => void;
   readDetails: ControllerBridge['requestDetails'];
-}) {
+}
+
+function RequestContents({ snapshot, disabled, onDecision, readDetails }: RequestPanelProps) {
   if (snapshot.requestCatalog?.status === 'reconciling') return <EmptyState icon="request" title={ko.requestReconciling} description={ko.requestReconcilingBody} />;
   if (snapshot.dataAvailability.requests !== 'available') return <EmptyState icon="request" title={ko.requestUnavailable} description={ko.requestUnavailableBody} />;
   if (!snapshot.requests.length && snapshot.requestCatalog?.peerCount === 0) return <EmptyState icon="pc" title={ko.noComputers} description={ko.pairingUnavailable} />;
@@ -47,4 +50,13 @@ export function RequestPanel({ snapshot, disabled, onDecision, readDetails }: {
     const review = snapshot.requestReview?.locator === request.id ? snapshot.requestReview : null;
     return <RequestCard key={`${request.id}:${review?.revision ?? ''}`} request={request} disabled={disabled} onDecision={onDecision} readDetails={readDetails} initiallyOpen={review !== null} />;
   })}</div>;
+}
+
+export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOpenScanner, scannerButtonRef }:
+  RequestPanelProps & { onOpenScanner: () => void; scannerButtonRef: Ref<HTMLButtonElement> }) {
+  const scannerAvailable = snapshot.platform === 'android' && snapshot.mobile?.canOpenPairingScanner === true;
+  return <>
+    <RequestContents snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={onDecision} />
+    {scannerAvailable && <div className="collection-actions"><button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button secondary" disabled={disabled} onClick={onOpenScanner}>{ko.openPairingScanner}</button></div>}
+  </>;
 }

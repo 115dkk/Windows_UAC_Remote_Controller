@@ -39,10 +39,13 @@ import dev.dkk115.uacremote.background.NativeRequestReadReply
 import dev.dkk115.uacremote.background.NativeRequestReview
 import dev.dkk115.uacremote.background.NativeRequestRules
 import java.lang.ref.WeakReference
+import dev.dkk115.uacremote.pairing.PairingScannerDialog
+import dev.dkk115.uacremote.pairing.PairingScannerLaunch
 
 /** One Application owner; Direct Boot construction does not touch CE/Rust/keys. */
 class ControllerApplication : Application() {
     @Volatile private var policyActor: ApplicationPolicyActor? = null
+    private var pairingScanner: PairingScannerDialog? = null // main only, retained through cleanup
     private val main = Handler(Looper.getMainLooper())
     private val readLock = Any()
     private val pendingReads = ArrayList<PendingRead>()
@@ -71,6 +74,7 @@ class ControllerApplication : Application() {
         override fun onActivityPostResumed(activity: Activity) {
             if (activity is MainActivity) {
                 resumedControllerHost.resumed(activity)
+                pairingScanner?.takeIf { it.activity === activity }?.hostResumed()
                 policyActor?.maintainRequests()
                 dispatchNotificationRoute(activity)
             }
@@ -78,6 +82,7 @@ class ControllerApplication : Application() {
         override fun onActivityPrePaused(activity: Activity) { clearHost(activity) }
         override fun onActivityDestroyed(activity: Activity) { clearHost(activity) }
         private fun clearHost(activity: Activity) {
+            pairingScanner?.takeIf { it.activity === activity }?.hostPaused()
             resumedControllerHost.pausedOrDestroyed(activity)
             bootRegistration.hostRetired(activity)
             if (routeHost?.get() === activity) { routeHost = null; pendingRoute = null }
@@ -138,6 +143,53 @@ class ControllerApplication : Application() {
         val current = currentResumedControllerHost() as? MainActivity ?: return false
         return current === activity && current.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
     }
+
+    internal fun canOpenPairingScanner(activity: MainActivity): Boolean {
+        if (!isCurrentForegroundControllerHost(activity) || pairingScanner != null || activity.pairingPermissionPending() ||
+            !serviceWanted || serviceToken == null || explicitStopRequested || !controllerBootActivationEnabled()) return false
+        val actor = policyActor ?: return false
+        if (actor.lifecyclePhase() != PolicyOwnerPhase.READY || actor.hasPendingPairingScan()) return false
+        return try {
+            getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure == true &&
+                ControllerForegroundService.observeUnlock(this) == UserUnlockObservation.UNLOCKED &&
+                packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
+        } catch (_: Exception) { false }
+    }
+
+    /** Zero-payload native opening. The original physical binding is retained only as liveness. */
+    internal fun openPairingScanner(activity: MainActivity, origin: Any, originCurrent: () -> Boolean,
+        callback: (PairingScannerLaunch) -> Unit) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!isCurrentForegroundControllerHost(activity) || !originCurrent()) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+        if (pairingScanner != null || activity.pairingPermissionPending() || policyActor?.hasPendingPairingScan() == true) {
+            callback(PairingScannerLaunch.BUSY); return
+        }
+        val actor = policyActor
+        if (actor == null || !canOpenPairingScanner(activity)) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+        val flow = try { PairingScannerDialog(activity, origin, actor,
+            { policyActor === actor && actor.lifecyclePhase() == PolicyOwnerPhase.READY &&
+                serviceWanted && serviceToken != null && !explicitStopRequested && controllerBootActivationEnabled() &&
+                isCurrentForegroundControllerHost(activity) && originCurrent() },
+            { finished -> if (pairingScanner === finished) {
+                pairingScanner = null
+                // One zero-payload snapshot invalidation after ACTUAL release,
+                // never to a replacement Activity/WebView or while resources remain.
+                if (isCurrentForegroundControllerHost(activity) && originCurrent()) requestSnapshotChanged()
+            } }) } catch (_: Exception) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+        pairingScanner = flow
+        try {
+            val opened = flow.show()
+            if (!opened || !flow.isShowing() || !isCurrentForegroundControllerHost(activity) || !originCurrent()) {
+                flow.close(); callback(PairingScannerLaunch.UNAVAILABLE)
+            } else callback(PairingScannerLaunch.OPENED)
+        } catch (_: Exception) { flow.close(); callback(PairingScannerLaunch.UNAVAILABLE) }
+    }
+
+    internal fun retirePairingScanner(activity: MainActivity, origin: Any) {
+        pairingScanner?.takeIf { it.belongsTo(activity, origin) }?.close()
+    }
+    internal fun pairingScannerHostStopped(activity: MainActivity) { pairingScanner?.takeIf { it.activity === activity }?.close() }
+    internal fun pairingScannerRotationChanged(activity: MainActivity) { pairingScanner?.takeIf { it.activity === activity }?.rotationChanged() }
 
     /** Native listener gets an empty wake only; sticky review is read separately. */
     internal fun observeRequestChanges(activity: Activity, listener: (() -> Unit)?) {
@@ -429,6 +481,7 @@ class ControllerApplication : Application() {
 
     private fun ownerPhaseChanged(actor: ApplicationPolicyActor, phase: PolicyOwnerPhase) {
         if (policyActor !== actor) return
+        if (phase != PolicyOwnerPhase.READY) pairingScanner?.close()
         if (phase == PolicyOwnerPhase.FAILED) {
             ownerFailed = true
             if (!explicitReplacement) mayReplaceClosed = false

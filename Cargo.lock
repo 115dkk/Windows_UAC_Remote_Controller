@@ -75,6 +75,7 @@ dependencies = [
  "approval-protocol",
  "controller-runtime",
  "framed-transport",
+ "getrandom 0.3.4",
  "libc",
  "notification-policy",
  "p256",

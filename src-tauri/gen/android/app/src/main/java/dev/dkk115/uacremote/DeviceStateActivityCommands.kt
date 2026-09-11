@@ -49,6 +49,7 @@ internal class DeviceStateActivityCommands(
             webView.context === activity && !activity.isDestroyed && !activity.isFinishing
     internal fun retire() {
         binding.retire()
+        (activity.application as? ControllerApplication)?.retirePairingScanner(activity, binding)
         (activity.application as? ControllerApplication)?.observeRequestChanges(activity, null)
     }
 
@@ -380,7 +381,23 @@ internal class DeviceStateActivityCommands(
             result.put("notifications", observation.notifications.wireValue)
             result.put("canOpenLockSettings", observation.canOpenLockSettings)
             result.put("canOpenNotificationSettings", observation.canOpenNotificationSettings)
+            result.put("canOpenPairingScanner", isForeground() &&
+                (activity.application as? ControllerApplication)?.canOpenPairingScanner(activity) == true)
             invoke.resolve(result)
+        }
+    }
+
+    fun openPairingScanner(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        activity.runOnUiThread {
+            val owner = activity.application as? ControllerApplication
+            fun reply(status: dev.dkk115.uacremote.pairing.PairingScannerLaunch) {
+                val value = if (isForeground()) status else dev.dkk115.uacremote.pairing.PairingScannerLaunch.UNAVAILABLE
+                val result = JSObject(); result.put("status", value.wireValue)
+                try { invoke.resolve(result) } catch (_: Exception) { }
+            }
+            if (owner == null || !isForeground()) reply(dev.dkk115.uacremote.pairing.PairingScannerLaunch.UNAVAILABLE)
+            else owner.openPairingScanner(activity, binding, ::isForeground, ::reply)
         }
     }
 

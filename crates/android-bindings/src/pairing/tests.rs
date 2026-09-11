@@ -466,7 +466,7 @@ fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptanc
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let f = Fixture::new();
-    assert_eq!(bridge_version(), 9);
+    assert_eq!(bridge_version(), 10);
     let before = f.bytes();
     let intent = f.intent();
     assert_eq!(f.bytes(), before);

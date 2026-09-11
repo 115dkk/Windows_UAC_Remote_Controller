@@ -145,6 +145,8 @@ pub struct MobileReadiness {
     pub notifications: NotificationPermission,
     pub can_open_lock_settings: bool,
     pub can_open_notification_settings: bool,
+    /// Native camera-input entry only, never complete pairing or permission proof.
+    pub can_open_pairing_scanner: bool,
 }
 
 impl MobileReadiness {
@@ -153,6 +155,7 @@ impl MobileReadiness {
         notifications: NotificationPermission::Unavailable,
         can_open_lock_settings: false,
         can_open_notification_settings: false,
+        can_open_pairing_scanner: false,
     };
 }
 

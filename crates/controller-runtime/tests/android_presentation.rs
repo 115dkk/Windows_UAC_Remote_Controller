@@ -25,6 +25,7 @@ fn native_policy_presentation_does_not_invent_request_owners_or_a_missing_lock()
         notifications: NotificationPermission::Denied,
         can_open_lock_settings: false,
         can_open_notification_settings: true,
+        can_open_pairing_scanner: false,
     };
     assert_eq!(
         AppSnapshot::from_android_policy(NotificationPolicy::default(), readiness).mobile,

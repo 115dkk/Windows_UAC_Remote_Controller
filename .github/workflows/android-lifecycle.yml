@@ -39,7 +39,7 @@ jobs:
       - name: Install locked client/build dependencies
         run: npm ci
       - name: Test host guards and exact ABI selection (no device)
-        run: node --test tools/android-lifecycle-ci.test.mjs tools/android-abi.test.mjs tools/android-core-check.test.mjs tools/build-android-bindings.test.mjs tools/verify-android-apk.test.mjs tools/verify-android-boot-manifest.test.mjs
+        run: node --test tools/android-lifecycle-ci.test.mjs tools/android-pairing-scan-ci.test.mjs tools/android-abi.test.mjs tools/android-core-check.test.mjs tools/build-android-bindings.test.mjs tools/verify-android-apk.test.mjs tools/verify-android-boot-manifest.test.mjs
       - name: Record source inputs before any APK build
         run: node tools/android-lifecycle-ci.mjs --prepare
       - name: Install pinned Android build inputs
@@ -127,6 +127,7 @@ jobs:
       - name: Allow disposable CI emulator acceleration
         run: sudo chmod 0666 /dev/kvm
       - name: Test actual foreground owner, reboot and package replacement
+        id: lifecycle
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0, Node 24
         with:
           api-level: 36
@@ -136,8 +137,10 @@ jobs:
           avd-name: uac-lifecycle-ci-36-x86_64
           emulator-port: 5554
           disable-animations: true
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
-          script: node tools/android-lifecycle-ci.mjs
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated
+          # Preserve every original lifecycle/first-unlock check and its limits.
+          # The separately bounded scanner step uses that same unlocked fixture.
+          script: node tools/android-lifecycle-ci.mjs && node tools/android-pairing-scan-ci.mjs
       - name: Retain exact APKs and lifecycle evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
@@ -146,5 +149,13 @@ jobs:
           path: |
             target/android-lifecycle-ci/
             src-tauri/gen/android/app/build/outputs/apk/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain native scanner checks and no-QR view renders separately
+        if: ${{ always() && (steps.lifecycle.outcome == 'success' || hashFiles('target/android-pairing-scan-ci/**') != '') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: android-pairing-scan-${{ github.sha }}
+          path: target/android-pairing-scan-ci/
           if-no-files-found: error
           retention-days: 14

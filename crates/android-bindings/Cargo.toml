@@ -23,6 +23,7 @@ notification-policy = { path = "../notification-policy" }
 controller-runtime = { path = "../controller-runtime" }
 secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }
+getrandom.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uniffi = { version = "=0.32.0", default-features = false }

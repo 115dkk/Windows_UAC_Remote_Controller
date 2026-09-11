@@ -12,7 +12,8 @@ export type ClientCommand =
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
-  | { readonly kind: 'notification-settings' };
+  | { readonly kind: 'notification-settings' }
+  | { readonly kind: 'scan_pairing' };
 
 interface ViewState {
   readonly owner: ControllerBridge;
@@ -23,10 +24,11 @@ interface ViewState {
   readonly error: string | null;
   readonly notice: string | null;
   readonly requestObservedAt: number;
+  readonly scannerFocusRevision: number;
 }
 
 function emptyState(owner: ControllerBridge): ViewState {
-  return { owner, snapshot: null, refreshing: true, busy: null, stale: false, error: null, notice: null, requestObservedAt: 0 };
+  return { owner, snapshot: null, refreshing: true, busy: null, stale: false, error: null, notice: null, requestObservedAt: 0, scannerFocusRevision: 0 };
 }
 
 async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
@@ -61,10 +63,11 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
     case 'policy': return snapshot.platform === 'android' && snapshot.policy !== null && snapshot.phoneService?.policyOwnerReady === true;
     case 'lock-settings': return snapshot.mobile?.screenLock === 'missing' && snapshot.mobile.canOpenLockSettings;
     case 'notification-settings': return snapshot.platform === 'android' && snapshot.mobile?.notifications === 'denied' && snapshot.mobile.canOpenNotificationSettings;
+    case 'scan_pairing': return snapshot.platform === 'android' && snapshot.mobile?.canOpenPairingScanner === true;
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return bridge.beginPairing();
@@ -75,6 +78,11 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
   }
 }
 
+function scannerFailure(error: unknown): string {
+  const code = error !== null && typeof error === 'object' && 'code' in error ? error.code : null;
+  return code === 'pairing_scanner_busy' || code === 'app_busy' ? ko.pairingScannerBusy : ko.pairingScannerFailure;
+}
+
 export function useController(bridge: ControllerBridge) {
   const [state, setState] = useState<ViewState>(() => emptyState(bridge));
   const current = useRef<ViewState>(state);
@@ -82,6 +90,21 @@ export function useController(bridge: ControllerBridge) {
   const liveOwner = useRef<ControllerBridge | null>(null);
   const readPending = useRef(false);
   const commandPending = useRef(false);
+  const scannerReturn = useRef({ pending: false, opened: false, wake: false });
+  const scannerFocusRevision = useRef(0);
+  const dismissScannerReturnFocus = useCallback(() => {
+    scannerReturn.current = { pending: false, opened: false, wake: false };
+  }, []);
+
+  const scannerReturnRevision = useCallback((snapshot: AppSnapshot) => {
+    const flow = scannerReturn.current;
+    if (flow.pending && flow.opened && flow.wake && snapshot.platform === 'android'
+      && snapshot.mobile?.canOpenPairingScanner === true) {
+      scannerReturn.current = { pending: false, opened: false, wake: false };
+      scannerFocusRevision.current += 1;
+    }
+    return scannerFocusRevision.current;
+  }, []);
 
   const publish = useCallback((next: ViewState) => {
     current.current = next;
@@ -97,7 +120,7 @@ export function useController(bridge: ControllerBridge) {
     try {
       const snapshot = await readSnapshot(bridge);
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now() });
+      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
     } catch {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
       const latest = current.current;
@@ -105,7 +128,7 @@ export function useController(bridge: ControllerBridge) {
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
     }
-  }, [bridge, publish]);
+  }, [bridge, publish, scannerReturnRevision]);
 
   const run = useCallback(async (command: ClientCommand): Promise<AppSnapshot | null> => {
     const previous = current.current;
@@ -118,10 +141,25 @@ export function useController(bridge: ControllerBridge) {
       return null;
     }
     commandPending.current = true;
+    if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
+    else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
     readPending.current = false;
     const attempt = ++revision.current; // A command supersedes an older snapshot request.
     publish({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
+    let scannerOpened = false;
     try {
+      if (command.kind === 'scan_pairing') {
+        await bridge.openPairingScanner();
+        scannerOpened = true;
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        scannerReturn.current.opened = true;
+        // Dialog acknowledgement is input-entry only. Refresh native capability,
+        // never invent a paired PC, a read result or a success notification.
+        const snapshot = await readSnapshot(bridge);
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
+        return null;
+      }
       if (command.kind === 'lock-settings' || command.kind === 'notification-settings') {
         if (command.kind === 'lock-settings') await bridge.openLockSettings();
         else await bridge.openNotificationSettings();
@@ -133,17 +171,30 @@ export function useController(bridge: ControllerBridge) {
       const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       // Native cancellation and errors are AppIssue results, never local success.
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now() });
+      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
       return snapshot.issue ? null : snapshot;
-    } catch {
+    } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+      if (command.kind === 'scan_pairing' && !scannerOpened) {
+        scannerReturn.current = { pending: false, opened: false, wake: false };
+        const error = scannerFailure(failure);
+        let snapshot: AppSnapshot | null = null;
+        try { snapshot = await readSnapshot(bridge); } catch { /* Keep recovery, never raw native errors. */ }
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        const latest = current.current;
+        publish({ ...latest, snapshot: snapshot ?? (latest.snapshot ? withoutRequestBodies(latest.snapshot) : null),
+          refreshing: false, busy: null, stale: snapshot === null, error, notice: null,
+          requestObservedAt: snapshot ? performance.now() : latest.requestObservedAt });
+        return null;
+      }
       const latest = current.current;
-      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true, error: command.kind === 'policy' ? ko.saveFailure : ko.actionFailure, notice: null });
+      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
+        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' ? ko.saveFailure : ko.actionFailure, notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
     }
-  }, [bridge, publish, refresh]);
+  }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision]);
 
   useEffect(() => {
     const snapshot = state.snapshot;
@@ -162,10 +213,17 @@ export function useController(bridge: ControllerBridge) {
     liveOwner.current = bridge;
     readPending.current = false;
     commandPending.current = false;
+    scannerReturn.current = { pending: false, opened: false, wake: false };
+    scannerFocusRevision.current = 0;
     // Defer the initial presentation update; the first render already is loading.
     void Promise.resolve().then(() => refresh());
     const onForeground = () => {
-      if (document.visibilityState === 'visible') void refresh();
+      if (document.visibilityState === 'visible') {
+        // The empty native event is an invalidation, not a closed/paired result.
+        // A later true capability confirms no active native scan before focus.
+        if (scannerReturn.current.pending) scannerReturn.current.wake = true;
+        void refresh();
+      }
       else if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
     };
     let disposed = false;
@@ -188,5 +246,5 @@ export function useController(bridge: ControllerBridge) {
     };
   }, [bridge, publish, refresh]);
 
-  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run };
+  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, dismissScannerReturnFocus };
 }

@@ -11,12 +11,19 @@ import dev.dkk115.uacremote.nativecore.MobileController
 import dev.dkk115.uacremote.nativecore.bridgeVersion
 import dev.dkk115.uacremote.nativecore.uniffiEnsureInitialized
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
+import dev.dkk115.uacremote.nativecore.NativePairingScan
+import dev.dkk115.uacremote.nativecore.NativePairingScanResult
+import dev.dkk115.uacremote.pairing.PairingScanTicket
+import dev.dkk115.uacremote.pairing.PairingScanStart
+import dev.dkk115.uacremote.pairing.PairingScanRead
+import dev.dkk115.uacremote.pairing.PairingScanRules
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * One Application-lifetime worker and one real generated controller. No Activity,
@@ -37,6 +44,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
     )
     // Worker-thread-only. Never expose/clone this generated handle.
     private var controller: MobileController? = null
+    private class PairingJob(val ticket: PairingScanTicket, val released: () -> Unit) {
+        val scan = AtomicReference<NativePairingScan?>(null)
+        val pending = AtomicBoolean(true)
+        val accepted = AtomicBoolean(false)
+        val cleanup = DenialCloseCursor(1)
+    }
+    private val pairingJob = AtomicReference<PairingJob?>(null)
     // Retain even if the Rust constructor fails after partially reopening keys.
     // This adapter owns only its own in-process references, never aliases.
     private val platform = AndroidNativePlatform(application)
@@ -92,6 +106,117 @@ internal class ApplicationPolicyActor(private val application: Application) {
     internal fun validRequestReply(value: NativeRequestPayload): Boolean = requests.validReply(value)
     internal fun maintainRequests() = requests.progress()
     internal fun invalidateRequestTime() { platform.invalidateRequestTime(); requests.progress() }
+
+    internal fun hasPendingPairingScan(): Boolean = pairingJob.get() != null
+
+    /** One fixed native scan operation on the existing worker, never a second owner. */
+    internal fun beginPairingScan(ticket: PairingScanTicket, callback: (PairingScanStart) -> Unit, released: () -> Unit): Boolean {
+        if (ticket.isCancelled() || lifecycle.phase() != PolicyOwnerPhase.READY) {
+            pairingReply { callback(PairingScanStart.UNAVAILABLE) }; return false
+        }
+        if (lifecycle.admit() != null) { pairingReply { callback(PairingScanStart.BUSY) }; return false }
+        val job = PairingJob(ticket, released)
+        if (!pairingJob.compareAndSet(null, job)) {
+            lifecycle.release(); pairingReply { callback(PairingScanStart.BUSY) }; return false
+        }
+        try {
+            worker.execute {
+                var result = PairingScanStart.UNAVAILABLE
+                try {
+                    if (!ticket.isCancelled() && lifecycle.phase() == PolicyOwnerPhase.READY) {
+                        val owner = controller ?: throw BridgeException.Closed()
+                        val scan = owner.beginPairingScan()
+                        job.scan.set(scan)
+                        if (ticket.isCancelled()) scan.cancel()
+                        else { scan.checkCurrent(); result = PairingScanStart.READY }
+                    }
+                } catch (failure: Throwable) { rethrowFatal(failure) }
+                finally {
+                    if (result != PairingScanStart.READY) ticket.cancel()
+                    job.pending.set(false); lifecycle.release()
+                    cleanupPairingScan(false)
+                    pairingReply { callback(if (ticket.isCancelled()) PairingScanStart.UNAVAILABLE else result) }
+                    resumeQueuedWork(); cleanupIfStopped()
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            ticket.cancel(); job.pending.set(false); lifecycle.release()
+            // No native operation was queued, so no generated handle can exist.
+            pairingJob.compareAndSet(job, null)
+            pairingReply { released(); callback(PairingScanStart.UNAVAILABLE) }
+        }
+        return true
+    }
+
+    /** Text comes only from the owned native decoder; no renderer/Intent ingress. */
+    internal fun acceptPairingInvitation(ticket: PairingScanTicket, text: String, callback: (PairingScanRead) -> Unit) {
+        val job = pairingJob.get()
+        if (job == null || job.ticket !== ticket || ticket.isCancelled() || lifecycle.phase() != PolicyOwnerPhase.READY ||
+            !job.accepted.compareAndSet(false, true)) {
+            cancelPairingScan(ticket); pairingReply { callback(PairingScanRead.UNAVAILABLE) }; return
+        }
+        if (!PairingScanRules.boundedText(text)) {
+            cancelPairingScan(ticket); pairingReply { callback(PairingScanRead.INVALID) }; return
+        }
+        if (!job.pending.compareAndSet(false, true)) {
+            cancelPairingScan(ticket); pairingReply { callback(PairingScanRead.UNAVAILABLE) }; return
+        }
+        if (lifecycle.admit() != null) {
+            job.pending.set(false); cancelPairingScan(ticket); pairingReply { callback(PairingScanRead.UNAVAILABLE) }; return
+        }
+        try {
+            worker.execute {
+                var result = PairingScanRead.UNAVAILABLE
+                try {
+                    if (!ticket.isCancelled() && lifecycle.phase() == PolicyOwnerPhase.READY) {
+                        val scan = job.scan.get() ?: throw BridgeException.Closed()
+                        scan.checkCurrent()
+                        result = when (scan.acceptInvitation(text)) {
+                            NativePairingScanResult.READ -> PairingScanRead.READ
+                            NativePairingScanResult.INVALID -> PairingScanRead.INVALID
+                            NativePairingScanResult.UNAVAILABLE -> PairingScanRead.UNAVAILABLE
+                        }
+                        if (result == PairingScanRead.READ) scan.checkCurrent()
+                    }
+                } catch (failure: Throwable) { rethrowFatal(failure); result = PairingScanRead.UNAVAILABLE }
+                finally {
+                    if (result != PairingScanRead.READ) ticket.cancel()
+                    job.pending.set(false); lifecycle.release()
+                    cleanupPairingScan(false)
+                    pairingReply { callback(if (ticket.isCancelled() && result == PairingScanRead.READ) PairingScanRead.UNAVAILABLE else result) }
+                    resumeQueuedWork(); cleanupIfStopped()
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            job.pending.set(false); lifecycle.release(); cancelPairingScan(ticket)
+            pairingReply { callback(PairingScanRead.UNAVAILABLE) }
+        }
+    }
+
+    /** Only cancel is allowed concurrently with the worker; Rust implements it atomically. */
+    internal fun cancelPairingScan(ticket: PairingScanTicket) {
+        ticket.cancel()
+        val job = pairingJob.get()?.takeIf { it.ticket === ticket } ?: return
+        try { job.scan.get()?.cancel() } catch (_: Exception) { /* terminal, cleanup remains retained */ }
+        requestWorkerCleanup()
+    }
+
+    private fun pairingReply(action: () -> Unit) {
+        main.post { try { action() } catch (_: Exception) { /* never transfer a detached reply */ } }
+    }
+
+    /** Worker only. Failed generated close remains owned until existing explicit cleanup retry. */
+    private fun cleanupPairingScan(explicitRetry: Boolean) {
+        val job = pairingJob.get() ?: return
+        if (!job.ticket.isCancelled() || job.pending.get()) return
+        val scan = job.scan.getAndSet(null)
+        if (scan != null) {
+            try { scan.cancel() } catch (_: Exception) { }
+            try { job.cleanup.closeOrRetain(scan) } catch (_: Exception) { }
+        }
+        if (explicitRetry) job.cleanup.retryOnce()
+        if (job.cleanup.complete() && pairingJob.compareAndSet(job, null)) pairingReply(job.released)
+    }
 
     private fun enqueueRequest(action: () -> Unit): Boolean = try {
         worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
@@ -161,6 +286,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     /** Explicit asynchronous termination request, never an Activity lifecycle hook. */
     fun shutdown(explicitRetry: Boolean = false) {
+        pairingJob.get()?.let { cancelPairingScan(it.ticket) }
         requests.stop()
         denials.stop()
         approvals.stop()
@@ -272,6 +398,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
 
     private fun failOwner(status: PolicyStatus, origin: OwnerFailureOrigin, failure: Throwable? = null) {
         traceOwnerFailure(status, origin, failure)
+        pairingJob.get()?.let { cancelPairingScan(it.ticket) }
         requests.stop()
         denials.stop()
         approvals.stop()
@@ -331,9 +458,14 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private fun cleanupIfStopped() {
         platform.requests.continueCleanup()
         approvals.cleanupOnWorker()
-        if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) return
+        if (lifecycle.phase() == PolicyOwnerPhase.STARTING || lifecycle.phase() == PolicyOwnerPhase.READY) {
+            cleanupPairingScan(false)
+            return
+        }
         val explicitRetry = explicitCleanupRetry.getAndSet(false)
         val resumed = cleanupWake.getAndSet(false)
+        cleanupPairingScan(explicitRetry)
+        if (pairingJob.get() != null) return
         if (explicitRetry) platform.requests.retryCleanup()
         denials.prepareShutdownCleanup(explicitRetry)
         if (explicitRetry) {

@@ -73,7 +73,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     internal fun invalidateRequestTime() { presentation.invalidate() }
     internal fun stopRequests() { requests.stop() }
     internal fun closeRequestClock() { presentation.close() }
-    internal fun secureLockConfigured(): Boolean = try {
+    override fun secureLockConfigured(): Boolean = try {
         application.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure ?: throw BridgeException.NativeUnavailable()
     } catch (_: Exception) { throw BridgeException.NativeUnavailable() }
     private var withdrawal: ((NativeRequestSelection) -> Unit)? = null

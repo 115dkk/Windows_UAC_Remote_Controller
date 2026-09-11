@@ -35,7 +35,7 @@ pub use native_clock::NativePresentationClock;
 pub use pairing::{
     CreatedPairingCommitError, CreatedPairingKeys, FrozenCreatedPairing, KeyCreationContext,
     KeyCreationIntent, NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
-    NativeKeyCreationRequest,
+    NativeKeyCreationRequest, NativePairingScan, NativePairingScanResult,
 };
 pub use request_projection::{
     NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
@@ -115,6 +115,12 @@ impl fmt::Debug for NativeClock {
 
 #[uniffi::export(foreign)]
 pub trait NativePlatform: Send + Sync {
+    /// Actual Application KeyguardManager.isDeviceSecure observation only.
+    /// This is configured secure lock, not successful per-operation auth. Native
+    /// implementations override it; unsupported/test adapters fail closed.
+    fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
     /// Only a privately minted, one-shot request after durable Preparing may
     /// reach the existing Application key owner. Synchronous completion only;
     /// bound public evidence before callback conversion, retain no key wrapper.
@@ -265,7 +271,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    9
+    10
 }
 
 #[uniffi::export]

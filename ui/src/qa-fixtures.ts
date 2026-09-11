@@ -4,14 +4,14 @@
 import type { AppSnapshot, ControllerBridge, RequestView, ServiceState } from './contracts';
 import type { ClientPage } from './App';
 
-export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage }
+export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable' }
 
 export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): AppSnapshot {
   return {
     schemaVersion: 3, platform, computerName: '화면 예시 PC',
     service: platform === 'windows' ? { installed: false, state: null, allowedActions: [], controlHint: 'needs_installer', remoteRequestsReady: false } : null,
     phoneService: platform === 'android' ? { state: 'local_settings_ready', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: true } : null,
-    mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false } : null,
+    mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false, canOpenPairingScanner: false } : null,
     policy: { schedule: { mode: 'always' }, alert: 'sound' },
     devices: [], requests: [], activity: [],
     requestCatalog: platform === 'android' ? { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 1 } : null,
@@ -46,6 +46,20 @@ export function qaCase(name: string): QaCase {
     case 'phone-long-request': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: '화면 예시 · 길이가 긴 프로그램 이름 설치 관리자.exe', executablePath: `C:\\${'한글 경로와 English mixed-direction אבג '.repeat(8)}\\${'unbroken'.repeat(22)}.exe`, details: `${'<img src=x onerror="exampleOnly()">\n'.repeat(4)}${'아주 긴 프로그램 요청의 예시 내용입니다. '.repeat(35)}` })] } };
     case 'phone-empty': return { page: 'requests', snapshot: phone };
     case 'phone-unpaired': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'ready', revision: '1', peerCount: 0, connectedPeerCount: 0 } } };
+    case 'phone-scanner-launch': return { page: 'requests', snapshot: { ...phone,
+      mobile: { ...phone.mobile!, canOpenPairingScanner: true },
+      requestCatalog: { status: 'ready', revision: '1', peerCount: 0, connectedPeerCount: 0 },
+      dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' },
+    } };
+    case 'phone-scanner-unavailable-catalog': return { page: 'requests', snapshot: { ...phone,
+      mobile: { ...phone.mobile!, canOpenPairingScanner: true }, requestCatalog: null,
+      dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'available' },
+    } };
+    case 'phone-scanner-launch-error': return { page: 'requests', scannerFailure: 'unavailable', snapshot: { ...phone,
+      mobile: { ...phone.mobile!, canOpenPairingScanner: true },
+      requestCatalog: { status: 'ready', revision: '1', peerCount: 0, connectedPeerCount: 0 },
+      dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' },
+    } };
     case 'phone-disconnected': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 } } };
     case 'phone-reconciling': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'reconciling', revision: '1', peerCount: 1, connectedPeerCount: 1 }, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' } } };
     case 'phone-authenticating': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'authenticating', canApprove: false }] } };
@@ -71,15 +85,15 @@ export function qaCase(name: string): QaCase {
     case 'phone-service-cleanup': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'cleanup_pending', bootEnabled: false, canStart: false, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'phone-service-unavailable': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'unavailable', bootEnabled: null, canStart: false, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'phone-service-error': return { page: 'schedule', snapshot: { ...phone, policy: null, phoneService: { state: 'unavailable', bootEnabled: false, canStart: true, canStop: false, policyOwnerReady: false }, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' }, issue: { code: 'synthetic_service_start_rejected', message: '휴대폰 승인을 켜지 못했어요.', nextAction: '휴대폰 승인 상태를 다시 확인해 주세요.' } } };
-    case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true, canOpenNotificationSettings: false } } };
-    case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false, canOpenNotificationSettings: false } } };
-    case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false, canOpenNotificationSettings: true } } };
+    case 'phone-lock-missing': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'missing', notifications: 'allowed', canOpenLockSettings: true, canOpenNotificationSettings: false, canOpenPairingScanner: false } } };
+    case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false, canOpenNotificationSettings: false, canOpenPairingScanner: false } } };
+    case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false, canOpenNotificationSettings: true, canOpenPairingScanner: false } } };
     case 'errors': return { page: 'requests', snapshot: { ...phone, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' }, issue: { code: 'synthetic_unavailable', message: '요청 상태를 확인하지 못했어요.', nextAction: '연결을 확인한 뒤 다시 시도해 주세요.' } } };
     default: return { page: 'status', snapshot: windows };
   }
 }
 
-export function createQaBridge(initial: AppSnapshot): ControllerBridge {
+export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure']): ControllerBridge {
   let value = initial;
   function reply(next: AppSnapshot): Promise<AppSnapshot> { value = next; return Promise.resolve(value); }
   return {
@@ -114,5 +128,8 @@ export function createQaBridge(initial: AppSnapshot): ControllerBridge {
     clearActivity: () => reply({ ...value, activity: [] }),
     openLockSettings: () => Promise.resolve(),
     openNotificationSettings: () => Promise.resolve(),
+    // Client/synthetic acknowledgement only; no camera surface or pairing result.
+    openPairingScanner: () => scannerFailure
+      ? Promise.reject(Object.assign(new Error('Synthetic scanner launch unavailable'), { code: 'pairing_scanner_unavailable' })) : Promise.resolve(),
   };
 }

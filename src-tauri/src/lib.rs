@@ -92,6 +92,7 @@ pub fn run() {
             commands::save_notification_policy,
             commands::control_service,
             commands::begin_pairing,
+            commands::open_pairing_scanner,
             commands::remove_device,
             commands::decide_request,
             commands::request_details,
