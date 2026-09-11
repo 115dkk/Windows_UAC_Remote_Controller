@@ -699,11 +699,16 @@ fn pattern_available(
     property: UIA_PROPERTY_ID,
     cleanup: &CleanupLog,
 ) -> Result<bool, ProbeError> {
+    // Availability properties take the provider default (false) when a provider
+    // does not implement them. With the default suppressed, the XAML-hosted consent
+    // dialog answered the reserved not-supported object for every element and the
+    // whole inspection failed on each cycle (lab run 34649783087).
     let value = read_property(
         element,
         property,
         NativeOperation::PatternAvailability,
         cleanup,
+        false,
     )?;
     if value.value.vt() != VT_BOOL {
         return Err(malformed(NativeOperation::PatternAvailability));
@@ -717,11 +722,15 @@ fn pattern_available(
     }
 }
 
+/// `ignore_default` asks UI Automation for the reserved not-supported object
+/// instead of the property default; text readers want that distinction, boolean
+/// availability readers want the default.
 fn read_property<'a>(
     element: &IUIAutomationElement,
     property: UIA_PROPERTY_ID,
     operation: NativeOperation,
     cleanup: &'a CleanupLog,
+    ignore_default: bool,
 ) -> Result<PropertyValue<'a>, ProbeError> {
     // Own the initialized out slot before calling COM. The generated ergonomic
     // wrapper drops its temporary VARIANT on HRESULT failure and discards the
@@ -739,7 +748,7 @@ fn read_property<'a>(
         (element.vtable().GetCurrentPropertyValueEx)(
             element.as_raw(),
             property,
-            true.into(),
+            ignore_default.into(),
             &mut *value.value,
         )
     };
@@ -792,7 +801,7 @@ fn string_property(
     remaining: usize,
     cleanup: &CleanupLog,
 ) -> Result<String, ProbeError> {
-    let value = read_property(element, property, operation, cleanup)?;
+    let value = read_property(element, property, operation, cleanup, true)?;
     if value.value.vt() != VT_BSTR {
         return Err(malformed(operation));
     }
