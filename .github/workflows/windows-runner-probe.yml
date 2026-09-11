@@ -1,0 +1,48 @@
+name: Windows runner capability probe
+
+# Read-only, manually dispatched. Reports whether a hosted Windows runner offers
+# the native preconditions (TPM/PCP provider, UAC policy, interactive session)
+# that a later native service/prompt lab would need. It installs, starts or
+# elevates nothing and changes no policy.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Hosted Windows runner facts (read-only)
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Report session, token and desktop facts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Output "UserInteractive=$([Environment]::UserInteractive)"
+          Write-Output "SessionId=$((Get-Process -Id $PID).SessionId)"
+          whoami /groups /fo list | Select-String -Pattern 'Group Name|Mandatory Label|Administrators|Users' | ForEach-Object { $_.Line }
+          query session 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- UAC policy (HKLM\...\Policies\System) ---"
+          $policy = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+          foreach ($name in 'EnableLUA','ConsentPromptBehaviorAdmin','ConsentPromptBehaviorUser','PromptOnSecureDesktop','EnableUIADesktopToggle','FilterAdministratorToken','EnableInstallerDetection') {
+            Write-Output ("{0}={1}" -f $name, $policy.$name)
+          }
+      - name: Report TPM and platform crypto provider facts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try { Get-Tpm | Format-List | Out-String -Width 200 } catch { Write-Output "Get-Tpm failed: $($_.Exception.Message)" }
+          tpmtool getdeviceinformation 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- registered KSPs (certutil -csplist) ---"
+          certutil -csplist 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- Win32_Tpm ---"
+          try { Get-CimInstance -Namespace root/cimv2/Security/MicrosoftTpm -ClassName Win32_Tpm | Format-List | Out-String -Width 200 } catch { Write-Output "Win32_Tpm unavailable: $($_.Exception.Message)" }
+      - name: Report VM and OS identity
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, TotalPhysicalMemory | Format-List | Out-String
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber | Format-List | Out-String
+          Get-Service -Name TBS, TrustedInstaller -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String
