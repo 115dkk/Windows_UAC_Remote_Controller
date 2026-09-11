@@ -79,7 +79,8 @@ class PairingScannerInstrumentationTest {
                 // Fixed tokens only: whether the native open ran and how it ended, plus the owner lines.
                 val launch = onMain { app.lastPairingScannerLaunch }
                 val gate = onMain { app.canOpenPairingScanner(host) }
-                throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
+                val notice = eval(host, VISIBLE_NOTICE)
+                throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate notice=$notice ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
             }
             assertTrue(onMain { secureScannerWindow() })
             await { onMain { scannerMessage() == host.getString(R.string.pairing_scanner_scanning) } }
@@ -257,6 +258,7 @@ class PairingScannerInstrumentationTest {
     companion object {
         private const val BUTTON_READY = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return !!b&&!b.disabled;})()"
         private const val BUTTON_STATE = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return JSON.stringify({present:!!b,disabled:b?b.disabled:null,buttons:document.querySelectorAll('button').length,title:document.title});})()"
+        private const val VISIBLE_NOTICE = "(()=>{const n=document.querySelector('[role=\"alert\"] p, .notice-box p');return JSON.stringify(n?n.textContent:null);})()"
         private const val CLICK_BUTTON = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');if(!b||b.disabled)return 'missing';b.click();return 'clicked';})()"
     }
 }

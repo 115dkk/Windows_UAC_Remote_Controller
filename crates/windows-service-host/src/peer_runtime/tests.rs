@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Real TCP/rustls/framing and existing Android owner/socket composition.
 //! Identity/registry fixtures are SOFTWARE ONLY, not TPM, native ACL or OS proof.
+#![cfg_attr(not(all(windows, target_pointer_width = "64")), allow(dead_code))]
 
 use android_controller::{
     AssociatedPcSocket, DurableInbox, LocalAttestationChallenge, LocalKeyHandle,

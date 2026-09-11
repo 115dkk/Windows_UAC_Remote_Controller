@@ -72,6 +72,8 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
             commands?.takeIf { it.matches(origin) }
         } else null
         if (captured == null) {
+            // Fixed-token CI diagnostic: which command was refused and why (thread or origin), never payloads.
+            android.util.Log.i("UacScan", "stage=dispatch rejected command=${invoke.command} main=${Looper.myLooper() == Looper.getMainLooper()} origin=${origin != null} bound=${commands != null}")
             try { invoke.reject("휴대폰 상태를 확인하지 못했어요.", "mobile_state_unavailable") } catch (_: Exception) { }
             return
         }

@@ -51,6 +51,7 @@ pub struct CommittedRegistryChange {
 }
 impl CommittedRegistryChange {
     #[cfg(test)]
+    #[cfg_attr(not(all(windows, target_pointer_width = "64")), allow(dead_code))]
     pub(crate) const fn for_test(device: DeviceId, revision: u64) -> Self {
         Self { device, revision }
     }

@@ -4,6 +4,13 @@
 //! consent/enrollment/grant. No network
 //! listener/dialer, request-opening API or OS action is activated.
 #![forbid(unsafe_code)]
+// The ceremony and dialer orchestration only runs on 64-bit Windows; other
+// targets compile this module for its shared types and host tests, so items
+// that those paths alone use are not dead code there.
+#![cfg_attr(
+    not(all(windows, target_pointer_width = "64")),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 
 use std::{
     fmt,

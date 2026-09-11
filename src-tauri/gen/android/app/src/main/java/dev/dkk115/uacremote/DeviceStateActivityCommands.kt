@@ -388,6 +388,7 @@ internal class DeviceStateActivityCommands(
     }
 
     fun openPairingScanner(invoke: Invoke) {
+        android.util.Log.i("UacScan", "stage=command argumentBytes=${invoke.getRawArgs().length}")
         if (!acceptsNoArguments(invoke)) return
         activity.runOnUiThread {
             val owner = activity.application as? ControllerApplication
@@ -396,7 +397,7 @@ internal class DeviceStateActivityCommands(
                 val result = JSObject(); result.put("status", value.wireValue)
                 try { invoke.resolve(result) } catch (_: Exception) { }
             }
-            android.util.Log.i("UacScan", "stage=command owner=${owner != null} foreground=${isForeground()}")
+            android.util.Log.i("UacScan", "stage=open-request owner=${owner != null} foreground=${isForeground()}")
             if (owner == null || !isForeground()) reply(dev.dkk115.uacremote.pairing.PairingScannerLaunch.UNAVAILABLE)
             else owner.openPairingScanner(activity, binding, ::isForeground, ::reply)
         }
