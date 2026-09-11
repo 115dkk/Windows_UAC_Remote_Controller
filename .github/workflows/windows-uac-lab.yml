@@ -192,8 +192,17 @@ jobs:
           schtasks.exe /Create /F /TN UacLabElevationRequest /TR $trigger /SC ONCE /ST 00:00 /RL LIMITED /IT | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/schtasks-create.txt"
           schtasks.exe /Run /TN UacLabElevationRequest | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/schtasks-run.txt"
           $consent = $null
-          for ($i = 0; $i -lt 30; $i++) { $consent = Get-Process -Name consent -ErrorAction SilentlyContinue; if ($consent) { break }; Start-Sleep -Milliseconds 500 }
-          if ($consent) { Write-Output ("consent.exe present: pid {0} session {1}" -f $consent.Id, $consent.SessionId) } else { Write-Output 'consent.exe did not appear within 15 s.' }
+          $timeline = @()
+          for ($i = 0; $i -lt 80; $i++) {
+            $consent = Get-Process -Name consent -ErrorAction SilentlyContinue
+            $timeline += ('{0,5} ms: {1}' -f ($i * 500), ((Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'svchost' -and ($_.Name -ne 'svchost' -or $_.SessionId -ne 0) } | ForEach-Object { '{0}:{1}/s{2}' -f $_.Name, $_.Id, $_.SessionId }) -join ' '))
+            if ($consent) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          $timeline | Set-Content -Path "$env:LAB_EVIDENCE/consent-timeline.txt"
+          schtasks.exe /Query /TN UacLabElevationRequest /V /FO LIST | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/schtasks-query.txt"
+          Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 60 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'UacLabElevationRequest' } | Format-List TimeCreated, Id, Message | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/taskscheduler-events.txt"
+          if ($consent) { Write-Output ("consent.exe present: pid {0} session {1}" -f $consent.Id, $consent.SessionId) } else { Write-Output 'consent.exe did not appear within 40 s.' }
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-before-probe.txt"
           Start-Sleep -Seconds 2
           & $exe probe-once | Tee-Object -FilePath "$env:LAB_EVIDENCE/probe-once-request.json"

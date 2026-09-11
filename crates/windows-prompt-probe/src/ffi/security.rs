@@ -119,7 +119,9 @@ pub(super) fn service_identity(
                 matched = true;
             }
         }
-        if !matched {
+        // ADR 0028: the service token is not write-restricted; an empty restricting
+        // list is the expected shape. A nonempty list must still name the service SID.
+        if !matched && (class == TokenGroups || count > 0) {
             return Err(ProbeError::new(ProbeFailure::SystemUserRequired));
         }
     }

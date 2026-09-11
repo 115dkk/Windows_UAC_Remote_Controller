@@ -276,9 +276,12 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
     }
     let regular = groups(token, TokenGroups)?;
     let restricted = groups(token, TokenRestrictedSids)?;
+    // ADR 0028: the service SID is an ordinary enabled group of an unrestricted
+    // service token. A restricting-SID list is not expected any more; if one is
+    // present it must still name the service SID, never a foreign principal set.
     if !regular.iter().any(|(sid, flags)| {
         sid == service_sid && flags & GROUP_ENABLED != 0 && flags & GROUP_DENY_ONLY == 0
-    }) || !restricted.iter().any(|(sid, _)| sid == service_sid)
+    }) || (!restricted.is_empty() && !restricted.iter().any(|(sid, _)| sid == service_sid))
     {
         return Err(Error::RestrictedTokenMismatch);
     }
