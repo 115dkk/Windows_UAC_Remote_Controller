@@ -64,12 +64,15 @@ use super::{
 use crate::{ServiceError, native};
 
 mod io;
+pub(super) mod renderer;
 mod uac_policy;
 pub(crate) use io::{AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener};
 pub use io::{PairingPipe, PairingPipeProgress};
+pub(crate) use renderer::RendererRegistration;
 
 pub(super) const STARTER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingStarter.v1";
 pub(super) const HELPER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingHelper.v1";
+pub(super) const RENDERER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingRenderer.v1";
 const PIPE_BUFFER_BYTES: u32 = 4096;
 // Concrete data/EA/attribute read+write, READ_CONTROL and SYNCHRONIZE. Crucially
 // not FILE_APPEND_DATA == FILE_CREATE_PIPE_INSTANCE (0x4). Future clients must
@@ -361,6 +364,7 @@ impl PairingServerEndpoint {
             live: true,
             policy_claimed: false,
             uac_policy: None,
+            renderer_claimed: false,
         };
         // Reobserve the same process and pipe before publication. This rejects
         // observed changes; it is not an atomic lease on the client's future use.
@@ -385,6 +389,7 @@ pub struct PairingPeer {
     live: bool,
     policy_claimed: bool,
     uac_policy: Option<uac_policy::UacPolicyLease>,
+    renderer_claimed: bool,
 }
 impl PairingPeer {
     pub fn role(&self) -> PairingPeerRole {
@@ -538,12 +543,41 @@ fn create_server(
     sid: &[u8],
     context: Rc<ServiceContext>,
 ) -> Result<PairingServerEndpoint, PairingPeerError> {
+    create_server_named(
+        role,
+        sid,
+        context,
+        match role {
+            PairingPeerRole::Starter => STARTER_PIPE,
+            PairingPeerRole::Helper => HELPER_PIPE,
+        },
+        None,
+    )
+}
+fn create_renderer_server(
+    context: Rc<ServiceContext>,
+    deadline: std::time::Instant,
+) -> Result<PairingServerEndpoint, PairingPeerError> {
+    let sid = OwnServiceSid::lookup()
+        .map_err(PairingPeerError::Service)?
+        .bytes();
+    create_server_named(
+        PairingPeerRole::Helper,
+        &sid,
+        context,
+        RENDERER_PIPE,
+        Some(deadline),
+    )
+}
+fn create_server_named(
+    role: PairingPeerRole,
+    sid: &[u8],
+    context: Rc<ServiceContext>,
+    name: &'static str,
+    deadline: Option<std::time::Instant>,
+) -> Result<PairingServerEndpoint, PairingPeerError> {
     context.recheck()?;
-    let name = Wide::new(match role {
-        PairingPeerRole::Starter => STARTER_PIPE,
-        PairingPeerRole::Helper => HELPER_PIPE,
-    })
-    .map_err(PairingPeerError::Service)?;
+    let name = Wide::new(name).map_err(PairingPeerError::Service)?;
     let descriptor =
         SecurityDescriptor::from_sddl(&pipe_sddl(role, sid)?).map_err(PairingPeerError::Service)?;
     let security = SECURITY_ATTRIBUTES {
@@ -555,6 +589,9 @@ fn create_server(
     // Metadata/allocation above cannot authorize entering CreateNamedPipe after
     // the control callback has already latched Stop.
     service_positive(|| Ok(()))?;
+    if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+        return Err(PairingPeerError::DeadlineElapsed);
+    }
     // SAFETY: fixed local names, bounded buffers, first instance only, no remote
     // clients/inheritance. Private DACL exists AT creation, not patched afterward.
     let pipe = unsafe {

@@ -75,6 +75,46 @@ impl fmt::Debug for PairingPipe {
     }
 }
 impl PairingPipe {
+    /// Sealed third endpoint on this original Starter's context/window. Only one
+    /// claim is possible, including failure; no generic name or later deadline.
+    pub(crate) fn prepare_renderer_pipe(&mut self) -> Result<Self, Error> {
+        let inner = self.inner_mut();
+        let result = (|| {
+            inner.fence()?;
+            if inner.phase != Phase::Connected || inner.operation.is_some() {
+                return Err(Error::InvalidPhase);
+            }
+            let peer = match inner.connection.as_mut() {
+                Some(Connection::Peer(peer)) => peer,
+                _ => return Err(Error::InvalidPhase),
+            };
+            if peer.role() != PairingPeerRole::Starter || peer.renderer_claimed {
+                return Err(Error::InvalidPhase);
+            }
+            peer.check_uac_policy()?;
+            peer.renderer_claimed = true;
+            let context = std::rc::Rc::clone(&peer.endpoint.context);
+            let start = inner.budget.started_at;
+            let deadline = inner.budget.deadline;
+            inner.fence()?;
+            let endpoint = super::create_renderer_server(context, deadline)?;
+            let renderer = Self::new(endpoint, start, deadline)?;
+            inner.fence()?; // No pending operation exists on the returned owner yet.
+            Ok(renderer)
+        })();
+        result.map_err(|error| inner.fail(error))
+    }
+    pub(super) fn renderer_peer(&mut self) -> Result<&mut PairingPeer, Error> {
+        let inner = self.inner_mut();
+        inner.fence()?;
+        if !matches!(inner.connection, Some(Connection::Peer(_))) {
+            return Err(inner.fail(Error::InvalidPhase));
+        }
+        match inner.connection.as_mut() {
+            Some(Connection::Peer(peer)) => Ok(peer),
+            _ => unreachable!("connection variant checked without an intervening mutation"),
+        }
+    }
     /// Does not renew an existing ceremony: accepts only a still-live original
     /// interval in (0, 5min]. Connect is an explicit, single-use next operation.
     pub fn new(

@@ -36,6 +36,8 @@ use windows::{
 };
 
 const POLL: Duration = Duration::from_millis(25);
+mod renderer_launch;
+use renderer_launch::HelperRendererLaunch;
 static HELPER_INVOKED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -128,6 +130,8 @@ enum Event {
     Bound,
     Closing,
     PeerClosed,
+    PrepareRenderer(crate::pairing_handoff::RendererRequest),
+    ResumeRenderer(crate::pairing_handoff::RendererRequest),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalCompletion {
@@ -164,6 +168,25 @@ struct Endpoint {
     mode: Mode,
 }
 impl Endpoint {
+    fn send_renderer_launched(
+        &mut self,
+        request: crate::pairing_handoff::RendererRequest,
+        process: crate::pairing_handoff::RendererProcess,
+    ) -> Result<(), Error> {
+        let frame = self
+            .handoff
+            .renderer_launched(request, process)
+            .map_err(|_| Error::Protocol)?;
+        self.client
+            .begin_write(&frame.encode().map_err(|_| Error::Protocol)?)?;
+        self.mode = Mode::Write;
+        Ok(())
+    }
+    fn renderer_resumed(&mut self) -> Result<(), Error> {
+        self.client.begin_read()?;
+        self.mode = Mode::Read;
+        Ok(())
+    }
     fn starter(mut client: PairingClient) -> Result<Self, Error> {
         client.begin_read()?;
         Ok(Self {
@@ -227,6 +250,8 @@ impl Endpoint {
                         self.mode = Mode::TerminalAck(bytes.len());
                         Ok(Event::Closing)
                     }
+                    Next::PrepareRenderer(request) => Ok(Event::PrepareRenderer(request)),
+                    Next::ResumeRenderer(request) => Ok(Event::ResumeRenderer(request)),
                     _ => Err(Error::Protocol),
                 }
             }
@@ -315,6 +340,53 @@ impl Endpoint {
     fn cancel(&mut self) {
         self.handoff.cancel();
         self.client.cancel();
+    }
+}
+
+/// Reuses the exact private Ack/EOF cleanup path. This wrapper is constructed
+/// only by the fixed renderer after its genuine normal-authenticated Close;
+/// it is stored before the potentially pending Ack write is begun.
+pub(super) struct RendererTerminal {
+    endpoint: Endpoint,
+    id: PendingElevationId,
+}
+impl RendererTerminal {
+    pub(super) fn after_close(client: PairingClient, id: PendingElevationId) -> Self {
+        Self {
+            endpoint: Endpoint {
+                client,
+                handoff: Handoff::renderer_close(id),
+                mode: Mode::Read,
+            },
+            id,
+        }
+    }
+    pub(super) fn start(&mut self) -> Result<(), Error> {
+        let bytes = Frame::CloseAck(self.id)
+            .encode()
+            .map_err(|_| Error::Protocol)?;
+        self.endpoint.client.begin_write(&bytes)?;
+        self.endpoint.mode = Mode::TerminalAck(bytes.len());
+        Ok(())
+    }
+    pub(super) fn poll(&mut self) -> Result<bool, Error> {
+        match self.endpoint.poll()? {
+            Event::PeerClosed => Ok(true),
+            Event::Pending | Event::Closing => Ok(false),
+            _ => Err(Error::Protocol),
+        }
+    }
+    pub(super) fn cancel(&mut self) {
+        self.endpoint.cancel();
+    }
+    pub(super) fn drain(&mut self) -> Result<bool, Error> {
+        self.endpoint.client.drain().map_err(Into::into)
+    }
+    pub(super) fn finish(&mut self) -> Result<(), Error> {
+        if self.endpoint.mode != Mode::PeerClosed || !self.endpoint.handoff.closed() {
+            return Err(Error::Protocol);
+        }
+        self.endpoint.budget()
     }
 }
 
@@ -584,6 +656,7 @@ impl LaunchInner {
                 Ok(PairingLaunchProgress::Bound)
             }
             Event::Closing => Ok(PairingLaunchProgress::Closing),
+            Event::PrepareRenderer(_) | Event::ResumeRenderer(_) => Err(Error::Protocol),
             Event::PeerClosed => {
                 if !self.drain_resources()? {
                     return Ok(PairingLaunchProgress::CleanupPending);
@@ -659,6 +732,164 @@ impl LaunchInner {
     }
 }
 
+struct HelperRunInner {
+    endpoint: Endpoint,
+    renderer: Option<HelperRendererLaunch>,
+    // Same original Helper-client reservation, retained even after pipe drain
+    // until its created renderer and desktop owners are actually drained.
+    reservation: Option<Reservation>,
+    first_failure: Option<Error>,
+    cleanup_failure: Option<Error>,
+    drained: bool,
+}
+struct HelperRun {
+    inner: Option<Box<HelperRunInner>>,
+}
+impl HelperRun {
+    fn new(mut endpoint: Endpoint) -> Result<Self, Error> {
+        let reservation = endpoint
+            .client
+            .inner_mut()
+            .connection
+            .as_mut()
+            .ok_or(Error::InvalidPhase)?
+            .reservation
+            .take()
+            .ok_or(Error::InvalidPhase)?;
+        Ok(Self {
+            inner: Some(Box::new(HelperRunInner {
+                endpoint,
+                renderer: None,
+                reservation: Some(reservation),
+                first_failure: None,
+                cleanup_failure: None,
+                drained: false,
+            })),
+        })
+    }
+    fn inner_mut(&mut self) -> &mut HelperRunInner {
+        self.inner
+            .as_deref_mut()
+            .expect("helper run exists until Drop")
+    }
+    fn poll(&mut self) -> Result<bool, Error> {
+        let inner = self.inner_mut();
+        if let Some(error) = inner.first_failure {
+            return Err(error);
+        }
+        let result = (|| {
+            match inner.endpoint.poll()? {
+                Event::PrepareRenderer(request) => {
+                    if inner.renderer.is_some() {
+                        return Err(Error::InvalidPhase);
+                    }
+                    inner.renderer = Some(HelperRendererLaunch::new());
+                    let (request, process) = inner
+                        .renderer
+                        .as_mut()
+                        .ok_or(Error::InvalidPhase)?
+                        .begin(&mut inner.endpoint.client, request)?;
+                    inner.endpoint.send_renderer_launched(request, process)?;
+                }
+                Event::ResumeRenderer(request) => {
+                    inner
+                        .renderer
+                        .as_mut()
+                        .ok_or(Error::InvalidPhase)?
+                        .resume(&mut inner.endpoint.client, request)?;
+                    inner.endpoint.renderer_resumed()?;
+                }
+                Event::Closing => {
+                    if let Some(renderer) = inner.renderer.as_mut() {
+                        renderer.close_requested();
+                    }
+                }
+                Event::PeerClosed => {
+                    if let Some(renderer) = inner.renderer.as_mut() {
+                        renderer.close_requested();
+                        if !renderer.drain()? {
+                            return Ok(false);
+                        }
+                        if let Some(error) = renderer.failure() {
+                            return Err(error);
+                        }
+                    }
+                    if !inner.endpoint.client.drain()? {
+                        return Ok(false);
+                    }
+                    inner.endpoint.budget()?;
+                    cleanup_state()?;
+                    drop(inner.reservation.take());
+                    inner.drained = true;
+                    return Ok(true);
+                }
+                Event::Launch(_) => return Err(Error::Protocol),
+                Event::Pending | Event::Written | Event::Bound => {
+                    if !inner.endpoint.handoff.closing()
+                        && let Some(renderer) = inner.renderer.as_mut()
+                    {
+                        renderer.recheck(&mut inner.endpoint.client)?;
+                    }
+                }
+            }
+            Ok(false)
+        })();
+        result.map_err(|error| inner.fail(error))
+    }
+    fn cancel(&mut self) {
+        self.inner_mut().fail(Error::Cancelled);
+    }
+    fn drain(&mut self) -> Result<bool, Error> {
+        self.inner_mut().drain()
+    }
+}
+impl HelperRunInner {
+    fn fail(&mut self, error: Error) -> Error {
+        let first = *self.first_failure.get_or_insert(error);
+        self.endpoint.cancel();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.cancel();
+        }
+        first
+    }
+    fn drain(&mut self) -> Result<bool, Error> {
+        if self.drained {
+            return Ok(true);
+        }
+        let first = self.fail(Error::Cancelled);
+        let pipe = self.endpoint.client.drain().map_err(|error| {
+            self.cleanup_failure.get_or_insert(Error::Client(error));
+            first
+        })?;
+        let renderer = match self.renderer.as_mut() {
+            Some(renderer) => renderer.drain().map_err(|error| {
+                self.cleanup_failure.get_or_insert(error);
+                first
+            })?,
+            None => true,
+        };
+        if !pipe || !renderer {
+            return Ok(false);
+        }
+        cleanup_state()?;
+        drop(self.reservation.take());
+        self.drained = true;
+        Ok(true)
+    }
+}
+impl Drop for HelperRun {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take()
+            && !inner.drained
+        {
+            inner.fail(Error::Cancelled);
+            UNHEALTHY.store(true, Ordering::Release);
+            // No detached replacement or reservation release. Keep the original
+            // client/pending storage AND all child/desktop owners together.
+            mem::forget(inner);
+        }
+    }
+}
 pub(crate) fn run_pair_helper(id: PendingElevationId) -> Result<(), Error> {
     if HELPER_INVOKED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -671,22 +902,13 @@ pub(crate) fn run_pair_helper(id: PendingElevationId) -> Result<(), Error> {
         .checked_add(MAX_LIFETIME)
         .ok_or(ClientError::InvalidDeadline)?;
     let client = PairingClient::connect_helper(start, deadline)?;
-    let mut endpoint = Endpoint::helper(client, id)?;
+    let mut owner = HelperRun::new(Endpoint::helper(client, id)?)?;
     let outcome = loop {
-        let event = match endpoint.poll() {
-            Ok(event) => event,
+        match owner.poll() {
+            Ok(true) => break Ok(()),
+            Ok(false) => (),
             Err(error) => break Err(error),
-        };
-        match event {
-            Event::PeerClosed => match endpoint.client.drain() {
-                Ok(true) => break endpoint.budget(),
-                Ok(false) => (),
-                Err(error) => break Err(error.into()),
-            },
-            Event::Launch(_) => break Err(Error::Protocol),
-            Event::Pending | Event::Written | Event::Bound | Event::Closing => (),
         }
-        // Bounded fixed helper loop only, never a renewed service/GUI deadline.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break Err(ClientError::DeadlineElapsed.into());
@@ -694,21 +916,19 @@ pub(crate) fn run_pair_helper(id: PendingElevationId) -> Result<(), Error> {
         thread::sleep(POLL.min(remaining));
     };
     if outcome.is_err() {
-        endpoint.cancel();
-        loop {
-            match endpoint.client.drain() {
-                Ok(true) => break,
-                Ok(false) => (),
-                Err(_) => break,
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            thread::sleep(POLL.min(remaining));
+        owner.cancel();
+    }
+    loop {
+        match owner.drain() {
+            Ok(true) => break,
+            Ok(false) => (),
+            Err(error) => return outcome.and(Err(error)),
         }
-        // Failure never becomes exit0; pending Drop retains/quarantines the
-        // original allocation. There is no assertion that process exit is drain.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return outcome.and(Err(Error::CleanupUnconfirmed));
+        }
+        thread::sleep(POLL.min(remaining));
     }
     outcome
 }

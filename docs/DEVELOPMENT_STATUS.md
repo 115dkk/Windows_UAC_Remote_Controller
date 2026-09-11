@@ -1,9 +1,9 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last fully passing quality revision: `c21a4bc8e92766976d87ad73031e48b7278e43d4` on
-`codex/native-runtime`. This document separates that baseline, installed native
-experiments and unmerged protocol experiments. New edits require new ROOT checks.
+Last fully passing quality revision: `cbac9627a4889db6b74d1015ff9cf7a23d3ec1ec` on
+`codex/native-runtime`. New Windows renderer-bootstrap changes are in progress
+after that revision and require their own ROOT checks. No prerelease is published.
 
 ## Latest evidence — September 11
 
@@ -14,14 +14,60 @@ offline, all-feature workspace inputs and received `licenses ok`. The original
 material scripts/assets remain preserved but are removed from default quality
 checks/collection. No further manual notice search is planned.
 
-The Android pre-input freshness repair is frozen and source-reviewed; ROOT's
-38 harness fixtures passed. It keeps the original5s/120s/command limits and
-allows only two global recaptures before an input is dispatched. Native CI is
-still required. C4's first Windows quality run found three Clippy style errors;
-ROOT corrected the two extra public-ID references and map_err/inspect_err usage.
-No lint allowance or native behavior change was introduced for those findings.
+### Current verified baseline and remaining implementation
 
-The checkpoints below retain their earlier revision-specific scope.
+At `cbac962`, all five triggered workflows completed successfully:
+
+- [Quality 34564518693](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34564518693):
+  Windows/Linux full quality, actual Rust Analyzer and canaries, Android Rust
+  core, Cargo Deny and the Tamarin protocol obligations.
+- [Windows package 34564518754](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34564518754)
+  and [Android package 34564518711](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34564518711),
+  including the actual Gradle unit-test task.
+- [Native Android lifecycle 34564518701](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34564518701)
+  and [notification renderer 34564518735](https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34564518735).
+
+ROOT verified 577 native command logs and three metadata files in memory and
+retained a bounded 15-file original subset. Seven phases and twelve observations
+passed. One actual pre-input System UI snapshot expired after 5309.929709 ms;
+the bounded repair discarded it without issuing input, captured a fresh layout,
+and completed the sole synthetic unlock attempt. The original 5 s/120 s and
+command limits remain. First unlock was observed; physical authentication and
+request delivery were not tested. The earlier `93f9289` ordinary-launch owner
+failure did not recur. Its cause remains unknown; `cbac962` adds bounded stage
+and first-failure diagnostics, not a claimed lifecycle repair.
+
+C4's policy watcher and one-use private ceremony preparation are included in
+this passing baseline. The newer C5 slice adds the fixed, from-creation private
+renderer, registered suspended-child launch and direct service-to-renderer
+channel. It is currently **nonvisual and unvalidated**: no QR, window, graphics,
+desktop switch, secret release or enrollment is enabled by that slice.
+
+The product still needs an actual QR/scanner-to-enrollment path, provisioned
+initial and paired connectivity, the live Windows prompt owner and exact-target
+approval/denial application, release signer/provisioning integration, and physical
+acceptance. Existing Windows capture is read-only; the signed-decision branch
+still returns `AuthorizedButNotApplied` because no live OS application adapter
+is connected. These are implementation gaps, not merely deferred user tests.
+Credential-prompt support remains conditional on meeting Windows authentication
+requirements; unsupported types must be ignored.
+
+The installed Windows service's platform-provider failure (`0x80090030`) is
+unresolved. The last authorized one-shot experiment was cancelled by the user
+at 05:46:10 KST on September 11 and is consumed. No further local UAC/provider
+experiment is authorized. Local Rust/Gradle builds remain stopped for disk space.
+
+At 14:49 KST the general Codex bucket was 37% used / 63% remaining, with no reset
+credits. The 50%-remaining Claude-handoff condition has not fired, and the genuine
+final architecture phase has not begun. No bridge was launched and no C/E files
+were deleted. Cleanup is due after actual prerelease publication, or as part of
+that explicitly authorized conditional handoff.
+
+### Historical checkpoints
+
+The checkpoints below retain their earlier revision-specific scope. Their
+pending work and license-collection statements are historical; the current Cargo
+Deny policy and verified baseline above supersede them.
 
 At af1c5b9, both Windows/Linux code-quality steps passed, including the new
 Step3 Windows fixtures, Clippy, full tests and actual Analyzer/canaries. The

@@ -20,6 +20,7 @@ pub enum Command {
     Uninstall,
     ProbeOnce,
     Pair(PendingElevationId),
+    PairRenderer(RendererInvocation),
     Help,
 }
 
@@ -69,6 +70,38 @@ impl PendingElevationId {
             text.push(char::from(HEX[usize::from(byte & 15)]));
         }
         text
+    }
+}
+
+/// Two public correlations only. Native renderer admission still requires the
+/// exact registered child/process and original authenticated service channel.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RendererInvocation {
+    pending: PendingElevationId,
+    display: PendingElevationId,
+}
+impl fmt::Debug for RendererInvocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RendererInvocation(redacted, not_authority)")
+    }
+}
+impl RendererInvocation {
+    pub(crate) fn new(
+        pending: PendingElevationId,
+        display: PendingElevationId,
+    ) -> Result<Self, ServiceError> {
+        if pending == display {
+            return Err(ServiceError::InvalidArguments);
+        }
+        Ok(Self { pending, display })
+    }
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
+    pub(crate) fn pending(self) -> PendingElevationId {
+        self.pending
+    }
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
+    pub(crate) fn display(self) -> PendingElevationId {
+        self.display
     }
 }
 
@@ -125,7 +158,18 @@ impl Command {
             return Ok(Self::Status);
         };
         let second = arguments.next();
+        let third = arguments.next();
         if arguments.next().is_some() {
+            return Err(ServiceError::InvalidArguments);
+        }
+        if first.as_ref().to_str() == Some("pair-renderer") {
+            let pending =
+                PendingElevationId::parse(second.ok_or(ServiceError::InvalidArguments)?.as_ref())?;
+            let display =
+                PendingElevationId::parse(third.ok_or(ServiceError::InvalidArguments)?.as_ref())?;
+            return RendererInvocation::new(pending, display).map(Self::PairRenderer);
+        }
+        if third.is_some() {
             return Err(ServiceError::InvalidArguments);
         }
         if first.as_ref().to_str() == Some("pair") {
@@ -348,6 +392,10 @@ pub enum ServiceError {
     PairingHandoffUnavailable,
     #[error("pairing client Windows call failed at fixed stage {stage} (HRESULT {hresult:#010x})")]
     PairingClientNative { stage: u8, hresult: i32 },
+    #[error(
+        "renderer bootstrap Windows call failed at fixed stage {stage} (HRESULT {hresult:#010x})"
+    )]
+    RendererNative { stage: u8, hresult: i32 },
 }
 
 impl ServiceError {
@@ -525,6 +573,45 @@ pub(crate) fn continuing_pending_start(existing: Option<Instant>, now: Instant) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn renderer_cli_is_exact_three_tokens_canonical_and_nonauthority() {
+        let pending = "11".repeat(32);
+        let display = "22".repeat(32);
+        let command = Command::parse(["pair-renderer", &pending, &display]).unwrap();
+        let Command::PairRenderer(invocation) = command else {
+            panic!("fixed renderer mode expected");
+        };
+        assert_eq!(invocation.pending().argument(), pending);
+        assert_eq!(invocation.display().argument(), display);
+        assert!(!format!("{command:?}").contains(&pending));
+        for arguments in [
+            vec!["pair-renderer"],
+            vec!["pair-renderer", &pending],
+            vec!["pair-renderer", &pending, &display, "extra"],
+            vec!["pair-renderer", &pending, &pending],
+        ] {
+            assert_eq!(
+                Command::parse(arguments),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+        for bad in [
+            "00".repeat(32),
+            "AA".repeat(32),
+            format!(" {display}"),
+            format!("{display} "),
+            "g".repeat(64),
+        ] {
+            assert_eq!(
+                Command::parse(["pair-renderer", &pending, &bad]),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+        assert_eq!(
+            Command::parse(["pair", &pending, &display]),
+            Err(ServiceError::InvalidArguments)
+        );
+    }
 
     #[test]
     fn service_diagnostic_keeps_existing_small_exit_classes_for_other_errors() {

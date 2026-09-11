@@ -62,8 +62,10 @@ use super::{
 use crate::{ServiceError, native};
 
 mod helper_launch;
+mod renderer;
 pub(crate) use helper_launch::run_pair_helper;
 pub use helper_launch::{PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress};
+pub(crate) use renderer::run_pair_renderer;
 
 const MAX_MESSAGE: usize = 4096;
 const READ_CAPACITY: usize = MAX_MESSAGE + 1;
@@ -78,6 +80,27 @@ const ADMINISTRATORS: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0
 const AUTHENTICATED_USERS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
 static RESERVED: AtomicBool = AtomicBool::new(false);
 static UNHEALTHY: AtomicBool = AtomicBool::new(false);
+#[derive(Clone, Copy)]
+enum ClientEndpoint {
+    Starter,
+    Helper,
+    Renderer,
+}
+impl ClientEndpoint {
+    fn role(self) -> PairingPeerRole {
+        match self {
+            Self::Starter => PairingPeerRole::Starter,
+            _ => PairingPeerRole::Helper,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Starter => pairing_peer::STARTER_PIPE,
+            Self::Helper => pairing_peer::HELPER_PIPE,
+            Self::Renderer => pairing_peer::RENDERER_PIPE,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingClientStage {
@@ -359,16 +382,17 @@ impl fmt::Debug for PairingClient {
 }
 impl PairingClient {
     pub fn connect_starter(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
-        Self::connect(PairingPeerRole::Starter, started_at, deadline)
+        Self::connect(ClientEndpoint::Starter, started_at, deadline)
     }
     pub fn connect_helper(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
-        Self::connect(PairingPeerRole::Helper, started_at, deadline)
+        Self::connect(ClientEndpoint::Helper, started_at, deadline)
     }
     fn connect(
-        role: PairingPeerRole,
+        endpoint: ClientEndpoint,
         started_at: Instant,
         deadline: Instant,
     ) -> Result<Self, Error> {
+        let role = endpoint.role();
         let mut budget = OriginalBudget::new(started_at, deadline, Instant::now())?;
         let reservation = Reservation::acquire()?;
         reject_thread_impersonation().map_err(Error::Service)?;
@@ -378,11 +402,7 @@ impl PairingClient {
         let (service, expected_pid) =
             native::pairing_service_for_client(installation.service()).map_err(Error::Service)?;
         let service_sid = OwnServiceSid::lookup().map_err(Error::Service)?.bytes();
-        let name = Wide::new(match role {
-            PairingPeerRole::Starter => pairing_peer::STARTER_PIPE,
-            PairingPeerRole::Helper => pairing_peer::HELPER_PIPE,
-        })
-        .map_err(Error::Service)?;
+        let name = Wide::new(endpoint.name()).map_err(Error::Service)?;
         budget.observe(Instant::now())?;
         own.recheck(role)?;
         budget.observe(Instant::now())?;
@@ -776,7 +796,7 @@ fn pipe_identity(pipe: HANDLE) -> Result<(u32, u32), Error> {
     }
     Ok((pid, session))
 }
-fn process_image(process: HANDLE) -> Result<PathBuf, Error> {
+pub(super) fn process_image(process: HANDLE) -> Result<PathBuf, Error> {
     let mut buffer = [0u16; 1024];
     let mut length = buffer.len() as u32;
     // SAFETY: retained query-only process, fixed bounded output, DOS path mode.

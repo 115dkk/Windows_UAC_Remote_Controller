@@ -48,9 +48,9 @@ mod runtime;
 mod startup_phase;
 
 pub use contract::{
-    Command, ControlOutcome, InstallationState, PendingElevationId, RuntimeCapabilities,
-    ServiceControlIntent, ServiceError, ServiceOperation, ServiceSnapshot, ServiceState,
-    SetupFailure,
+    Command, ControlOutcome, InstallationState, PendingElevationId, RendererInvocation,
+    RuntimeCapabilities, ServiceControlIntent, ServiceError, ServiceOperation, ServiceSnapshot,
+    ServiceState, SetupFailure,
 };
 
 // Opaque native integration resources, not UI/CLI/network commands. Server
@@ -80,6 +80,19 @@ pub fn run_pair_helper(id: PendingElevationId) -> Result<(), ServiceError> {
     #[cfg(not(all(windows, target_pointer_width = "64")))]
     {
         let _ = id;
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Fixed nonvisual renderer bootstrap only; no window, QR, grant or enrollment.
+pub fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::run_pair_renderer(invocation).map_err(|error| error.service_error())
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        let _ = invocation;
         Err(ServiceError::UnsupportedPlatform)
     }
 }

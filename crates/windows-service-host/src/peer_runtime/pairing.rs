@@ -6,8 +6,12 @@
 
 use crate::{
     PairingPeerError, PairingPipe, PairingPipeProgress, PairingServerEndpoints, PendingElevationId,
-    ffi::{AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener},
-    pairing_handoff::{Frame, ServiceHandoff, ServiceSide},
+    RendererInvocation,
+    ffi::{
+        AttemptWindow, ListenProgress, RendererRegistration, StarterAdmission,
+        UnboundPairingListener, check_renderer_cutoff, renderer_original_cutoff,
+    },
+    pairing_handoff::{Frame, RendererProcess, RendererRequest, ServiceHandoff, ServiceSide},
     startup_phase::ScmReadyPermit,
 };
 use approval_core::RegistryCheckpoint;
@@ -56,6 +60,215 @@ enum Io {
     CloseWrite,
     AckRead,
     Idle,
+    RendererPrepareWrite,
+    RendererRegisterWrite,
+    RendererParentRead,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RendererParent {
+    PrepareWrite,
+    AwaitLaunch,
+    RegisterWrite,
+    Done,
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RendererIo {
+    Connect,
+    HelloRead,
+    ObjectsRead,
+    BoundWrite,
+    Idle,
+    CloseWrite,
+    AckRead,
+    Acknowledged,
+    TransportClosed,
+    Drained,
+}
+struct RendererRun {
+    request: RendererRequest,
+    pipe: PairingPipe,
+    registration: RendererRegistration,
+    parent: RendererParent,
+    io: RendererIo,
+    cleanup_failed: bool,
+}
+impl RendererRun {
+    fn awaiting_parent(&self) -> bool {
+        matches!(
+            self.parent,
+            RendererParent::PrepareWrite | RendererParent::AwaitLaunch
+        )
+    }
+    fn accept_parent(
+        &mut self,
+        parent: &mut PairingPipe,
+        request: RendererRequest,
+        process: RendererProcess,
+    ) -> Result<Frame, Failure> {
+        if self.parent != RendererParent::AwaitLaunch
+            || request.invocation != self.request.invocation
+            || request.cutoff == 0
+            || request.cutoff > self.request.cutoff
+        {
+            return Err(Failure::Protocol);
+        }
+        check_renderer_cutoff(request.cutoff)?;
+        self.request = request; // One conservative narrowing, never a renewed timer.
+        self.registration.register(parent, process)?;
+        check_renderer_cutoff(request.cutoff)?;
+        self.parent = RendererParent::RegisterWrite;
+        Ok(Frame::RendererRegistered(request))
+    }
+    fn ready_idle(&self) -> bool {
+        self.parent == RendererParent::Done
+            && self.io == RendererIo::Idle
+            && self.registration.objects_bound()
+    }
+    fn begin_close(&mut self) -> Result<(), Failure> {
+        if !self.ready_idle() {
+            return Err(Failure::Protocol);
+        }
+        self.registration.check_connected(&mut self.pipe)?;
+        self.pipe.begin_write(
+            &Frame::Close(self.request.invocation.pending())
+                .encode()
+                .map_err(|_| Failure::Protocol)?,
+        )?;
+        self.io = RendererIo::CloseWrite;
+        Ok(())
+    }
+    fn poll(&mut self, work_end: Instant) -> Result<(), Failure> {
+        if self.io == RendererIo::Drained {
+            return Ok(());
+        }
+        if self.io == RendererIo::TransportClosed {
+            if self.registration.drain()? {
+                self.io = RendererIo::Drained;
+                if let Some(error) = self.registration.failure() {
+                    return Err(Failure::Native(error));
+                }
+            }
+            return Ok(());
+        }
+        check_renderer_cutoff(self.request.cutoff)?;
+        let closing = matches!(
+            self.io,
+            RendererIo::CloseWrite | RendererIo::AckRead | RendererIo::Acknowledged
+        );
+        if !closing && Instant::now() >= work_end {
+            return Err(Failure::Window);
+        }
+        if self.io == RendererIo::Acknowledged {
+            self.registration.check_connected(&mut self.pipe)?;
+            return Ok(());
+        }
+        let progress = self.pipe.poll()?;
+        check_renderer_cutoff(self.request.cutoff)?;
+        match (self.io, progress) {
+            (_, PairingPipeProgress::Pending) => (),
+            (RendererIo::Connect, PairingPipeProgress::Connected) => {
+                self.registration.check_connected(&mut self.pipe)?;
+                self.pipe.begin_read()?;
+                self.io = RendererIo::HelloRead;
+            }
+            (RendererIo::HelloRead, PairingPipeProgress::Read(bytes)) => {
+                if Frame::decode(&bytes).map_err(|_| Failure::Protocol)?
+                    != Frame::RendererHello(self.request)
+                {
+                    return Err(Failure::Protocol);
+                }
+                self.registration.check_connected(&mut self.pipe)?;
+                self.pipe.begin_read()?;
+                self.io = RendererIo::ObjectsRead;
+            }
+            (RendererIo::ObjectsRead, PairingPipeProgress::Read(bytes)) => {
+                let Frame::RendererObjects {
+                    invocation,
+                    objects,
+                } = Frame::decode(&bytes).map_err(|_| Failure::Protocol)?
+                else {
+                    return Err(Failure::Protocol);
+                };
+                if invocation != self.request.invocation {
+                    return Err(Failure::Protocol);
+                }
+                self.registration
+                    .bind_objects(&mut self.pipe, invocation, objects)?;
+                if Instant::now() >= work_end {
+                    return Err(Failure::Window);
+                }
+                check_renderer_cutoff(self.request.cutoff)?;
+                self.pipe.begin_write(
+                    &Frame::RendererBound(self.request)
+                        .encode()
+                        .map_err(|_| Failure::Protocol)?,
+                )?;
+                self.io = RendererIo::BoundWrite;
+            }
+            (RendererIo::BoundWrite, PairingPipeProgress::Written) => {
+                self.registration.check_connected(&mut self.pipe)?;
+                if Instant::now() >= work_end {
+                    return Err(Failure::Window);
+                }
+                self.io = RendererIo::Idle;
+            }
+            (RendererIo::Idle, PairingPipeProgress::Idle) => {
+                self.registration.check_connected(&mut self.pipe)?;
+                self.pipe.check_input_quiet()?;
+            }
+            (RendererIo::CloseWrite, PairingPipeProgress::Written) => {
+                self.pipe.begin_read()?;
+                self.io = RendererIo::AckRead;
+            }
+            (RendererIo::AckRead, PairingPipeProgress::Read(bytes)) => {
+                if Frame::decode(&bytes).map_err(|_| Failure::Protocol)?
+                    != Frame::CloseAck(self.request.invocation.pending())
+                {
+                    return Err(Failure::Protocol);
+                }
+                self.registration.check_connected(&mut self.pipe)?;
+                self.io = RendererIo::Acknowledged;
+            }
+            _ => return Err(Failure::Protocol),
+        }
+        check_renderer_cutoff(self.request.cutoff)?;
+        Ok(())
+    }
+    fn acknowledged(&self) -> bool {
+        matches!(
+            self.io,
+            RendererIo::Acknowledged | RendererIo::TransportClosed | RendererIo::Drained
+        )
+    }
+    fn close_transport_after_all_acks(&mut self) -> Result<(), Failure> {
+        if self.io == RendererIo::Acknowledged {
+            // Normal identities were checked while all three clients remained
+            // alive. This cleanup EOF allows renderer exit; parents stay owned.
+            if !self.pipe.drain()? {
+                return Err(Failure::Protocol);
+            }
+            self.io = RendererIo::TransportClosed;
+        } else if !matches!(self.io, RendererIo::TransportClosed | RendererIo::Drained) {
+            return Err(Failure::Protocol);
+        }
+        Ok(())
+    }
+    fn cancel(&mut self) {
+        self.pipe.cancel();
+    }
+    fn drain(&mut self) {
+        self.pipe.cancel();
+        let pipe_failed = self.pipe.drain().is_err();
+        let registration_failed = self.registration.drain().is_err();
+        self.cleanup_failed |= pipe_failed || registration_failed;
+    }
+    fn remaining_owners(&self) -> usize {
+        usize::from(!self.pipe.is_drained()) + usize::from(!self.registration.is_drained())
+    }
+}
+fn all_participants_acknowledged(originals: bool, renderer: Option<bool>) -> bool {
+    originals && renderer.unwrap_or(true)
 }
 enum Channel {
     Listener(UnboundPairingListener),
@@ -153,6 +366,8 @@ pub(super) struct ServicePairing {
     protocol: Option<ServiceHandoff>,
     pending_id: Option<PendingElevationId>,
     preparation: Option<OriginalCeremony>,
+    renderer: Option<RendererRun>,
+    renderer_attempted: bool,
     next_side: ServiceSide,
     first_failure: Option<Failure>,
     cleanup_failed: bool,
@@ -182,6 +397,8 @@ impl ServicePairing {
             protocol: None,
             pending_id: None,
             preparation: None,
+            renderer: None,
+            renderer_attempted: false,
             next_side: ServiceSide::Starter,
             first_failure: None,
             cleanup_failed: false,
@@ -227,6 +444,8 @@ impl ServicePairing {
             || self.protocol.is_some()
             || self.pending_id.is_some()
             || self.preparation.is_some()
+            || self.renderer.is_some()
+            || self.renderer_attempted
         {
             return Err(Failure::Protocol);
         }
@@ -365,8 +584,13 @@ impl ServicePairing {
     fn write(&mut self, side: ServiceSide, frame: Frame, operation: Io) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
         self.check_policy()?;
-        if matches!(frame, Frame::Offer(_) | Frame::Bound(_))
-            && Instant::now() >= self.close_at()?
+        if matches!(
+            frame,
+            Frame::Offer(_)
+                | Frame::Bound(_)
+                | Frame::PrepareRenderer(_)
+                | Frame::RendererRegistered(_)
+        ) && Instant::now() >= self.close_at()?
         {
             return Err(Failure::Window);
         }
@@ -464,7 +688,15 @@ impl ServicePairing {
         let helper = self.helper.as_mut().ok_or(Failure::Protocol)?.pipe()?.0;
         helper.match_launched_helper(starter, pid, created)?;
         starter.check_input_quiet()?;
-        helper.check_input_quiet()?;
+        // Exactly one registered-parent reply may race our observed Prepare
+        // write completion. All other idle helper input stays forbidden.
+        if !self
+            .renderer
+            .as_ref()
+            .is_some_and(RendererRun::awaiting_parent)
+        {
+            helper.check_input_quiet()?;
+        }
         self.check_window(Instant::now())?;
         self.check_policy()
     }
@@ -482,7 +714,13 @@ impl ServicePairing {
                 .ok_or(Failure::Protocol)?
                 .is_closing()
         {
-            if !self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound) || !self.both_idle() {
+            if !self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound)
+                || !self.both_idle()
+                || self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| !renderer.ready_idle())
+            {
                 return Err(Failure::Window);
             }
             self.match_pair()?;
@@ -494,6 +732,9 @@ impl ServicePairing {
                 .ok_or(Failure::Protocol)?
                 .start_close()
                 .map_err(|_| Failure::Protocol)?;
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.begin_close()?;
+            }
         }
         let side = self.next_side;
         self.next_side = match side {
@@ -501,12 +742,25 @@ impl ServicePairing {
             ServiceSide::Helper => ServiceSide::Starter,
         };
         self.poll_side(side)?;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.poll(close_at)?;
+        }
+        self.check_policy()?;
         self.check_window(Instant::now())?;
-        if self
+        let original_acks = self
             .protocol
             .as_ref()
-            .is_some_and(ServiceHandoff::both_acknowledged)
-        {
+            .is_some_and(ServiceHandoff::both_acknowledged);
+        if all_participants_acknowledged(
+            original_acks,
+            self.renderer.as_ref().map(RendererRun::acknowledged),
+        ) {
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.close_transport_after_all_acks()?;
+                if renderer.io != RendererIo::Drained {
+                    return Ok(());
+                }
+            }
             // BOTH normal post-read native fences have completed while clients
             // remain live. Only now may either original pipe be closed.
             self.retire(None, true);
@@ -633,7 +887,54 @@ impl ServicePairing {
         })();
         if let Err(error) = result {
             self.retire(Some(error), true);
+        } else if !self.renderer_attempted {
+            let begun = self.begin_renderer();
+            if let Err(error) = begun {
+                self.retire(Some(error), true);
+            }
         }
+    }
+    fn begin_renderer(&mut self) -> Result<(), Failure> {
+        self.renderer_attempted = true; // Burn before RNG, allocation or native creation.
+        self.match_pair()?;
+        if Instant::now() >= self.close_at()? {
+            return Err(Failure::Window);
+        }
+        let pending = self.pending_id.ok_or(Failure::Protocol)?;
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| Failure::Random)?;
+        let display = PendingElevationId::from_bytes(bytes).map_err(|_| Failure::Random)?;
+        let invocation = RendererInvocation::new(pending, display).map_err(|_| Failure::Random)?;
+        let cutoff =
+            renderer_original_cutoff(self.window.as_ref().ok_or(Failure::Protocol)?.deadline())?;
+        let request = RendererRequest::new(invocation, cutoff).map_err(|_| Failure::Protocol)?;
+        let pipe = self
+            .starter
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .pipe()?
+            .0
+            .prepare_renderer_pipe()?;
+        self.renderer = Some(RendererRun {
+            request,
+            pipe,
+            registration: RendererRegistration::new(),
+            parent: RendererParent::PrepareWrite,
+            io: RendererIo::Connect,
+            cleanup_failed: false,
+        });
+        self.match_pair()?;
+        self.renderer
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .pipe
+            .begin_connect()?;
+        self.match_pair()?;
+        self.write(
+            ServiceSide::Helper,
+            Frame::PrepareRenderer(request),
+            Io::RendererPrepareWrite,
+        )
     }
     fn both_idle(&self) -> bool {
         self.starter.as_ref().is_some_and(Channel::idle)
@@ -692,6 +993,45 @@ impl ServicePairing {
                     .map_err(|_| Failure::Protocol)?;
                 self.read(side, Io::AckRead)
             }
+            (Io::RendererPrepareWrite, PairingPipeProgress::Written)
+                if side == ServiceSide::Helper =>
+            {
+                let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
+                if renderer.parent != RendererParent::PrepareWrite {
+                    return Err(Failure::Protocol);
+                }
+                renderer.parent = RendererParent::AwaitLaunch;
+                *self.channel(side)?.pipe()?.1 = Io::Idle;
+                self.read(side, Io::RendererParentRead)
+            }
+            (Io::RendererParentRead, PairingPipeProgress::Read(bytes))
+                if side == ServiceSide::Helper =>
+            {
+                *self.channel(side)?.pipe()?.1 = Io::Idle;
+                let Frame::RendererLaunched { request, process } =
+                    Frame::decode(&bytes).map_err(|_| Failure::Protocol)?
+                else {
+                    return Err(Failure::Protocol);
+                };
+                let helper = self.helper.as_mut().ok_or(Failure::Protocol)?.pipe()?.0;
+                let reply = self
+                    .renderer
+                    .as_mut()
+                    .ok_or(Failure::Protocol)?
+                    .accept_parent(helper, request, process)?;
+                self.write(ServiceSide::Helper, reply, Io::RendererRegisterWrite)
+            }
+            (Io::RendererRegisterWrite, PairingPipeProgress::Written)
+                if side == ServiceSide::Helper =>
+            {
+                let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
+                if renderer.parent != RendererParent::RegisterWrite {
+                    return Err(Failure::Protocol);
+                }
+                renderer.parent = RendererParent::Done;
+                *self.channel(side)?.pipe()?.1 = Io::Idle;
+                Ok(())
+            }
             _ => Err(Failure::Protocol),
         };
         outcome?;
@@ -707,6 +1047,9 @@ impl ServicePairing {
         }
         if let Some(preparation) = self.preparation.as_mut() {
             preparation.invalidate();
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.cancel();
         }
         if let Some(starter) = self.starter.as_mut() {
             starter.cancel();
@@ -735,6 +1078,10 @@ impl ServicePairing {
         {
             self.cleanup_failed = true;
         }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.drain();
+            self.cleanup_failed |= renderer.cleanup_failed;
+        }
         if self.remaining_owners() != 0 {
             return;
         }
@@ -745,6 +1092,8 @@ impl ServicePairing {
         self.protocol = None;
         self.pending_id = None;
         self.preparation = None;
+        self.renderer = None;
+        self.renderer_attempted = false;
         self.generation = None;
         if self.rearm
             && !self.cleanup_failed
@@ -777,7 +1126,10 @@ impl ServicePairing {
             self.admission
                 .as_ref()
                 .is_some_and(|admission| !admission.is_drained()),
-        )
+        ) + self
+            .renderer
+            .as_ref()
+            .map_or(0, RendererRun::remaining_owners)
     }
     pub(super) fn cleanup_failed(&self) -> bool {
         self.cleanup_failed
@@ -832,6 +1184,16 @@ mod tests {
         assert!(owner.starter.is_none() && owner.helper.is_none());
         assert_eq!(owner.state, State::Unavailable);
         assert!(!owner.enabled);
+    }
+    #[test]
+    fn renderer_terminal_needs_all_three_acknowledgements_before_any_close() {
+        assert!(!all_participants_acknowledged(false, Some(false)));
+        assert!(!all_participants_acknowledged(true, Some(false)));
+        assert!(!all_participants_acknowledged(false, Some(true)));
+        assert!(all_participants_acknowledged(true, Some(true)));
+        // A ceremony rejected before creating a renderer keeps the original
+        // two-peer cleanup contract; absence is not fabricated renderer success.
+        assert!(all_participants_acknowledged(true, None));
     }
     #[test]
     fn uncertain_mock_drain_retains_owner_and_never_rearms() {
