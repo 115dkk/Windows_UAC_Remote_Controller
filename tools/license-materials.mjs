@@ -10,16 +10,17 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, win
 import { fileURLToPath } from 'node:url';
 import { TextDecoder } from 'node:util';
 import { licenseInventoryFromMetadata, readLockedCargoMetadata } from './license-inventory.mjs';
+import { ALLOC_STDLIB_SHARED_NOTICE, isReviewedSharedNoticeConsumer, isReviewedSharedNoticeProvider, matchesReviewedSharedNoticeBytes } from './license-material-supplements.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 export const MATERIALS_OUTPUT = 'target/license-materials/rust';
 export const MATERIAL_LIMITS = Object.freeze({ packages: 2048, perPackage: 32, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, rootEntries: 1024, pathBytes: 4096, manifestBytes: 16 * 1024 * 1024 });
-const MARKER = '.rust-license-materials-v1';
-const MARKER_BYTES = Buffer.from('Rust license-materials collection v1; incomplete until manifest.json is committed.\n');
+const MARKER = '.rust-license-materials-v2';
+const MARKER_BYTES = Buffer.from('Rust license-materials collection v2; incomplete until manifest.json is committed.\n');
 const ROOT_NOTICES = ['LICENSE', 'LICENSE-NOTICE.md'];
 const PATCH_NOTICE = 'vendor/ANDROID_LIFECYCLE_PATCHES.md';
 const LIMITATIONS = Object.freeze(['license-compatibility-not-evaluated', 'legal-completeness-not-certified', 'corresponding-source-not-produced', 'npm-maven-not-collected', 'fonts-remain-owned-by-tools/ui-fonts.mjs', 'stable-input-observations-not-upstream-archive-verification', 'quiescent-trusted-checkout-source-cache-output-required', 'anchor-stat-checks-not-adversarial-ancestor-swap-or-aba-containment']);
-const LEGAL_NAME = /^(?:LICENSE|COPYING|NOTICE|COPYRIGHT|UNLICENSE)(?:[-_.][A-Za-z0-9._-]+)?$/iu;
+const LEGAL_NAME = /^(?:LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT|UNLICENSE)(?:[-_.][A-Za-z0-9._-]+)?$/iu;
 const PRIVATE_SEGMENT = /^(?:\.git|\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.config|\.codex|\.superloopy|\.env(?:\..*)?|credentials?|secrets?|config(?:\..*)?|id_rsa|id_ed25519)$/iu;
 const ERRORS = new Set(['arguments', 'metadata_observation', 'metadata_shape', 'metadata_license', 'provenance', 'path', 'source_missing', 'source_type', 'source_changed', 'source_text', 'source_bounds', 'name_collision', 'material_missing', 'output_exists', 'output_io', 'manifest']);
 const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
@@ -231,7 +232,7 @@ function packageRecords(metadata, repository) {
 }
 
 export function validateMaterialManifest(manifest) {
-  if (!keys(manifest, ['schemaVersion', 'status', 'scope', 'lockfile', 'inventory', 'packages', 'materials', 'limitations']) || manifest.schemaVersion !== 1 || manifest.status !== 'collected' || manifest.scope !== 'rust-declared-and-shallow-legal-materials' || !Array.isArray(manifest.inventory) || !Array.isArray(manifest.packages) || !Array.isArray(manifest.materials) || manifest.inventory.length === 0 || manifest.inventory.length > MATERIAL_LIMITS.packages || manifest.packages.length !== manifest.inventory.length || manifest.materials.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + 3) incomplete('manifest');
+  if (!keys(manifest, ['schemaVersion', 'status', 'scope', 'lockfile', 'inventory', 'packages', 'materials', 'sharedNotices', 'limitations']) || manifest.schemaVersion !== 2 || manifest.status !== 'collected' || manifest.scope !== 'rust-declared-and-shallow-legal-materials' || !Array.isArray(manifest.inventory) || !Array.isArray(manifest.packages) || !Array.isArray(manifest.materials) || !Array.isArray(manifest.sharedNotices) || manifest.sharedNotices.length > 1 || manifest.inventory.length === 0 || manifest.inventory.length > MATERIAL_LIMITS.packages || manifest.packages.length !== manifest.inventory.length || manifest.materials.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + 3) incomplete('manifest');
   const byteRecord = (value, maximum) => Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= maximum && /^[a-f0-9]{64}$/u.test(value.sha256);
   if (!keys(manifest.lockfile, ['sourcePath', 'bytes', 'sha256']) || manifest.lockfile.sourcePath !== 'Cargo.lock' || !byteRecord(manifest.lockfile, MATERIAL_LIMITS.fileBytes)) incomplete('manifest');
   const origins = new Set(), materialById = new Map();
@@ -251,15 +252,24 @@ export function validateMaterialManifest(manifest) {
     if (!keys(row, ['name', 'version', 'workspace', 'license', 'hasLicenseFile', 'source']) || !/^[A-Za-z0-9_-]{1,128}$/u.test(row.name) || !/^[A-Za-z0-9.+-]{1,128}$/u.test(row.version) || typeof row.workspace !== 'boolean' || typeof row.hasLicenseFile !== 'boolean' || row.license !== null && !text(row.license, 4096)) incomplete('manifest');
     publicCargoSource(row.source);
   });
+  const reviewedShares = new Map();
+  for (const share of manifest.sharedNotices) {
+    if (!keys(share, ['id', 'consumerInventoryIndex', 'providerInventoryIndex', 'materialId', 'upstreamNoticeUrl', 'bytes', 'sha256']) || share.id !== ALLOC_STDLIB_SHARED_NOTICE.id || !Number.isSafeInteger(share.consumerInventoryIndex) || !Number.isSafeInteger(share.providerInventoryIndex) || share.consumerInventoryIndex < 0 || share.providerInventoryIndex < 0 || share.consumerInventoryIndex === share.providerInventoryIndex || share.consumerInventoryIndex >= manifest.inventory.length || share.providerInventoryIndex >= manifest.inventory.length || share.upstreamNoticeUrl !== ALLOC_STDLIB_SHARED_NOTICE.upstreamNoticeUrl || share.bytes !== ALLOC_STDLIB_SHARED_NOTICE.bytes || share.sha256 !== ALLOC_STDLIB_SHARED_NOTICE.sha256) incomplete('manifest');
+    const consumer = manifest.packages[share.consumerInventoryIndex], provider = manifest.packages[share.providerInventoryIndex];
+    const material = materialById.get(share.materialId);
+    if (!isReviewedSharedNoticeConsumer(manifest.inventory[share.consumerInventoryIndex], consumer?.provenance?.kind) || !isReviewedSharedNoticeProvider(manifest.inventory[share.providerInventoryIndex], provider?.provenance?.kind) || !matchesReviewedSharedNoticeBytes(material) || material.origin !== `package:${String(share.providerInventoryIndex).padStart(6, '0')}` || !Array.isArray(consumer.materials) || !consumer.materials.includes(share.materialId) || !Array.isArray(provider.materials) || !provider.materials.includes(share.materialId)) incomplete('manifest');
+    reviewedShares.set(share.consumerInventoryIndex, share.materialId);
+  }
   manifest.packages.forEach((pkg, index) => {
     if (!keys(pkg, ['inventoryIndex', 'provenance', 'materials']) || pkg.inventoryIndex !== index || !keys(pkg.provenance, ['kind', 'root']) || !['workspace', 'vendored', 'path', 'registry', 'git'].includes(pkg.provenance.kind) || !Array.isArray(pkg.materials) || pkg.materials.length === 0 || pkg.materials.length > MATERIAL_LIMITS.perPackage + 3 || new Set(pkg.materials).size !== pkg.materials.length) incomplete('manifest');
     safeRelativePath(pkg.provenance.root);
     const ownOrigin = `package:${String(index).padStart(6, '0')}`;
     const selected = pkg.materials.map((id) => materialById.get(id));
-    if (selected.some((item) => !item || item.origin !== 'repository' && item.origin !== ownOrigin)) incomplete('manifest');
+    const reviewedMaterial = reviewedShares.get(index);
+    if (selected.some((item) => !item || item.origin !== 'repository' && item.origin !== ownOrigin && item.id !== reviewedMaterial)) incomplete('manifest');
     const row = manifest.inventory[index];
     if (row.workspace !== (pkg.provenance.kind === 'workspace')) incomplete('manifest');
-    if (!row.workspace && !selected.some((item) => item.origin === ownOrigin && item.kind === 'text')) incomplete('material_missing');
+    if (!row.workspace && !selected.some((item) => item.origin === ownOrigin && item.kind === 'text' || item.id === reviewedMaterial)) incomplete('material_missing');
     if ((row.workspace || pkg.provenance.kind === 'vendored' && row.license?.includes('GPL-2.0-or-later')) && ROOT_NOTICES.some((name) => !selected.some((item) => item.origin === 'repository' && item.sourcePath === name))) incomplete('material_missing');
     if (pkg.provenance.kind === 'vendored' && !selected.some((item) => item.origin === 'repository' && item.sourcePath === PATCH_NOTICE)) incomplete('material_missing');
   });
@@ -331,7 +341,7 @@ export function collectLicenseMaterials({ repository = repositoryRoot, metadataR
   try { metadata = metadataReader({ cwd: root, offline: true, stderr: { write() {} } }); } catch { incomplete('metadata_observation'); }
   recheck(io, lock);
   const { entries, inventory } = packageRecords(metadata, root);
-  const inputs = [], materials = [], packages = [], byPath = new Map(), scans = [];
+  const inputs = [], materials = [], packages = [], byPath = new Map(), scans = [], missingText = [];
   let total = 0;
   const add = (anchor, sourcePath, origin, kind = 'text') => {
     safeRelativePath(sourcePath);
@@ -366,14 +376,27 @@ export function collectLicenseMaterials({ repository = repositoryRoot, metadataR
     }
     if (selected.length > MATERIAL_LIMITS.perPackage) incomplete('source_bounds', entry.pkg.name);
     selected.sort(compare);
-    if (!entry.workspace && !selected.some((name) => !name.toLowerCase().endsWith('.spdx'))) incomplete('material_missing', entry.pkg.name);
+    if (!entry.workspace && !selected.some((name) => !name.toLowerCase().endsWith('.spdx'))) {
+      if (!isReviewedSharedNoticeConsumer(inventory[index], entry.provenance.kind)) incomplete('material_missing', entry.pkg.name);
+      missingText.push(index);
+    }
     const refs = selected.map((name) => add(entry.root, name, `package:${String(index).padStart(6, '0')}`, name.toLowerCase().endsWith('.spdx') ? 'spdx-metadata' : 'text'));
     if (entry.workspace || entry.provenance.kind === 'vendored' && entry.pkg.license?.includes('GPL-2.0-or-later')) refs.push(...rootRefs);
     if (entry.provenance.kind === 'vendored') refs.push(add(root, PATCH_NOTICE, 'repository', 'attribution'));
     packages.push({ inventoryIndex: index, provenance: entry.provenance, materials: [...new Set(refs)].sort(compare) });
     scans.push({ root: entry.root, anchors, manifest: entry.manifest, manifestStamp: stamp(manifestStat), names });
   });
-  const manifest = validateMaterialManifest({ schemaVersion: 1, status: 'collected', scope: 'rust-declared-and-shallow-legal-materials', lockfile: { sourcePath: 'Cargo.lock', bytes: lock.bytes.length, sha256: digest(lock.bytes) }, inventory, packages, materials, limitations: [...LIMITATIONS] });
+  const sharedNotices = missingText.map((consumerInventoryIndex) => {
+    const providerInventoryIndex = inventory.findIndex((row, index) => isReviewedSharedNoticeProvider(row, packages[index].provenance.kind));
+    const material = providerInventoryIndex < 0 ? null : materials.find((item) => item.origin === `package:${String(providerInventoryIndex).padStart(6, '0')}` && item.sourcePath === ALLOC_STDLIB_SHARED_NOTICE.sourcePath);
+    if (!matchesReviewedSharedNoticeBytes(material)) incomplete('material_missing', inventory[consumerInventoryIndex].name);
+    // Reference the actual provider-owned copy; never fabricate a LICENSE path
+    // or material origin under alloc-stdlib, and never copy generic SPDX text.
+    packages[consumerInventoryIndex].materials.push(material.id);
+    packages[consumerInventoryIndex].materials.sort(compare);
+    return { id: ALLOC_STDLIB_SHARED_NOTICE.id, consumerInventoryIndex, providerInventoryIndex, materialId: material.id, upstreamNoticeUrl: ALLOC_STDLIB_SHARED_NOTICE.upstreamNoticeUrl, bytes: material.bytes, sha256: material.sha256 };
+  });
+  const manifest = validateMaterialManifest({ schemaVersion: 2, status: 'collected', scope: 'rust-declared-and-shallow-legal-materials', lockfile: { sourcePath: 'Cargo.lock', bytes: lock.bytes.length, sha256: digest(lock.bytes) }, inventory, packages, materials, sharedNotices, limitations: [...LIMITATIONS] });
   const manifestBytes = encodeMaterialManifest(manifest);
   const checkSources = () => {
     recheck(io, lock);

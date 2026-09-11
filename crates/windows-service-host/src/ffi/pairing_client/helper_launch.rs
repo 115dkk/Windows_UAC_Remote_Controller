@@ -464,14 +464,14 @@ impl PairingHelperLaunch {
 }
 impl Drop for PairingHelperLaunch {
     fn drop(&mut self) {
-        if let Some(mut inner) = self.inner.take() {
-            if !inner.drained {
-                inner.fail(Error::Cancelled);
-                UNHEALTHY.store(true, Ordering::Release);
-                // Keep helper + original client/operation/pins + original
-                // reservation together. No wait, kill or replacement on Drop.
-                mem::forget(inner);
-            }
+        if let Some(mut inner) = self.inner.take()
+            && !inner.drained
+        {
+            inner.fail(Error::Cancelled);
+            UNHEALTHY.store(true, Ordering::Release);
+            // Keep helper + original client/operation/pins + original
+            // reservation together. No wait, kill or replacement on Drop.
+            mem::forget(inner);
         }
     }
 }

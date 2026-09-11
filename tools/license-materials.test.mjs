@@ -9,6 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { licenseInventoryFromMetadata, readLockedCargoMetadata } from './license-inventory.mjs';
 import { collectLicenseMaterials, encodeMaterialManifest, explicitLicensePath, inspectGeneratedMaterialNames, legalCandidates, LicenseMaterialsError, MATERIAL_LIMITS, MATERIALS_OUTPUT, publicCargoSource, runLicenseMaterials, safeRelativePath, validateMaterialManifest } from './license-materials.mjs';
+import { ALLOC_STDLIB_SHARED_NOTICE, isReviewedSharedNoticeConsumer, isReviewedSharedNoticeProvider, matchesReviewedSharedNoticeBytes } from './license-material-supplements.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const registrySource = 'registry+https://github.com/rust-lang/crates.io-index';
@@ -134,7 +135,7 @@ test('traversal, credential/config paths and candidate name collisions fail befo
   }
   assert.throws(() => explicitLicensePath(f.dependency, join(f.repository, 'LICENSE')), rejected('path'));
   for (const names of [['LICENSE', 'license'], ['COPYING', 'COPYING'], ['NOTICE.md', 'notice.MD']]) assert.throws(() => legalCandidates(names), rejected('name_collision'));
-  assert.deepEqual(legalCandidates(['Cargo.toml', 'src', 'LICENSE-MIT', 'COPYING', 'UNLICENSE', '.env', 'LICENSES']), ['COPYING', 'LICENSE-MIT', 'UNLICENSE']);
+  assert.deepEqual(legalCandidates(['Cargo.toml', 'src', 'LICENSE-MIT', 'LICENCE', 'LICENCE-MIT', 'COPYING', 'UNLICENSE', '.env', 'LICENSES']), ['COPYING', 'LICENCE', 'LICENCE-MIT', 'LICENSE-MIT', 'UNLICENSE']);
   f.dep.license_file = '../LICENSE';
   assert.throws(() => f.run(), rejected('path'));
   assert.ok(!fs.existsSync(f.output));
@@ -299,4 +300,120 @@ test('collector metadata failures and arbitrary exceptions cannot escape fixed i
   assert.ok(!fs.existsSync(f.output));
   for (const args of [['--output', '/outside'], ['--online'], ['--help', '--online']]) assert.equal(runLicenseMaterials({ args, collect: () => assert.fail('must not collect'), stdout: { write() {} }, stderr: { write() {} } }), 1);
   assert.equal(runLicenseMaterials({ args: ['--help'], collect: () => assert.fail('help must not collect'), stdout: { write() {} }, stderr: { write() {} } }), 0);
+});
+
+// Exact original Dropbox BSD notice copied from the ROOT-reviewed companion
+// LICENSE, with copyright/terms retained. ROOT runs the length/hash assertion;
+// these are not synthetic bytes relabelled with a real upstream digest.
+const reviewedDropboxNotice = Buffer.from(`Copyright (c) 2016 Dropbox, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+`);
+
+function allocFixture(t) {
+  const f = fixture(t);
+  const make = (tuple, licenseBytes) => {
+    const root = join(dirname(f.dependency), `${tuple.name}-${tuple.version}`);
+    fs.mkdirSync(root);
+    fs.writeFileSync(join(root, 'Cargo.toml'), '# Synthetic package placement; original notice bytes where supplied.\n');
+    if (licenseBytes) fs.writeFileSync(join(root, 'LICENSE'), licenseBytes);
+    const pkg = { ...tuple, id: `${registrySource}#${tuple.name}@${tuple.version}`, license_file: null, manifest_path: join(root, 'Cargo.toml') };
+    f.metadata.packages.push(pkg);
+    return { root, pkg };
+  };
+  const provider = make(ALLOC_STDLIB_SHARED_NOTICE.provider, reviewedDropboxNotice);
+  const consumer = make(ALLOC_STDLIB_SHARED_NOTICE.consumer);
+  return { ...f, provider, consumer };
+}
+
+test('one curated shared-notice policy requires every exact tuple and byte-pin field', () => {
+  const consumer = { ...ALLOC_STDLIB_SHARED_NOTICE.consumer, workspace: false };
+  const provider = { ...ALLOC_STDLIB_SHARED_NOTICE.provider, workspace: false };
+  assert.equal(isReviewedSharedNoticeConsumer(consumer, 'registry'), true);
+  assert.equal(isReviewedSharedNoticeProvider(provider, 'registry'), true);
+  for (const [field, value] of [['name', 'other'], ['version', '99.0.0'], ['license', 'MIT'], ['source', 'registry+https://example.com/index'], ['workspace', true]]) {
+    assert.equal(isReviewedSharedNoticeConsumer({ ...consumer, [field]: value }, 'registry'), false);
+    assert.equal(isReviewedSharedNoticeProvider({ ...provider, [field]: value }, 'registry'), false);
+  }
+  for (const kind of ['path', 'vendored', 'git', 'workspace']) {
+    assert.equal(isReviewedSharedNoticeConsumer(consumer, kind), false);
+    assert.equal(isReviewedSharedNoticeProvider(provider, kind), false);
+  }
+  const material = { kind: 'text', sourcePath: 'LICENSE', bytes: 1483, sha256: ALLOC_STDLIB_SHARED_NOTICE.sha256 };
+  assert.equal(matchesReviewedSharedNoticeBytes(material), true, 'pure pin selection, not byte-verification evidence');
+  for (const [field, value] of [['kind', 'spdx-metadata'], ['sourcePath', 'COPYING'], ['bytes', 1484], ['sha256', '0'.repeat(64)]]) assert.equal(matchesReviewedSharedNoticeBytes({ ...material, [field]: value }), false);
+});
+
+test('approved alloc-stdlib relation reuses actual provider bytes and records their different origin explicitly', (t) => {
+  assert.equal(reviewedDropboxNotice.length, ALLOC_STDLIB_SHARED_NOTICE.bytes);
+  assert.equal(hash(reviewedDropboxNotice), ALLOC_STDLIB_SHARED_NOTICE.sha256, 'ROOT-run assertion against independently supplied authoritative pin');
+  const f = allocFixture(t); f.run();
+  const manifest = f.manifest();
+  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.sharedNotices.length, 1);
+  const share = manifest.sharedNotices[0];
+  assert.equal(manifest.inventory[share.consumerInventoryIndex].name, 'alloc-stdlib');
+  assert.equal(manifest.inventory[share.providerInventoryIndex].name, 'alloc-no-stdlib');
+  assert.equal(share.upstreamNoticeUrl, ALLOC_STDLIB_SHARED_NOTICE.upstreamNoticeUrl);
+  const material = manifest.materials.find((item) => item.id === share.materialId);
+  assert.equal(material.origin, `package:${String(share.providerInventoryIndex).padStart(6, '0')}`);
+  assert.equal(material.sourcePath, 'LICENSE');
+  assert.deepEqual(fs.readFileSync(join(f.output, material.outputPath)), reviewedDropboxNotice);
+  assert.ok(manifest.packages[share.consumerInventoryIndex].materials.includes(material.id));
+  assert.ok(manifest.packages[share.providerInventoryIndex].materials.includes(material.id));
+  assert.ok(!manifest.materials.some((item) => item.origin === `package:${String(share.consumerInventoryIndex).padStart(6, '0')}`));
+  assert.ok(!fs.existsSync(join(f.consumer.root, 'LICENSE')), 'never mutate the consumer or the cache to fabricate a local notice');
+  assert.equal(validateMaterialManifest(manifest), manifest);
+});
+
+test('missing or changed provider, tuple, source-path, length or hash stays incomplete', (t) => {
+  for (const change of [
+    (f) => { f.metadata.packages = f.metadata.packages.filter((pkg) => pkg !== f.provider.pkg); },
+    (f) => { f.provider.pkg.license = 'MIT OR BSD-3-Clause'; },
+    (f) => { f.provider.pkg.source = 'registry+https://example.com/index'; },
+    (f) => { f.consumer.pkg.license = 'MIT'; },
+    (f) => { f.consumer.pkg.source = 'registry+https://example.com/index'; },
+    (f) => { fs.unlinkSync(join(f.provider.root, 'LICENSE')); },
+    (f) => { fs.renameSync(join(f.provider.root, 'LICENSE'), join(f.provider.root, 'COPYING')); },
+    (f) => { fs.writeFileSync(join(f.provider.root, 'LICENSE'), Buffer.concat([reviewedDropboxNotice, Buffer.from('\n')])); },
+    (f) => { const bytes = Buffer.from(reviewedDropboxNotice); bytes[0] ^= 1; fs.writeFileSync(join(f.provider.root, 'LICENSE'), bytes); },
+    (f) => { const path = join(dirname(f.provider.root), 'alloc-no-stdlib-2.0.5'); fs.renameSync(f.provider.root, path); Object.assign(f.provider.pkg, { version: '2.0.5', manifest_path: join(path, 'Cargo.toml') }); },
+    (f) => { const path = join(dirname(f.consumer.root), 'alloc-stdlib-0.2.5'); fs.renameSync(f.consumer.root, path); Object.assign(f.consumer.pkg, { version: '0.2.5', manifest_path: join(path, 'Cargo.toml') }); },
+  ]) {
+    const f = allocFixture(t); change(f);
+    assert.throws(() => f.run(), rejected('material_missing'));
+    assert.ok(!fs.existsSync(f.output));
+  }
+});
+
+test('shared-notice manifest cannot authorize another relation or hide provider ownership and pins', (t) => {
+  const f = allocFixture(t); f.run();
+  for (const mutate of [
+    (value) => { value.schemaVersion = 1; },
+    (value) => { value.sharedNotices = []; },
+    (value) => { value.sharedNotices.push({ ...value.sharedNotices[0] }); },
+    (value) => { value.sharedNotices[0].id = 'generic-bsd-waiver'; },
+    (value) => { value.sharedNotices[0].upstreamNoticeUrl = 'https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/6032b6a9b20e03737135c55a0270ccffcc1438ef/LICENSE'; },
+    (value) => { value.sharedNotices[0].bytes += 1; },
+    (value) => { value.sharedNotices[0].sha256 = '0'.repeat(64); },
+    (value) => { const share = value.sharedNotices[0]; share.consumerInventoryIndex = share.providerInventoryIndex; },
+    (value) => { const share = value.sharedNotices[0]; value.inventory[share.consumerInventoryIndex].version = '0.2.5'; },
+    (value) => { const share = value.sharedNotices[0]; value.materials.find((item) => item.id === share.materialId).origin = `package:${String(share.consumerInventoryIndex).padStart(6, '0')}`; },
+    (value) => { const share = value.sharedNotices[0]; value.packages[share.providerInventoryIndex].materials = []; },
+    (value) => { const share = value.sharedNotices[0]; value.packages[share.consumerInventoryIndex].materials.push(value.materials.find((item) => item.sourcePath === 'NOTICE').id); },
+  ]) {
+    const manifest = f.manifest(); mutate(manifest);
+    assert.throws(() => validateMaterialManifest(manifest));
+  }
+  const ordinary = fixture(t); ordinary.run();
+  assert.deepEqual(ordinary.manifest().sharedNotices, [], 'all other packages keep the original no-cross-package rule');
 });

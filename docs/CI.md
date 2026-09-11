@@ -179,13 +179,19 @@ The same jobs then run `tools/license-materials.mjs` against the cached exact
 Cargo sources with offline metadata. Collection requires trusted, quiescent
 checkout/cache/output trees; observed filesystem stability is not atomic
 containment against an adversarial path swap. The collector retains bounded
-original Rust LICENSE/COPYING/NOTICE material, existing workspace/vendor notices
+original Rust LICENSE/LICENCE/COPYING/NOTICE material, existing workspace/vendor notices
 and a source-relative byte/digest manifest in a fresh output directory. Missing
 or unsupported material fails the job. Only successful collection uploads
 `rust-license-materials-<runner>-<commit>` for14 days; unknown/partial output from
-a failed collection is not uploaded. Its18 fixture tests run in host quality.
+a failed collection is not uploaded. Its fixture tests run in host quality.
 This is original-text collection, not license compatibility clearance, npm/Maven
 coverage, corresponding-source production or publication of a release.
+
+Schema2 additionally records explicitly reviewed shared-notice relationships.
+The initial alloc-stdlib0.2.4 relation reuses the actual alloc-no-stdlib2.0.4
+LICENSE only with the fixed declared tuples,1483-byte length, SHA-256 and original
+consumer-commit upstream URL. The material keeps its real provider origin; other
+missing notices or cross-package references remain rejected.
 
 The current tree contains the native presentation shell and service foundations,
 not a functioning installable remote UAC controller.

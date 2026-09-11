@@ -1,11 +1,33 @@
 # Development handoff — 2026-09-11
 
 This inventory prevents duplicate implementation. It is not a readiness claim.
-Last checked implementation revision: `a72b0d0b16bc8d15079b08bc7c49f6e7aca0d4d7` on
+Last fully passing quality revision: `c21a4bc8e92766976d87ad73031e48b7278e43d4` on
 `codex/native-runtime`. This document separates that baseline, installed native
 experiments and unmerged protocol experiments. New edits require new ROOT checks.
 
 ## Latest evidence — September 11
+
+At591b937 the canonical `pair` CLI, original-client-owned helper launch and
+six-frame live rendezvous/terminal consumer are implemented, with ADR0023 and
+bounded-source static review. The actual service pending-slot/endpoint producer,
+QR/scanner and enrollment are still absent. No positive local UAC run occurred.
+
+Windows package, Android package/Kotlin tests, notification rendering and real
+Android lifecycle passed at591b937. This is the third successive native emulator
+full pass with durable ON/OFF activation, following a72b0d0 and c21a4bc. The latter
+two original artifacts were separately hash-checked/reparsed by ROOT;591b937's
+workflow success is not a newly downloaded original-artifact review.
+
+591b937 Quality is RED: Windows Clippy rejected one nested-if style; Linux passed
+its code/Analyzer gates but the new original-license collector stopped at missing
+alloc-stdlib notice material. ROOT's equivalent let-chain correction and narrow
+reviewed shared-notice repair are awaiting new CI. The collector's22 local
+fixtures passed. It collects actual source bytes, not compatibility clearance or
+full corresponding source. Further absent notice material—including non-target
+dependencies in Cargo's full metadata inventory—still needs source/membership
+review. No package is silently removed or treated as legally cleared.
+
+The following a72b0d0 checkpoint is historical and retains its exact scope.
 
 At a72b0d0, all six triggered workflows passed: complete Windows/Linux Rust
 quality with actual Analyzer/canaries, Android Rust core, real Tamarin, both app
