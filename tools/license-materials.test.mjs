@@ -11,7 +11,7 @@ import test from 'node:test';
 import { licenseInventoryFromMetadata, readLockedCargoMetadata } from './license-inventory.mjs';
 import { collectLicenseMaterials, encodeMaterialManifest, explicitLicensePath, inspectGeneratedMaterialNames, legalCandidates, LicenseMaterialsError, MATERIAL_LIMITS, MATERIALS_OUTPUT, publicCargoSource, runLicenseMaterials, safeRelativePath, validateMaterialManifest } from './license-materials.mjs';
 import { ALLOC_STDLIB_SHARED_NOTICE, isReviewedSharedNoticeConsumer, isReviewedSharedNoticeProvider, matchesReviewedSharedNoticeBytes } from './license-material-supplements.mjs';
-import { isApprovedUpstreamIndex, matchesUpstreamMaterial, MAX_UPSTREAM_CONSUMERS, upstreamNoticeGroup, UPSTREAM_NOTICE_GROUPS, UPSTREAM_SOURCE_INDEX, UPSTREAM_SOURCE_PINS } from './license-upstream-policy.mjs';
+import { isApprovedUpstreamIndex, isUpstreamMaterialOrigin, matchesUpstreamMaterial, MAX_UPSTREAM_CONSUMERS, upstreamNoticeGroup, UPSTREAM_NOTICE_GROUPS, UPSTREAM_SOURCE_INDEX, UPSTREAM_SOURCE_PINS } from './license-upstream-policy.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const registrySource = 'registry+https://github.com/rust-lang/crates.io-index';
@@ -360,7 +360,7 @@ test('approved alloc-stdlib relation reuses actual provider bytes and records th
   assert.equal(hash(reviewedDropboxNotice), ALLOC_STDLIB_SHARED_NOTICE.sha256, 'ROOT-run assertion against independently supplied authoritative pin');
   const f = allocFixture(t); f.run();
   const manifest = f.manifest();
-  assert.equal(manifest.schemaVersion, 3);
+  assert.equal(manifest.schemaVersion, 4);
   assert.equal(manifest.sharedNotices.length, 1);
   const share = manifest.sharedNotices[0];
   assert.equal(manifest.inventory[share.consumerInventoryIndex].name, 'alloc-stdlib');
@@ -421,8 +421,7 @@ test('shared-notice manifest cannot authorize another relation or hide provider 
 });
 
 function exactUpstreamTuples() {
-  return [...UPSTREAM_NOTICE_GROUPS.flatMap((group) => group.names.map((name) => ({ name, version: group.version, license: group.license, source: registrySource }))),
-    { name: 'ndk-sys', version: '0.6.0+11769913', license: 'MIT OR Apache-2.0', source: registrySource }];
+  return UPSTREAM_NOTICE_GROUPS.flatMap((group) => group.consumers.map((tuple) => ({ ...tuple, source: registrySource })));
 }
 function upstreamFixture(t, tuples = exactUpstreamTuples()) {
   const f = fixture(t), originals = new Map(), packageRoots = new Map();
@@ -445,22 +444,22 @@ function upstreamFixture(t, tuples = exactUpstreamTuples()) {
     fs.mkdirSync(root);
     fs.writeFileSync(join(root, 'Cargo.toml'), '# Synthetic package placement only.\n');
     const pkg = { ...tuple, id: `${tuple.source}#${tuple.name}@${tuple.version}`, license_file: null, manifest_path: join(root, 'Cargo.toml') };
-    f.metadata.packages.push(pkg); packageRoots.set(tuple.name, root);
+    f.metadata.packages.push(pkg); packageRoots.set(`${tuple.name}@${tuple.version}`, root);
   }
   return { ...f, originals, packageRoots, indexPath, indexBytes };
 }
 
-test('upstream policy matches only the15 exact registry tuples and complete ROOT-owned11-file index', () => {
+test('upstream policy matches only the47 exact registry tuples and complete ROOT-owned30-file index', () => {
   const tuples = exactUpstreamTuples();
   assert.equal(tuples.length, MAX_UPSTREAM_CONSUMERS);
-  assert.equal(UPSTREAM_SOURCE_PINS.length, 11);
+  assert.equal(UPSTREAM_SOURCE_PINS.length, 30);
   for (const tuple of tuples) {
     const row = { ...tuple, workspace: false };
     assert.ok(upstreamNoticeGroup(row, 'registry'));
-    for (const [field, value] of [['name', `${tuple.name}_other`], ['version', '99.0.0'], ['license', 'MIT'], ['source', 'registry+https://example.com/index'], ['workspace', true]]) assert.equal(upstreamNoticeGroup({ ...row, [field]: value }, 'registry'), null);
+    for (const [field, value] of [['name', `${tuple.name}_other`], ['version', '99.0.0'], ['license', tuple.license === 'MIT' ? 'Apache-2.0' : 'MIT'], ['source', 'registry+https://example.com/index'], ['workspace', true]]) assert.equal(upstreamNoticeGroup({ ...row, [field]: value }, 'registry'), null);
     for (const kind of ['workspace', 'path', 'git', 'vendored']) assert.equal(upstreamNoticeGroup(row, kind), null);
   }
-  for (const name of ['selectors', 'uniffi_build', 'uniffi_testing', 'unic-ucd-category']) assert.equal(upstreamNoticeGroup({ name, version: '0.32.0', license: 'MPL-2.0', source: registrySource, workspace: false }, 'registry'), null);
+  for (const name of ['uniffi_build', 'uniffi_testing', 'unic-ucd-category', 'objc2-health-kit', 'libappindicator']) assert.equal(upstreamNoticeGroup({ name, version: '0.32.0', license: 'MPL-2.0', source: registrySource, workspace: false }, 'registry'), null);
   const root = fileURLToPath(new URL('../', import.meta.url));
   const original = JSON.parse(fs.readFileSync(join(root, UPSTREAM_SOURCE_INDEX), 'utf8'));
   assert.equal(isApprovedUpstreamIndex(original), true);
@@ -481,34 +480,74 @@ test('upstream policy matches only the15 exact registry tuples and complete ROOT
   }
 });
 
-test('all15 packages retain full required groups, own notices, exact raw pins and explicit repository origins', (t) => {
+test('expanded allowlist matches ROOT exact47 name/version/expression/commit assignments independently', () => {
+  const expected = [
+    ['uniffi-5c7b73906358', '0.32.0', 'MPL-2.0', ['uniffi', 'uniffi_bindgen', 'uniffi_core', 'uniffi_internal_macros', 'uniffi_macros', 'uniffi_meta', 'uniffi_pipeline', 'uniffi_udl']],
+    ['ndk-49bbbba16c58', '0.9.0', 'MIT OR Apache-2.0', ['ndk']],
+    ['ndk-49bbbba16c58', '0.6.0+11769913', 'MIT OR Apache-2.0', ['ndk-sys']],
+    ['unic-5878605364af', '0.9.0', 'MIT/Apache-2.0', ['unic-char-property', 'unic-char-range', 'unic-common', 'unic-ucd-version']],
+    ['unic-8a6ce83063d9', '0.9.0', 'MIT/Apache-2.0', ['unic-ucd-ident']],
+    ['defmt-4a8cdb44891e', '1.0.0', 'MIT OR Apache-2.0', ['defmt-parser']],
+    ['dlopen2-cc80e4a0a90', '0.8.2', 'MIT', ['dlopen2']],
+    ['dlopen2-cc80e4a0a90', '0.4.3', 'MIT', ['dlopen2_derive']],
+    ['jni-sys-64d77b7a5f11', '0.4.1', 'MIT OR Apache-2.0', ['jni-sys-macros']],
+    ['webview2-b74dc5e2b394', '0.38.2', 'MIT', ['webview2-com', 'webview2-com-sys']],
+    ['webview2-dffa41a8a46d', '0.8.1', 'MIT', ['webview2-com-macros']],
+    ['libappindicator-eafd1e3682a1', '0.9.0', 'Apache-2.0 OR MIT', ['libappindicator-sys']],
+    ['selectors-635e1a19d029', '0.36.1', 'MPL-2.0', ['selectors']],
+    ['objc2-b4167b582b2f', '0.6.2', 'MIT', ['block2']],
+    ['objc2-8852b424193c', '0.6.4', 'MIT', ['objc2']],
+    ['objc2-8852b424193c', '0.3.1', 'Zlib OR Apache-2.0 OR MIT', ['dispatch2']],
+    ['objc2-8d214f547736', '4.1.0', 'MIT', ['objc2-encode']],
+    ['objc2-8d214f547736', '0.1.1', 'Zlib OR Apache-2.0 OR MIT', ['objc2-exception-helper']],
+    ['objc2-7b1abfd750a2', '0.3.2', 'Zlib OR Apache-2.0 OR MIT', ['objc2-app-kit', 'objc2-cloud-kit', 'objc2-core-data', 'objc2-core-foundation', 'objc2-core-graphics', 'objc2-core-image', 'objc2-core-location', 'objc2-core-text', 'objc2-io-surface', 'objc2-quartz-core', 'objc2-ui-kit', 'objc2-user-notifications', 'objc2-web-kit']],
+    ['objc2-7b1abfd750a2', '0.3.2', 'MIT', ['objc2-foundation']],
+    ['r-efi-97b55bed1c2c', '5.3.0', 'MIT OR Apache-2.0 OR LGPL-2.1-or-later', ['r-efi']],
+    ['r-efi-7e1b0322d31d', '6.0.0', 'MIT OR Apache-2.0 OR LGPL-2.1-or-later', ['r-efi']],
+    ['winapi-9497609ef44c', '0.4.0', 'MIT/Apache-2.0', ['winapi-i686-pc-windows-gnu', 'winapi-x86_64-pc-windows-gnu']],
+  ].flatMap(([groupId, version, license, names]) => names.map((name) => `${name}@${version}|${license}|${groupId}`)).sort();
+  const actual = UPSTREAM_NOTICE_GROUPS.flatMap((group) => group.consumers.map((row) => `${row.name}@${row.version}|${row.license}|${group.id}`)).sort();
+  assert.equal(expected.length, 47);
+  assert.deepEqual(actual, expected);
+  assert.deepEqual(legalCandidates(['AUTHORS', 'LICENSES', 'README.md']), [], 'no generic AUTHORS or directory waiver');
+  assert.equal(upstreamNoticeGroup({ name: 'libappindicator-sys', version: '0.9.0', license: 'MIT OR Apache-2.0', source: registrySource, workspace: false }, 'registry'), null, 'literal expression order is preserved');
+});
+
+test('all47 packages retain whole required original groups, own notices, raw pins and honest origins', (t) => {
   const f = upstreamFixture(t);
-  fs.writeFileSync(join(f.packageRoots.get('uniffi'), 'NOTICE'), 'Synthetic package-local additional notice; must not be dropped.\n');
+  fs.writeFileSync(join(f.packageRoots.get('uniffi@0.32.0'), 'NOTICE'), 'Synthetic package-local additional notice; must not be dropped.\n');
   f.run();
   const manifest = f.manifest();
-  assert.equal(manifest.schemaVersion, 3);
-  assert.equal(manifest.upstreamNotices.length, 15);
+  assert.equal(manifest.schemaVersion, 4);
+  assert.equal(manifest.upstreamNotices.length, 47);
+  assert.equal(manifest.inventory.length, 49, 'complete metadata is retained; no target filtering');
   assert.equal(manifest.upstreamIndex.sourcePath, UPSTREAM_SOURCE_INDEX);
   assert.equal(manifest.upstreamIndex.bytes, f.indexBytes.length);
   assert.equal(manifest.upstreamIndex.sha256, hash(f.indexBytes));
-  assert.equal(manifest.materials.filter((item) => item.origin === 'upstream-repository').length, 11);
+  assert.equal(manifest.materials.filter((item) => isUpstreamMaterialOrigin(item.origin)).length, 30);
+  assert.equal(manifest.materials.filter((item) => item.origin === 'referenced-license-document').length, 1);
   for (const relation of manifest.upstreamNotices) {
     const row = manifest.inventory[relation.consumerInventoryIndex];
     const group = upstreamNoticeGroup(row, manifest.packages[relation.consumerInventoryIndex].provenance.kind);
     assert.equal(relation.groupId, group.id);
+    assert.equal(relation.coverage, group.coverage);
+    assert.deepEqual(relation.limitations, group.limitations);
     assert.equal(relation.sources.length, group.sources.length);
     for (const [index, source] of relation.sources.entries()) {
       const pin = group.sources[index], material = manifest.materials.find((item) => item.id === source.materialId);
       assert.equal(matchesUpstreamMaterial(material, pin), true);
       assert.equal(source.upstreamUrl, pin.upstreamUrl);
       assert.equal(source.upstreamSourcePath, pin.upstreamSourcePath);
+      assert.equal(source.origin, pin.origin);
+      assert.equal(source.documentVersion, pin.documentVersion);
+      assert.equal(source.referencedBySourceId, pin.referencedBySourceId);
       assert.equal(material.sourcePath, pin.sourcePath, 'not a fabricated file inside the crate');
       const bytes = fs.readFileSync(join(f.output, material.outputPath));
       assert.deepEqual(bytes, f.originals.get(pin.id));
       assert.equal(bytes.length, pin.bytes);
       assert.equal(hash(bytes), pin.sha256, 'ROOT-run real original-byte assertion, not synthetic digest substitution');
     }
-    assert.ok(!fs.existsSync(join(f.packageRoots.get(row.name), 'LICENSE')));
+    assert.ok(!fs.existsSync(join(f.packageRoots.get(`${row.name}@${row.version}`), 'LICENSE')));
   }
   const uniffiIndex = manifest.inventory.findIndex((row) => row.name === 'uniffi');
   assert.ok(manifest.packages[uniffiIndex].materials.some((id) => {
@@ -518,6 +557,12 @@ test('all15 packages retain full required groups, own notices, exact raw pins an
   const unicMit = manifest.materials.filter((item) => item.origin === 'upstream-repository' && item.sourcePath.endsWith('/LICENSE-MIT') && item.sourcePath.includes('/unic-'));
   assert.equal(unicMit.length, 2);
   assert.notEqual(unicMit[0].id, unicMit[1].id, 'equal bytes from different reviewed revisions keep distinct source origins');
+  for (const [prefix, count] of [['/objc2-', 4], ['/webview2-', 2]]) {
+    const separate = manifest.materials.filter((item) => isUpstreamMaterialOrigin(item.origin) && item.sourcePath.includes(prefix));
+    assert.equal(separate.length, count);
+    assert.equal(new Set(separate.map((item) => item.id)).size, count);
+    assert.equal(new Set(separate.map((item) => item.sha256)).size, 1, 'equal bytes are deliberately not the dedupe key');
+  }
   assert.equal(manifest.inventory.find((row) => row.name === 'unic-common').license, 'MIT/Apache-2.0');
   assert.equal(validateMaterialManifest(manifest), manifest);
 });
@@ -526,7 +571,7 @@ test('each group asset remains mandatory despite local text and missing or chang
   for (const pin of UPSTREAM_SOURCE_PINS) {
     const tuple = exactUpstreamTuples().find((row) => upstreamNoticeGroup({ ...row, workspace: false }, 'registry').sources.some((source) => source.id === pin.id));
     const f = upstreamFixture(t, [tuple]);
-    fs.writeFileSync(join(f.packageRoots.get(tuple.name), 'NOTICE'), 'Synthetic local notice is not a substitute for a required original.\n');
+    fs.writeFileSync(join(f.packageRoots.get(`${tuple.name}@${tuple.version}`), 'NOTICE'), 'Synthetic local notice is not a substitute for a required original.\n');
     fs.unlinkSync(join(f.repository, pin.sourcePath));
     assert.throws(() => f.run(), rejected('source_missing'));
     assert.ok(!fs.existsSync(f.output));
@@ -552,7 +597,8 @@ test('upstream index mutation, missing index and non-approved package tuples do 
     assert.ok(!fs.existsSync(f.output));
   }
   for (const tuple of [
-    { name: 'selectors', version: '0.36.1', license: 'MPL-2.0', source: registrySource },
+    { name: 'selectors', version: '0.36.2', license: 'MPL-2.0', source: registrySource },
+    { name: 'libappindicator', version: '0.9.0', license: 'Apache-2.0 OR MIT', source: registrySource },
     { ...exactUpstreamTuples()[0], version: '0.32.1' },
     { ...exactUpstreamTuples()[0], license: 'MIT' },
     { ...exactUpstreamTuples()[0], source: 'registry+https://example.com/index' },
@@ -566,7 +612,7 @@ test('upstream index mutation, missing index and non-approved package tuples do 
 test('upstream references have a finite extra budget and index changes after staging are observed', (t) => {
   const tuple = exactUpstreamTuples().find((row) => row.name === 'unic-common');
   const f = upstreamFixture(t, [tuple]);
-  for (let index = 0; index < MATERIAL_LIMITS.perPackage; index += 1) fs.writeFileSync(join(f.packageRoots.get(tuple.name), `NOTICE-${index}`), 'Synthetic local attribution.\n');
+  for (let index = 0; index < MATERIAL_LIMITS.perPackage; index += 1) fs.writeFileSync(join(f.packageRoots.get(`${tuple.name}@${tuple.version}`), `NOTICE-${index}`), 'Synthetic local attribution.\n');
   f.run();
   const manifest = f.manifest(), consumer = manifest.packages[manifest.inventory.findIndex((row) => row.name === 'unic-common')];
   assert.equal(consumer.materials.length, MATERIAL_LIMITS.perPackage + 4);
@@ -580,6 +626,7 @@ test('upstream manifest relations cannot omit group files, change provenance or 
   const f = upstreamFixture(t); f.run();
   for (const mutate of [
     (value) => { value.schemaVersion = 2; },
+    (value) => { value.schemaVersion = 3; },
     (value) => { value.upstreamNotices = []; },
     (value) => { value.upstreamIndex = null; },
     (value) => { value.upstreamIndex.sourcePath = '/outside/sources.json'; },
@@ -588,7 +635,7 @@ test('upstream manifest relations cannot omit group files, change provenance or 
     (value) => { value.upstreamNotices[0].sources[0].upstreamUrl = 'https://example.com/LICENSE'; },
     (value) => { value.upstreamNotices[0].sources[0].bytes += 1; },
     (value) => { value.upstreamNotices[0].sources[0].sha256 = '0'.repeat(64); },
-    (value) => { const relation = value.upstreamNotices[0]; value.inventory[relation.consumerInventoryIndex].license = 'MIT'; },
+    (value) => { const relation = value.upstreamNotices[0], row = value.inventory[relation.consumerInventoryIndex]; row.license = row.license === 'MIT' ? 'Apache-2.0' : 'MIT'; },
     (value) => { const relation = value.upstreamNotices[0]; value.materials.find((item) => item.id === relation.sources[0].materialId).origin = `package:${String(relation.consumerInventoryIndex).padStart(6, '0')}`; },
     (value) => { const index = value.inventory.findIndex((row) => row.name === 'dep'); value.packages[index].materials.push(value.upstreamNotices[0].sources[0].materialId); },
     (value) => { const first = value.upstreamNotices.find((item) => item.groupId === 'unic-5878605364af'), other = value.upstreamNotices.find((item) => item.groupId === 'unic-8a6ce83063d9'); const oldId = first.sources[0].materialId, newId = other.sources[0].materialId; first.sources[0].materialId = newId; value.packages[first.consumerInventoryIndex].materials = value.packages[first.consumerInventoryIndex].materials.map((id) => id === oldId ? newId : id); },
@@ -600,4 +647,52 @@ test('upstream manifest relations cannot omit group files, change provenance or 
   const ordinary = fixture(t); ordinary.run();
   assert.equal(ordinary.manifest().upstreamIndex, null);
   assert.deepEqual(ordinary.manifest().upstreamNotices, []);
+});
+
+test('schema4 preserves selector external-document/header linkage and mandatory limited coverage', (t) => {
+  const f = upstreamFixture(t);
+  const result = f.run(), manifest = f.manifest();
+  assert.equal(result.legalCompatibility, 'not-evaluated');
+  assert.equal(result.legalCompletion, 'not-proven');
+  assert.equal(result.correspondingSource, 'not-produced');
+  const selectors = manifest.upstreamNotices.find((relation) => relation.groupId === 'selectors-635e1a19d029');
+  assert.equal(selectors.coverage, 'header-and-referenced-license-document');
+  const header = selectors.sources.find((source) => source.upstreamSourcePath === 'selectors/lib.rs');
+  const document = selectors.sources.find((source) => source.origin === 'referenced-license-document');
+  assert.equal(header.origin, 'upstream-repository');
+  assert.equal(document.upstreamSourcePath, null);
+  assert.equal(document.upstreamUrl, 'https://www.mozilla.org/media/MPL/2.0/index.txt');
+  assert.equal(document.documentVersion, 'MPL-2.0');
+  assert.equal(document.referencedBySourceId, header.sourceId);
+  assert.equal(manifest.materials.find((item) => item.id === document.materialId).origin, 'referenced-license-document');
+  const explanations = manifest.upstreamNotices.filter((relation) => relation.coverage === 'upstream-license-explanation');
+  assert.equal(explanations.length, 19);
+  for (const relation of explanations) {
+    assert.deepEqual(relation.limitations, ['full-license-terms-not-collected', 'apple-sdk-distribution-uncertainty-unresolved', 'no-license-option-selected', 'g002-legal-completion-not-proven']);
+    assert.equal(manifest.materials.find((item) => item.id === relation.sources[0].materialId).kind, 'attribution');
+  }
+  const mixed = manifest.upstreamNotices.filter((relation) => relation.coverage === 'original-mixed-license-notice');
+  assert.equal(mixed.length, 2);
+  for (const relation of mixed) assert.ok(relation.limitations.includes('not-all-alternative-license-terms-collected'));
+  for (const relation of manifest.upstreamNotices.filter((item) => item.groupId === 'winapi-9497609ef44c')) assert.deepEqual(relation.limitations, ['no-archived-vcs-record', 'root-verified-original-file-association']);
+  assert.ok(manifest.limitations.includes('g002-legal-completion-not-proven'));
+  for (const mutate of [
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources.pop(); },
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources.shift(); },
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources[1].upstreamSourcePath = 'MPL-2.0.txt'; },
+    (value) => { const source = value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources[1]; source.origin = 'upstream-repository'; value.materials.find((item) => item.id === source.materialId).origin = 'upstream-repository'; },
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources[1].documentVersion = 'MPL-1.1'; },
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'selectors-635e1a19d029').sources[1].referencedBySourceId = null; },
+    (value) => { value.upstreamNotices.find((item) => item.coverage === 'upstream-license-explanation').coverage = 'original-license-materials'; },
+    (value) => { value.upstreamNotices.find((item) => item.coverage === 'upstream-license-explanation').limitations = []; },
+    (value) => { const relation = value.upstreamNotices.find((item) => item.coverage === 'upstream-license-explanation'); relation.limitations = relation.limitations.filter((item) => !item.includes('apple-sdk')); },
+    (value) => { const relation = value.upstreamNotices.find((item) => item.coverage === 'upstream-license-explanation'); value.materials.find((item) => item.id === relation.sources[0].materialId).kind = 'text'; },
+    (value) => { value.upstreamNotices.find((item) => item.coverage === 'original-mixed-license-notice').coverage = 'all-alternative-terms'; },
+    (value) => { value.upstreamNotices.find((item) => item.coverage === 'original-mixed-license-notice').limitations = []; },
+    (value) => { value.upstreamNotices.find((item) => item.groupId === 'winapi-9497609ef44c').limitations = ['archive-vcs-verified']; },
+    (value) => { value.limitations = value.limitations.filter((item) => !item.includes('g002')); },
+  ]) {
+    const changed = structuredClone(manifest); mutate(changed);
+    assert.throws(() => validateMaterialManifest(changed));
+  }
 });

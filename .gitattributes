@@ -5,3 +5,5 @@
 # Preserve imported upstream notice bytes, including their original line endings.
 third-party/notices/rust/** -text
 third-party/notices/rust/sources.json text eol=lf
+# This pinned upstream original intentionally has one extra final blank line.
+third-party/notices/rust/jni-sys-64d77b7a5f11/LICENSE-APACHE whitespace=-blank-at-eof
