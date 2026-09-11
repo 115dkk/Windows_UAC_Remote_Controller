@@ -39,3 +39,13 @@ pub use pairing::{
     PAIRING_INVITATION_QR_PREFIX, PairingInvitation, PairingInvitationError,
     PairingInvitationFields,
 };
+// Enrollment ceremony messages (ADR 0027): the plaintext candidate submission,
+// the in-TLS confirmation and the magic-based classifier for inner frames.
+pub use pairing::{
+    CandidateSubmission, CandidateSubmissionFields, CeremonyMessageKind,
+    MAX_CANDIDATE_SUBMISSION_BYTES, MAX_SUBMISSION_CERTIFICATE_BYTES, MAX_SUBMISSION_CERTIFICATES,
+    MAX_SUBMISSION_CHAIN_BYTES, MIN_CANDIDATE_SUBMISSION_BYTES, PAIRING_CONFIRMATION_BYTES,
+    PLAINTEXT_LENGTH_PREFIX_BYTES, PairingConfirmation, PairingConfirmationFields,
+    candidate_digest, ceremony_message_kind, frame_plaintext_submission,
+    plaintext_submission_length,
+};

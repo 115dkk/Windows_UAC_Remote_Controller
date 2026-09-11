@@ -8,6 +8,14 @@ repository.workspace = true
 publish.workspace = true
 description = "Service-only TPM-backed Windows CNG PC identity key adapter"
 
+[features]
+# Disposable CI lab hosts have no TPM (probe run 34591263436 returned
+# NTE_DEVICE_NOT_READY from the Platform Crypto Provider). This compile-time
+# feature selects the Microsoft Software Key Storage Provider so the whole
+# service can run in that lab. It is never a runtime fallback; release
+# packaging rejects binaries that embed the lab profile marker (ADR 0027).
+lab-software-identity = []
+
 [dependencies]
 p256.workspace = true
 thiserror.workspace = true

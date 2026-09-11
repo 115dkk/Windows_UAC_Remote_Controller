@@ -28,6 +28,13 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 /// Versioned persistent machine-key name, not a path or caller-supplied label.
 pub const PERSISTENT_KEY_NAME: &str = "UacRemoteController.PcIdentity.P256.v1";
 
+/// Build-time identity provider profile. Only this value ships in a release.
+#[cfg(not(feature = "lab-software-identity"))]
+pub const IDENTITY_PROVIDER_PROFILE: &str = "platform-crypto-provider";
+/// Lab-only profile (ADR 0027). Release packaging rejects a binary carrying it.
+#[cfg(feature = "lab-software-identity")]
+pub const IDENTITY_PROVIDER_PROFILE: &str = "lab-software-ksp-do-not-ship";
+
 /// Observe the current thread/process's fixed service identity without opening
 /// or creating a key. This is a point-in-time check, not a transferable grant:
 /// callers must recheck at each protected operation and must never impersonate

@@ -6,7 +6,17 @@ use std::fmt;
 
 use crate::{IdentityError, IdentityPolicy, PERSISTENT_KEY_NAME};
 
+#[cfg(not(feature = "lab-software-identity"))]
 pub(super) const PROVIDER_NAME: &str = "Microsoft Platform Crypto Provider";
+/// Lab builds only (hosted runners have no TPM). Never selected at runtime.
+#[cfg(feature = "lab-software-identity")]
+pub(super) const PROVIDER_NAME: &str = "Microsoft Software Key Storage Provider";
+/// NCRYPT_IMPL_HARDWARE_FLAG; hardware RNG (16) is optional in production.
+#[cfg(not(feature = "lab-software-identity"))]
+const ACCEPTED_IMPLEMENTATION: (u32, u32) = (1, 1 | 16);
+/// NCRYPT_IMPL_SOFTWARE_FLAG exactly, for the lab software provider.
+#[cfg(feature = "lab-software-identity")]
+const ACCEPTED_IMPLEMENTATION: (u32, u32) = (2, 2);
 pub(super) const MAX_DESCRIPTOR_BYTES: usize = 4096;
 pub(super) const SYSTEM_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 // GENERIC_ALL. Both exact principals need key administration during explicit
@@ -43,9 +53,11 @@ pub(super) fn validate_provider(
             IdentityPolicy::PlatformProviderRequired,
         ));
     }
-    // Hardware is mandatory; hardware RNG is optional. Software, removable,
-    // virtual-isolation-only and unknown flags are rejected, not guessed at.
-    if implementation & 1 == 0 || implementation & !(1 | 16) != 0 {
+    // Production: hardware is mandatory and hardware RNG optional. Software,
+    // removable, virtual-isolation-only and unknown flags are rejected, not
+    // guessed at. The lab feature instead requires exactly the software flag.
+    let (required, allowed) = ACCEPTED_IMPLEMENTATION;
+    if implementation & required != required || implementation & !allowed != 0 {
         return Err(IdentityError::Policy(
             IdentityPolicy::HardwareProviderRequired,
         ));
@@ -291,6 +303,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(not(feature = "lab-software-identity"))]
     #[test]
     fn hardware_only_provider_and_security_descriptor_support_are_mandatory() {
         let name = wide(PROVIDER_NAME);
@@ -304,6 +317,20 @@ mod tests {
             assert!(validate_provider(&name, 1, support).is_err());
         }
         assert!(validate_provider(&wide("Microsoft Software Key Storage Provider"), 1, 1).is_err());
+        assert_eq!(crate::IDENTITY_PROVIDER_PROFILE, "platform-crypto-provider");
+    }
+
+    #[cfg(feature = "lab-software-identity")]
+    #[test]
+    fn lab_feature_accepts_only_the_software_provider_with_the_exact_software_flag() {
+        let name = wide(PROVIDER_NAME);
+        assert!(validate_provider(&name, 2, 1).is_ok());
+        for flags in [0, 1, 3, 8, 17, 18, 0x20, u32::MAX] {
+            assert!(validate_provider(&name, flags, 1).is_err());
+        }
+        assert!(validate_provider(&name, 2, 0).is_err());
+        assert!(validate_provider(&wide("Microsoft Platform Crypto Provider"), 2, 1).is_err());
+        assert!(crate::IDENTITY_PROVIDER_PROFILE.contains("do-not-ship"));
     }
 
     #[test]

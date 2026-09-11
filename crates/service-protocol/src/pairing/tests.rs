@@ -328,6 +328,25 @@ fn der_validation_is_not_a_signature_or_a_freshness_replay_commit_check() {
 }
 
 #[test]
+fn ceremony_inner_message_magic_is_classified_without_parsing() {
+    assert_eq!(
+        ceremony_message_kind(b"WUACFRZ\0trailing bytes need not parse"),
+        Some(CeremonyMessageKind::FrozenCandidate)
+    );
+    assert_eq!(
+        ceremony_message_kind(b"WUACCFM\0"),
+        Some(CeremonyMessageKind::Confirmation)
+    );
+    assert_eq!(
+        ceremony_message_kind(b"WUACENR\0anything"),
+        Some(CeremonyMessageKind::EnrollmentAcceptance)
+    );
+    assert_eq!(ceremony_message_kind(b"WUACSUB\0"), None);
+    assert_eq!(ceremony_message_kind(b"garbage!"), None);
+    assert_eq!(ceremony_message_kind(b"short"), None);
+}
+
+#[test]
 fn diagnostics_do_not_render_nonces_keys_or_statement_bytes() {
     let value = fields();
     assert_eq!(

@@ -4,8 +4,13 @@
 //! The receiving owner must enforce those independent conditions exactly once.
 #![forbid(unsafe_code)]
 
+pub mod confirm;
 mod frozen;
 mod invitation;
+pub mod submission;
+pub use confirm::{
+    PAIRING_CONFIRMATION_BYTES, PairingConfirmation, PairingConfirmationFields, candidate_digest,
+};
 pub use frozen::{
     FrozenCandidateContext, FrozenCandidateError, FrozenCandidateFields, InvitationContextDigest,
     MAX_FROZEN_CANDIDATE_BYTES, MatchedFrozenCandidate, PairingComparisonCode,
@@ -16,6 +21,12 @@ pub use invitation::{
     MIN_PAIRING_INVITATION_BYTES, MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
     PAIRING_INVITATION_QR_PREFIX, PairingInvitation, PairingInvitationError,
     PairingInvitationFields,
+};
+pub use submission::{
+    CandidateSubmission, CandidateSubmissionFields, MAX_CANDIDATE_SUBMISSION_BYTES,
+    MAX_SUBMISSION_CERTIFICATE_BYTES, MAX_SUBMISSION_CERTIFICATES, MAX_SUBMISSION_CHAIN_BYTES,
+    MIN_CANDIDATE_SUBMISSION_BYTES, PLAINTEXT_LENGTH_PREFIX_BYTES, frame_plaintext_submission,
+    plaintext_submission_length,
 };
 
 use approval_protocol::{DeviceId, MAX_DER_SIGNATURE_BYTES, MIN_DER_SIGNATURE_BYTES, PcIdentity};
@@ -306,6 +317,23 @@ fn signing_bytes(fields: &EnrollmentAcceptanceFields) -> Vec<u8> {
     bytes.extend_from_slice(DOMAIN);
     bytes.extend_from_slice(&body(fields));
     bytes
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CeremonyMessageKind {
+    FrozenCandidate,
+    Confirmation,
+    EnrollmentAcceptance,
+}
+
+/// Classifies an inner TLS frame by its eight-byte magic without parsing it.
+pub fn ceremony_message_kind(bytes: &[u8]) -> Option<CeremonyMessageKind> {
+    match bytes.get(..8)? {
+        b"WUACFRZ\0" => Some(CeremonyMessageKind::FrozenCandidate),
+        b"WUACCFM\0" => Some(CeremonyMessageKind::Confirmation),
+        b"WUACENR\0" => Some(CeremonyMessageKind::EnrollmentAcceptance),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

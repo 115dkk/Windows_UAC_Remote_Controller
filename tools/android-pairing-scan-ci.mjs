@@ -162,11 +162,34 @@ export async function main(args = process.argv.slice(2)) {
     }
     return value.stdout;
   };
+  let adbPath = null;
+  // Bounded read-only failure context: which windows/activities exist and what the product and
+  // the runtime logged. It never repeats the instrumentation, grants anything or mutates state.
+  const captureFailureDiagnostics = async () => {
+    if (adbPath === null || cancellation.signal.aborted) return;
+    const captures = [
+      ['dumpsys-window', ['shell', 'dumpsys', 'window', 'windows']],
+      ['dumpsys-activity-top', ['shell', 'dumpsys', 'activity', 'top']],
+      ['dumpsys-service', ['shell', 'dumpsys', 'activity', 'service', `${PACKAGE}/.background.ControllerForegroundService`]],
+      ['dumpsys-package', ['shell', 'dumpsys', 'package', PACKAGE]],
+      ['logcat-runtime', ['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '4000', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I', 'UacBoot:I', 'chromium:W', 'cr_*:W', 'CameraX:W', 'Camera*:W', '*:S']],
+      ['logcat-activity', ['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '2000', 'ActivityManager:I', 'ActivityTaskManager:I', 'WindowManager:I', 'InputDispatcher:W', '*:S']],
+    ];
+    result.failureDiagnostics = [];
+    for (const [name, argv] of captures) {
+      const path = join(directory, `diag-${name}.log`);
+      const value = await runProver(adbPath, ['-s', SERIAL, ...argv], { cwd: ROOT, logPath: path, timeoutMs: 20000,
+        maxOutputBytes: 2 * 1024 * 1024, signal: cancellation.signal }).catch(() => null);
+      const record = value ? await fingerprint(path, 2 * 1024 * 1024, true).catch(() => ({ logUnavailable: true })) : { logUnavailable: true };
+      result.failureDiagnostics.push({ log: `diag-${name}.log`, args: argv, status: value?.status ?? null, failed: !value || Boolean(value.error), ...record });
+    }
+  };
   try {
     const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
     requireThat(sdk && isAbsolute(sdk) && (!process.env.ANDROID_HOME || !process.env.ANDROID_SDK_ROOT ||
       realpathSync(process.env.ANDROID_HOME) === realpathSync(process.env.ANDROID_SDK_ROOT)), 'One configured SDK required.');
     const adb = join(sdk, 'platform-tools/adb'); regular(adb, 64 * 1024 * 1024);
+    adbPath = adb;
     const read = (argv, timeout, mutates = false, maximum, png) => command(adb, ['-s', SERIAL, ...argv], timeout, mutates, maximum, png);
     async function currentSources() {
       const commit = (await command('/usr/bin/git', ['rev-parse', 'HEAD'])).trim();
@@ -223,6 +246,7 @@ export async function main(args = process.argv.slice(2)) {
     result.passed = true;
   } catch (error) {
     result.failure = error instanceof Error ? error.message : 'Scanner CI failed.';
+    await captureFailureDiagnostics().catch(() => { result.failureDiagnosticsIncomplete = true; });
     throw error;
   } finally {
     result.cancelled ||= cancellation.signal.aborted;

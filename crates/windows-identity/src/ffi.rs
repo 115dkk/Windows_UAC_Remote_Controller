@@ -21,9 +21,8 @@ use windows::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
             Cryptography::{
-                BCRYPT_ECCPUBLIC_BLOB, CERT_KEY_SPEC, MS_PLATFORM_CRYPTO_PROVIDER,
-                NCRYPT_ALGORITHM_GROUP_PROPERTY, NCRYPT_ALGORITHM_PROPERTY,
-                NCRYPT_ALLOW_SIGNING_FLAG, NCRYPT_ECDSA_P256_ALGORITHM,
+                BCRYPT_ECCPUBLIC_BLOB, CERT_KEY_SPEC, NCRYPT_ALGORITHM_GROUP_PROPERTY,
+                NCRYPT_ALGORITHM_PROPERTY, NCRYPT_ALLOW_SIGNING_FLAG, NCRYPT_ECDSA_P256_ALGORITHM,
                 NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_FLAGS, NCRYPT_HANDLE,
                 NCRYPT_IMPL_TYPE_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_KEY_TYPE_PROPERTY,
                 NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_LENGTH_PROPERTY, NCRYPT_MACHINE_KEY_FLAG,
@@ -56,6 +55,13 @@ use crate::{
         is_service_sid, service_sid_sddl, sid_prefix, validate_descriptor, validate_provider,
     },
 };
+
+// Exactly one provider name is compiled in. The lab feature exists because
+// hosted CI runners have no TPM; it is never a runtime choice (ADR 0027).
+#[cfg(feature = "lab-software-identity")]
+use windows::Win32::Security::Cryptography::MS_KEY_STORAGE_PROVIDER as SELECTED_PROVIDER;
+#[cfg(not(feature = "lab-software-identity"))]
+use windows::Win32::Security::Cryptography::MS_PLATFORM_CRYPTO_PROVIDER as SELECTED_PROVIDER;
 
 const KEY_NAME: PCWSTR = w!("UacRemoteController.PcIdentity.P256.v1");
 const SERVICE_ACCOUNT: PCWSTR = w!("NT SERVICE\\UacRemoteController");
@@ -336,10 +342,11 @@ struct OwnedProvider {
 impl OwnedProvider {
     fn open() -> Result<Self, IdentityError> {
         let mut handle = NCRYPT_PROV_HANDLE::default();
-        // SAFETY: fixed Microsoft Platform Crypto Provider name, zero reserved
-        // flags, initialized aligned exclusive output. No caller-selected KSP,
-        // fallback provider or UI operation. Successful handle is owned once.
-        unsafe { NCryptOpenStorageProvider(&mut handle, MS_PLATFORM_CRYPTO_PROVIDER, 0) }
+        // SAFETY: one fixed provider name chosen at compile time (the Platform
+        // Crypto Provider; the lab feature substitutes the Software KSP), zero
+        // reserved flags, initialized aligned exclusive output. No caller-selected
+        // KSP, runtime fallback or UI operation. Successful handle is owned once.
+        unsafe { NCryptOpenStorageProvider(&mut handle, SELECTED_PROVIDER, 0) }
             .map_err(|error| os_error(IdentityOperation::OpenProvider, error))?;
         Self::from_acquired(handle, IdentityOperation::OpenProvider)
     }

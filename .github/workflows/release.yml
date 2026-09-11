@@ -1,0 +1,286 @@
+name: Release
+
+# Builds the Windows installer, the Android APK and the relay binaries for one
+# tag and publishes them as a GitHub PRERELEASE with checksums. Publication is a
+# packaging fact only: it does not claim working UAC approval, phone
+# authentication or pairing on any real device. Those are user-verified.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, for example v0.1.0-alpha.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  version:
+    name: Tag matches the workspace version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Compare tag, package.json, tauri.conf.json and Cargo workspace version
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "tag $tag is not a version tag" >&2; exit 1; }
+          version="${tag#v}"
+          node -e '
+            const fs = require("node:fs");
+            const want = process.argv[1];
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+            const cargo = /\[workspace\.package\][\s\S]*?version = "([^"]+)"/u.exec(fs.readFileSync("Cargo.toml", "utf8"))[1];
+            for (const [name, value] of [["package.json", pkg], ["tauri.conf.json", tauri], ["Cargo.toml", cargo]]) {
+              if (value !== want) { console.error(`${name} version ${value} does not match tag ${want}`); process.exit(1); }
+            }
+          ' "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  android:
+    name: Android arm64 release APK (signed)
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+    outputs:
+      signer_sha256: ${{ steps.sign.outputs.signer_sha256 }}
+      signer_source: ${{ steps.sign.outputs.signer_source }}
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0, Node 24
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Install Rust and the Android target
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-linux-android
+      - name: Install pinned SDK inputs
+        shell: bash
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$sdk"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" \
+            --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' --channel=0 </dev/null
+      - name: Build the release APK (unsigned) without launching it
+        shell: bash
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          export NDK_HOME="$sdk/ndk/28.2.13676358"
+          npm run tauri -- android build --target aarch64 --apk --ci
+      - name: Sign the APK with the release keystore, or with a documented ephemeral one
+        id: sign
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          tools="$sdk/build-tools/36.0.0"
+          mapfile -t unsigned < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*unsigned*.apk')
+          [[ ${#unsigned[@]} -eq 1 ]] || { echo "expected exactly one unsigned release APK, found ${#unsigned[@]}" >&2; exit 1; }
+          mkdir -p release-out
+          keystore="$RUNNER_TEMP/release.jks"
+          if [[ -n "${ANDROID_KEYSTORE_BASE64}" ]]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+            alias="$ANDROID_KEY_ALIAS"; kspass="$ANDROID_KEYSTORE_PASSWORD"; keypass="$ANDROID_KEY_PASSWORD"
+            source="repository-secret"
+          else
+            # No release keystore is configured. Sign with a fresh key that lives only in this run so the
+            # APK installs; the next release will NOT update over this install (different signer).
+            kspass="$(head -c 24 /dev/urandom | base64 | tr -d '=+/')"; keypass="$kspass"; alias="uac-ephemeral"
+            keytool -genkeypair -keystore "$keystore" -storepass "$kspass" -keypass "$keypass" -alias "$alias" \
+              -keyalg EC -groupname secp256r1 -sigalg SHA256withECDSA -validity 90 \
+              -dname "CN=uac-remote-controller ephemeral prerelease signer" >/dev/null
+            source="ephemeral-this-run-only"
+          fi
+          "$tools/zipalign" -p -f 4 "${unsigned[0]}" release-out/aligned.apk
+          "$tools/apksigner" sign --ks "$keystore" --ks-pass "pass:$kspass" --key-pass "pass:$keypass" --ks-key-alias "$alias" \
+            --v2-signing-enabled true --v3-signing-enabled true --out "release-out/uac-remote-controller-android-arm64.apk" release-out/aligned.apk
+          rm -f release-out/aligned.apk "$keystore"
+          "$tools/apksigner" verify --print-certs release-out/uac-remote-controller-android-arm64.apk > release-out/apk-signer.txt
+          digest="$(grep -i 'certificate SHA-256 digest' release-out/apk-signer.txt | head -1 | awk '{print tolower($NF)}')"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "could not read the signer digest" >&2; exit 1; }
+          echo "signer_sha256=$digest" >> "$GITHUB_OUTPUT"
+          echo "signer_source=$source" >> "$GITHUB_OUTPUT"
+          echo "$source" > release-out/apk-signer-source.txt
+      - name: Inspect the signed APK passively
+        shell: bash
+        run: |
+          node tools/verify-android-apk.mjs release-out/uac-remote-controller-android-arm64.apk > release-out/apk-inspection.json
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          "$sdk/cmdline-tools/latest/bin/apkanalyzer" manifest print release-out/uac-remote-controller-android-arm64.apk > release-out/apk-manifest.xml
+          node tools/verify-android-boot-manifest.mjs release-out/apk-manifest.xml > release-out/apk-boot-inspection.json
+      - name: Upload the Android release outputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: release-android-${{ needs.version.outputs.version }}
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    name: Windows x64 installer
+    needs: [version, android]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/windows-package-build
+      # The Android app signer accepted by the PC-side attestation policy is a build input, never learned
+      # from a phone or a relay. The packaging manifest records the value that was embedded.
+      UAC_ANDROID_SIGNER_SHA256: ${{ needs.android.outputs.signer_sha256 }}
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install locked frontend inputs
+        run: npm ci
+      - name: Install repository-pinned Rust and Windows target
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-pc-windows-msvc
+      - name: Build the service, prompt helper and installer (no installation, no UAC)
+        run: npm run package:windows
+      - name: Inspect the installer payload without executing it
+        run: npm run inspect:windows-package
+      - name: Build the relay for Windows
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p relay-service --bin relay-service
+      - name: Collect Windows release outputs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-out | Out-Null
+          Copy-Item target/windows-package/controller-setup.exe release-out/uac-remote-controller-windows-x64-setup.exe
+          Copy-Item target/windows-package/manifest.json release-out/windows-package-manifest.json
+          Copy-Item target/windows-package/inspection.json release-out/windows-package-inspection.json
+          Copy-Item "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/relay-service.exe" release-out/uac-relay-windows-x64.exe
+          Set-Content -Path release-out/android-signer-embedded.txt -Value $env:UAC_ANDROID_SIGNER_SHA256 -NoNewline
+      - name: Upload the Windows release outputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: release-windows-${{ needs.version.outputs.version }}
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 30
+
+  relay-linux:
+    name: Relay binary (Linux x64)
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Install repository-pinned Rust
+        run: rustup show active-toolchain
+      - name: Build the relay
+        run: cargo build --locked --release -p relay-service --bin relay-service
+      - name: Collect
+        run: |
+          mkdir -p release-out
+          cp target/release/relay-service release-out/uac-relay-linux-x64
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: release-relay-linux-${{ needs.version.outputs.version }}
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the GitHub prerelease
+    needs: [version, android, windows, relay-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged revision (release notes source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Download every release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, Node 24
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Write checksums and release notes
+        shell: bash
+        env:
+          SIGNER_SHA256: ${{ needs.android.outputs.signer_sha256 }}
+          SIGNER_SOURCE: ${{ needs.android.outputs.signer_source }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd assets
+          rm -f SHA256SUMS.txt
+          sha256sum uac-remote-controller-windows-x64-setup.exe uac-remote-controller-android-arm64.apk uac-relay-windows-x64.exe uac-relay-linux-x64 > SHA256SUMS.txt
+          cd ..
+          node tools/release-notes.mjs docs/RELEASE_NOTES_TEMPLATE.md assets/SHA256SUMS.txt > notes.md
+      - name: Create or update the prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.RELEASE_TAG }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          files=(assets/uac-remote-controller-windows-x64-setup.exe assets/uac-remote-controller-android-arm64.apk assets/uac-relay-windows-x64.exe assets/uac-relay-linux-x64 assets/SHA256SUMS.txt assets/windows-package-manifest.json assets/windows-package-inspection.json assets/apk-inspection.json assets/apk-boot-inspection.json assets/apk-signer.txt assets/apk-signer-source.txt)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --prerelease --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "${files[@]}" --prerelease --verify-tag --title "휴대폰 승인 $VERSION (프리릴리즈)" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+          fi

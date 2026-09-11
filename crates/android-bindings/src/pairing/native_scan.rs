@@ -97,7 +97,9 @@ impl ScanGuard {
             if callback_active() {
                 return Err(BridgeError::Busy);
             }
-            let owner = self.controller.upgrade().ok_or(BridgeError::Closed)?;
+            // Explicit type: rust-analyzer cannot infer Weak<Object>::upgrade here.
+            let owner: Arc<MobileController> =
+                self.controller.upgrade().ok_or(BridgeError::Closed)?;
             let before = self
                 .clock
                 .now()
@@ -235,7 +237,7 @@ impl NativePairingScan {
             let handle =
                 LocalKeyHandle::from_bytes(handle).map_err(|_| AcceptError::Unavailable)?;
             self.guard.observe()?;
-            let owner = self
+            let owner: Arc<MobileController> = self
                 .guard
                 .controller
                 .upgrade()
@@ -324,13 +326,16 @@ impl MobileController {
                 Ok(())
             }
         })?;
-        if self
-            .creation_slot
-            .lock()
-            .map_err(|_| BridgeError::Closed)?
-            .upgrade()
-            .is_some()
-        {
+        let creation_busy = {
+            // Explicit type: rust-analyzer cannot infer Weak::upgrade here.
+            let slot: Option<Arc<super::CreationState>> = self
+                .creation_slot
+                .lock()
+                .map_err(|_| BridgeError::Closed)?
+                .upgrade();
+            slot.is_some()
+        };
+        if creation_busy {
             return Err(BridgeError::Busy);
         }
         let reservation = ScanReservation::acquire()?;
