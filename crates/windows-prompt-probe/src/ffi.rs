@@ -27,7 +27,7 @@ use windows::{
                 QueryFullProcessImageNameW, WaitForSingleObject,
             },
         },
-        UI::WindowsAndMessaging::{GetWindowThreadProcessId, WSF_VISIBLE},
+        UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindowVisible, WSF_VISIBLE},
     },
     core::{BOOL, Error as WinError, PWSTR},
 };
@@ -428,6 +428,19 @@ pub(super) fn candidate_for(
         lab_note!("window {:#x}: pid={pid} image mismatch", hwnd.0 as usize);
         return Ok(None);
     }
+    // consent.exe owns hidden top-level windows besides the dialog (one per GUI
+    // thread, such as the IME windows), so the census saw several candidates and
+    // answered Ambiguous on a real prompt (lab run 34647161633). Only a window
+    // that is shown can be the consent dialog; hidden ones are never targets.
+    // SAFETY: read-only window state query on an OS-enumerated handle.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        lab_note!("window {:#x}: pid={pid} hidden, skipped", hwnd.0 as usize);
+        return Ok(None);
+    }
+    lab_note!(
+        "window {:#x}: pid={pid} visible consent candidate",
+        hwnd.0 as usize
+    );
     security::native64(process.raw())?;
     security::process_identity(process.raw(), pid, Some(session), cleanup)?;
     alive(process.raw())?;
