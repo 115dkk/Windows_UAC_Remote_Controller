@@ -66,7 +66,13 @@ class PairingScannerInstrumentationTest {
                 throw AssertionError("Scanner gate stayed closed: ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
             }
             val originalActor = onMain { actor(app) }
-            await { eval(host, BUTTON_READY) == "true" }
+            try { await { eval(host, BUTTON_READY) == "true" } }
+            catch (error: AssertionError) {
+                // Fixed shape only: whether the client rendered the button, the native gate and owner lines.
+                val client = eval(host, BUTTON_STATE)
+                val gate = onMain { app.canOpenPairingScanner(host) }
+                throw AssertionError("Scanner button never became ready: client=$client nativeGate=$gate ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
+            }
             assertEquals("\"clicked\"", eval(host, CLICK_BUTTON))
             await { onMain { scannerWindow() != null } }
             assertTrue(onMain { secureScannerWindow() })
@@ -244,6 +250,7 @@ class PairingScannerInstrumentationTest {
     }
     companion object {
         private const val BUTTON_READY = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return !!b&&!b.disabled;})()"
+        private const val BUTTON_STATE = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return JSON.stringify({present:!!b,disabled:b?b.disabled:null,buttons:document.querySelectorAll('button').length,title:document.title});})()"
         private const val CLICK_BUTTON = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');if(!b||b.disabled)return 'missing';b.click();return 'clicked';})()"
     }
 }
