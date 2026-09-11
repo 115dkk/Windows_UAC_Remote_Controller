@@ -38,7 +38,7 @@ describe('native snapshot truth in the client', () => {
     const snapshot = qaCase('desktop-unavailable').snapshot;
     render(<App bridge={bridgeFor(snapshot)} />);
     expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: ko.phones })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.phones })).toBeEnabled();
     expect(screen.queryByRole('button', { name: ko.activity })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.install })).not.toBeInTheDocument();
@@ -184,7 +184,7 @@ describe('pairing progress in the device collection', () => {
   it.each(['finished', 'failed'] as const)('shows %s text and permits retry only when otherwise enabled', (phase) => {
     const pairing: PairingView = { phase, message: '기기 연결 화면을 닫았어요.', failure: phase === 'failed' ? 'user_cancelled' : null };
     for (const devices of ['available', 'unavailable'] as const) {
-      const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair: true,
+      const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair: true, relayConfigured: true,
         dataAvailability: { devices, requests: 'available', activity: 'available' } };
       const onPair = vi.fn(), onRemove = vi.fn();
       const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
@@ -198,7 +198,7 @@ describe('pairing progress in the device collection', () => {
       expect(onPair).toHaveBeenCalledOnce();
       view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
       expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
-      expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
       view.unmount();
     }
   });
@@ -206,14 +206,15 @@ describe('pairing progress in the device collection', () => {
   it('keeps unavailable collections honest while exposing only the Windows pairing capability', () => {
     for (const platform of ['windows', 'android'] as const) {
       for (const canPair of [true, false]) {
-        const snapshot: AppSnapshot = { ...exampleSnapshot(platform), schemaVersion: 4, pairing: null, canPair,
+        const snapshot: AppSnapshot = { ...exampleSnapshot(platform), schemaVersion: 4, pairing: null, canPair, relayConfigured: true,
           dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' } };
         const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
         expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
         expect(screen.queryByRole('heading', { name: ko.noPhones })).not.toBeInTheDocument();
         expect(screen.queryByRole('heading', { name: ko.noComputers })).not.toBeInTheDocument();
         if (platform === 'windows' && canPair) expect(screen.getByRole('button', { name: ko.pairPhone })).toBeEnabled();
-        else expect(screen.queryByRole('button', { name: platform === 'windows' ? ko.pairPhone : ko.pairComputer })).not.toBeInTheDocument();
+        else if (platform === 'windows') expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
+        else expect(screen.queryByRole('button', { name: ko.pairComputer })).not.toBeInTheDocument();
         if (platform === 'windows') expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
         else expect(screen.queryByRole('button')).not.toBeInTheDocument();
         view.unmount();
@@ -395,7 +396,8 @@ describe('request interaction boundaries', () => {
     await user.click(screen.getByRole('button', { name: ko.details }));
     expect(screen.getByRole('button', { name: ko.fewerDetails })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('region', { name: ko.commandDetails })).toHaveTextContent(unsafeText);
-    expect(container.querySelector('img')).toBeNull();
+    expect(screen.getByRole('region', { name: ko.commandDetails }).querySelector('img')).toBeNull();
+    expect([...container.querySelectorAll('img')].every(image => image.getAttribute('src') === '/app-logo.svg')).toBe(true);
     expect(container.querySelector('script')).toBeNull();
     await user.click(screen.getByRole('button', { name: ko.deny }));
     expect(decide).toHaveBeenCalledWith('synthetic-request-1', 'deny');

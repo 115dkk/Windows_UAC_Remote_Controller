@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { phoneServiceGalleryCases } from './phone-service-cases';
-export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings' | 'remove-feature';
+export type GalleryAction = 'overview' | 'details' | 'long-details' | 'schedule' | 'dialog' | 'draft' | 'deny' | 'notification-settings' | 'remove-feature' | 'connection-setup';
 export interface GalleryCase {
   readonly id: string;
   readonly fixture: string;
@@ -28,12 +28,18 @@ export const galleryCases: readonly GalleryCase[] = [
   { ...row('desktop-running-text-size-200-760', 'desktop-running', 760, 580), rootTextSizePercent: 200 },
   row('desktop-running-dark-1280', 'desktop-running', 1280, 900, 'overview', 'dark'),
   row('desktop-devices-768', 'desktop-devices', 768, 900),
+  row('desktop-qr-ready-980', 'desktop-pairing-ready', 980, 740),
+  row('desktop-qr-setup-760', 'desktop-setup-missing', 760, 740),
   row('desktop-devices-narrow-390', 'desktop-devices', 390, 844),
   row('desktop-history-980', 'desktop-history', 980, 740),
   row('desktop-top-nav-boundary-672', 'desktop-empty', 672, 760),
   row('desktop-rail-boundary-673', 'desktop-empty', 673, 760),
   row('phone-empty-390', 'phone-empty', 390, 844),
   row('phone-unpaired-390', 'phone-unpaired', 390, 844),
+  row('phone-connection-setup-dark-390', 'phone-scanner-launch', 390, 844, 'connection-setup', 'dark'),
+  row('phone-connection-unavailable-dark-390', 'phone-setup-unavailable', 390, 844, 'connection-setup', 'dark'),
+  row('phone-connection-unavailable-forced-320', 'phone-setup-unavailable', 320, 740, 'connection-setup', 'light', 'active'),
+  { ...row('phone-connection-text-200-390', 'phone-scanner-launch', 390, 844, 'connection-setup'), rootTextSizePercent: 200 },
   row('phone-disconnected-390', 'phone-disconnected', 390, 844),
   row('phone-reconciling-390', 'phone-reconciling', 390, 844),
   row('phone-authenticating-390', 'phone-authenticating', 390, 844),

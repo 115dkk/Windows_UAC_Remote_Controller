@@ -282,5 +282,5 @@ jobs:
             gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
             gh release edit "$TAG" --prerelease --notes-file notes.md --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" "${files[@]}" --prerelease --verify-tag --title "휴대폰 승인 $VERSION (프리릴리즈)" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+            gh release create "$TAG" "${files[@]}" --prerelease --verify-tag --title "UAC 원격 승인 $VERSION (프리릴리즈)" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
           fi

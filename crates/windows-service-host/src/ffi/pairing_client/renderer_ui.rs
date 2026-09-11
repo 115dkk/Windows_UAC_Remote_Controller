@@ -47,7 +47,7 @@ use windows::{
 };
 
 const CLASS_NAME: &str = "UacRemoteControllerPairingRenderer";
-const CAPTION: &str = "휴대폰 승인";
+const CAPTION: &str = "UAC 원격 승인";
 const CONFIRM_ID: usize = 1001;
 const CANCEL_ID: usize = 1002;
 const TIMER_ID: usize = 1;
@@ -475,7 +475,7 @@ impl WindowOwner {
         draw_text(
             dc,
             self.title_font,
-            "휴대폰 승인 · PC 연결",
+            "UAC 원격 승인 · PC 연결",
             RECT {
                 left: left + scale(32),
                 top: top + scale(26),
@@ -526,7 +526,7 @@ impl WindowOwner {
         draw_text(
             dc,
             self.body_font,
-            "휴대폰 승인 앱에서 [PC 연결 QR 읽기]를 누르고 이 QR을 비춰 주세요.",
+            "UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요.",
             RECT {
                 left: left + scale(36),
                 top: top + scale(76),

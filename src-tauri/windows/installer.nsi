@@ -42,6 +42,9 @@ ${StrLoc}
 
 !define MANUFACTURER "{{manufacturer}}"
 !define PRODUCTNAME "{{product_name}}"
+; Display branding may change; installed storage, registry identity and the
+; protected native path remain compatible with existing alpha installations.
+!define INSTALLATIONID "휴대폰 승인"
 !define VERSION "{{version}}"
 !define VERSIONWITHBUILD "{{version_with_build}}"
 !define HOMEPAGE "{{homepage}}"
@@ -66,9 +69,9 @@ ${StrLoc}
 !define WEBVIEW2BOOTSTRAPPERPATH "{{webview2_bootstrapper_path}}"
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
-!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${INSTALLATIONID}"
 !define MANUKEY "Software\${MANUFACTURER}"
-!define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
+!define MANUPRODUCTKEY "${MANUKEY}\${INSTALLATIONID}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
@@ -110,9 +113,29 @@ ${StrLoc}
 !if "${MAINBINARYNAME}" != "controller-app"
   !error "Unexpected controller executable name."
 !endif
-!if "${PRODUCTNAME}" != "휴대폰 승인"
+!if "${PRODUCTNAME}" != "UAC 원격 승인"
   !error "Unexpected fixed protected installation folder."
 !endif
+
+; Exact old/new shortcut paths only. A name collision stops instead of replacing
+; an unrelated shortcut. The source link must already point to our fixed binary.
+!macro UacMigrateShortcut OLD NEW
+  !insertmacro IsShortcutTarget "${OLD}" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 = 1
+    ${If} ${FileExists} "${NEW}"
+      StrCpy $UacFailure "$(UacCopyFailed)"
+      Call UacFail
+    ${EndIf}
+    ClearErrors
+    Rename "${OLD}" "${NEW}"
+    ${If} ${Errors}
+      StrCpy $UacFailure "$(UacCopyFailed)"
+      Call UacFail
+    ${EndIf}
+    !insertmacro SetLnkAppUserModelId "${NEW}"
+  ${EndIf}
+!macroend
 
 Var PassiveMode
 Var UpdateMode
@@ -127,7 +150,7 @@ OutFile "${OUTFILE}"
 ; We don't actually use this value as default install path,
 ; it's just for nsis to append the product name folder in the directory selector
 ; https://nsis.sourceforge.io/Reference/InstallDir
-!define PLACEHOLDER_INSTALL_DIR "placeholder\${PRODUCTNAME}"
+!define PLACEHOLDER_INSTALL_DIR "placeholder\${INSTALLATIONID}"
 InstallDir "${PLACEHOLDER_INSTALL_DIR}"
 
 VIProductVersion "${VERSIONWITHBUILD}"
@@ -443,6 +466,12 @@ Section Install
     Call CreateOrUpdateStartMenuShortcut
   !insertmacro MUI_STARTMENU_WRITE_END
 
+  ; A pre-existing desktop shortcut gets the new display name on interactive
+  ; upgrades too, without creating one when the user had not chosen it.
+  ${If} $NoShortcutMode <> 1
+    !insertmacro UacMigrateShortcut "$DESKTOP\${INSTALLATIONID}.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
+  ${EndIf}
+
   ; Create desktop shortcut for silent and passive installers
   ; because finish page will be skipped
   ${If} $PassiveMode = 1
@@ -575,6 +604,43 @@ Section Uninstall
       !insertmacro UnpinShortcut "$DESKTOP\${PRODUCTNAME}.lnk"
       Delete "$DESKTOP\${PRODUCTNAME}.lnk"
     ${EndIf}
+
+    ; /NOSHORTCUTS may intentionally preserve legacy names during an upgrade.
+    ; Remove them on uninstall only when they still target this exact binary.
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      !insertmacro UnpinShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk"
+      ClearErrors
+      Delete "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk"
+      ${If} ${Errors}
+        StrCpy $UacFailure "$(UacFileFailed)"
+        Call un.UacFail
+      ${EndIf}
+      RMDir "$SMPROGRAMS\$AppStartMenuFolder"
+    ${EndIf}
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\${INSTALLATIONID}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      !insertmacro UnpinShortcut "$SMPROGRAMS\${INSTALLATIONID}.lnk"
+      ClearErrors
+      Delete "$SMPROGRAMS\${INSTALLATIONID}.lnk"
+      ${If} ${Errors}
+        StrCpy $UacFailure "$(UacFileFailed)"
+        Call un.UacFail
+      ${EndIf}
+    ${EndIf}
+    !insertmacro IsShortcutTarget "$DESKTOP\${INSTALLATIONID}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      !insertmacro UnpinShortcut "$DESKTOP\${INSTALLATIONID}.lnk"
+      ClearErrors
+      Delete "$DESKTOP\${INSTALLATIONID}.lnk"
+      ${If} ${Errors}
+        StrCpy $UacFailure "$(UacFileFailed)"
+        Call un.UacFail
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
 
   ; Remove registry information for add/remove programs
@@ -623,6 +689,12 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
+  ; Renaming an existing owned shortcut also applies to /UPDATE. Never create a
+  ; previously absent shortcut, overwrite another file or follow another target.
+  ${If} $NoShortcutMode <> 1
+    !insertmacro UacMigrateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk" "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    !insertmacro UacMigrateShortcut "$SMPROGRAMS\${INSTALLATIONID}.lnk" "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  ${EndIf}
   ; Skip creating shortcut if in update mode or no shortcut mode
   ; but always create if migrating from wix
   ${If} $WixMode = 0
@@ -653,6 +725,9 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
+  ${If} $NoShortcutMode <> 1
+    !insertmacro UacMigrateShortcut "$DESKTOP\${INSTALLATIONID}.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
+  ${EndIf}
   ; Skip creating shortcut if in update mode or no shortcut mode
   ; but always create if migrating from wix
   ${If} $WixMode = 0

@@ -9,6 +9,8 @@ import type { IconName } from './icons';
 import { ko, policyUnavailableText, serviceActionText, serviceConfirmText } from './messages.ko';
 import { PolicyEditor } from './PolicyEditor';
 import { PhoneServicePanel } from './PhoneServicePanel';
+import { PairingEntry } from './PairingEntry';
+import { hasNoPairedPc } from './phoneConnection';
 import { RequestPanel } from './RequestPanel';
 import { EmptyState, MobileNotices, ServicePanel } from './StatusPanels';
 import { useController } from './useController';
@@ -18,7 +20,7 @@ interface NavItem { readonly page: ClientPage; readonly label: string; readonly 
 
 function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
   const phone = snapshot.platform === 'android';
-  const devices: NavItem = { page: 'devices', label: phone ? ko.computers : ko.phones, icon: phone ? 'pc' : 'phone', available: snapshot.dataAvailability.devices === 'available' };
+  const devices: NavItem = { page: 'devices', label: phone ? ko.computers : ko.phones, icon: phone ? 'pc' : 'phone', available: !phone || snapshot.dataAvailability.devices === 'available' };
   const activity: NavItem = { page: 'activity', label: phone ? ko.phoneActivity : ko.activity, icon: 'history', available: snapshot.dataAvailability.activity === 'available' };
   return phone ? [
     // Request recovery remains reachable even while native inventory is unknown.
@@ -50,7 +52,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
     if (scannerFocusHandled.current.owner !== bridge) scannerFocusHandled.current = { owner: bridge, revision: 0 };
     if (controller.scannerFocusRevision <= scannerFocusHandled.current.revision) return;
     scannerFocusHandled.current.revision = controller.scannerFocusRevision;
-    if (!phone || page !== 'requests') return; // Navigation away consumes the old return intent.
+    if (!phone || (page !== 'requests' && page !== 'schedule')) return;
     const restore = () => {
       const focused = document.activeElement;
       if (focused !== document.body && focused !== document.documentElement && focused !== scannerButton.current) return;
@@ -79,17 +81,17 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
   }
   const refreshButton = <button className="button quiet refresh-button" type="button" disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" />{refreshing ? ko.refreshing : ko.refresh}</button>;
 
-  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><Icon name="link" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ?? ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main></div>;
+  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ?? ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main></div>;
   if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main></div>;
 
   const items = navigationFor(snapshot);
   const title = !phone && page === 'status' ? ko.homeTitle
     : items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
   const navigation = <aside className="navigation-shell">
-    <div className="app-brand"><span className="brand-symbol"><Icon name="link" /></span><span>{ko.appName}</span></div>
+    <div className="app-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div>
     <nav aria-label={ko.navigation}>{items.map((item) => item.available
       ? <button key={item.page} type="button" className={`navigation-item ${page === item.page ? 'current' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => navigate(item.page)}><Icon name={item.icon} /><span>{item.label}</span></button>
-      : <span key={item.page} className={`navigation-item passive ${page === item.page ? 'current' : ''}`}><Icon name={item.icon} /><span>{item.label}<small>{ko.unavailable}</small></span></span>)}</nav>
+      : <button key={item.page} type="button" disabled className="navigation-item passive"><Icon name={item.icon} /><span>{item.label}{' '}<small>{ko.unavailable}</small></span></button>)}</nav>
     <p className="rail-caption">{ko.appDescription}</p>
   </aside>;
 
@@ -103,7 +105,8 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} onAction={serviceAction} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
-      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
+      {phone && page === 'schedule' && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
+      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });

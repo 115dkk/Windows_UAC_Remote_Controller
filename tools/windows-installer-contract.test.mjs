@@ -54,7 +54,10 @@ test('source contract fixes per-machine x64 package and protected product names'
   assert.equal(base.bundle.windows.nsis.installerHooks, 'windows/packaging-hooks.nsh');
   assert.deepEqual(base.bundle.windows.nsis.languages, ['Korean', 'English']);
   for (const guard of ['!if "${INSTALLMODE}" != "perMachine"', '!if "${ARCH}" != "x64"',
-    '!if "${MAINBINARYNAME}" != "controller-app"', '!if "${PRODUCTNAME}" != "휴대폰 승인"']) rejectingGuard(template, guard);
+    '!if "${MAINBINARYNAME}" != "controller-app"', '!if "${PRODUCTNAME}" != "UAC 원격 승인"']) rejectingGuard(template, guard);
+  position(template, '!define INSTALLATIONID "휴대폰 승인"');
+  position(template, '!define PLACEHOLDER_INSTALL_DIR "placeholder\\${INSTALLATIONID}"');
+  position(template, '!define UNINSTKEY "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${INSTALLATIONID}"');
   position(template, 'RequestExecutionLevel admin');
   ordered(native('UacFixedLocation'), ['${IfNot} ${RunningX64}', 'Call ${PREFIX}UacFail',
     'StrCpy $UacDirectory "$PROGRAMFILES64\\휴대폰 승인"', '${If} $INSTDIR != "placeholder\\휴대폰 승인"',
@@ -71,6 +74,25 @@ test('source contract rejects missing duplicate or extra helper payloads at NSIS
   assert.ok(declarations.some((line) => line.includes('!error "Unexpected external executable')));
   rejectingGuard(template, '!ifndef UAC_SERVICE_INCLUDED');
   rejectingGuard(template, '!ifndef UAC_PROBE_INCLUDED');
+});
+
+test('branding migration preserves installation identity and only renames owned legacy shortcuts', () => {
+  const migration = block(template, '!macro UacMigrateShortcut OLD NEW', '!macroend');
+  ordered(migration, ['!insertmacro IsShortcutTarget "${OLD}" "$INSTDIR\\${MAINBINARYNAME}.exe"',
+    'Pop $0', '${If} $0 = 1', '${If} ${FileExists} "${NEW}"', 'Call UacFail', '${EndIf}',
+    'ClearErrors', 'Rename "${OLD}" "${NEW}"', '${If} ${Errors}', 'Call UacFail']);
+  for (const name of ['CreateOrUpdateStartMenuShortcut', 'CreateOrUpdateDesktopShortcut']) {
+    const body = block(template, `Function ${name}`, 'FunctionEnd');
+    const rename = body.findIndex(line => line.startsWith('!insertmacro UacMigrateShortcut'));
+    assert.ok(rename >= 0 && rename < position(body, '${If} $UpdateMode = 1'), 'existing owned shortcut migrates before update creation is skipped');
+    assert.ok(position(body, '${If} $NoShortcutMode <> 1') < rename);
+  }
+  const uninstall = section('Uninstall');
+  for (const path of ['$SMPROGRAMS\\$AppStartMenuFolder', '$SMPROGRAMS', '$DESKTOP']) {
+    ordered(uninstall, [`!insertmacro IsShortcutTarget "${path}\\\${INSTALLATIONID}.lnk" "$INSTDIR\\\${MAINBINARYNAME}.exe"`,
+      'Pop $0', '${If} $0 = 1', `!insertmacro UnpinShortcut "${path}\\\${INSTALLATIONID}.lnk"`,
+      'ClearErrors', `Delete "${path}\\\${INSTALLATIONID}.lnk"`, '${If} ${Errors}', 'Call un.UacFail']);
+  }
 });
 
 test('source contract runs PREINSTALL before destination writes and POSTINSTALL after all packaged files', () => {

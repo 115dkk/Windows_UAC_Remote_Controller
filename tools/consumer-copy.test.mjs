@@ -25,8 +25,8 @@ test('Android notification values are consumer copy; stable resource names and t
   const values = new Map(entries.map((match) => [match[1], match[2]]));
   assert.equal(values.size, entries.length, 'resource names must be unique');
   for (const [, , value] of entries) assert.doesNotMatch(value, developerLabel);
-  assert.equal(values.get('app_name'), '"휴대폰 승인"');
-  assert.equal(values.get('controller_service_title'), '휴대폰 승인');
+  assert.equal(values.get('app_name'), '"UAC 원격 승인"');
+  assert.equal(values.get('controller_service_title'), 'UAC 원격 승인');
   assert.equal(values.get('controller_service_ready'), '앱 설정을 사용할 수 있습니다.');
   assert.equal(values.get('controller_service_stopping'), '휴대폰 승인을 끄고 있습니다.');
   assert.equal(values.get('request_notification_summary'), '%1$s\\n%2$s', 'original program/path text is not rewritten');

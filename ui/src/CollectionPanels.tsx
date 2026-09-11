@@ -6,9 +6,10 @@ import { Icon } from './icons';
 import { activityText, ko } from './messages.ko';
 import { EmptyState } from './StatusPanels';
 
-export function DevicesPanel({ snapshot, disabled, onPair, onRemove, onSetRelay }: {
+export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemove, onSetRelay }: {
   snapshot: AppSnapshot; disabled: boolean; onPair: () => void; onRemove: (device: PairedDeviceView) => void;
   onSetRelay: (address: string) => Promise<AppSnapshot | null>;
+  onOpenStatus?: () => void;
 }) {
   const [address, setAddress] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -55,12 +56,25 @@ export function DevicesPanel({ snapshot, disabled, onPair, onRemove, onSetRelay 
       <div className="collection-actions"><button type="submit" className="button primary" disabled={relayDisabled || submitting || !address.trim()}>{submitting ? ko.saving : ko.save}</button></div>
     </fieldset>
   </form>;
-  if (unavailable && (snapshot.platform !== 'windows' || (!snapshot.canPair && !pairing))) return <>{unavailableState}{relayForm}</>;
+  const pc = snapshot.platform === 'windows';
+  const qrDisabled = disabled || !snapshot.canPair || pairingActive || !snapshot.relayConfigured;
+  const recovery = snapshot.service?.installed === false ? ko.pairingPcInstallFirst
+    : snapshot.service?.state === 'stopped' ? ko.pairingPcStartFirst
+      : !snapshot.canPair ? ko.pairingPcCheck : !snapshot.relayConfigured ? ko.pairingPcRelayFirst : null;
+  const qrEntry = pc && <section className="surface pairing-entry" aria-label={ko.pairPhone}>
+    <p className="supporting-text" id={`${id}-qr-purpose`}>{ko.pairingQrPurpose}</p>
+    <button type="button" className="button primary" disabled={qrDisabled} aria-describedby={`${id}-qr-purpose`} onClick={onPair}><Icon name="qr" />{ko.pairPhone}</button>
+    {pairing && <p className="supporting-text" role="status">{pairing.message}</p>}
+    {!pairingActive && recovery && <p className="supporting-text">{recovery}</p>}
+    {!pairingActive && !snapshot.canPair && onOpenStatus && <button type="button" className="button secondary" onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
+  </section>;
+  if (unavailable) return <>{qrEntry}{unavailableState}{relayForm}</>;
   return <>
+    {qrEntry}
     {unavailable ? unavailableState : snapshot.devices.length ? <ul className="surface device-list">{snapshot.devices.map((device) => <li key={device.id}><span className="device-icon"><Icon name={phone ? 'pc' : 'phone'} /></span><div className="device-copy"><h2><bdi>{device.name}</bdi></h2><p className={`state-line ${device.connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{device.connected ? ko.connected : ko.disconnected}</p>{device.lastSeenLabel && <p className="supporting-text"><bdi>{device.lastSeenLabel}</bdi></p>}</div>{snapshot.canUnpair && <button type="button" className="button danger-quiet" disabled={disabled} onClick={() => onRemove(device)} aria-label={`${device.name} ${ko.removeDevice}`}>{ko.removeDevice}</button>}</li>)}</ul>
       : <EmptyState icon={phone ? 'pc' : 'phone'} title={phone ? ko.noComputers : ko.noPhones} description={ko.noDevicesBody} />}
-    {snapshot.canPair || pairingActive ? <div className="collection-actions"><button type="button" className="button primary" disabled={disabled || pairingActive} onClick={onPair}><Icon name="plus" />{phone ? ko.pairComputer : ko.pairPhone}</button></div> : !pairing && <p className="supporting-text">{ko.pairingUnavailable}</p>}
-    {pairing && <p className="supporting-text" role="status">{pairing.message}</p>}
+    {!pc && (snapshot.canPair || pairingActive ? <div className="collection-actions"><button type="button" className="button primary" disabled={disabled || pairingActive} onClick={onPair}><Icon name="plus" />{ko.pairComputer}</button></div> : !pairing && <p className="supporting-text">{ko.pairingUnavailable}</p>)}
+    {!pc && pairing && <p className="supporting-text" role="status">{pairing.message}</p>}
     {relayForm}
   </>;
 }

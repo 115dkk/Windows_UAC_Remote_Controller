@@ -21,7 +21,32 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
   test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
-    if (fixture.startsWith('desktop-') && fixture !== 'desktop-devices' && fixture !== 'desktop-history') {
+    if (selected.action === 'connection-setup') {
+      await page.getByRole('button', { name: '알림 시간', exact: true }).click();
+      const card = page.locator('.pairing-entry');
+      await expect(card).toContainText('PC의 UAC 원격 승인 앱에서');
+      const scanner = card.getByRole('button', { name: 'PC의 QR 코드 촬영', exact: true });
+      const passive = page.getByRole('navigation').locator('button:disabled');
+      expect(await passive.count()).toBeGreaterThan(0);
+      for (const button of await passive.all()) {
+        await expect(button).toHaveCSS('opacity', selected.forcedColors === 'active' ? '1' : '0.45');
+        await expect(button).not.toHaveAttribute('aria-current', 'page');
+      }
+      if (fixture === 'phone-setup-unavailable') {
+        await expect(card.getByRole('heading', { name: 'PC 연결', exact: true })).toBeVisible();
+        await expect(page.getByText('PC와 아직 연결하지 않았어요', { exact: true })).toHaveCount(0);
+        await expect(scanner).toBeDisabled();
+        await expect(page.getByText('휴대폰 승인 상태를 확인할 수 없어요', { exact: true })).toBeVisible();
+      } else {
+        await expect(card.getByRole('heading', { name: 'PC와 아직 연결하지 않았어요', exact: true })).toBeVisible();
+        await expect(scanner).toBeEnabled();
+      }
+      await gallery.capture('connection-guidance', 'CLIENT/SYNTHETIC · 연결 안내와 비활성 메뉴');
+      await scanner.scrollIntoViewIfNeeded();
+      await expect(scanner).toBeInViewport({ ratio: 1 });
+      await gallery.capture('connection-action', 'CLIENT/SYNTHETIC · 좁은 화면/확대에서 촬영 버튼 접근');
+    }
+    if (fixture.startsWith('desktop-') && !['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing', 'desktop-history'].includes(fixture)) {
       const purpose = page.getByRole('heading', { level: 1, name: 'PC 승인을 휴대폰에서', exact: true });
       await expect(purpose).toBeVisible();
       if (!selected.rootTextSizePercent) await expect(purpose).toBeInViewport({ ratio: 1 });
@@ -32,7 +57,10 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('heading', { name: '휴대폰 승인 설정이 필요해요', exact: true })).toBeVisible();
       await expect(page.getByRole('region', { name: '휴대폰 승인 설정이 필요해요', exact: true }).getByRole('button')).toHaveCount(0);
     }
-    if (fixture === 'desktop-unavailable') await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(1);
+    if (fixture === 'desktop-unavailable') {
+      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(2);
+      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(1);
+    }
     if (fixture === 'desktop-running') {
       await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.getByText('PC 요청을 휴대폰으로 보낼 준비가 아직 되지 않았어요.', { exact: true })).toBeVisible();
@@ -41,6 +69,18 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('button', { name: '휴대폰 승인 끄기', exact: true })).toBeEnabled();
     }
     if (fixture === 'desktop-devices') await expect(page.getByRole('heading', { name: '화면 예시 휴대폰', exact: true })).toBeVisible();
+    if (fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
+      const entry = page.getByRole('button', { name: 'UAC 원격 승인', exact: true });
+      await expect(entry).toBeVisible();
+      await expect(page.getByText('연결용 QR 코드를 표시해 휴대폰을 등록해요.', { exact: true })).toBeVisible();
+      await expect(page.getByRole('navigation').getByRole('button', { name: '휴대폰 관리', exact: true })).toBeEnabled();
+      if (fixture === 'desktop-pairing-ready') await expect(entry).toBeEnabled();
+      else {
+        await expect(entry).toBeDisabled();
+        await expect(entry).toHaveCSS('opacity', '0.45');
+        await expect(page.getByRole('button', { name: 'PC 상태 열기', exact: true })).toBeEnabled();
+      }
+    }
     if (fixture === 'desktop-history') {
       await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
@@ -48,7 +88,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toBeVisible();
     const intakeCopy: Record<string, string> = {
-      'phone-unpaired': '연결된 PC가 없어요', 'phone-disconnected': '컴퓨터와 연결을 기다리고 있어요',
+      'phone-unpaired': 'PC와 아직 연결하지 않았어요', 'phone-disconnected': '컴퓨터와 연결을 기다리고 있어요',
       'phone-reconciling': '받은 요청을 확인하고 있어요', 'phone-authenticating': '휴대폰에서 본인 확인을 진행해 주세요.',
       'phone-waiting': '앞선 작업이 끝나기를 기다리고 있어요.', 'phone-awaiting-outcome': 'Windows의 처리 결과를 기다리고 있어요.',
     };
@@ -73,8 +113,9 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toHaveCount(0);
     }
     if (fixture === 'phone-unavailable') {
-      await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
-      await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button')).toHaveCount(2);
+      await expect(page.getByRole('heading', { name: '요청을 받을 준비가 필요해요', exact: true })).toBeVisible();
+      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(2);
+      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(2);
     }
     if (fixture === 'phone-pending' || fixture === 'phone-long-request' || fixture === 'phone-terminal') {
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeEnabled();
@@ -108,7 +149,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('alert')).toContainText('요청 상태를 확인하지 못했어요.');
       await expect(page.getByText('연결을 확인한 뒤 다시 시도해 주세요.', { exact: true })).toBeVisible();
       await expect(page.getByText('synthetic_unavailable', { exact: true })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: '현재 요청을 확인할 수 없어요', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '요청을 받을 준비가 필요해요', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toHaveCount(0);
     }
     if (fixture.startsWith('desktop-')) await expect(page.locator('button[data-pairing-scanner="open"]')).toHaveCount(0);
@@ -287,7 +328,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await gallery.capture('landscape-actions', '가로 클라이언트 화면에서 요청 동작 접근 · 실제 기기 아님');
     }
     if (selected.id.startsWith('client-scanner-launch-')) {
-      const entry = page.getByRole('button', { name: 'PC 연결 QR 읽기', exact: true });
+      const entry = page.getByRole('button', { name: 'PC의 QR 코드 촬영', exact: true });
       await expect(entry).toHaveAttribute('data-pairing-scanner', 'open');
       await expect(page.getByRole('navigation', { name: '주요 메뉴' }).getByRole('button', { name: '연결된 PC', exact: true })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'PC 연결', exact: true })).toHaveCount(0);

@@ -103,7 +103,7 @@ describe('native request presentation integration', () => {
     expect(decide).not.toHaveBeenCalled();
   });
 
-  it('separates unpaired, disconnected and reconciling from a known empty queue', async () => {
+  it('shows empty requests alongside connection state, but not during reconciliation', async () => {
     const states = [
       { status: 'ready' as const, peerCount: 0, connectedPeerCount: 0, title: ko.noComputers },
       { status: 'ready' as const, peerCount: 1, connectedPeerCount: 0, title: ko.requestDisconnected },
@@ -112,7 +112,8 @@ describe('native request presentation integration', () => {
     for (const { title, ...catalog } of states) {
       const rendered = view({ ...pending(), requests: [], requestCatalog: { ...catalog, revision: '1' } });
       expect(await screen.findByRole('heading', { name: title })).toBeInTheDocument();
-      expect(screen.queryByText(ko.requestEmpty)).not.toBeInTheDocument();
+      if (catalog.status === 'ready') expect(screen.getByText(ko.requestEmpty)).toBeInTheDocument();
+      else expect(screen.queryByText(ko.requestEmpty)).not.toBeInTheDocument();
       rendered.unmount();
     }
   });

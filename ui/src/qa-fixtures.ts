@@ -39,6 +39,10 @@ export function qaCase(name: string): QaCase {
   const phone = exampleSnapshot('android');
   switch (name) {
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
+    case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
+      service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
+    case 'desktop-setup-missing': return { page: 'devices', snapshot: { ...windows,
+      dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'desktop-unavailable': return { page: 'status', snapshot: { ...windows, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
     case 'desktop-devices': return { page: 'devices', snapshot: { ...windows, devices: [{ id: 'synthetic-device', name: '화면 예시 휴대폰', revision: 1, connected: false, routePresent: false, lastSeenLabel: '마지막 연결: 화면 예시' }], canUnpair: true } };
     case 'desktop-history': return { page: 'activity', snapshot: { ...windows, activity: [{ id: 'synthetic-event-1', timestampMillis: Date.UTC(2026, 8, 8, 12, 30), kind: 'service_started' }, { id: 'synthetic-event-2', timestampMillis: Date.UTC(2026, 8, 8, 12, 20), kind: 'cancelled' }], canClearActivity: true } };
@@ -46,6 +50,10 @@ export function qaCase(name: string): QaCase {
     case 'phone-terminal': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: 'PowerShell', executablePath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', details: `pwsh.exe -NoProfile -Command "Write-Output '화면 예시'"` })] } };
     case 'phone-long-request': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: '화면 예시 · 길이가 긴 프로그램 이름 설치 관리자.exe', executablePath: `C:\\${'한글 경로와 English mixed-direction אבג '.repeat(8)}\\${'unbroken'.repeat(22)}.exe`, details: `${'<img src=x onerror="exampleOnly()">\n'.repeat(4)}${'아주 긴 프로그램 요청의 예시 내용입니다. '.repeat(35)}` })] } };
     case 'phone-empty': return { page: 'requests', snapshot: phone };
+    case 'phone-setup-unavailable': return { page: 'requests', snapshot: { ...phone, policy: null, requestCatalog: null,
+      phoneService: { state: 'unavailable', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: false },
+      dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' },
+    } };
     case 'phone-unpaired': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'ready', revision: '1', peerCount: 0, connectedPeerCount: 0 } } };
     case 'phone-scanner-launch': return { page: 'requests', snapshot: { ...phone,
       mobile: { ...phone.mobile!, canOpenPairingScanner: true },

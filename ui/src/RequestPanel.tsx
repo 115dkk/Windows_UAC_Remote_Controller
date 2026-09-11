@@ -6,6 +6,8 @@ import { Icon } from './icons';
 import { ko, remainingLabel } from './messages.ko';
 import { EmptyState } from './StatusPanels';
 import { RequestDetailsDisclosure } from './RequestDetailsDisclosure';
+import { PairingEntry } from './PairingEntry';
+import { hasNoPairedPc } from './phoneConnection';
 
 const requestStateText: Record<Exclude<RequestView['state'], 'pending'>, string> = {
   authenticating: ko.authenticating, waiting: ko.requestWaiting, sending: ko.sending,
@@ -41,8 +43,11 @@ interface RequestPanelProps {
 function RequestContents({ snapshot, disabled, onDecision, readDetails }: RequestPanelProps) {
   if (snapshot.requestCatalog?.status === 'reconciling') return <EmptyState icon="request" title={ko.requestReconciling} description={ko.requestReconcilingBody} />;
   if (snapshot.dataAvailability.requests !== 'available') return <EmptyState icon="request" title={ko.requestUnavailable} description={ko.requestUnavailableBody} />;
-  if (!snapshot.requests.length && snapshot.requestCatalog?.peerCount === 0) return <EmptyState icon="pc" title={ko.noComputers} description={ko.pairingUnavailable} />;
-  if (!snapshot.requests.length && snapshot.requestCatalog?.connectedPeerCount === 0) return <EmptyState icon="pc" title={ko.requestDisconnected} description={ko.requestDisconnectedBody} />;
+  if (hasNoPairedPc(snapshot)) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
+  if (!snapshot.requests.length && snapshot.requestCatalog?.connectedPeerCount === 0) return <>
+    <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />
+    <section className="notice-box"><Icon name="pc" /><div><h2>{ko.requestDisconnected}</h2><p>{ko.requestDisconnectedBody}</p></div></section>
+  </>;
   if (!snapshot.requests.length) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
   const selected = snapshot.requests.find((request) => request.id === snapshot.requestReview?.locator);
   const requests = selected ? [selected, ...snapshot.requests.filter((request) => request !== selected)] : snapshot.requests;
@@ -54,9 +59,8 @@ function RequestContents({ snapshot, disabled, onDecision, readDetails }: Reques
 
 export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOpenScanner, scannerButtonRef }:
   RequestPanelProps & { onOpenScanner: () => void; scannerButtonRef: Ref<HTMLButtonElement> }) {
-  const scannerAvailable = snapshot.platform === 'android' && snapshot.mobile?.canOpenPairingScanner === true;
   return <>
     <RequestContents snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={onDecision} />
-    {scannerAvailable && <div className="collection-actions"><button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button secondary" disabled={disabled} onClick={onOpenScanner}>{ko.openPairingScanner}</button></div>}
+    {snapshot.platform === 'android' && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} scannerButtonRef={scannerButtonRef} />}
   </>;
 }

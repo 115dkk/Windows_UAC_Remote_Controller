@@ -29,14 +29,16 @@ describe('native QR-input entry, separate from pairing', () => {
       const openPairingScanner = vi.fn<ControllerBridge['openPairingScanner']>();
       const rendered = view(snapshot, { openPairingScanner });
       await screen.findByRole('heading', { name: ko.noComputers });
-      expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
+      const disabledEntry = screen.getByRole('button', { name: ko.openPairingScanner });
+      expect(disabledEntry).toBeDisabled();
+      fireEvent.click(disabledEntry);
       expect(openPairingScanner).not.toHaveBeenCalled();
       rendered.unmount();
     }
     const unrelated = available();
     const unrelatedView = view({ ...unrelated, canPair: true, mobile: { ...unrelated.mobile!, canOpenPairingScanner: false } });
     await screen.findByRole('heading', { name: ko.noComputers });
-    expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
     unrelatedView.unmount();
     for (const fixture of ['phone-scanner-launch', 'phone-scanner-unavailable-catalog']) {
       const rendered = view(qaCase(fixture).snapshot);
@@ -50,7 +52,7 @@ describe('native QR-input entry, separate from pairing', () => {
   it('leaves lock recovery and Windows presentation unchanged', async () => {
     const lock = view(qaCase('phone-lock-missing').snapshot);
     expect(await screen.findByRole('button', { name: ko.openLockSettings })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
     lock.unmount();
     const windows = qaCase('desktop-running').snapshot;
     view({ ...windows, mobile: available().mobile }); // Even a crossed capability cannot create Windows camera UI.
@@ -126,7 +128,7 @@ describe('native QR-input entry, separate from pairing', () => {
     const foreground = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     view(original, { snapshot: () => Promise.resolve(snapshot), openPairingScanner });
     await user.click(await screen.findByRole('button', { name: ko.openPairingScanner }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled());
     // Synthetic native close/cancel observation. This is not a camera or modal-focus test.
     snapshot = original;
     fireEvent(window, new Event('focus'));
@@ -188,6 +190,6 @@ describe('native QR-input entry, separate from pairing', () => {
     await screen.findByRole('button', { name: ko.openLockSettings });
     await act(async () => { pending.resolve(); await pending.promise; });
     expect(oldRead).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
   });
 });

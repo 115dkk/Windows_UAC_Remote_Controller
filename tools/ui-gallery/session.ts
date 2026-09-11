@@ -55,7 +55,7 @@ export class GallerySession {
       // native scaling claim, content masking or screenshot modification.
       await this.page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
     }
-    const heading = selected.fixture === 'desktop-devices' ? '연결된 휴대폰'
+    const heading = ['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing'].includes(selected.fixture) ? '휴대폰 관리'
       : selected.fixture === 'desktop-history' ? '활동 기록'
         : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
         : selected.fixture.startsWith('desktop-') ? 'PC 승인을 휴대폰에서'

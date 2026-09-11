@@ -1,9 +1,9 @@
 <resources>
-    <string name="app_name">"휴대폰 승인"</string>
-    <string name="main_activity_title">"휴대폰 승인"</string>
+    <string name="app_name">"UAC 원격 승인"</string>
+    <string name="main_activity_title">"UAC 원격 승인"</string>
     <string name="controller_service_channel">휴대폰 승인 실행 상태</string>
     <string name="controller_service_channel_description">휴대폰 승인이 켜져 있는지, 앱 준비가 끝났는지 알려 줍니다.</string>
-    <string name="controller_service_title">휴대폰 승인</string>
+    <string name="controller_service_title">UAC 원격 승인</string>
     <string name="controller_service_locked">잠금을 풀면 앱을 준비합니다.</string>
     <string name="controller_service_preparing">앱을 준비하고 있습니다.</string>
     <string name="controller_service_ready">앱 설정을 사용할 수 있습니다.</string>

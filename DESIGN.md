@@ -102,7 +102,19 @@ contrast after rendering; values above are design intent, not a passed audit.
 - Desktop: native caption, compact task navigation, connected phones and
   activity. Home leads with `PC 승인을 휴대폰에서` and a short explanation of
   the administrator-request approval/denial purpose, before local execution.
-  Keep the installed product name `휴대폰 승인`.
+  Product branding is `UAC 원격 승인` on Windows and Android. Existing protected
+  installation paths, bundle/application IDs and persisted identities stay stable.
+- PC navigation uses `휴대폰 관리` for the destination and `UAC 원격 승인` for
+  the pairing action, with the explicit description `연결용 QR 코드를 표시해 휴대폰을 등록해요.`
+  Android QR instructions use these exact labels in the same order. Management
+  stays reachable before device inventory is available. The QR action remains
+  visible but disabled until native pairing capability and relay configuration
+  are present; installation/start/recovery guidance directs to PC status.
+- The shared original SVG mark is a monitor + phone + approval check, using
+  existing teal/off-white tokens. `tools/generate-app-icons.mjs` compiles it for
+  Windows PNG/ICO, Android density/round/adaptive resources, and client branding.
+  Android adaptive foreground has 16% inset to keep the mark inside the safe area.
+  Client brand image is 2rem (3rem at launch). It is decorative beside the app name.
 - Consumer controls name the product/job, not the implementation's service:
   `휴대폰 승인 켜기 / 끄기 / 다시 켜기`, and `PC 연결 기능 설치 / 제거`.
   Local on/off state is scoped by `이 PC에서 실행`; it is not remote readiness.
@@ -132,6 +144,21 @@ contrast after rendering; values above are design intent, not a passed audit.
   restores focus; repeated submission is disabled while pending.
 - Unavailable future operations are not enabled buttons. No fake QR, paired
   device, completed approval or live latency number in the production app.
+- Disabled navigation and controls use `--disabled-opacity: .45`, retain their
+  labels, and never receive active press/hover treatments. Unavailable tabs are
+  disabled buttons with the compact `사용 불가` note, not selected tabs. In forced
+  colors use full-opacity system GrayText. Radio/checkbox labels dim with inputs.
+- Phone QR entry explains where to open the QR on the PC and launches the
+  existing native scanner from the app. Keep a disabled entry with recovery text
+  when native scanner capability is absent. A ready native catalogue with zero
+  peers gets `PC와 아직 연결하지 않았어요`; unread inventory keeps its uncertainty.
+  The connection entry is also reachable directly on the schedule page when
+  unpaired or inventory is unknown; local service/settings failures stay visible.
+- The main request page separates empty requests from connection status: a ready
+  empty catalogue says `기다리는 요청이 없어요`, including an unpaired or disconnected
+  PC. Pairing/reconnection guidance is separate. Unread inventory instead says
+  `요청을 받을 준비가 필요해요` and points to local service settings; it must not invent
+  no pending requests or diagnose Internet loss from a failed native read.
 - Every icon has one purpose; use local SVG shapes, not emoji or icon-only labels
   without accessible names. Decorative shapes have no focus/interaction role.
 
