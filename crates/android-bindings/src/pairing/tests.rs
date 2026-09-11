@@ -129,6 +129,10 @@ fn snapshot(path: &str) -> ControllerCheckpoint {
 }
 
 impl NativePlatform for Platform {
+    fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
+
     fn create_local_key_set(
         &self,
         request: Arc<NativeKeyCreationRequest>,

@@ -149,6 +149,10 @@ impl Platform {
     }
 }
 impl NativePlatform for Platform {
+    fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
+
     fn create_local_key_set(
         &self,
         _request: std::sync::Arc<crate::NativeKeyCreationRequest>,

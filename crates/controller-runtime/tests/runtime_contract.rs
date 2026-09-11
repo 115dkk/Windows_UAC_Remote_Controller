@@ -602,7 +602,8 @@ fn scanner_readiness_is_required_native_input_only_and_never_enables_pairing() {
     let mut extra = record;
     extra["qr"] = json!("synthetic-untrusted-input");
     assert!(serde_json::from_value::<MobileReadiness>(extra).is_err());
-    assert!(!MobileReadiness::UNAVAILABLE.can_open_pairing_scanner);
+    let unavailable = serde_json::to_value(MobileReadiness::UNAVAILABLE).unwrap();
+    assert_eq!(unavailable["canOpenPairingScanner"], json!(false));
 }
 
 #[test]

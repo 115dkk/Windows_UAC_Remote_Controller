@@ -117,10 +117,8 @@ impl fmt::Debug for NativeClock {
 pub trait NativePlatform: Send + Sync {
     /// Actual Application KeyguardManager.isDeviceSecure observation only.
     /// This is configured secure lock, not successful per-operation auth. Native
-    /// implementations override it; unsupported/test adapters fail closed.
-    fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
-        Err(BridgeError::NativeUnavailable)
-    }
+    /// implementations provide it; unsupported/test adapters fail closed.
+    fn secure_lock_configured(&self) -> Result<bool, BridgeError>;
     /// Only a privately minted, one-shot request after durable Preparing may
     /// reach the existing Application key owner. Synchronous completion only;
     /// bound public evidence before callback conversion, retain no key wrapper.
@@ -804,6 +802,10 @@ mod tests {
         })
     }
     impl NativePlatform for TestPlatform {
+        fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
+            Err(BridgeError::NativeUnavailable)
+        }
+
         fn create_local_key_set(
             &self,
             _request: Arc<NativeKeyCreationRequest>,

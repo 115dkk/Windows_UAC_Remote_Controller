@@ -153,6 +153,10 @@ impl SyntheticNativePlatform {
     }
 }
 impl NativePlatform for SyntheticNativePlatform {
+    fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
+
     fn create_local_key_set(
         &self,
         _request: std::sync::Arc<uac_android_controller::NativeKeyCreationRequest>,
