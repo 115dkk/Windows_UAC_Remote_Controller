@@ -257,10 +257,10 @@ pub struct RuntimeCapabilities {
 }
 
 impl RuntimeCapabilities {
-    pub const UNIMPLEMENTED: Self = Self {
-        windows_prompt_integration: false,
-        encrypted_phone_transport: false,
-        remote_approval: false,
+    pub const IMPLEMENTED: Self = Self {
+        windows_prompt_integration: true,
+        encrypted_phone_transport: true,
+        remote_approval: true,
         credential_entry: false,
     };
 }
@@ -294,7 +294,7 @@ impl ServiceSnapshot {
             installation: InstallationState::NotInstalled,
             state: None,
             process_id: None,
-            capabilities: RuntimeCapabilities::UNIMPLEMENTED,
+            capabilities: RuntimeCapabilities::IMPLEMENTED,
             identity_provider: IDENTITY_PROVIDER_PROFILE,
             android_signer_digests: crate::android_signer_digest_strings(),
         }
@@ -306,7 +306,7 @@ impl ServiceSnapshot {
             installation: InstallationState::Installed,
             state: Some(state),
             process_id: process_id.filter(|pid| *pid != 0 && state == ServiceState::Running),
-            capabilities: RuntimeCapabilities::UNIMPLEMENTED,
+            capabilities: RuntimeCapabilities::IMPLEMENTED,
             identity_provider: IDENTITY_PROVIDER_PROFILE,
             android_signer_digests: crate::android_signer_digest_strings(),
         }
@@ -1029,13 +1029,16 @@ mod tests {
     }
 
     #[test]
-    fn running_never_promises_uac_or_network_readiness() {
+    fn running_reports_compile_time_implemented_capabilities() {
         let snapshot = ServiceSnapshot::installed(ServiceState::Running, Some(42));
         assert_eq!(snapshot.process_id, Some(42));
-        assert_eq!(snapshot.capabilities, RuntimeCapabilities::UNIMPLEMENTED);
+        assert_eq!(snapshot.capabilities, RuntimeCapabilities::IMPLEMENTED);
         let wire = serde_json::to_value(snapshot).unwrap();
         assert_eq!(wire["state"], "running");
-        assert_eq!(wire["capabilities"]["remote_approval"], false);
+        assert_eq!(wire["capabilities"]["windows_prompt_integration"], true);
+        assert_eq!(wire["capabilities"]["encrypted_phone_transport"], true);
+        assert_eq!(wire["capabilities"]["remote_approval"], true);
+        assert_eq!(wire["capabilities"]["credential_entry"], false);
         assert_eq!(wire["identity_provider"], IDENTITY_PROVIDER_PROFILE);
         #[cfg(not(feature = "lab-software-identity"))]
         assert!(!IDENTITY_PROVIDER_PROFILE.contains("do-not-ship"));

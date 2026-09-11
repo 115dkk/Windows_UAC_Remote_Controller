@@ -12,6 +12,11 @@ use approval_core::{DeviceKeys, RegistryCheckpointEntry, RequestTtl};
 use approval_protocol::{
     DecisionPublicKey, DecisionPurpose, OsSession, RequestContent, UnsignedDecision,
 };
+use windows_prompt_probe::{
+    LabelKind, ProbeCounts, ProbeReport, PromptAction, PromptContentObservation, PromptLabel,
+    supervision::{ApplyOutcome, GoneReason, RefusalReason, TargetIdentity},
+};
+
 use notification_policy::{
     CapacityLimits, ClockReading, LocalTime, MonotonicTime, NotificationPolicy, Weekday,
 };
@@ -35,6 +40,7 @@ use std::{
 };
 
 use super::*;
+use crate::ProbeSupervisorError;
 
 const TEST_LIMIT: Duration = Duration::from_secs(15);
 fn public(seed: u8) -> TlsPublicKey {
@@ -70,7 +76,7 @@ impl Identity {
         let signature: Signature = self.key.sign(bytes);
         signature.to_der().as_bytes().to_vec()
     }
-    pub(super) fn sign_clock(
+    pub(super) fn sign_event(
         &self,
         value: UnsignedPcEvent,
     ) -> Result<SignedPcEvent, PeerRuntimeError> {
@@ -198,6 +204,76 @@ struct Client {
     notices: mpsc::Receiver<Notice>,
     thread: Option<JoinHandle<()>>,
 }
+fn target(sequence: u32) -> TargetIdentity {
+    TargetIdentity {
+        hwnd: u64::from(sequence),
+        pid: 40 + sequence,
+        created: 80 + u64::from(sequence),
+        sequence,
+    }
+}
+
+fn prompt_report(caption: &str, path: &str) -> ProbeReport {
+    prompt_report_with_labels(
+        caption,
+        vec![
+            (LabelKind::Text, "Publisher".into()),
+            (LabelKind::Hyperlink, path.into()),
+            (LabelKind::Button, "Yes".into()),
+            (LabelKind::Button, "No".into()),
+        ],
+    )
+}
+
+fn prompt_report_with_labels(caption: &str, values: Vec<(LabelKind, String)>) -> ProbeReport {
+    let labels = values
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (kind, text))| {
+            PromptLabel::new(u16::try_from(ordinal).unwrap(), 1, kind, true, text).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let element_count = u16::try_from(labels.len()).unwrap();
+    let button_count = u16::try_from(
+        labels
+            .iter()
+            .filter(|label| label.kind() == LabelKind::Button)
+            .count(),
+    )
+    .unwrap();
+    let content = PromptContentObservation::from_parts(vec![1], caption.into(), labels).unwrap();
+    ProbeReport::from_observation(
+        ProbeCounts {
+            top_level_windows: 1,
+            qualified_candidates: 1,
+            elements: element_count,
+            enabled_elements: element_count,
+            button_elements: button_count,
+            maximum_depth: 1,
+            ..ProbeCounts::default()
+        },
+        content,
+    )
+    .unwrap()
+}
+
+#[derive(Default)]
+struct FakePromptApply {
+    calls: Vec<(TargetIdentity, PromptAction, [u8; 32])>,
+}
+
+impl prompt::PromptApply for FakePromptApply {
+    fn apply_prompt(
+        &mut self,
+        target: TargetIdentity,
+        action: PromptAction,
+        content_digest: [u8; 32],
+    ) -> Result<(), ProbeSupervisorError> {
+        self.calls.push((target, action, content_digest));
+        Ok(())
+    }
+}
+
 fn streams() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -381,6 +457,162 @@ fn android_client(client: TcpStream, pc: PcIdentity, server_key: TlsPublicKey) -
     }
 }
 
+fn ready_peer(
+    session: &mut ServiceSession<'_>,
+    key: &Identity,
+    device_id: DeviceId,
+    key_seed: u8,
+    clients: &mut Vec<Client>,
+) {
+    // Prompt events reach only connections whose clock exchange is complete,
+    // exactly as the phone requires, so the fixture peer probes the clock first.
+    let pc = session.engine.pc_identity();
+    let probe = ClockProbe::start(pc, 0).unwrap();
+    let (server, client) = streams();
+    session
+        .attach_carrier(ServicePeerCarrier {
+            stream: server,
+            device: device_id,
+        })
+        .unwrap();
+    clients.push(raw_client(
+        client,
+        key.public.clone(),
+        key_seed,
+        vec![probe.request().to_wire().to_vec()],
+    ));
+    drive_until(session, |progress| {
+        progress == SessionProgress::ClockDrained
+    });
+    let client = clients.last().unwrap();
+    let end = Instant::now() + TEST_LIMIT;
+    loop {
+        if let Some(PcEvent::Clock { .. }) = try_verified_event(client, pc, key) {
+            break;
+        }
+        assert!(Instant::now() < end, "clock response was not delivered");
+        let _ = session.process_one();
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn ready_connection_without_a_clock_exchange_receives_no_prompt_event() {
+    exercise(|session, key, _, clients| {
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 5, Vec::new()));
+        drive_until(session, |progress| progress == SessionProgress::PeerReady);
+        let now = session.now().unwrap();
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(1),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 7,
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(progress.queued_opened(), 0);
+        assert_eq!(session.engine.pending_count(), 1);
+        for _ in 0..16 {
+            let _ = session.process_one();
+            thread::yield_now();
+        }
+        assert!(try_verified_event(&clients[0], session.engine.pc_identity(), key).is_none());
+    });
+}
+
+#[test]
+fn connection_completing_its_clock_exchange_during_a_live_prompt_receives_the_same_opened() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        let now = session.now().unwrap();
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(1),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 7,
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(progress.queued_opened(), 1);
+        let first = next_verified_event(&clients[0], session, key);
+        assert!(matches!(first, PcEvent::Opened { .. }));
+
+        // A second phone connects while the prompt is live: nothing before its
+        // clock exchange, the identical signed request right after it.
+        ready_peer(session, key, device(2), 8, clients);
+        let second = next_verified_event(&clients[1], session, key);
+        assert_eq!(first, second);
+        for _ in 0..16 {
+            let _ = session.process_one();
+            thread::yield_now();
+        }
+        let pc = session.engine.pc_identity();
+        assert!(try_verified_event(&clients[0], pc, key).is_none());
+        assert!(try_verified_event(&clients[1], pc, key).is_none());
+        assert_eq!(session.engine.pending_count(), 1);
+    });
+}
+
+fn next_verified_event(
+    client: &Client,
+    session: &mut ServiceSession<'_>,
+    key: &Identity,
+) -> PcEvent {
+    let pc = session.engine.pc_identity();
+    let end = Instant::now() + TEST_LIMIT;
+    loop {
+        let _ = session.process_one();
+        if let Some(event) = try_verified_event(client, pc, key) {
+            return event;
+        }
+        assert!(Instant::now() < end, "signed PC event was not delivered");
+        thread::yield_now();
+    }
+}
+
+fn next_verified_event_without_processing(
+    client: &Client,
+    pc: PcIdentity,
+    key: &Identity,
+) -> PcEvent {
+    let end = Instant::now() + TEST_LIMIT;
+    loop {
+        if let Some(event) = try_verified_event(client, pc, key) {
+            return event;
+        }
+        assert!(Instant::now() < end, "signed PC event was not delivered");
+        thread::yield_now();
+    }
+}
+
+fn try_verified_event(client: &Client, pc: PcIdentity, key: &Identity) -> Option<PcEvent> {
+    match client.notices.try_recv() {
+        Ok(Notice::Frame(bytes)) => Some(
+            VerifiedPcEvent::from_wire(
+                &bytes,
+                pc,
+                &PcPublicKey::from_spki_der(key.public.as_spki_der()).unwrap(),
+            )
+            .unwrap()
+            .event()
+            .clone(),
+        ),
+        Ok(_) | Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => panic!("peer closed before PC event"),
+    }
+}
+
 fn drive_until(
     session: &mut ServiceSession<'_>,
     mut accepted: impl FnMut(SessionProgress) -> bool,
@@ -522,6 +754,21 @@ fn open_fixture_request(session: &mut ServiceSession<'_>) -> approval_core::Pend
         )
         .unwrap()
 }
+fn decision_for(
+    binding: approval_protocol::RequestBinding,
+    device: DeviceId,
+    purpose: DecisionPurpose,
+    seed: u8,
+) -> Vec<u8> {
+    let unsigned = UnsignedDecision::new(binding, device, purpose);
+    let signature: Signature = SigningKey::from_slice(&[seed; 32])
+        .unwrap()
+        .sign(&unsigned.signing_bytes());
+    SignedDecision::from_der(unsigned, signature.to_der().as_bytes())
+        .unwrap()
+        .to_wire()
+}
+
 fn decision(challenge: &approval_core::PendingChallenge, device: DeviceId, seed: u8) -> Vec<u8> {
     let unsigned = UnsignedDecision::new(challenge.binding(), device, DecisionPurpose::Deny);
     let signature: Signature = SigningKey::from_slice(&[seed; 32])
@@ -530,6 +777,455 @@ fn decision(challenge: &approval_core::PendingChallenge, device: DeviceId, seed:
     SignedDecision::from_der(unsigned, signature.to_der().as_bytes())
         .unwrap()
         .to_wire()
+}
+
+#[test]
+fn content_mapping_preserves_order_paths_and_allowed_newlines_and_enforces_byte_bounds() {
+    let report = prompt_report_with_labels(
+        "Caption\t",
+        vec![
+            (LabelKind::Text, "First\rline\ncontinued".into()),
+            (LabelKind::Hyperlink, "\\\\server\\first.exe".into()),
+            (LabelKind::Text, "C:\\later.exe".into()),
+            (LabelKind::Button, "Yes\u{7}".into()),
+        ],
+    );
+    let mapped = prompt::map_content(&report).unwrap();
+    assert_eq!(
+        mapped.program_name(),
+        "Caption  · First line\ncontinued · C:\\later.exe"
+    );
+    assert_eq!(mapped.path(), "\\\\server\\first.exe");
+    assert_eq!(
+        mapped.details(),
+        "First line\ncontinued\n\\\\server\\first.exe\nC:\\later.exe\nYes "
+    );
+
+    let exact = prompt_report_with_labels(
+        &"a".repeat(512),
+        vec![(LabelKind::Hyperlink, "C:\\x".into())],
+    );
+    assert_eq!(
+        prompt::map_content(&exact).unwrap().program_name().len(),
+        512
+    );
+    let over = prompt_report_with_labels(
+        &"a".repeat(513),
+        vec![(LabelKind::Hyperlink, "C:\\x".into())],
+    );
+    assert_eq!(
+        prompt::map_content(&over),
+        Err(prompt::PromptContentMappingError::FieldTooLong)
+    );
+
+    let path = "C:\\x";
+    let exact_details = prompt_report_with_labels(
+        "caption",
+        vec![
+            (LabelKind::Hyperlink, path.into()),
+            (LabelKind::Button, "d".repeat(8_192 - path.len() - 1)),
+        ],
+    );
+    assert_eq!(
+        prompt::map_content(&exact_details).unwrap().details().len(),
+        8_192
+    );
+    let over_details = prompt_report_with_labels(
+        "caption",
+        vec![
+            (LabelKind::Hyperlink, path.into()),
+            (LabelKind::Button, "d".repeat(8_192 - path.len())),
+        ],
+    );
+    assert_eq!(
+        prompt::map_content(&over_details),
+        Err(prompt::PromptContentMappingError::FieldTooLong)
+    );
+
+    let no_path = prompt_report_with_labels("caption", vec![(LabelKind::Text, "Publisher".into())]);
+    assert_eq!(prompt::map_content(&no_path).unwrap().path(), "");
+}
+
+#[test]
+fn appeared_opens_once_and_publishes_the_same_signed_request_to_two_live_peers() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        ready_peer(session, key, device(2), 8, clients);
+        let now = session.now().unwrap();
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(1),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 7,
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(progress.queued_opened(), 2);
+        assert_eq!(session.engine.pending_count(), 1);
+        let first = next_verified_event(&clients[0], session, key);
+        let second = next_verified_event(&clients[1], session, key);
+        assert_eq!(first, second);
+        let PcEvent::Opened { binding, .. } = first else {
+            panic!("opened event expected");
+        };
+        assert_eq!(binding.session().session_id(), 7);
+    });
+}
+
+#[test]
+fn matching_phone_decision_applies_once_to_the_exact_target_and_observation_digest() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(2), 8, clients);
+        let observed = prompt_report("Consent", "C:\\App\\tool.exe");
+        let expected_digest = observed.content().digest();
+        let expected_target = target(2);
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: expected_target,
+                    report: observed,
+                    session: 9,
+                },
+                now,
+            )
+            .unwrap();
+        let binding = session.prompt.live().unwrap().binding;
+        let wire = decision_for(binding, device(1), DecisionPurpose::Approve, 3);
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 5, vec![wire]));
+        let mut apply = FakePromptApply::default();
+        let end = Instant::now() + TEST_LIMIT;
+        let pc = session.engine.pc_identity();
+        loop {
+            let progress = session.process_one_with_watch(&mut apply).unwrap();
+            let _ = try_verified_event(&clients[0], pc, key);
+            if progress
+                == (SessionProgress::ApplyRequested {
+                    device: device(1),
+                    purpose: DecisionPurpose::Approve,
+                })
+            {
+                break;
+            }
+            assert!(Instant::now() < end, "decision was not applied");
+            thread::yield_now();
+        }
+        assert_eq!(
+            apply.calls,
+            vec![(expected_target, PromptAction::Approve, expected_digest)]
+        );
+        for _ in 0..8 {
+            let _ = session.process_one_with_watch(&mut apply).unwrap();
+        }
+        assert_eq!(apply.calls.len(), 1);
+    });
+}
+
+#[test]
+fn gone_cancels_and_publishes_cancelled_and_late_signed_decision_has_no_live_target() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        let prompt_target = target(3);
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: prompt_target,
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 11,
+                },
+                now,
+            )
+            .unwrap();
+        let event = next_verified_event(&clients[0], session, key);
+        let PcEvent::Opened { binding, .. } = event else {
+            panic!("opened event expected");
+        };
+        let gone_now = session.now().unwrap();
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Gone {
+                    target: prompt_target,
+                    reason: GoneReason::Closed,
+                },
+                gone_now,
+            )
+            .unwrap();
+        assert_eq!(progress.result(), Some(prompt::PromptResult::Cancelled));
+        assert_eq!(session.engine.pending_count(), 0);
+        let pc = session.engine.pc_identity();
+        assert!(matches!(
+            next_verified_event_without_processing(&clients[0], pc, key),
+            PcEvent::Resolved {
+                binding: resolved,
+                outcome: service_protocol::RequestResolution::Cancelled,
+                ..
+            } if resolved == binding
+        ));
+        let late = decision_for(binding, device(2), DecisionPurpose::Deny, 7);
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(2),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 8, vec![late]));
+        let mut apply = FakePromptApply::default();
+        let end = Instant::now() + TEST_LIMIT;
+        loop {
+            let progress = session.process_one_with_watch(&mut apply).unwrap();
+            if progress == SessionProgress::AuthorizedButNotApplied(NotAppliedReason::NoLiveTarget)
+            {
+                break;
+            }
+            assert!(Instant::now() < end, "late decision was not rejected");
+            thread::yield_now();
+        }
+        assert!(apply.calls.is_empty());
+    });
+}
+
+#[test]
+fn deadline_expiry_publishes_expired_and_clears_engine_and_live_target() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(4),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 12,
+                },
+                now,
+            )
+            .unwrap();
+        let _ = next_verified_event(&clients[0], session, key);
+        let deadline = session.prompt.live().unwrap().deadline;
+        let progress = session.prompt_deadline_step(deadline).unwrap().unwrap();
+        assert_eq!(progress.result(), Some(prompt::PromptResult::Expired));
+        assert_eq!(session.engine.pending_count(), 0);
+        assert!(!session.prompt.is_live());
+        let pc = session.engine.pc_identity();
+        assert!(matches!(
+            next_verified_event_without_processing(&clients[0], pc, key),
+            PcEvent::Resolved {
+                outcome: service_protocol::RequestResolution::Expired,
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
+fn applying_prompt_expires_at_its_prompt_deadline_and_publishes_expired() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(8),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 16,
+                },
+                now,
+            )
+            .unwrap();
+        let opened = next_verified_event(&clients[0], session, key);
+        let PcEvent::Opened { binding, .. } = opened else {
+            panic!("opened event expected");
+        };
+        let _ = mark_applying(session, DecisionPurpose::Approve);
+        assert_eq!(session.engine.pending_count(), 0);
+        let deadline = session.prompt.live().unwrap().deadline;
+        let progress = session.prompt_deadline_step(deadline).unwrap().unwrap();
+        assert_eq!(progress.result(), Some(prompt::PromptResult::Expired));
+        assert!(!session.prompt.is_live());
+        let pc = session.engine.pc_identity();
+        assert!(matches!(
+            next_verified_event_without_processing(&clients[0], pc, key),
+            PcEvent::Resolved {
+                binding: resolved,
+                outcome: service_protocol::RequestResolution::Expired,
+                ..
+            } if resolved == binding
+        ));
+    });
+}
+
+#[test]
+fn replacement_withdraws_the_first_request_before_opening_the_second() {
+    exercise(|session, key, _, clients| {
+        ready_peer(session, key, device(1), 5, clients);
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(5),
+                    report: prompt_report("First", "C:\\first.exe"),
+                    session: 13,
+                },
+                now,
+            )
+            .unwrap();
+        let first = next_verified_event(&clients[0], session, key);
+        let PcEvent::Opened {
+            binding: first_binding,
+            ..
+        } = first
+        else {
+            panic!("first opened event expected");
+        };
+        let replacement_now = session.now().unwrap();
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(6),
+                    report: prompt_report("Second", "C:\\second.exe"),
+                    session: 14,
+                },
+                replacement_now,
+            )
+            .unwrap();
+        assert_eq!(progress.result(), Some(prompt::PromptResult::Cancelled));
+        assert_eq!(progress.queued_opened(), 1);
+        let pc = session.engine.pc_identity();
+        assert!(matches!(
+            next_verified_event_without_processing(&clients[0], pc, key),
+            PcEvent::Resolved {
+                binding,
+                outcome: service_protocol::RequestResolution::Cancelled,
+                ..
+            } if binding == first_binding
+        ));
+        assert!(matches!(
+            next_verified_event_without_processing(&clients[0], pc, key),
+            PcEvent::Opened { binding, .. } if binding != first_binding
+        ));
+        assert_eq!(session.engine.pending_count(), 1);
+    });
+}
+
+fn mark_applying(session: &mut ServiceSession<'_>, purpose: DecisionPurpose) -> TargetIdentity {
+    let target = session.prompt.live().unwrap().target;
+    let binding = session.prompt.live().unwrap().binding;
+    let unsigned = UnsignedDecision::new(binding, device(1), purpose);
+    let seed = if purpose == DecisionPurpose::Approve {
+        3
+    } else {
+        4
+    };
+    let signature: Signature = SigningKey::from_slice(&[seed; 32])
+        .unwrap()
+        .sign(&unsigned.signing_bytes());
+    let decision = SignedDecision::from_der(unsigned, signature.to_der().as_bytes()).unwrap();
+    let decision_now = session.now().unwrap();
+    // The fake applies nothing here: the authorization is consumed on purpose.
+    drop(
+        session
+            .engine
+            .submit_decision(&decision, decision_now)
+            .unwrap(),
+    );
+    session.prompt.live_mut().unwrap().applying = Some((device(1), purpose));
+    target
+}
+
+#[test]
+fn ordinary_gone_cancels_while_applied_outcomes_map_to_approved_denied_and_failed() {
+    for (purpose, event, expected) in [
+        (
+            DecisionPurpose::Approve,
+            None,
+            prompt::PromptResult::Cancelled,
+        ),
+        (DecisionPurpose::Deny, None, prompt::PromptResult::Cancelled),
+        (
+            DecisionPurpose::Approve,
+            Some(ApplyOutcome::Gone),
+            prompt::PromptResult::Approved,
+        ),
+        (
+            DecisionPurpose::Deny,
+            Some(ApplyOutcome::Gone),
+            prompt::PromptResult::Denied,
+        ),
+        (
+            DecisionPurpose::Approve,
+            Some(ApplyOutcome::StillPresent),
+            prompt::PromptResult::FailedUnknown,
+        ),
+        (
+            DecisionPurpose::Approve,
+            Some(ApplyOutcome::Refused(RefusalReason::ContentChanged)),
+            prompt::PromptResult::FailedRejected,
+        ),
+    ] {
+        exercise(|session, key, _, clients| {
+            ready_peer(session, key, device(1), 5, clients);
+            let now = session.now().unwrap();
+            session
+                .handle_watch_event(
+                    crate::WatchEvent::Appeared {
+                        target: target(7),
+                        report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                        session: 15,
+                    },
+                    now,
+                )
+                .unwrap();
+            let opened = next_verified_event(&clients[0], session, key);
+            let PcEvent::Opened { binding, .. } = opened else {
+                panic!("opened event expected");
+            };
+            let applying_target = mark_applying(session, purpose);
+            let applied_now = session.now().unwrap();
+            let watch_event = event.map_or(
+                crate::WatchEvent::Gone {
+                    target: applying_target,
+                    reason: GoneReason::Closed,
+                },
+                |outcome| crate::WatchEvent::Applied {
+                    target: applying_target,
+                    outcome,
+                },
+            );
+            let progress = session
+                .handle_watch_event(watch_event, applied_now)
+                .unwrap();
+            assert_eq!(progress.result(), Some(expected));
+            assert!(!session.prompt.is_live());
+            let pc = session.engine.pc_identity();
+            let expected_resolution = match expected {
+                prompt::PromptResult::Approved => service_protocol::RequestResolution::Approved,
+                prompt::PromptResult::Denied => service_protocol::RequestResolution::Denied,
+                prompt::PromptResult::Cancelled => service_protocol::RequestResolution::Cancelled,
+                prompt::PromptResult::FailedRejected | prompt::PromptResult::FailedUnknown => {
+                    service_protocol::RequestResolution::Failed
+                }
+                prompt::PromptResult::Expired => service_protocol::RequestResolution::Expired,
+            };
+            assert!(matches!(
+                next_verified_event_without_processing(&clients[0], pc, key),
+                PcEvent::Resolved {
+                    binding: resolved,
+                    outcome,
+                    ..
+                } if resolved == binding && outcome == expected_resolution
+            ));
+        });
+    }
 }
 
 #[test]
@@ -799,7 +1495,7 @@ fn real_queued_decision_expiring_during_peer_validation_does_not_consume_authori
         }));
 
         assert_eq!(
-            session.dispatch(0, event),
+            session.dispatch(0, event, None),
             Ok(SessionProgress::PeerRejected)
         );
         assert_eq!(

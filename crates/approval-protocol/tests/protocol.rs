@@ -291,9 +291,15 @@ fn content_is_bounded_in_utf8_bytes_and_never_debug_printed() {
         maximum.program_name().len() + maximum.path().len() + maximum.details().len(),
         MAX_REQUEST_CONTENT_BYTES
     );
+    // A consent prompt does not always show a file path: the empty path is legal.
+    let no_path = RequestContent::new("name", "", "").unwrap();
+    assert_eq!(no_path.path(), "");
+    assert_ne!(
+        no_path.digest(),
+        RequestContent::new("name", "x", "").unwrap().digest()
+    );
     for fields in [
         ("".to_owned(), "path".to_owned(), String::new()),
-        ("name".to_owned(), String::new(), String::new()),
         (
             "a".repeat(MAX_PROGRAM_NAME_BYTES + 1),
             "path".to_owned(),

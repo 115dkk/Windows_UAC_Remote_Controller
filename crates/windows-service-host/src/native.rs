@@ -590,10 +590,12 @@ mod tests {
         );
     }
 
-    fn assert_no_remote_capabilities(snapshot: &ServiceSnapshot) {
-        assert!(!snapshot.capabilities.windows_prompt_integration);
-        assert!(!snapshot.capabilities.encrypted_phone_transport);
-        assert!(!snapshot.capabilities.remote_approval);
+    fn assert_compile_time_capabilities(snapshot: &ServiceSnapshot) {
+        // Capabilities describe the queried binary, never the observed SCM state.
+        assert_eq!(
+            snapshot.capabilities,
+            crate::RuntimeCapabilities::IMPLEMENTED
+        );
         assert!(!snapshot.capabilities.credential_entry);
     }
 
@@ -618,7 +620,7 @@ mod tests {
                 let public = snapshot(status);
                 assert_eq!(public.state, Some(expected));
                 assert_eq!(public.process_id, pid.filter(|value| *value != 0));
-                assert_no_remote_capabilities(&public);
+                assert_compile_time_capabilities(&public);
             }
         }
     }
@@ -641,7 +643,7 @@ mod tests {
             let public = snapshot(status);
             assert_eq!(public.state, Some(expected));
             assert_eq!(public.process_id, None);
-            assert_no_remote_capabilities(&public);
+            assert_compile_time_capabilities(&public);
         }
         // Only the native adapter has raw Running provenance for the exception.
         // The shared constructor must not retain guessed StartPending PIDs.

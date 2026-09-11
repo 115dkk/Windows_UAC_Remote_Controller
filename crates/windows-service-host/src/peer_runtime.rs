@@ -2,7 +2,7 @@
 //! One service-worker session. Native pairing rendezvous is owned here only
 //! after full SCM Ready; policy-qualified private preparation still confers no
 //! consent/enrollment/grant. No network
-//! listener/dialer, request-opening API or OS action is activated.
+//! listener or generic request/action API is exposed.
 #![forbid(unsafe_code)]
 // The ceremony and dialer orchestration only runs on 64-bit Windows; other
 // targets compile this module for its shared types and host tests, so items
@@ -13,6 +13,7 @@
 )]
 
 use std::{
+    collections::VecDeque,
     fmt,
     net::TcpStream,
     sync::{
@@ -24,10 +25,13 @@ use std::{
 };
 
 use approval_core::{
-    ApprovalEngine, DecisionError, DeviceKeys, MAX_PENDING_REQUESTS, PrivilegedDeviceRegistry,
-    RegistryCheckpoint,
+    ApprovalEngine, DecisionError, DeviceKeys, EngineError, MAX_PENDING_REQUESTS,
+    PrivilegedDeviceRegistry, RegistryCheckpoint,
 };
-use approval_protocol::{BootEpoch, DecisionPublicKey, DeviceId, PcIdentity, SignedDecision};
+use approval_protocol::{
+    BootEpoch, DecisionPublicKey, DecisionPurpose, DeviceId, OsSession, PcIdentity, RequestId,
+    SignedDecision,
+};
 use framed_transport::{
     CancellationToken, ConnectionBudget, OutboundFrameGuard, PeerTransport, ReceivedFrame,
     SocketClock, SocketClockUnavailable, SocketDriver, SocketEvent, SocketLimits,
@@ -52,8 +56,10 @@ mod dialer;
 mod enrollment;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod pairing;
+pub(crate) mod prompt;
 
 const MAX_PEERS: usize = framed_transport::MAX_CONNECTIONS;
+const RESPONSE_QUEUE_CAPACITY: usize = 4;
 const POLL: Duration = Duration::from_millis(25);
 const EVENT_LIFETIME: Duration = Duration::from_nanos(MAX_CLOCK_PROBE_RTT_NANOS);
 const IDENTITY_DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pc-identity/v1\0";
@@ -102,6 +108,11 @@ pub enum SessionProgress {
     ClockDrained,
     DecisionRejected(DecisionError),
     AuthorizedButNotApplied(NotAppliedReason),
+    ApplyRequested {
+        device: DeviceId,
+        purpose: DecisionPurpose,
+    },
+    Prompt(prompt::PromptProgress),
     Enrolled(DeviceId),
     PairingFailed,
     Expired(usize),
@@ -109,6 +120,7 @@ pub enum SessionProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotAppliedReason {
     PlatformUnavailable,
+    NoLiveTarget,
     ExpiredAfterVerification,
     PeerChangedAfterVerification,
 }
@@ -174,13 +186,19 @@ struct PeerFrame {
 enum PeerEvent {
     Ready,
     Frame(PeerFrame),
-    Drained(u64),
+    Drained { id: u64, kind: ResponseKind },
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseKind {
+    Clock,
+    Prompt,
 }
 struct Response {
     source: Arc<PeerState>,
     id: u64,
     bytes: Vec<u8>,
     deadline: Instant,
+    kind: ResponseKind,
 }
 struct PeerSlot {
     state: Arc<PeerState>,
@@ -188,7 +206,13 @@ struct PeerSlot {
     responses: async_mpsc::Sender<Response>,
     thread: Option<JoinHandle<Result<(), PeerRuntimeError>>>,
     ready: bool,
-    response: Option<(u64, Instant)>,
+    /// This connection has drained at least one clock response. The phone
+    /// aborts a connection that carries a prompt event before its own
+    /// connection-bound clock correlation exists, so prompt events wait.
+    clock_served: bool,
+    /// The live request whose `Opened` this connection has already received.
+    opened_sent: Option<RequestId>,
+    responses_in_flight: VecDeque<(u64, Instant, ResponseKind)>,
 }
 
 enum RegistryOwner<'key> {
@@ -379,8 +403,8 @@ impl<'key> SessionKey<'key> {
             Self::Fixture(key) => Ok(key.sign_protocol(bytes)),
         }
     }
-    fn sign_clock(&self, message: UnsignedPcEvent) -> Result<SignedPcEvent, PeerRuntimeError> {
-        // ONLY the coordinator's fixed Clock event reaches this method. No
+    fn sign_event(&self, message: UnsignedPcEvent) -> Result<SignedPcEvent, PeerRuntimeError> {
+        // Only internally constructed fixed PcEvent values reach this method. No
         // network-supplied signing bytes/digest command exists in the dispatch.
         match self {
             #[cfg(windows)]
@@ -394,7 +418,7 @@ impl<'key> SessionKey<'key> {
                     .map_err(|_| PeerRuntimeError::Identity)
             }
             #[cfg(test)]
-            Self::Fixture(key) => key.sign_clock(message),
+            Self::Fixture(key) => key.sign_event(message),
         }
     }
 }
@@ -435,6 +459,7 @@ pub struct ServiceSession<'key> {
     cursor: usize,
     closing: bool,
     io_failed: bool,
+    prompt: prompt::PromptState,
 }
 impl fmt::Debug for ServiceSession<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -513,6 +538,7 @@ impl<'key> ServiceSession<'key> {
             cursor: 0,
             closing: false,
             io_failed: false,
+            prompt: prompt::PromptState::default(),
         })
     }
 
@@ -550,6 +576,371 @@ impl<'key> ServiceSession<'key> {
         Ok(())
     }
 
+    pub(crate) fn handle_watch_event(
+        &mut self,
+        event: crate::WatchEvent,
+        now: Instant,
+    ) -> Result<prompt::PromptProgress, PeerRuntimeError> {
+        if self.closing {
+            return Err(PeerRuntimeError::Closed);
+        }
+        self.observe_external_now(now)?;
+        self.prompt.clear_withdrawn_if_expired(now);
+        match event {
+            crate::WatchEvent::Appeared {
+                target,
+                report,
+                session,
+            } => {
+                let previous = self.cancel_live_prompt(prompt::PromptResult::Cancelled, now)?;
+                let content = match prompt::map_content(&report) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        return Ok(prompt::PromptProgress::opened(0, previous));
+                    }
+                };
+                let deadline = now
+                    .checked_add(prompt::request_ttl().as_duration())
+                    .ok_or(PeerRuntimeError::Clock)?;
+                let issued_at = self.tick(now)?;
+                let observed_digest = report.content().digest();
+                let challenge = match self.engine.open_from_privileged_host(
+                    OsSession::new(session, 0),
+                    (*content).clone(),
+                    prompt::request_ttl(),
+                    now,
+                ) {
+                    Ok(challenge) => challenge,
+                    Err(EngineError::NoEligibleDevices) => {
+                        return Ok(prompt::PromptProgress::opened(0, previous));
+                    }
+                    Err(EngineError::Clock(_)) | Err(EngineError::ClockRangeExceeded) => {
+                        return Err(PeerRuntimeError::Clock);
+                    }
+                    Err(_) => return Err(PeerRuntimeError::Protocol),
+                };
+                let binding = challenge.binding();
+                if challenge.binding().session().session_id() != session
+                    || challenge.binding().session().logon_id() != 0
+                    || binding.content_digest() != content.digest()
+                    || challenge.content() != content.as_ref()
+                {
+                    let _ = self.engine.cancel_from_privileged_host(&binding);
+                    return Err(PeerRuntimeError::Protocol);
+                }
+                let live = prompt::LivePrompt {
+                    target,
+                    session_id: session,
+                    binding,
+                    request_id: binding.request_id(),
+                    content: Arc::clone(&content),
+                    content_digest: observed_digest,
+                    issued_at,
+                    deadline,
+                    applying: None,
+                };
+                self.prompt.replace(live);
+                let event = PcEvent::Opened {
+                    binding,
+                    issued_at,
+                    content,
+                };
+                let queued = match self.publish_event(event, deadline, now) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = self.cancel_live_prompt(prompt::PromptResult::FailedUnknown, now);
+                        return Err(error);
+                    }
+                };
+                Ok(prompt::PromptProgress::opened(queued, previous))
+            }
+            crate::WatchEvent::Gone { target, .. } => {
+                if self
+                    .prompt
+                    .live()
+                    .is_some_and(|prompt| prompt.target == target)
+                {
+                    let result = self
+                        .cancel_live_prompt(prompt::PromptResult::Cancelled, now)?
+                        .unwrap_or(prompt::PromptResult::Cancelled);
+                    Ok(prompt::PromptProgress::resolved(result))
+                } else {
+                    Ok(prompt::PromptProgress::default())
+                }
+            }
+            crate::WatchEvent::Applied { target, outcome } => {
+                let Some(live) = self.prompt.live() else {
+                    return Ok(prompt::PromptProgress::default());
+                };
+                if live.target != target || live.applying.is_none() {
+                    return Ok(prompt::PromptProgress::default());
+                }
+                let (_, purpose) = live.applying.expect("checked applying state");
+                let result = match outcome {
+                    crate::ApplyOutcome::Gone => match purpose {
+                        DecisionPurpose::Approve => prompt::PromptResult::Approved,
+                        DecisionPurpose::Deny => prompt::PromptResult::Denied,
+                    },
+                    crate::ApplyOutcome::StillPresent => prompt::PromptResult::FailedUnknown,
+                    crate::ApplyOutcome::Refused(_) => prompt::PromptResult::FailedRejected,
+                };
+                self.resolve_live_prompt(result, now)?;
+                Ok(prompt::PromptProgress::resolved(result))
+            }
+            crate::WatchEvent::HelperRestarted { .. } | crate::WatchEvent::HelperUnavailable => {
+                let result = self.cancel_live_prompt(prompt::PromptResult::Cancelled, now)?;
+                Ok(
+                    result.map_or_else(prompt::PromptProgress::default, |result| {
+                        prompt::PromptProgress::resolved(result)
+                    }),
+                )
+            }
+        }
+    }
+
+    pub(crate) fn prompt_deadline_step(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<prompt::PromptProgress>, PeerRuntimeError> {
+        self.observe_external_now(now)?;
+        self.prompt.clear_withdrawn_if_expired(now);
+        let Some(live) = self.prompt.live() else {
+            return Ok(None);
+        };
+        if now < live.deadline {
+            return Ok(None);
+        }
+        let request_id = live.request_id;
+        let applying = live.applying.is_some();
+        let expired = self
+            .engine
+            .expire_from_privileged_host(now)
+            .map_err(|_| PeerRuntimeError::Clock)?;
+        let request_expired = expired.contains(&request_id);
+        if self
+            .prompt
+            .live()
+            .is_some_and(|current| current.request_id != request_id)
+            || applying == request_expired
+        {
+            return Err(PeerRuntimeError::Protocol);
+        }
+        self.resolve_live_prompt(prompt::PromptResult::Expired, now)?;
+        Ok(Some(prompt::PromptProgress::resolved(
+            prompt::PromptResult::Expired,
+        )))
+    }
+
+    fn cancel_live_prompt(
+        &mut self,
+        result: prompt::PromptResult,
+        now: Instant,
+    ) -> Result<Option<prompt::PromptResult>, PeerRuntimeError> {
+        let Some(live) = self.prompt.take() else {
+            return Ok(None);
+        };
+        match self.engine.cancel_from_privileged_host(&live.binding) {
+            Ok(()) => {}
+            Err(approval_core::CancelError::UnknownOrCompleted) if live.applying.is_some() => {}
+            Err(_) => {
+                self.prompt.replace(live);
+                return Err(PeerRuntimeError::Protocol);
+            }
+        }
+        self.prompt.remember_withdrawn(live.binding, live.deadline);
+        self.publish_resolution(&live, result, now)?;
+        Ok(Some(result))
+    }
+
+    fn resolve_live_prompt(
+        &mut self,
+        result: prompt::PromptResult,
+        now: Instant,
+    ) -> Result<(), PeerRuntimeError> {
+        let live = self.prompt.take().ok_or(PeerRuntimeError::Protocol)?;
+        if result == prompt::PromptResult::Cancelled {
+            self.prompt.remember_withdrawn(live.binding, live.deadline);
+        }
+        self.publish_resolution(&live, result, now).map(|_| ())
+    }
+
+    fn fail_consumed_live(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
+        let live = self.prompt.take().ok_or(PeerRuntimeError::Protocol)?;
+        self.publish_resolution(&live, prompt::PromptResult::FailedUnknown, now)
+            .map(|_| ())
+    }
+
+    fn publish_resolution(
+        &mut self,
+        live: &prompt::LivePrompt,
+        result: prompt::PromptResult,
+        now: Instant,
+    ) -> Result<usize, PeerRuntimeError> {
+        let event = PcEvent::Resolved {
+            binding: live.binding,
+            issued_at: live.issued_at,
+            outcome: result.resolution(),
+        };
+        let deadline = now
+            .checked_add(EVENT_LIFETIME)
+            .ok_or(PeerRuntimeError::Clock)?;
+        self.publish_event(event, deadline, now)
+    }
+
+    fn publish_event(
+        &mut self,
+        event: PcEvent,
+        deadline: Instant,
+        now: Instant,
+    ) -> Result<usize, PeerRuntimeError> {
+        let opened = match &event {
+            PcEvent::Opened { binding, .. } => Some(binding.request_id()),
+            _ => None,
+        };
+        let bytes = self.signed_event_bytes(event)?;
+        self.revalidate_peers()?;
+        let mut queued = 0;
+        for index in 0..self.peers.len() {
+            if !self.peers[index].clock_served {
+                continue;
+            }
+            if self.queue_signed_event(index, &bytes, deadline, now, opened)? {
+                queued += 1;
+            }
+        }
+        Ok(queued)
+    }
+
+    /// A connection that completed its clock exchange after the live prompt
+    /// opened (a phone that connected during the prompt, or whose clock probe
+    /// arrived after `Appeared`) has not seen `Opened` yet: publish the same
+    /// signed request to that connection alone, once.
+    fn resend_live_opened(&mut self, index: usize, now: Instant) -> Result<(), PeerRuntimeError> {
+        let Some(live) = self.prompt.live() else {
+            return Ok(());
+        };
+        if live.applying.is_some()
+            || now >= live.deadline
+            || self.peers[index].opened_sent == Some(live.request_id)
+        {
+            return Ok(());
+        }
+        let request_id = live.request_id;
+        let deadline = live.deadline;
+        let event = PcEvent::Opened {
+            binding: live.binding,
+            issued_at: live.issued_at,
+            content: Arc::clone(&live.content),
+        };
+        let bytes = self.signed_event_bytes(event)?;
+        self.revalidate_peers()?;
+        self.queue_signed_event(index, &bytes, deadline, now, Some(request_id))
+            .map(|_| ())
+    }
+
+    fn signed_event_bytes(&mut self, event: PcEvent) -> Result<Vec<u8>, PeerRuntimeError> {
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        let message = UnsignedPcEvent::new(event).map_err(|_| PeerRuntimeError::Protocol)?;
+        let signed = self.key.sign_event(message)?;
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        signed
+            .verify(
+                self.engine.pc_identity(),
+                &PcPublicKey::from_spki_der(self.pc_key.as_spki_der())
+                    .map_err(|_| PeerRuntimeError::Identity)?,
+            )
+            .map_err(|_| PeerRuntimeError::Identity)?;
+        encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)
+    }
+
+    /// Queues one signed prompt event on one ready connection. `false` means
+    /// the connection was skipped or retired instead of served.
+    fn queue_signed_event(
+        &mut self,
+        index: usize,
+        bytes: &[u8],
+        deadline: Instant,
+        now: Instant,
+        opened: Option<RequestId>,
+    ) -> Result<bool, PeerRuntimeError> {
+        let state = Arc::clone(&self.peers[index].state);
+        if !self.peers[index].ready || !state.live() {
+            return Ok(false);
+        }
+        if self.check_peer(&state).is_err()
+            || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
+            || now >= deadline
+        {
+            state.retire();
+            return Ok(false);
+        }
+        let id = self.next_response;
+        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
+        let response = Response {
+            source: Arc::clone(&state),
+            id,
+            bytes: bytes.to_vec(),
+            deadline,
+            kind: ResponseKind::Prompt,
+        };
+        if self.peers[index].responses.try_send(response).is_err() {
+            state.retire();
+            return Ok(false);
+        }
+        self.peers[index]
+            .responses_in_flight
+            .push_back((id, deadline, ResponseKind::Prompt));
+        if let Some(request_id) = opened {
+            self.peers[index].opened_sent = Some(request_id);
+        }
+        Ok(true)
+    }
+
+    /// The engine consumed or dropped `request_id`: a live prompt for it that
+    /// is not being applied must not outlive the engine request, or the exact
+    /// deadline step would find the two out of agreement.
+    fn settle_consumed(
+        &mut self,
+        request_id: RequestId,
+        result: prompt::PromptResult,
+        now: Instant,
+    ) -> Result<(), PeerRuntimeError> {
+        let Some(live) = self.prompt.live() else {
+            return Ok(());
+        };
+        if live.request_id != request_id || live.applying.is_some() {
+            return Ok(());
+        }
+        let result = if now >= live.deadline {
+            prompt::PromptResult::Expired
+        } else {
+            result
+        };
+        self.resolve_live_prompt(result, now)
+    }
+
+    fn tick(&self, now: Instant) -> Result<ServiceTick, PeerRuntimeError> {
+        let nanos = now
+            .checked_duration_since(self.epoch_start)
+            .ok_or(PeerRuntimeError::Clock)?
+            .as_nanos();
+        Ok(ServiceTick::from_nanos_since_epoch(
+            u64::try_from(nanos).map_err(|_| PeerRuntimeError::Clock)?,
+        ))
+    }
+
+    fn observe_external_now(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
+        if now < self.last_time || now < self.epoch_start {
+            return Err(PeerRuntimeError::Clock);
+        }
+        self.last_time = now;
+        Ok(())
+    }
+
     /// Only a sealed native carrier can reach this point. This is not a
     /// listener or a generic local request interface; no production source exists.
     pub fn attach_carrier(&mut self, carrier: ServicePeerCarrier) -> Result<(), PeerRuntimeError> {
@@ -577,8 +968,8 @@ impl<'key> ServiceSession<'key> {
             #[cfg(test)]
             hold_exit: AtomicBool::new(false),
         });
-        let (event_sender, events) = async_mpsc::channel(1);
-        let (responses, response_receiver) = async_mpsc::channel(1);
+        let (event_sender, events) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+        let (responses, response_receiver) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
         self.peers
             .try_reserve_exact(1)
             .map_err(|_| PeerRuntimeError::Capacity)?;
@@ -645,7 +1036,9 @@ impl<'key> ServiceSession<'key> {
             responses,
             thread: Some(thread),
             ready: false,
-            response: None,
+            clock_served: false,
+            opened_sent: None,
+            responses_in_flight: VecDeque::new(),
         });
         Ok(())
     }
@@ -653,17 +1046,36 @@ impl<'key> ServiceSession<'key> {
     /// Services at most one signing request and one peer event. Native key work
     /// can block; it is not preempted by the response/cleanup budgets.
     pub fn process_one(&mut self) -> Result<SessionProgress, PeerRuntimeError> {
+        self.process_one_inner(None)
+    }
+
+    pub(crate) fn process_one_with_watch(
+        &mut self,
+        watch: &mut dyn prompt::PromptApply,
+    ) -> Result<SessionProgress, PeerRuntimeError> {
+        self.process_one_inner(Some(watch))
+    }
+
+    fn process_one_inner(
+        &mut self,
+        watch: Option<&mut dyn prompt::PromptApply>,
+    ) -> Result<SessionProgress, PeerRuntimeError> {
         if self.closing {
             return Err(PeerRuntimeError::Closed);
         }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process_live()))
-            .unwrap_or(Err(PeerRuntimeError::Unwind));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process_live(watch)))
+                .unwrap_or(Err(PeerRuntimeError::Unwind));
         if result.is_err() {
             self.begin_shutdown();
         }
         result
     }
-    fn process_live(&mut self) -> Result<SessionProgress, PeerRuntimeError> {
+
+    fn process_live(
+        &mut self,
+        watch: Option<&mut dyn prompt::PromptApply>,
+    ) -> Result<SessionProgress, PeerRuntimeError> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             let now = self.now()?;
@@ -729,16 +1141,19 @@ impl<'key> ServiceSession<'key> {
             .map_err(PeerRuntimeError::Signing)?;
         self.revalidate_peers()?;
         let now = self.now()?;
-        let expired = self
-            .engine
-            .expire_from_privileged_host(now)
-            .map_err(|_| PeerRuntimeError::Clock)?;
+        let expired = if self.prompt.is_live() {
+            Vec::new()
+        } else {
+            self.engine
+                .expire_from_privileged_host(now)
+                .map_err(|_| PeerRuntimeError::Clock)?
+        };
         let count = self.peers.len();
         for offset in 0..count {
             let index = (self.cursor + offset) % count;
             if let Ok(event) = self.peers[index].events.try_recv() {
                 self.cursor = (index + 1) % count;
-                return self.dispatch(index, event);
+                return self.dispatch(index, event, watch);
             }
         }
         if !expired.is_empty() {
@@ -853,6 +1268,7 @@ impl<'key> ServiceSession<'key> {
         &mut self,
         index: usize,
         event: PeerEvent,
+        watch: Option<&mut dyn prompt::PromptApply>,
     ) -> Result<SessionProgress, PeerRuntimeError> {
         let state = Arc::clone(&self.peers[index].state);
         if self.check_peer(&state).is_err() {
@@ -864,18 +1280,27 @@ impl<'key> ServiceSession<'key> {
                 self.peers[index].ready = true;
                 Ok(SessionProgress::PeerReady)
             }
-            PeerEvent::Drained(id) => {
+            PeerEvent::Drained { id, kind } => {
                 let now = self.now()?;
-                if self.peers[index]
-                    .response
-                    .take()
-                    .is_none_or(|(expected, deadline)| expected != id || now >= deadline)
-                {
+                let Some((expected, deadline, expected_kind)) =
+                    self.peers[index].responses_in_flight.pop_front()
+                else {
+                    state.retire();
+                    return Ok(SessionProgress::PeerRejected);
+                };
+                if expected != id || expected_kind != kind || now >= deadline {
                     state.retire();
                     return Ok(SessionProgress::PeerRejected);
                 }
                 self.check_peer(&state)?;
-                Ok(SessionProgress::ClockDrained)
+                Ok(match kind {
+                    ResponseKind::Clock => {
+                        self.peers[index].clock_served = true;
+                        self.resend_live_opened(index, now)?;
+                        SessionProgress::ClockDrained
+                    }
+                    ResponseKind::Prompt => SessionProgress::Idle,
+                })
             }
             PeerEvent::Frame(frame) => {
                 if !self.peers[index].ready || !Arc::ptr_eq(&state, &frame.source) {
@@ -900,7 +1325,7 @@ impl<'key> ServiceSession<'key> {
                         }
                     };
                     if request.pc() != self.engine.pc_identity()
-                        || self.peers[index].response.is_some()
+                        || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
                     {
                         state.retire();
                         return Ok(SessionProgress::PeerRejected);
@@ -924,36 +1349,159 @@ impl<'key> ServiceSession<'key> {
                         state.retire();
                         return Ok(SessionProgress::PeerRejected);
                     }
+                    match self.withdrawn_decision_matches(&decision, &state, now) {
+                        Ok(true) => {
+                            return Ok(SessionProgress::AuthorizedButNotApplied(
+                                NotAppliedReason::NoLiveTarget,
+                            ));
+                        }
+                        Ok(false) => {}
+                        Err(_) => {
+                            state.retire();
+                            return Ok(SessionProgress::PeerRejected);
+                        }
+                    }
+                    let request_id = decision.statement().binding().request_id();
                     match self.engine.submit_decision(&decision, now) {
                         Err(error) => {
                             state.retire();
+                            if matches!(error, DecisionError::Expired) {
+                                // The engine dropped the expired request on this decision.
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::Expired,
+                                    now,
+                                )?;
+                            }
                             Ok(SessionProgress::DecisionRejected(error))
                         }
                         Ok(authorized) => {
-                            let current = self.check_peer(&state);
-                            let after = self.now();
-                            let reason = if current.is_err() {
-                                NotAppliedReason::PeerChangedAfterVerification
-                            } else if after.is_err()
-                                || after.is_ok_and(|now| {
-                                    now >= deadline || now >= authorized.deadline()
-                                })
-                            {
-                                NotAppliedReason::ExpiredAfterVerification
-                            } else {
-                                NotAppliedReason::PlatformUnavailable
-                            };
-                            drop(authorized); // No OS target exists; never queue/serialize this token.
-                            if current.is_err() || after.is_err() {
+                            if self.check_peer(&state).is_err() {
+                                drop(authorized);
                                 self.begin_shutdown();
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::PeerChangedAfterVerification,
+                                ));
                             }
-                            Ok(SessionProgress::AuthorizedButNotApplied(reason))
+                            let after = match self.now() {
+                                Ok(now) => now,
+                                Err(_) => {
+                                    drop(authorized);
+                                    self.begin_shutdown();
+                                    return Ok(SessionProgress::AuthorizedButNotApplied(
+                                        NotAppliedReason::ExpiredAfterVerification,
+                                    ));
+                                }
+                            };
+                            if after >= deadline || after >= authorized.deadline() {
+                                drop(authorized);
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::Expired,
+                                    after,
+                                )?;
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::ExpiredAfterVerification,
+                                ));
+                            }
+                            let Some(watch) = watch else {
+                                drop(authorized);
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::FailedUnknown,
+                                    after,
+                                )?;
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::PlatformUnavailable,
+                                ));
+                            };
+                            self.prompt.clear_withdrawn_if_expired(after);
+                            let Some(live) = self.prompt.live() else {
+                                drop(authorized);
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::NoLiveTarget,
+                                ));
+                            };
+                            if live.binding != authorized.binding()
+                                || live.session_id != authorized.binding().session().session_id()
+                                || authorized.binding().session().logon_id() != 0
+                                || live.content.as_ref() != authorized.content()
+                                || after >= live.deadline
+                                || live.applying.is_some()
+                            {
+                                drop(authorized);
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::FailedUnknown,
+                                    after,
+                                )?;
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::NoLiveTarget,
+                                ));
+                            }
+                            let target = live.target;
+                            let digest = live.content_digest;
+                            let purpose = authorized.purpose();
+                            let device = authorized.device_id();
+                            let action = match purpose {
+                                DecisionPurpose::Approve => crate::PromptAction::Approve,
+                                DecisionPurpose::Deny => crate::PromptAction::Deny,
+                            };
+                            if watch.apply_prompt(target, action, digest).is_err() {
+                                drop(authorized);
+                                self.fail_consumed_live(after)?;
+                                return Ok(SessionProgress::Prompt(
+                                    prompt::PromptProgress::resolved(
+                                        prompt::PromptResult::FailedUnknown,
+                                    ),
+                                ));
+                            }
+                            drop(authorized);
+                            let live = self.prompt.live_mut().ok_or(PeerRuntimeError::Protocol)?;
+                            if live.target != target
+                                || live.binding != decision.statement().binding()
+                                || live.applying.is_some()
+                            {
+                                return Err(PeerRuntimeError::Protocol);
+                            }
+                            live.applying = Some((device, purpose));
+                            Ok(SessionProgress::ApplyRequested { device, purpose })
                         }
                     }
                 }
             }
         }
     }
+    fn withdrawn_decision_matches(
+        &mut self,
+        decision: &SignedDecision,
+        state: &PeerState,
+        now: Instant,
+    ) -> Result<bool, PeerRuntimeError> {
+        self.prompt.clear_withdrawn_if_expired(now);
+        let Some(withdrawn) = self.prompt.withdrawn() else {
+            return Ok(false);
+        };
+        let statement = decision.statement();
+        if statement.binding() != withdrawn.binding || statement.device_id() != state.binding.device
+        {
+            return Ok(false);
+        }
+        let current = self.binding(state.binding.device)?;
+        if current != state.binding {
+            return Ok(false);
+        }
+        let key = match statement.purpose() {
+            DecisionPurpose::Approve => current.keys.approval(),
+            DecisionPurpose::Deny => current.keys.denial(),
+        };
+        decision
+            .verify(key)
+            .map_err(|_| PeerRuntimeError::Protocol)?;
+        let _ = self.prompt.take_withdrawn();
+        Ok(now < withdrawn.deadline)
+    }
+
     fn respond_clock(
         &mut self,
         index: usize,
@@ -983,7 +1531,7 @@ impl<'key> ServiceSession<'key> {
             sampled_at: ServiceTick::from_nanos_since_epoch(tick),
         })
         .map_err(|_| PeerRuntimeError::Protocol)?;
-        let signed = self.key.sign_clock(message)?;
+        let signed = self.key.sign_event(message)?;
         if self.key.public()? != self.pc_key {
             return Err(PeerRuntimeError::Identity);
         }
@@ -1012,9 +1560,12 @@ impl<'key> ServiceSession<'key> {
                 id,
                 bytes,
                 deadline,
+                kind: ResponseKind::Clock,
             })
             .map_err(|_| PeerRuntimeError::Protocol)?;
-        self.peers[index].response = Some((id, deadline));
+        self.peers[index]
+            .responses_in_flight
+            .push_back((id, deadline, ResponseKind::Clock));
         Ok(SessionProgress::ClockQueued)
     }
     fn now(&mut self) -> Result<Instant, PeerRuntimeError> {
@@ -1109,6 +1660,9 @@ impl<'key> ServiceSession<'key> {
         count
     }
     pub fn begin_shutdown(&mut self) {
+        if let Some(live) = self.prompt.take() {
+            let _ = self.engine.cancel_from_privileged_host(&live.binding);
+        }
         self.closing = true;
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
@@ -1243,7 +1797,7 @@ struct EnrolledPeerSocket {
     events: async_mpsc::Sender<PeerEvent>,
     responses: async_mpsc::Receiver<Response>,
     ready: bool,
-    response: Option<u64>,
+    response: Option<(u64, ResponseKind)>,
 }
 impl EnrolledPeerSocket {
     async fn emit(&mut self, mut event: PeerEvent) -> Result<(), PeerRuntimeError> {
@@ -1276,16 +1830,27 @@ impl EnrolledPeerSocket {
             tokio::select! {
                 biased;
                 _ = self.state.stop.cancelled() => { self.driver.abort(); return Ok(()); }
-                response = self.responses.recv() => {
+                response = self.responses.recv(), if self.response.is_none() => {
                     let Some(response) = response else { self.driver.abort(); return Ok(()); };
-                    #[cfg(test)] while self.state.hold_response.load(Ordering::Acquire) && self.state.live() {
-                        self.driver.observe_liveness().map_err(|_| PeerRuntimeError::Io)?;
+                    #[cfg(test)]
+                    while self.state.hold_response.load(Ordering::Acquire) && self.state.live() {
+                        self.driver
+                            .observe_liveness()
+                            .map_err(|_| PeerRuntimeError::Io)?;
                         tokio::time::sleep(POLL).await;
                     }
-                    if !self.ready || !self.state.live() || !Arc::ptr_eq(&response.source, &self.state) || self.response.is_some() { self.driver.abort(); return Err(PeerRuntimeError::Protocol); }
+                    if !self.ready
+                        || !self.state.live()
+                        || !Arc::ptr_eq(&response.source, &self.state)
+                    {
+                        self.driver.abort();
+                        return Err(PeerRuntimeError::Protocol);
+                    }
                     let guard: Arc<dyn OutboundFrameGuard> = self.state.clone();
-                    self.driver.queue_guarded_frame(response.bytes, response.deadline, guard).map_err(|_| PeerRuntimeError::Io)?;
-                    self.response = Some(response.id);
+                    self.driver
+                        .queue_guarded_frame(response.bytes, response.deadline, guard)
+                        .map_err(|_| PeerRuntimeError::Io)?;
+                    self.response = Some((response.id, response.kind));
                 }
                 event = self.driver.next_event() => {
                     let event = match event {
@@ -1294,15 +1859,26 @@ impl EnrolledPeerSocket {
                         Err(_) => return Err(PeerRuntimeError::Io),
                     };
                     match event {
-                        SocketEvent::Ready => { self.ready = true; self.emit(PeerEvent::Ready).await?; }
+                        SocketEvent::Ready => {
+                            self.ready = true;
+                            self.emit(PeerEvent::Ready).await?;
+                        }
                         SocketEvent::Frame(frame) => {
-                            if !self.ready || !self.state.live() { return Err(PeerRuntimeError::Protocol); }
+                            if !self.ready || !self.state.live() {
+                                return Err(PeerRuntimeError::Protocol);
+                            }
                             let received = self.clock.now().map_err(|_| PeerRuntimeError::Clock)?;
-                            self.emit(PeerEvent::Frame(PeerFrame { source: Arc::clone(&self.state), frame, received })).await?;
+                            self.emit(PeerEvent::Frame(PeerFrame {
+                                source: Arc::clone(&self.state),
+                                frame,
+                                received,
+                            }))
+                            .await?;
                         }
                         SocketEvent::OutboundDrained => {
-                            let id = self.response.take().ok_or(PeerRuntimeError::Protocol)?;
-                            self.emit(PeerEvent::Drained(id)).await?;
+                            let (id, kind) =
+                                self.response.take().ok_or(PeerRuntimeError::Protocol)?;
+                            self.emit(PeerEvent::Drained { id, kind }).await?;
                         }
                         SocketEvent::PeerClosed | SocketEvent::LocallyClosed => return Ok(()),
                     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Trusted service worker: lifecycle, protected identity and bounded journal.
-//! Pairing rendezvous endpoints are activated only after actual full SCM Ready;
-//! no prompt adapter, consent claim, enrollment or fake UAC is provided.
+//! Pairing and the protected prompt watcher activate only after actual full SCM Ready.
+//! Phone authorization remains distinct from the watcher's observed Windows outcome.
 #![forbid(unsafe_code)]
 
 use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
@@ -9,14 +9,17 @@ use crate::startup_phase::{
     ReadyRequest, RunningRequest, ready_handshake, run_platform_step, running_handshake,
 };
 use crate::{
-    ProbeSupervisorError, ServiceProbeSupervisor,
+    ProbeSupervisorError, ServiceProbeSupervisor, WatchSession,
     diagnostic::{
         CleanupObservation, HelperExitObservation, ProbeAdmission, ProbeDiagnosticRecord,
         ProbeObservation,
     },
 };
 use crate::{ServiceError, ServiceRegistry, ffi};
-use activity_journal::{ActivityEvent, FailureKind, Journal, Limits, ServiceOutcome, UnixMillis};
+use activity_journal::{
+    ActivityEvent, Decision, FailureKind, Journal, Limits, RequestOutcome, ServiceOutcome,
+    UnixMillis,
+};
 use std::{
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread::{self, JoinHandle},
@@ -223,114 +226,160 @@ fn run(
         ServiceSession::for_service(registry, &identity, Instant::now()).map_err(session_error)?;
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
+    let mut watch = None;
     // Keep session OUTSIDE this unwind boundary: every returned error or unwind
     // takes the same staged drain before registry/key release or Finished.
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || -> Result<(), ServiceError> {
-            if cancellation_requested(stop) {
-                return Ok(());
-            }
-            events
-                .send(WorkerEvent::Progress)
-                .map_err(|_| ServiceError::WorkerFailed)?;
-            append(
-                &mut journal,
-                ActivityEvent::Service(ServiceOutcome::Started),
-            )?;
-            // Explicit fixed-schema diagnostics for the integrations NOT provided by
-            // this lifecycle host. These events do not contain paths or authority state.
-            append(
-                &mut journal,
-                ActivityEvent::Failure(FailureKind::PlatformUnavailable),
-            )?;
-            append(
-                &mut journal,
-                ActivityEvent::Failure(FailureKind::TransportUnavailable),
-            )?;
-            // Passive fixed-slot inspection only, never a startup probe. Failure/full
-            // storage disables this diagnostic without bypassing identity/registry init.
-            PROBE_REQUESTS.prepare(
-                crate::native::probe_control_registration_ready(_installation.executable())
-                    .and_then(|()| directory.probe_slot_available()),
-            );
-            let (ready_request, ready_gate) = ready_handshake();
-            events
-                .send(WorkerEvent::Ready(ready_request))
-                .map_err(|_| ServiceError::WorkerFailed)?;
-            let ready = ready_gate.wait(startup_began, || cancellation_requested(stop))?;
-            if cancellation_requested(stop) {
-                return Ok(());
-            }
-            session.activate_pairing(ready).map_err(session_error)?;
-            session
-                .configure_relay_after_ready(relay)
-                .map_err(session_error)?;
-            if cancellation_requested(stop) {
-                return Ok(());
-            }
-            let mut last_purge = Instant::now();
-            loop {
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), ServiceError> {
                 if cancellation_requested(stop) {
-                    break;
+                    return Ok(());
                 }
-                match session.process_one().map_err(session_error)? {
-                    SessionProgress::AuthorizedButNotApplied(_) => {
-                        // Authorization consumption is NOT a Windows action/result.
-                        append(
-                            &mut journal,
-                            ActivityEvent::Failure(FailureKind::PlatformUnavailable),
-                        )?;
+                events
+                    .send(WorkerEvent::Progress)
+                    .map_err(|_| ServiceError::WorkerFailed)?;
+                append(
+                    &mut journal,
+                    ActivityEvent::Service(ServiceOutcome::Started),
+                )?;
+                // Passive fixed-slot inspection only, never a startup probe. Failure/full
+                // storage disables this diagnostic without bypassing identity/registry init.
+                PROBE_REQUESTS.prepare(
+                    crate::native::probe_control_registration_ready(_installation.executable())
+                        .and_then(|()| directory.probe_slot_available()),
+                );
+                let (ready_request, ready_gate) = ready_handshake();
+                events
+                    .send(WorkerEvent::Ready(ready_request))
+                    .map_err(|_| ServiceError::WorkerFailed)?;
+                let ready = ready_gate.wait(startup_began, || cancellation_requested(stop))?;
+                if cancellation_requested(stop) {
+                    return Ok(());
+                }
+                session.activate_pairing(ready).map_err(session_error)?;
+                session
+                    .configure_relay_after_ready(relay)
+                    .map_err(session_error)?;
+                watch = Some(
+                    WatchSession::for_running_service().map_err(|_| ServiceError::WorkerFailed)?,
+                );
+                if cancellation_requested(stop) {
+                    return Ok(());
+                }
+                let mut last_purge = Instant::now();
+                loop {
+                    if cancellation_requested(stop) {
+                        break;
                     }
-                    SessionProgress::PairingFailed => append(
-                        &mut journal,
-                        ActivityEvent::Failure(FailureKind::TransportUnavailable),
-                    )?,
-                    SessionProgress::Enrolled(_device) => {
-                        // The fixed journal schema has no enrollment-device event.
-                        // Never substitute a service lifecycle event or record keys,
-                        // comparison codes, or device identifiers in this journal.
+                    let iteration_now = Instant::now();
+                    let watcher = watch.as_mut().ok_or(ServiceError::WorkerFailed)?;
+                    for event in watcher
+                        .poll(iteration_now)
+                        .map_err(|_| ServiceError::WorkerFailed)?
+                    {
+                        let progress = session
+                            .handle_watch_event(event, iteration_now)
+                            .map_err(session_error)?;
+                        journal_prompt_progress(&mut journal, progress)?;
                     }
-                    _ => {}
-                }
-                match stop.recv_timeout(Duration::from_millis(25)) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => (),
-                }
-                if let Some(request) = PROBE_REQUESTS.take() {
-                    // The guard latches unavailable on storage error/unwind. Supervisor
-                    // ownership is retained here across every request and quarantine.
-                    let result = run_requested_probe(
-                        &directory,
-                        &mut supervisor,
-                        &mut supervisor_initialization_failed,
-                        &request,
-                    );
-                    match result {
-                        Ok(quarantined) => {
-                            request.finish(directory.probe_slot_available(), quarantined)
+                    if let Some(progress) = session
+                        .prompt_deadline_step(iteration_now)
+                        .map_err(session_error)?
+                    {
+                        journal_prompt_progress(&mut journal, progress)?;
+                    }
+                    match session
+                        .process_one_with_watch(watcher)
+                        .map_err(session_error)?
+                    {
+                        SessionProgress::AuthorizedButNotApplied(reason) => {
+                            let failure = match reason {
+                            crate::peer_runtime::NotAppliedReason::PlatformUnavailable => {
+                                FailureKind::PlatformUnavailable
+                            }
+                            crate::peer_runtime::NotAppliedReason::NoLiveTarget
+                            | crate::peer_runtime::NotAppliedReason::ExpiredAfterVerification
+                            | crate::peer_runtime::NotAppliedReason::PeerChangedAfterVerification =>
+                            {
+                                FailureKind::RequestValidationFailed
+                            }
+                        };
+                            append(&mut journal, ActivityEvent::Failure(failure))?;
                         }
-                        Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
-                        Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
+                        SessionProgress::ApplyRequested { purpose, .. } => {
+                            let decision = journal_decision(purpose);
+                            append(
+                                &mut journal,
+                                ActivityEvent::Request(RequestOutcome::PhoneDecisionVerified {
+                                    decision,
+                                }),
+                            )?;
+                            append(
+                                &mut journal,
+                                ActivityEvent::Request(RequestOutcome::DecisionSentToWindows {
+                                    decision,
+                                }),
+                            )?;
+                        }
+                        SessionProgress::Prompt(progress) => {
+                            journal_prompt_progress(&mut journal, progress)?;
+                        }
+                        SessionProgress::PairingFailed => append(
+                            &mut journal,
+                            ActivityEvent::Failure(FailureKind::TransportUnavailable),
+                        )?,
+                        SessionProgress::Enrolled(_device) => {
+                            // The fixed journal schema has no enrollment-device event.
+                        }
+                        _ => {}
+                    }
+                    match stop.recv_timeout(Duration::from_millis(25)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => (),
+                    }
+                    if let Some(request) = PROBE_REQUESTS.take() {
+                        // The watch holds the shared process lease. Preserve the one-shot
+                        // diagnostic path only when no watch exists.
+                        let result = if watch.is_some() {
+                            run_busy_probe(&directory, &request)
+                        } else {
+                            run_requested_probe(
+                                &directory,
+                                &mut supervisor,
+                                &mut supervisor_initialization_failed,
+                                &request,
+                            )
+                        };
+                        match result {
+                            Ok(quarantined) => {
+                                request.finish(directory.probe_slot_available(), quarantined)
+                            }
+                            Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
+                            Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
+                        }
+                    }
+                    if last_purge.elapsed() >= Duration::from_secs(3_600) {
+                        journal
+                            .purge(now()?)
+                            .map_err(|_| ServiceError::JournalUnavailable)?;
+                        last_purge = Instant::now();
                     }
                 }
-                if last_purge.elapsed() >= Duration::from_secs(3_600) {
-                    journal
-                        .purge(now()?)
-                        .map_err(|_| ServiceError::JournalUnavailable)?;
-                    last_purge = Instant::now();
-                }
-            }
-            append(
-                &mut journal,
-                ActivityEvent::Service(ServiceOutcome::Stopping),
-            )?;
-            Ok(())
-        },
-    ))
-    .unwrap_or(Err(ServiceError::WorkerFailed));
+                append(
+                    &mut journal,
+                    ActivityEvent::Service(ServiceOutcome::Stopping),
+                )?;
+                Ok(())
+            },
+        ))
+        .unwrap_or(Err(ServiceError::WorkerFailed));
     PROBE_REQUESTS.close();
+    if let Some(watch) = watch.as_mut() {
+        watch.begin_shutdown();
+    }
     session.begin_shutdown();
     let io_failed = loop {
+        let watch_done = watch.as_mut().is_none_or(WatchSession::poll_shutdown);
         match session.poll_shutdown() {
             SessionCleanup::CleanupPending { .. } => {
                 // Retain ownership even beyond an expected cleanup interval.
@@ -338,9 +387,11 @@ fn run(
                 // this key worker. Existing SCM timeout reporting is unchanged.
                 thread::park_timeout(Duration::from_millis(25));
             }
-            SessionCleanup::Quiescent { io_failed } => break io_failed,
+            SessionCleanup::Quiescent { io_failed } if watch_done => break io_failed,
+            SessionCleanup::Quiescent { .. } => thread::park_timeout(Duration::from_millis(25)),
         }
     };
+    drop(watch);
     drop(supervisor);
     let closed = session.finish_shutdown().map_err(session_error);
     drop(session);
@@ -363,11 +414,77 @@ fn session_error(error: PeerRuntimeError) -> ServiceError {
     }
 }
 
+fn journal_decision(purpose: approval_protocol::DecisionPurpose) -> Decision {
+    match purpose {
+        approval_protocol::DecisionPurpose::Approve => Decision::Approve,
+        approval_protocol::DecisionPurpose::Deny => Decision::Deny,
+    }
+}
+
+fn journal_prompt_progress(
+    journal: &mut Journal,
+    progress: crate::peer_runtime::prompt::PromptProgress,
+) -> Result<(), ServiceError> {
+    if let Some(result) = progress.result() {
+        let outcome = match result {
+            crate::peer_runtime::prompt::PromptResult::Approved => RequestOutcome::WindowsApplied {
+                decision: Decision::Approve,
+            },
+            crate::peer_runtime::prompt::PromptResult::Denied => RequestOutcome::WindowsApplied {
+                decision: Decision::Deny,
+            },
+            crate::peer_runtime::prompt::PromptResult::Cancelled => RequestOutcome::Cancelled,
+            crate::peer_runtime::prompt::PromptResult::Expired => RequestOutcome::Expired,
+            crate::peer_runtime::prompt::PromptResult::FailedRejected => {
+                RequestOutcome::WindowsRejected
+            }
+            crate::peer_runtime::prompt::PromptResult::FailedUnknown => {
+                RequestOutcome::WindowsOutcomeUnknown
+            }
+        };
+        append(journal, ActivityEvent::Request(outcome))?;
+    }
+    if progress.observed() {
+        append(journal, ActivityEvent::Request(RequestOutcome::Observed))?;
+    }
+    if progress.queued_opened() != 0 {
+        append(
+            journal,
+            ActivityEvent::Request(RequestOutcome::NotificationSent),
+        )?;
+    }
+    Ok(())
+}
+
 fn diagnostic_time() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+}
+
+fn run_busy_probe(
+    directory: &ffi::ActivityDirectory,
+    request: &crate::diagnostic::ProbeRun<'_>,
+) -> Result<bool, ServiceError> {
+    let file = directory.reserve_probe_slot()?;
+    let record = ProbeDiagnosticRecord::new(
+        file.slot(),
+        std::process::id(),
+        diagnostic_time(),
+        diagnostic_time(),
+        if request.cancelled() {
+            ProbeObservation::CancelledBeforeProbe
+        } else {
+            ProbeObservation::SupervisorFailure {
+                failure: ProbeSupervisorError::Busy,
+            }
+        },
+        CleanupObservation::NoRetainedRun,
+        HelperExitObservation::NotStarted,
+    );
+    file.write_record(record)?;
+    Ok(false)
 }
 
 fn run_requested_probe(

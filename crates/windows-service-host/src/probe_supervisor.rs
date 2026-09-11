@@ -157,6 +157,17 @@ impl fmt::Debug for WatchSession {
         formatter.write_str("WatchSession(owned_service_only)")
     }
 }
+impl crate::peer_runtime::prompt::PromptApply for WatchSession {
+    fn apply_prompt(
+        &mut self,
+        target: TargetIdentity,
+        action: PromptAction,
+        content_digest: [u8; 32],
+    ) -> Result<(), ProbeSupervisorError> {
+        self.apply(target, action, content_digest)
+    }
+}
+
 impl WatchSession {
     pub fn for_running_service() -> Result<Self, ProbeSupervisorError> {
         #[cfg(all(windows, target_pointer_width = "64"))]

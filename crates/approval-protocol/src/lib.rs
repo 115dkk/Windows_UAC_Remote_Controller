@@ -163,7 +163,9 @@ pub struct RequestContent {
 impl RequestContent {
     pub fn new(program_name: &str, path: &str, details: &str) -> Result<Self, ContentError> {
         validate_text(program_name, MAX_PROGRAM_NAME_BYTES, false)?;
-        validate_text(path, MAX_PATH_BYTES, false)?;
+        // A consent prompt does not always show a file path (MSI, COM elevation,
+        // packaged apps): an empty path is legal and is shown as absent.
+        validate_text(path, MAX_PATH_BYTES, true)?;
         validate_text(details, MAX_DETAILS_BYTES, true)?;
         Ok(Self {
             program_name: program_name.to_owned(),
