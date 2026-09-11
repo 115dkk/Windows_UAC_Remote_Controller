@@ -622,3 +622,24 @@ permission to consume it early.
   admission is busy (retry restarts the ceremony); the scanner instrumentation failed
   once with the owner closed and the camera reported unavailable (run 34624753148) and
   passed on the next run; the developer PC has not been re-tested (user deferred).
+## Prerelease v0.1.0-alpha.1 and the watcher diagnosis (September 12, ~06:00)
+
+- The tag `v0.1.0-alpha.1` was first pushed at `fae5d1f`; the release APK job stopped at
+  `generateReleaseControllerBindings` with "No UniFFI metadata found" because the release
+  profile's `strip = true` removed the metadata symbols the binding generator reads (only the
+  debug variant had ever been built in CI). `df85f03` strips debug info only; the tag was
+  deleted and re-pushed at `6551fcc` (no release had been published), and run 34646050609
+  published the prerelease: Windows x64 installer, signed arm64 APK, relay binaries for
+  Windows and Linux, SHA256SUMS and the inspection files. Publication is a packaging fact;
+  the release notes table states what is and is not verified.
+- Lab run 34640381593 (`fae5d1f`) settled the service side: the service stays Running with
+  the management pipe unavailable (`OpenProtectedPath` 0x80070002: the lab installs no GUI
+  image, so the pinned path is absent), the watcher starts and heart-beats
+  (`watcher_started`, `watcher_alive`), a real consent prompt is on screen, and nothing is
+  observed. `6551fcc` and `005d93e` gave the helper a lab-only `lab-diagnostics` feature
+  (fixed-token census notes in `<Windows>\Temp`, since the helper runs with a minimal
+  environment). Run 34647161633 then named the cause: on the Winlogon desktop the census
+  saw ten top-level windows, several owned by consent.exe, and answered Ambiguous seventy
+  times while the dialog was shown. consent.exe owns hidden top-level windows besides the
+  dialog (one per GUI thread, such as the IME windows). `f9c9055` counts only shown
+  windows as candidates; the next lab run tells whether the census now qualifies the dialog.
