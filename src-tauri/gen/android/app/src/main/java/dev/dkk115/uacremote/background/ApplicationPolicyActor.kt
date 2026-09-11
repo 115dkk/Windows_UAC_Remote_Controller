@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class ApplicationPolicyActor(private val application: Application) {
     private enum class Operation { READ_POLICY, SAVE_POLICY, READ_HISTORY, CLEAR_HISTORY }
     private val lifecycle = PolicyOwnerLifecycle()
+    private val bootTrace = OwnerBootTrace(BootDiagnostics::recordOwner)
     private val main = Handler(Looper.getMainLooper())
     private val pending = ConcurrentHashMap<PendingCall, Unit>()
     private val worker = ThreadPoolExecutor(
@@ -40,18 +41,18 @@ internal class ApplicationPolicyActor(private val application: Application) {
     // This adapter owns only its own in-process references, never aliases.
     private val platform = AndroidNativePlatform(application)
     private val denials = DenialJobs(platform, { controller }, ::enqueueDenial,
-        { lifecycle.phase() == PolicyOwnerPhase.READY }, { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, ::nativeCleanupProgress)
+        { lifecycle.phase() == PolicyOwnerPhase.READY }, { failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.DENIAL_OWNER) }, ::nativeCleanupProgress)
     private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval,
-        { failOwner(PolicyStatus.STORAGE_UNAVAILABLE) }, denials::blocksApproval, denials::nativeProgress)
+        { failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.APPROVAL_OWNER) }, denials::blocksApproval, denials::nativeProgress)
     private val requests = NativeRequestCoordinator(application, platform, { controller }, ::enqueueRequest,
         { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
         approvals::canRequest, denials::canRequest, denials::externalProgress,
-        { failOwner(PolicyStatus.UNAVAILABLE) })
+        { failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.REQUEST_MAINTENANCE) })
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
     private val cleanupWake = AtomicBoolean(false)
-    private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE) }
+    private val initializationTimeout = Runnable { failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.INIT_WATCHDOG) }
     @Volatile private var lifecycleObserver: ((PolicyOwnerPhase) -> Unit)? = null
 
     /** Read-only native service observation; CLOSED follows actual cleanup. */
@@ -132,14 +133,16 @@ internal class ApplicationPolicyActor(private val application: Application) {
     fun start() {
         if (!lifecycle.start()) return
         val started = SystemClock.elapsedRealtime()
+        bootTrace.initializing(OwnerInitializationStep.QUEUED)
         if (!main.postDelayed(initializationTimeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
+            traceOwnerFailure(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.INIT_TIMER_POST)
             lifecycle.fail(PolicyStatus.UNAVAILABLE)
             worker.shutdown()
             publishLifecycle()
             return
         }
         try { worker.execute { initialize(started) } }
-        catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE) }
+        catch (_: RejectedExecutionException) { failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.INIT_WORKER_SCHEDULE) }
         // Initialization is queued before observers may submit startup reads.
         publishLifecycle()
     }
@@ -174,26 +177,31 @@ internal class ApplicationPolicyActor(private val application: Application) {
         try {
             if (lifecycle.phase() != PolicyOwnerPhase.STARTING) return
             if (PolicyOwnerBounds.responseExpired(started, SystemClock.elapsedRealtime())) {
-                failOwner(PolicyStatus.UNAVAILABLE)
+                failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.INIT_PRECHECK)
                 return
             }
+            bootTrace.initializing(OwnerInitializationStep.PACKAGED_LIBRARY)
             PackagedControllerLibrary.prepare(application)
             // Run the generator's contract/API checksum checks before any
             // controller operation; our coarse ABI number is not a substitute.
+            bootTrace.initializing(OwnerInitializationStep.GENERATED_CONTRACT)
             uniffiEnsureInitialized()
+            bootTrace.initializing(OwnerInitializationStep.BRIDGE_ABI)
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
             // Rust alone decides initial creation versus adoption/migration.
             // In particular Kotlin never pre-clears notifications or retries a
             // failed open by creating a new store.
+            bootTrace.initializing(OwnerInitializationStep.OPEN_NATIVE_OWNER)
             controller = MobileController.openOrInitialize(platform)
             if (!lifecycle.initialized(started, SystemClock.elapsedRealtime())) {
-                failOwner(lifecycle.failure())
+                failOwner(lifecycle.failure(), OwnerFailureOrigin.INIT_COMPLETION)
                 return
             }
+            bootTrace.ready()
             requests.progress()
         } catch (failure: Throwable) {
             rethrowFatal(failure)
-            failOwner(failureStatus(failure, initializing = true))
+            failOwner(failureStatus(failure, initializing = true), OwnerFailureOrigin.INIT_EXCEPTION, failure)
         } finally {
             main.removeCallbacks(initializationTimeout)
             publishLifecycle()
@@ -210,8 +218,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
         val call = PendingCall(SystemClock.elapsedRealtime(), callback)
         pending[call] = Unit
         if (!main.postDelayed(call.timeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS)) {
-            abandon(call)
-            failOwner(PolicyStatus.UNAVAILABLE)
+            abandon(call, OwnerFailureOrigin.CALL_TIMER_POST)
+            failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.CALL_TIMER_POST)
             return
         }
         try { worker.execute { runCall(call, operation, policyJson) } }
@@ -224,7 +232,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         try {
             if (call.finished()) return
             if (PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())) {
-                failOwner(PolicyStatus.UNAVAILABLE)
+                failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.CALL_WORKER_DEADLINE)
                 return
             }
             if (lifecycle.phase() != PolicyOwnerPhase.READY) {
@@ -247,7 +255,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         } catch (failure: Throwable) {
             rethrowFatal(failure)
             val status = failureStatus(failure)
-            if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY && status != PolicyStatus.HISTORY_UNAVAILABLE) failOwner(status)
+            if (status != PolicyStatus.INVALID_POLICY && status != PolicyStatus.BUSY && status != PolicyStatus.HISTORY_UNAVAILABLE) failOwner(status, OwnerFailureOrigin.CALL_EXCEPTION, failure)
             deliver(call, PolicyReply.Failed(status))
         } finally {
             denials.externalProgress()
@@ -257,7 +265,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
         }
     }
 
-    private fun failOwner(status: PolicyStatus) {
+    private fun traceOwnerFailure(status: PolicyStatus, origin: OwnerFailureOrigin, failure: Throwable? = null) {
+        try { bootTrace.failed(origin, BootDiagnostics.ownerFailureCategory(failure), status, lifecycle.phase()) }
+        catch (_: Throwable) { /* Observations cannot replace the actual failure/cleanup. */ }
+    }
+
+    private fun failOwner(status: PolicyStatus, origin: OwnerFailureOrigin, failure: Throwable? = null) {
+        traceOwnerFailure(status, origin, failure)
         requests.stop()
         denials.stop()
         approvals.stop()
@@ -280,14 +294,14 @@ internal class ApplicationPolicyActor(private val application: Application) {
             pending.remove(call)
             lifecycle.release()
             val expired = PolicyOwnerBounds.responseExpired(call.started, SystemClock.elapsedRealtime())
-            if (expired) failOwner(PolicyStatus.UNAVAILABLE)
+            if (expired) failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.CALL_MAIN_DEADLINE)
             val actual = if (expired || (reply !is PolicyReply.Failed && lifecycle.phase() != PolicyOwnerPhase.READY)) {
                 PolicyReply.Failed(lifecycle.failure())
             } else reply
             safelyCallback(callback, actual)
         }
         if (Looper.myLooper() == Looper.getMainLooper()) action.run()
-        else if (!main.post(action)) abandon(call)
+        else if (!main.post(action)) abandon(call, OwnerFailureOrigin.CALL_MAIN_POST)
     }
 
     private fun deliverImmediate(callback: (PolicyReply) -> Unit, reply: PolicyReply) {
@@ -295,12 +309,13 @@ internal class ApplicationPolicyActor(private val application: Application) {
         else main.post { safelyCallback(callback, reply) }
     }
 
-    private fun abandon(call: PendingCall) {
+    private fun abandon(call: PendingCall, origin: OwnerFailureOrigin) {
         if (call.takeCallback() != null) {
             main.removeCallbacks(call.timeout)
             pending.remove(call)
             lifecycle.release()
         }
+        traceOwnerFailure(PolicyStatus.UNAVAILABLE, origin)
         lifecycle.fail(PolicyStatus.UNAVAILABLE)
         publishLifecycle()
     }
@@ -375,13 +390,14 @@ internal class ApplicationPolicyActor(private val application: Application) {
         if (approvals.hasPendingCleanup() || denials.hasPendingCleanup() || !platform.requests.cleanupComplete()) return
         platform.closeRequestClock()
         lifecycle.closed()
+        bootTrace.closed()
         worker.shutdown()
         publishLifecycle()
     }
 
     private inner class PendingCall(val started: Long, callback: (PolicyReply) -> Unit) {
         private var callback: ((PolicyReply) -> Unit)? = callback
-        val timeout = Runnable { if (!finished()) failOwner(PolicyStatus.UNAVAILABLE) }
+        val timeout = Runnable { if (!finished()) failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.CALL_TIMEOUT) }
         @Synchronized fun takeCallback(): ((PolicyReply) -> Unit)? = callback.also { callback = null }
         @Synchronized fun finished(): Boolean = callback == null
     }
