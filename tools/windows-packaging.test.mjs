@@ -169,6 +169,16 @@ test('v2 manifest refuses old schemas and unsupported transformation description
   }
 });
 
+test('lab-profile binaries are refused for every packaged executable', () => {
+  for (const name of leaves) {
+    const bytes = name === 'controller-app.exe' ? mainPe() : pe();
+    assert.doesNotThrow(() => expectedPayload(name, bytes));
+    const lab = Buffer.from(bytes);
+    lab.write('lab-software-ksp-do-not-ship', 800, 'ascii');
+    assert.throws(() => expectedPayload(name, lab), /lab-profile/u);
+  }
+});
+
 test('marker-only prediction refuses signed or malformed PE security directories', () => {
   const signed = mainPe();
   signed.writeUInt32LE(5, 128 + 24 + 108);

@@ -131,7 +131,11 @@ export function transformNsisMain(source) {
     },
   };
 }
+// ADR 0027: a binary built with the lab-only software key provider carries this
+// profile marker (windows-identity IDENTITY_PROVIDER_PROFILE) and must never be packaged.
+const LAB_PROFILE_MARKER = Buffer.from('lab-software-ksp-do-not-ship', 'ascii');
 export function expectedPayload(name, source) {
+  if (source.includes(LAB_PROFILE_MARKER)) fail('A lab-profile binary cannot be packaged; build without lab-software-identity.');
   if (name === 'controller-app.exe') return transformNsisMain(source).metadata;
   if (!LEAVES.includes(name)) fail('Unexpected packaged executable name.');
   const original = unsignedPayload(source);
