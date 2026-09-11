@@ -3,16 +3,19 @@
 //!
 //! Read-only status is callable by presentation. Mutations require a real
 //! elevated Windows token and validated protected installation; no caller can
-//! supply a service name, executable, account, credential or command line.
+//! supply a service name, executable, account, credential or freeform command line.
 //! Running means completed local service bootstrap, not remote readiness. Raw
 //! SCM Running without readiness controls projects as product StartPending.
-//! Windows prompt, phone, pairing,
-//! credential entry and encrypted transport integrations remain unimplemented.
+//! A closed pairing-helper rendezvous consumer exists, but has no GUI/service
+//! pending-slot producer or enrollment authority. Windows prompt, phone pairing,
+//! credential entry and encrypted transport activation remain unimplemented.
 
 #![deny(unsafe_code)]
 
 mod contract;
 mod diagnostic;
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+mod pairing_handoff;
 #[cfg(any(windows, test))]
 pub mod peer_runtime;
 mod probe_supervisor;
@@ -45,8 +48,9 @@ mod runtime;
 mod startup_phase;
 
 pub use contract::{
-    Command, ControlOutcome, InstallationState, RuntimeCapabilities, ServiceControlIntent,
-    ServiceError, ServiceOperation, ServiceSnapshot, ServiceState, SetupFailure,
+    Command, ControlOutcome, InstallationState, PendingElevationId, RuntimeCapabilities,
+    ServiceControlIntent, ServiceError, ServiceOperation, ServiceSnapshot, ServiceState,
+    SetupFailure,
 };
 
 // Opaque native integration resources, not UI/CLI/network commands. Server
@@ -55,15 +59,30 @@ pub use contract::{
 // authority claim is accepted. A peer observation alone cannot enroll a phone.
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use ffi::{
-    PairingClient, PairingClientError, PairingClientProgress, PairingClientStage, PairingPeer,
-    PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe, PairingPipeProgress,
-    PairingServerEndpoint, PairingServerEndpoints,
+    PairingClient, PairingClientError, PairingClientProgress, PairingClientStage,
+    PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress, PairingPeer, PairingPeerError,
+    PairingPeerRole, PairingPeerStage, PairingPipe, PairingPipeProgress, PairingServerEndpoint,
+    PairingServerEndpoints,
 };
 
 pub const SERVICE_NAME: &str = "UacRemoteController";
 pub const SERVICE_DISPLAY_NAME: &str = "휴대폰 승인";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
+
+/// One fixed helper invocation. Zero means only authenticated terminal close
+/// and local I/O drain, never a grant, enrollment or remote readiness result.
+pub fn run_pair_helper(id: PendingElevationId) -> Result<(), ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::run_pair_helper(id).map_err(|error| error.service_error())
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        let _ = id;
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
 
 /// Query this service only, without requesting elevation or changing Windows.
 /// `NotInstalled` is returned only for ERROR_SERVICE_DOES_NOT_EXIST.

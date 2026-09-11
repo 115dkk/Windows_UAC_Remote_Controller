@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #![forbid(unsafe_code)]
 
-use std::ffi::OsStr;
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
+use std::{ffi::OsStr, fmt};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,7 +19,57 @@ pub enum Command {
     Restart,
     Uninstall,
     ProbeOnce,
+    Pair(PendingElevationId),
     Help,
+}
+
+/// Public correlation only, never a bearer grant or fresh-elevation proof.
+/// Copying these bytes cannot copy a native launch/ceremony ownership right.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct PendingElevationId([u8; 32]);
+impl fmt::Debug for PendingElevationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PendingElevationId(redacted)")
+    }
+}
+impl PendingElevationId {
+    fn parse(value: &OsStr) -> Result<Self, ServiceError> {
+        let text = value.to_str().ok_or(ServiceError::InvalidArguments)?;
+        if text.len() != 64 {
+            return Err(ServiceError::InvalidArguments);
+        }
+        let digit = |value: u8| match value {
+            b'0'..=b'9' => Ok(value - b'0'),
+            b'a'..=b'f' => Ok(value - b'a' + 10),
+            _ => Err(ServiceError::InvalidArguments),
+        };
+        let mut bytes = [0; 32];
+        for (output, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+            *output = digit(pair[0])? * 16 + digit(pair[1])?;
+        }
+        Self::from_bytes(bytes)
+    }
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Result<Self, ServiceError> {
+        if bytes.iter().all(|value| *value == 0) {
+            Err(ServiceError::InvalidArguments)
+        } else {
+            Ok(Self(bytes))
+        }
+    }
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
+    pub(crate) fn bytes(self) -> [u8; 32] {
+        self.0
+    }
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
+    pub(crate) fn argument(self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(64);
+        for byte in self.0 {
+            text.push(char::from(HEX[usize::from(byte >> 4)]));
+            text.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+        text
+    }
 }
 
 /// Presentation submits only one of these user intents. It does not supply a
@@ -74,7 +124,17 @@ impl Command {
         let Some(first) = arguments.next() else {
             return Ok(Self::Status);
         };
+        let second = arguments.next();
         if arguments.next().is_some() {
+            return Err(ServiceError::InvalidArguments);
+        }
+        if first.as_ref().to_str() == Some("pair") {
+            return second
+                .ok_or(ServiceError::InvalidArguments)
+                .and_then(|value| PendingElevationId::parse(value.as_ref()))
+                .map(Self::Pair);
+        }
+        if second.is_some() {
             return Err(ServiceError::InvalidArguments);
         }
         match first.as_ref().to_str() {
@@ -284,6 +344,10 @@ pub enum ServiceError {
     ProbeSlotsFull,
     #[error("the read-only diagnostic owner or result storage is unavailable")]
     ProbeUnavailable,
+    #[error("the pairing helper handoff is unavailable or incomplete")]
+    PairingHandoffUnavailable,
+    #[error("pairing client Windows call failed at fixed stage {stage} (HRESULT {hresult:#010x})")]
+    PairingClientNative { stage: u8, hresult: i32 },
 }
 
 impl ServiceError {
@@ -709,6 +773,104 @@ mod tests {
             assert_eq!(error, ServiceError::InvalidArguments);
             assert!(!format!("{error:?}").contains("unexpected-input"));
         }
+    }
+
+    #[test]
+    fn pair_is_the_only_two_argument_command_and_public_id_is_canonical_redacted_data() {
+        let id = PendingElevationId::from_bytes([0xab; 32]).unwrap();
+        let text = id.argument();
+        assert_eq!(text, "ab".repeat(32));
+        assert_eq!(
+            Command::parse(["pair", text.as_str()]),
+            Ok(Command::Pair(id))
+        );
+        assert_eq!(PendingElevationId::parse(OsStr::new(&text)), Ok(id));
+        assert_eq!(
+            format!("{:?}", Command::Pair(id)),
+            "Pair(PendingElevationId(redacted))"
+        );
+        for verb in [
+            "status",
+            "service",
+            "install",
+            "start",
+            "stop",
+            "restart",
+            "uninstall",
+            "probe-once",
+            "help",
+        ] {
+            assert_eq!(
+                Command::parse([verb, text.as_str()]),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+        assert_eq!(
+            Command::parse(["pair"]),
+            Err(ServiceError::InvalidArguments)
+        );
+        assert_eq!(
+            Command::parse(["pair", text.as_str(), "extra"]),
+            Err(ServiceError::InvalidArguments)
+        );
+    }
+
+    #[test]
+    fn pair_rejects_noncanonical_zero_and_unicode_arguments_without_echo() {
+        for bad in [
+            "00".repeat(32),
+            "AB".repeat(32),
+            "a".repeat(63),
+            "a".repeat(65),
+            format!(" {}", "ab".repeat(32)),
+            format!("{}\0", "ab".repeat(32)),
+            format!("0x{}", "ab".repeat(32)),
+            "é".repeat(32),
+            format!("{}g", "a".repeat(63)),
+        ] {
+            assert_eq!(
+                Command::parse(["pair", bad.as_str()]),
+                Err(ServiceError::InvalidArguments)
+            );
+            assert!(!format!("{}", ServiceError::InvalidArguments).contains(&bad));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pair_does_not_lossily_convert_unpaired_utf16() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        assert_eq!(
+            Command::parse([OsString::from("pair"), OsString::from_wide(&[0xd800; 64])]),
+            Err(ServiceError::InvalidArguments)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pair_does_not_lossily_convert_invalid_os_bytes() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        assert_eq!(
+            Command::parse([OsString::from("pair"), OsString::from_vec(vec![0xff; 64])]),
+            Err(ServiceError::InvalidArguments)
+        );
+    }
+
+    #[test]
+    fn cli_capture_does_not_collect_or_reparse_a_tail_after_rejection() {
+        let mut count = 0;
+        let raw = [
+            "pair".to_owned(),
+            "ab".repeat(32),
+            "extra".to_owned(),
+            "never-read".to_owned(),
+        ];
+        let iterator = raw.iter().inspect(|_| count += 1);
+        assert_eq!(
+            Command::parse(iterator),
+            Err(ServiceError::InvalidArguments)
+        );
+        assert_eq!(count, 3);
     }
 
     #[test]

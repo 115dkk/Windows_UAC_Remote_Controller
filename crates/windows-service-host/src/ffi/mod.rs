@@ -20,8 +20,11 @@ mod trust_store;
 
 pub(crate) use elevation::request_elevated_control;
 #[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_client::run_pair_helper;
+#[cfg(target_pointer_width = "64")]
 pub use pairing_client::{
     PairingClient, PairingClientError, PairingClientProgress, PairingClientStage,
+    PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress,
 };
 #[cfg(target_pointer_width = "64")]
 pub use pairing_peer::{

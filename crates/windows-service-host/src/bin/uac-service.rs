@@ -13,6 +13,7 @@ fn run() -> Result<(), ServiceError> {
         writeln!(
             io::stdout().lock(),
             "uac-service [status|service|install|start|stop|restart|uninstall|probe-once|help]\n\
+             uac-service pair <64자리 소문자 공개 식별자>\n\
              기본 동작은 상태 확인입니다. 설치·시작·중지·재시작·제거는 관리자 권한이 필요합니다.\n\
              서비스 실행 상태는 휴대폰 연결이나 Windows 승인 기능의 동작을 뜻하지 않습니다."
         )
@@ -21,6 +22,11 @@ fn run() -> Result<(), ServiceError> {
     }
     if command == Command::Service {
         return windows_service_host::dispatch_service();
+    }
+    if let Command::Pair(id) = command {
+        // Captured/canonicalized once above. The helper path does not recapture
+        // argv, retry, echo the identifier or produce an enrollment receipt.
+        return windows_service_host::run_pair_helper(id);
     }
     if command == Command::ProbeOnce {
         let accepted = windows_service_host::request_probe_once()?;
@@ -36,7 +42,7 @@ fn run() -> Result<(), ServiceError> {
         Command::Stop => windows_service_host::stop(),
         Command::Restart => windows_service_host::restart(),
         Command::Uninstall => windows_service_host::uninstall(),
-        Command::Service | Command::Help | Command::ProbeOnce => {
+        Command::Service | Command::Help | Command::ProbeOnce | Command::Pair(_) => {
             return Err(ServiceError::InvalidArguments);
         }
     }?;

@@ -116,6 +116,28 @@ jobs:
         run: rustup show active-toolchain
       - name: UI checks/build, full Rust quality, actual analyzer canaries and licenses
         run: node tools/quality.mjs
+      - name: Retain exact-revision Rust license metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: rust-license-metadata-${{ matrix.os }}-${{ github.sha }}
+          path: target/quality/license-inventory.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Collect original Rust license material from the cached sources
+        # The preceding locked inventory has populated exact package sources.
+        # This collector is offline and requires these trees to remain quiescent.
+        run: node tools/license-materials.mjs
+      - name: Retain successfully collected Rust license material
+        # Default success() is deliberate: failed collection can preserve unknown
+        # partial files, which must not be published as reviewed materials.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: rust-license-materials-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            target/license-materials/rust/manifest.json
+            target/license-materials/rust/materials/
+          if-no-files-found: error
+          retention-days: 14
 
   android-core:
     name: Android Rust core Clippy (not an Android app build)

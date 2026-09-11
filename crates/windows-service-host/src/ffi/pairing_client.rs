@@ -61,6 +61,10 @@ use super::{
 };
 use crate::{ServiceError, native};
 
+mod helper_launch;
+pub(crate) use helper_launch::run_pair_helper;
+pub use helper_launch::{PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress};
+
 const MAX_MESSAGE: usize = 4096;
 const READ_CAPACITY: usize = MAX_MESSAGE + 1;
 const MAX_DESCRIPTOR: usize = 65_536;
@@ -298,7 +302,7 @@ struct Connection {
     pid: u32,
     created: u64,
     service_sid: Vec<u8>,
-    _reservation: Reservation,
+    reservation: Option<Reservation>,
 }
 impl Connection {
     fn recheck(&self) -> Result<(), Error> {
@@ -426,7 +430,7 @@ impl PairingClient {
             pid,
             created,
             service_sid,
-            _reservation: reservation,
+            reservation: Some(reservation),
         };
         let mut inner = Box::new(Inner {
             operation: None,
@@ -435,6 +439,7 @@ impl PairingClient {
             first_failure: None,
             cleanup_failure: None,
             drained: false,
+            protocol_used: false,
         });
         inner.fence()?;
         // SAFETY: our authenticated retained client handle only. This sets its
@@ -474,6 +479,12 @@ impl PairingClient {
     }
     pub fn cleanup_failure(&self) -> Option<Error> {
         self.inner_ref().cleanup_failure
+    }
+    /// Explicit trusted-host launch request only. Consumes the original fresh
+    /// Starter client; obtains its ID from that authenticated pipe, not an arg.
+    /// Call/poll on the same native worker, never a WebView/UI thread.
+    pub fn into_helper_launch(self) -> Result<PairingHelperLaunch, PairingLaunchError> {
+        PairingHelperLaunch::from_starter(self)
     }
     fn inner_ref(&self) -> &Inner {
         self.inner
@@ -569,6 +580,7 @@ struct Inner {
     first_failure: Option<Error>,
     cleanup_failure: Option<Error>,
     drained: bool,
+    protocol_used: bool,
 }
 impl Inner {
     fn in_flight(&self) -> bool {
@@ -623,6 +635,7 @@ impl Inner {
     }
     fn begin(&mut self, kind: Kind<'_>) -> Result<(), Error> {
         self.fence()?;
+        self.protocol_used = true;
         if self.operation.is_some() {
             return Err(self.fail(Error::Busy));
         }

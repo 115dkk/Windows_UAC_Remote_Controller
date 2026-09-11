@@ -169,6 +169,24 @@ release jobs. No `pull_request_target` or ignored failure is used.
 
 ## Incomplete release work
 
+After successful Windows/Linux quality checks, each job retains its existing
+`target/quality/license-inventory.json` as a commit- and runner-named
+`rust-license-metadata-<runner>-<commit>` artifact for14 days. Missing output
+fails the upload step. This preserves Cargo's metadata inventory for review;
+it is not the complete Rust/npm/Maven notices or corresponding-source bundle.
+
+The same jobs then run `tools/license-materials.mjs` against the cached exact
+Cargo sources with offline metadata. Collection requires trusted, quiescent
+checkout/cache/output trees; observed filesystem stability is not atomic
+containment against an adversarial path swap. The collector retains bounded
+original Rust LICENSE/COPYING/NOTICE material, existing workspace/vendor notices
+and a source-relative byte/digest manifest in a fresh output directory. Missing
+or unsupported material fails the job. Only successful collection uploads
+`rust-license-materials-<runner>-<commit>` for14 days; unknown/partial output from
+a failed collection is not uploaded. Its18 fixture tests run in host quality.
+This is original-text collection, not license compatibility clearance, npm/Maven
+coverage, corresponding-source production or publication of a release.
+
 The current tree contains the native presentation shell and service foundations,
 not a functioning installable remote UAC controller.
 No release is published from these libraries as though it were the product.
