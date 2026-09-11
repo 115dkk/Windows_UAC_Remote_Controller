@@ -68,19 +68,17 @@ jobs:
       - name: Install the protected product directory and both executables
         shell: pwsh
         run: |
-          using namespace System.Security.AccessControl
-          using namespace System.Security.Principal
           $ErrorActionPreference = 'Stop'
-          $admin = [SecurityIdentifier]::new('S-1-5-32-544')
+          $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
           function New-LabSecurity([bool]$Directory) {
-            $security = if ($Directory) { [DirectorySecurity]::new() } else { [FileSecurity]::new() }
+            $security = if ($Directory) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
             $security.SetOwner($admin); $security.SetGroup($admin)
             $security.SetAccessRuleProtection($true, $false)
-            $inheritance = [InheritanceFlags]::None
-            if ($Directory) { $inheritance = [InheritanceFlags]::ContainerInherit -bor [InheritanceFlags]::ObjectInherit }
+            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+            if ($Directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit }
             foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')) {
-              $rights = if ($sid -eq 'S-1-5-32-545') { [FileSystemRights]::ReadAndExecute } else { [FileSystemRights]::FullControl }
-              $security.AddAccessRule([FileSystemAccessRule]::new([SecurityIdentifier]::new($sid), $rights, $inheritance, [PropagationFlags]::None, [AccessControlType]::Allow))
+              $rights = if ($sid -eq 'S-1-5-32-545') { [System.Security.AccessControl.FileSystemRights]::ReadAndExecute } else { [System.Security.AccessControl.FileSystemRights]::FullControl }
+              $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($sid), $rights, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow))
             }
             return $security
           }
@@ -89,7 +87,7 @@ jobs:
           foreach ($leaf in 'uac-service.exe', 'uac-prompt-probe.exe') {
             $source = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/$leaf"
             $target = Join-Path $env:LAB_DIR $leaf
-            $stream = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-LabSecurity $false))
+            $stream = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-LabSecurity $false))
             try { $bytes = [IO.File]::ReadAllBytes($source); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
             Write-Output ("{0}: {1} bytes, sha256 {2}" -f $leaf, $bytes.Length, (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant())
           }
