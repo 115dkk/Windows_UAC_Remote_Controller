@@ -64,6 +64,7 @@ use super::{
 use crate::{ServiceError, native};
 
 mod io;
+mod uac_policy;
 pub(crate) use io::{AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener};
 pub use io::{PairingPipe, PairingPipeProgress};
 
@@ -125,6 +126,9 @@ pub enum PairingPeerStage {
     QueryProcess,
     QueryToken,
     QuerySession,
+    QueryUacPolicy,
+    WatchUacPolicy,
+    CloseUacPolicy,
 }
 
 /// Fixed categories/numeric codes only; native error strings and identity data
@@ -355,6 +359,8 @@ impl PairingServerEndpoint {
             token,
             interactive,
             live: true,
+            policy_claimed: false,
+            uac_policy: None,
         };
         // Reobserve the same process and pipe before publication. This rejects
         // observed changes; it is not an atomic lease on the client's future use.
@@ -377,6 +383,8 @@ pub struct PairingPeer {
     token: TokenFacts,
     interactive: SessionEpoch,
     live: bool,
+    policy_claimed: bool,
+    uac_policy: Option<uac_policy::UacPolicyLease>,
 }
 impl PairingPeer {
     pub fn role(&self) -> PairingPeerRole {
@@ -391,11 +399,74 @@ impl PairingPeer {
         if !self.live {
             return Err(PairingPeerError::Closed);
         }
-        let result = self.check_original();
+        let result = (|| {
+            self.check_original()?;
+            if let Some(policy) = self.uac_policy.as_mut() {
+                policy.check()?;
+            }
+            Ok(())
+        })();
         if result.is_err() {
             self.live = false;
         }
         result
+    }
+    fn prepare_uac_policy_resources(&mut self) -> Result<(), PairingPeerError> {
+        self.recheck()?;
+        if self.role() != PairingPeerRole::Starter || self.policy_claimed {
+            self.live = false;
+            return Err(PairingPeerError::InvalidPhase);
+        }
+        self.policy_claimed = true; // No retry after allocation/open failure.
+        self.uac_policy = Some(uac_policy::UacPolicyLease::new(self)?);
+        self.uac_policy
+            .as_mut()
+            .ok_or(PairingPeerError::InvalidPhase)?
+            .prepare()
+    }
+    fn check_before_uac_policy_arm(&mut self) -> Result<(), PairingPeerError> {
+        if !self.live || !self.policy_claimed {
+            return Err(PairingPeerError::InvalidPhase);
+        }
+        self.uac_policy
+            .as_mut()
+            .ok_or(PairingPeerError::InvalidPhase)?
+            .require_prepared()?;
+        // Only this narrow, unarmed preparation phase may perform original
+        // native checks before a policy snapshot exists. Ordinary recheck does
+        // not accept an unarmed lease. No handles leave this original peer.
+        self.check_original()
+    }
+    fn arm_uac_policy(&mut self) -> Result<(), PairingPeerError> {
+        // The original-budget/native fence ran immediately in the Pipe. Keep
+        // only pure phase checks here before registration, not another native
+        // query that could outlive that last budget fence before watch issue.
+        if !self.live || !self.policy_claimed {
+            return Err(PairingPeerError::InvalidPhase);
+        }
+        self.uac_policy
+            .as_mut()
+            .ok_or(PairingPeerError::InvalidPhase)?
+            .require_prepared()?;
+        self.uac_policy
+            .as_mut()
+            .ok_or(PairingPeerError::InvalidPhase)?
+            .arm()?;
+        self.recheck()
+    }
+    fn check_uac_policy(&mut self) -> Result<(), PairingPeerError> {
+        if !self.policy_claimed || self.uac_policy.is_none() {
+            return Err(PairingPeerError::InvalidPhase);
+        }
+        self.recheck()
+    }
+    fn drain_uac_policy(&mut self) -> Result<(), PairingPeerError> {
+        // Cleanup is allowed despite failed liveness, policy, deadline or Stop.
+        if let Some(policy) = self.uac_policy.as_mut() {
+            policy.close()?;
+        }
+        drop(self.uac_policy.take());
+        Ok(())
     }
     fn check_original(&self) -> Result<(), PairingPeerError> {
         self.endpoint.context.recheck()?;

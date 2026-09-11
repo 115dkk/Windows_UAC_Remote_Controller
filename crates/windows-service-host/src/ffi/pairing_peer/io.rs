@@ -160,6 +160,42 @@ impl PairingPipe {
     pub(crate) fn check_live(&mut self) -> Result<(), Error> {
         self.inner_mut().fence()
     }
+    /// One private pre-Offer policy capture. All resources are prepared before
+    /// the final original deadline/identity fence, then retained before watcharm.
+    pub(crate) fn prepare_uac_policy(&mut self) -> Result<(), Error> {
+        let inner = self.inner_mut();
+        let result = (|| {
+            inner.fence()?;
+            if inner.phase != Phase::Connected || inner.operation.is_some() {
+                return Err(Error::InvalidPhase);
+            }
+            match inner.connection.as_mut() {
+                Some(Connection::Peer(peer)) => peer.prepare_uac_policy_resources()?,
+                _ => return Err(Error::InvalidPhase),
+            }
+            // Even unarmed resources already belong to this exact peer. Late
+            // failure cannot leave a watch/key owner detached from its drain.
+            inner.fence_before_uac_policy_arm()?;
+            match inner.connection.as_mut() {
+                Some(Connection::Peer(peer)) => peer.arm_uac_policy()?,
+                _ => return Err(Error::InvalidPhase),
+            }
+            inner.fence()
+        })();
+        result.map_err(|error| inner.fail(error))
+    }
+    pub(crate) fn check_uac_policy(&mut self) -> Result<(), Error> {
+        let inner = self.inner_mut();
+        let result = (|| {
+            inner.fence()?;
+            match inner.connection.as_mut() {
+                Some(Connection::Peer(peer)) => peer.check_uac_policy()?,
+                _ => return Err(Error::InvalidPhase),
+            }
+            inner.fence()
+        })();
+        result.map_err(|error| inner.fail(error))
+    }
     /// The fixed protocol expects no further input after its one matched frame
     /// until Close. Observe queued bytes without arming an unfinishable idle read.
     pub(crate) fn check_input_quiet(&mut self) -> Result<(), Error> {
@@ -232,11 +268,11 @@ impl Drop for PairingPipe {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.fail(Error::Cancelled);
-            if inner.in_flight() {
+            if inner.in_flight() || inner.drain_uac_policy().is_err() {
                 BOUNDARY_HEALTH.quarantine();
                 // This is the WHOLE owner, not just OVERLAPPED/storage/event:
-                // original pipe, peer process, installation/SCM pins, original
-                // deadline and reservation remain together. At most two such
+                // original pipe, policy key/event, peer process, installation/
+                // SCM pins, original deadline and reservation remain together. At most two such
                 // owners can exist; the retained pair reservation blocks any
                 // replacement; shared health also rejects positive sibling use.
                 // No autonomous wait/retry/process kill occurs.
@@ -341,6 +377,12 @@ impl Connection {
             Self::Peer(peer) => peer.recheck(),
         }
     }
+    fn drain_uac_policy(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Server(_) => Ok(()),
+            Self::Peer(peer) => peer.drain_uac_policy(),
+        }
+    }
 }
 struct Operation {
     pending: PendingOperation<Handle>,
@@ -359,6 +401,30 @@ struct Inner {
     drained: bool,
 }
 impl Inner {
+    fn fence_before_uac_policy_arm(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.first_failure {
+            return Err(error);
+        }
+        let result = service_positive(|| {
+            self.budget.observe(Instant::now())?;
+            match self.connection.as_mut() {
+                Some(Connection::Peer(peer)) => peer.check_before_uac_policy_arm()?,
+                _ => return Err(Error::InvalidPhase),
+            }
+            self.budget.observe(Instant::now())?;
+            cleanup_state()
+        });
+        result.map_err(|error| self.fail(error))
+    }
+    fn drain_uac_policy(&mut self) -> Result<(), Error> {
+        if let Some(connection) = self.connection.as_mut() {
+            connection.drain_uac_policy().map_err(|error| {
+                self.cleanup_failure.get_or_insert(error);
+                error
+            })?;
+        }
+        Ok(())
+    }
     fn in_flight(&self) -> bool {
         self.operation
             .as_ref()
@@ -529,6 +595,9 @@ impl Inner {
         }
         // Prepared/unissued or confirmed terminal only; no outstanding borrow.
         drop(self.operation.take());
+        // Retain the whole original peer/pipe if the watched key/event release
+        // is uncertain. Closing the pipe alone must not free this reservation.
+        self.drain_uac_policy().map_err(|_| first)?;
         drop(self.connection.take());
         if let Err(error) = cleanup_state() {
             self.cleanup_failure.get_or_insert(error);

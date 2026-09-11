@@ -76,9 +76,10 @@
   drives, not leaving them unchanged. This handoff cleanup is authorized even
   before prerelease publication and supersedes the ordinary timing rule below.
 - ROOT checks the actual general `codex` usage windows (usedPercent >= 50), not
-  the separate Spark bucket. Missing usage is unknown, not zero. At the last
-  read, general usage was15% used/85% remaining. The final reset credit was
-  already redeemed; no additional reset is authorized/available under that grant.
+  the separate Spark bucket. Missing usage is unknown, not zero. Observations
+  saved in evidence are historical; obtain a fresh reading before deciding the
+  threshold or final-refactoring exception. The final reset credit was already
+  redeemed; no additional reset is authorized/available under that grant.
 - If final architecture refactoring genuinely starts while more than50% remains,
   ignore this handoff threshold and continue the normal completion workflow.
   Routine code cleanup or partial-feature refactoring does not qualify. Record

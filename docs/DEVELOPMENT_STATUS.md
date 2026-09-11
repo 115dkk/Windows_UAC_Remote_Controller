@@ -7,6 +7,38 @@ experiments and unmerged protocol experiments. New edits require new ROOT checks
 
 ## Latest evidence — September 11
 
+At af1c5b9, both Windows/Linux code-quality steps passed, including the new
+Step3 Windows fixtures, Clippy, full tests and actual Analyzer/canaries. The
+overall Quality34556026261 failed only its later block2 notice collection.
+Windows34556026310, Android34556026311 and renderer34556026228 passed.
+Native lifecycle34556026283 failed16m47 at the first pre-input SystemUI
+freshness check. ROOT retained/hash-checked433 command logs and three metadata
+files; six phases, durable OFF behavior and three locked/no-native-owner samples
+completed, but no unlock input was dispatched and first unlock was not verified.
+This is a new harness failure, not a passing whole lifecycle or an established
+Android runtime regression. A bounded pre-input recapture repair is under work.
+
+ROOT's expanded original-notice collector now passed30 local fixtures and one
+real offline observation:536 packages,887 materials,4382761 original bytes.
+The exact47-consumer/30-asset policy includes explicit external-document origins
+and incomplete-terms/explanatory limitations. No package was filtered. Full
+license compatibility, corresponding source and publication remain separate;
+new CI is required for this source change. The local generated output is retained
+at target/license-materials/rust and must not be overwritten or blindly deleted.
+
+The next Windows source slice is frozen/reviewed with ADR0025: pre-Offer native
+UAC-policy watching and one-use private ceremony preparation in the same Session.
+Review corrected secret-buffer wiping and two actual retained-key checks around
+the one claim. ROOT's read-only PC observation also removed an inapplicable
+built-in-administrator setting requirement for ordinary accounts. Formatting
+passed; no new local UAC/provider execution or QR/enrollment authority exists.
+
+At12:20KST general usage was27% used/73% remaining, and free space was
+C680935424/E55521280 bytes. Conditional50% handoff/cleanup is not yet triggered.
+ROOT has a read-only exact-path cleanup inventory; no drive files were deleted.
+
+The following6fce71e checkpoint is historical and retains its exact scope.
+
 At6fce71e, both complete Windows/Linux code-quality steps passed, including
 Rustfmt, Clippy, tests, real Analyzer and canaries. The overall Quality workflow
 34549153227 remains RED because the later notice collector stopped at block2

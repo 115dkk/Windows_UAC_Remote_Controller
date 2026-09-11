@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Private ServiceSession-owned rendezvous producer. Bound matches original
-//! native transport owners only: healthy UAC policy/fresh ceremony authority
-//! before QR/grants is still REQUIRED future work. No enrollment or signing.
+//! native transport owners only. A fixed pre-Offer policy watch permits one
+//! private preparation, NOT a consent receipt or QR/enrollment/signing grant.
 #![forbid(unsafe_code)]
 
 use crate::{
@@ -10,13 +10,17 @@ use crate::{
     pairing_handoff::{Frame, ServiceHandoff, ServiceSide},
     startup_phase::ScmReadyPermit,
 };
-use approval_protocol::BootEpoch;
+use approval_core::RegistryCheckpoint;
+use approval_protocol::{BootEpoch, PcIdentity};
+use secure_channel::TlsPublicKey;
 use std::{
     fmt,
     time::{Duration, Instant},
 };
 
 const CLOSE_RESERVE: Duration = Duration::from_secs(30);
+mod ceremony;
+use ceremony::{Context as CeremonyContext, Origin, OriginalCeremony, PreparationError};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
     Dormant,
@@ -34,6 +38,8 @@ enum Failure {
     Window,
     Cancelled,
     Generation,
+    Preparation(PreparationError),
+    Identity,
 }
 impl From<PairingPeerError> for Failure {
     fn from(error: PairingPeerError) -> Self {
@@ -66,6 +72,7 @@ struct FixtureChannel {
     drained: bool,
     cancelled: bool,
     fail: bool,
+    idle: bool,
 }
 impl Channel {
     fn listener(&mut self) -> Result<&mut UnboundPairingListener, Failure> {
@@ -81,7 +88,12 @@ impl Channel {
         }
     }
     fn idle(&self) -> bool {
-        matches!(self, Self::Pipe { io: Io::Idle, .. })
+        match self {
+            Self::Pipe { io: Io::Idle, .. } => true,
+            #[cfg(test)]
+            Self::Fixture(value) => value.idle,
+            _ => false,
+        }
     }
     fn cancel(&mut self) {
         match self {
@@ -139,6 +151,8 @@ pub(super) struct ServicePairing {
     admission: Option<StarterAdmission>,
     window: Option<AttemptWindow>,
     protocol: Option<ServiceHandoff>,
+    pending_id: Option<PendingElevationId>,
+    preparation: Option<OriginalCeremony>,
     next_side: ServiceSide,
     first_failure: Option<Failure>,
     cleanup_failed: bool,
@@ -166,6 +180,8 @@ impl ServicePairing {
             admission: None,
             window: None,
             protocol: None,
+            pending_id: None,
+            preparation: None,
             next_side: ServiceSide::Starter,
             first_failure: None,
             cleanup_failed: false,
@@ -209,6 +225,8 @@ impl ServicePairing {
             || self.admission.is_some()
             || self.window.is_some()
             || self.protocol.is_some()
+            || self.pending_id.is_some()
+            || self.preparation.is_some()
         {
             return Err(Failure::Protocol);
         }
@@ -310,10 +328,21 @@ impl ServicePairing {
         let generation = self.next_generation.take().ok_or(Failure::Generation)?;
         self.next_generation = generation.checked_add(1);
         self.generation = Some(generation);
+        // Fixed actual policy watch must be current before any Offer permits
+        // the original GUI to enter its one native helper launch.
+        self.starter
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .pipe()?
+            .0
+            .prepare_uac_policy()?;
+        self.check_window(Instant::now())?;
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).map_err(|_| Failure::Random)?;
         self.check_window(Instant::now())?;
         let id = PendingElevationId::from_bytes(bytes).map_err(|_| Failure::Random)?;
+        self.pending_id = Some(id);
+        self.preparation = Some(OriginalCeremony::new());
         self.protocol = Some(ServiceHandoff::new(id));
         self.state = State::Active;
         self.check_window(Instant::now())?;
@@ -335,6 +364,7 @@ impl ServicePairing {
     }
     fn write(&mut self, side: ServiceSide, frame: Frame, operation: Io) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         if matches!(frame, Frame::Offer(_) | Frame::Bound(_))
             && Instant::now() >= self.close_at()?
         {
@@ -347,17 +377,20 @@ impl ServicePairing {
         }
         pipe.begin_write(&bytes)?;
         *io = operation;
-        self.check_window(Instant::now())
+        self.check_window(Instant::now())?;
+        self.check_policy()
     }
     fn read(&mut self, side: ServiceSide, operation: Io) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         let (pipe, io) = self.channel(side)?.pipe()?;
         if *io != Io::Idle {
             return Err(Failure::Protocol);
         }
         pipe.begin_read()?;
         *io = operation;
-        self.check_window(Instant::now())
+        self.check_window(Instant::now())?;
+        self.check_policy()
     }
     fn ensure_running(&self) -> Result<(), Failure> {
         self.ensure_running_with(crate::entry::stop_requested)
@@ -391,8 +424,19 @@ impl ServicePairing {
             .checked_sub(CLOSE_RESERVE)
             .ok_or(Failure::Window)
     }
+    fn check_policy(&mut self) -> Result<(), Failure> {
+        self.check_window(Instant::now())?;
+        self.starter
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .pipe()?
+            .0
+            .check_uac_policy()?;
+        self.check_window(Instant::now())
+    }
     fn check_pair_live(&mut self) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         self.starter
             .as_mut()
             .ok_or(Failure::Protocol)?
@@ -405,10 +449,12 @@ impl ServicePairing {
             .pipe()?
             .0
             .check_live()?;
-        self.check_window(Instant::now())
+        self.check_window(Instant::now())?;
+        self.check_policy()
     }
     fn match_pair(&mut self) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         let (pid, created) = self
             .protocol
             .as_ref()
@@ -419,7 +465,8 @@ impl ServicePairing {
         helper.match_launched_helper(starter, pid, created)?;
         starter.check_input_quiet()?;
         helper.check_input_quiet()?;
-        self.check_window(Instant::now())
+        self.check_window(Instant::now())?;
+        self.check_policy()
     }
     fn active_step(&mut self, now: Instant) -> Result<(), Failure> {
         self.check_window(now)?;
@@ -439,6 +486,9 @@ impl ServicePairing {
                 return Err(Failure::Window);
             }
             self.match_pair()?;
+            if let Some(preparation) = self.preparation.as_mut() {
+                preparation.invalidate();
+            }
             self.protocol
                 .as_mut()
                 .ok_or(Failure::Protocol)?
@@ -504,17 +554,100 @@ impl ServicePairing {
         }
         Ok(())
     }
+    /// Scheduling only; the private mutation below repeats every native gate.
+    /// No caller-provided readiness/consent flag is accepted.
+    pub(super) fn wants_preparation_context(&self) -> bool {
+        self.state == State::Active
+            && self.enabled
+            && !crate::entry::stop_requested()
+            && self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound)
+            && self.both_idle()
+    }
+    pub(super) fn maintain_original(
+        &mut self,
+        epoch: BootEpoch,
+        pc: PcIdentity,
+        pc_key: &TlsPublicKey,
+        checkpoint: &RegistryCheckpoint,
+        mut read_key: impl FnMut() -> Result<TlsPublicKey, super::PeerRuntimeError>,
+    ) {
+        let result = (|| {
+            self.check_window(Instant::now())?;
+            if !self.wants_preparation_context() || self.epoch != Some(epoch) {
+                return Err(Failure::Protocol);
+            }
+            if Instant::now() >= self.close_at()? {
+                return Err(Failure::Window);
+            }
+            self.match_pair()?;
+            let window = self.window.as_ref().ok_or(Failure::Protocol)?;
+            let origin = Origin {
+                epoch,
+                generation: self.generation.ok_or(Failure::Generation)?,
+                pending_id: self.pending_id.ok_or(Failure::Protocol)?,
+                started: window.started(),
+                deadline: window.deadline(),
+            };
+            // This pure resource may be temporarily moved while its callback
+            // borrows the SAME native pair. No pipe/key owner moves or escapes.
+            // Unwind drops/wipes it; ordinary outcomes retain it before checks.
+            let mut preparation = self.preparation.take().ok_or(Failure::Protocol)?;
+            let mut validation_failure = None;
+            let maintained = preparation.maintain(
+                CeremonyContext {
+                    origin,
+                    pc,
+                    pc_key,
+                    checkpoint,
+                },
+                || {
+                    let validation = (|| {
+                        self.match_pair()?;
+                        if Instant::now() >= self.close_at()? {
+                            return Err(Failure::Window);
+                        }
+                        let current = read_key().map_err(|_| Failure::Identity)?;
+                        self.match_pair()?;
+                        if Instant::now() >= self.close_at()? {
+                            return Err(Failure::Window);
+                        }
+                        ceremony::check_pc_pin(&current, pc_key).map_err(|_| Failure::Identity)?;
+                        self.check_window(Instant::now())
+                    })();
+                    validation.map_err(|error| {
+                        validation_failure.get_or_insert(error);
+                        PreparationError::Identity
+                    })
+                },
+            );
+            self.preparation = Some(preparation);
+            maintained
+                .map_err(|error| validation_failure.unwrap_or(Failure::Preparation(error)))?;
+            // Native checks and RNG/cloning never renew the window or convert
+            // Prepared to a grant. A late failure destroys the prepared context.
+            self.match_pair()?;
+            if Instant::now() >= self.close_at()? {
+                return Err(Failure::Window);
+            }
+            self.check_window(Instant::now())
+        })();
+        if let Err(error) = result {
+            self.retire(Some(error), true);
+        }
+    }
     fn both_idle(&self) -> bool {
         self.starter.as_ref().is_some_and(Channel::idle)
             && self.helper.as_ref().is_some_and(Channel::idle)
     }
     fn poll_side(&mut self, side: ServiceSide) -> Result<(), Failure> {
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         let (operation, progress) = {
             let (pipe, io) = self.channel(side)?.pipe()?;
             (*io, pipe.poll()?)
         };
         self.check_window(Instant::now())?;
+        self.check_policy()?;
         let outcome = match (operation, progress) {
             (_, PairingPipeProgress::Pending) | (Io::Idle, PairingPipeProgress::Idle) => Ok(()),
             (Io::Connect, PairingPipeProgress::Connected) if side == ServiceSide::Helper => {
@@ -562,7 +695,8 @@ impl ServicePairing {
             _ => Err(Failure::Protocol),
         };
         outcome?;
-        self.check_window(Instant::now())
+        self.check_window(Instant::now())?;
+        self.check_policy()
     }
     fn retire(&mut self, failure: Option<Failure>, rearm: bool) {
         if let Some(error) = failure {
@@ -570,6 +704,9 @@ impl ServicePairing {
         }
         if let Some(protocol) = self.protocol.as_mut() {
             protocol.cancel();
+        }
+        if let Some(preparation) = self.preparation.as_mut() {
+            preparation.invalidate();
         }
         if let Some(starter) = self.starter.as_mut() {
             starter.cancel();
@@ -606,6 +743,8 @@ impl ServicePairing {
         drop(self.admission.take());
         self.window = None;
         self.protocol = None;
+        self.pending_id = None;
+        self.preparation = None;
         self.generation = None;
         if self.rearm
             && !self.cleanup_failed
@@ -654,6 +793,7 @@ mod tests {
             drained: false,
             cancelled: false,
             fail,
+            idle: false,
         })
     }
     #[test]
@@ -713,6 +853,52 @@ mod tests {
         owner.enabled = true;
         assert!(owner.arm().is_err()); // Rejects before any native factory.
         assert_eq!(owner.next_generation, Some(1));
+    }
+    #[test]
+    fn preparation_scheduling_requires_both_completed_bound_writes_and_idle_owners() {
+        let id = PendingElevationId::from_bytes([1; 32]).unwrap();
+        let mut protocol = ServiceHandoff::new(id);
+        protocol.offer_written().unwrap();
+        protocol
+            .receive(ServiceSide::Helper, Frame::Hello(id))
+            .unwrap();
+        protocol
+            .receive(
+                ServiceSide::Starter,
+                Frame::HelperLaunched {
+                    id,
+                    pid: 42,
+                    created: 99,
+                },
+            )
+            .unwrap();
+        protocol.confirm_match().unwrap();
+        protocol.bound_written(ServiceSide::Starter).unwrap();
+        let mut owner = ServicePairing::dormant();
+        owner.state = State::Active;
+        owner.enabled = true;
+        owner.protocol = Some(protocol);
+        owner.preparation = Some(OriginalCeremony::new());
+        for slot in [&mut owner.starter, &mut owner.helper] {
+            let mut channel = fixture(0, false);
+            if let Channel::Fixture(value) = &mut channel {
+                value.idle = true;
+            }
+            *slot = Some(channel);
+        }
+        assert!(!owner.wants_preparation_context());
+        owner
+            .protocol
+            .as_mut()
+            .unwrap()
+            .bound_written(ServiceSide::Helper)
+            .unwrap();
+        assert!(owner.wants_preparation_context()); // Scheduling only, not native authority.
+        owner.protocol.as_mut().unwrap().start_close().unwrap();
+        assert!(!owner.wants_preparation_context());
+        owner.poll_shutdown(); // Pure fixture cleanup, no native factory or query.
+        assert_eq!(owner.remaining_owners(), 0);
+        assert!(owner.preparation.is_none());
     }
     #[test]
     fn ordinary_test_process_cannot_activate_native_pairing_endpoints() {

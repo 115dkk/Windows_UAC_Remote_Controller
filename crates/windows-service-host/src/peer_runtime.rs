@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One service-worker session. Native pairing rendezvous is owned here only
-//! after full SCM Ready; it confers no consent/enrollment/grant. No network
+//! after full SCM Ready; policy-qualified private preparation still confers no
+//! consent/enrollment/grant. No network
 //! listener/dialer, request-opening API or OS action is activated.
 #![forbid(unsafe_code)]
 
@@ -518,6 +519,19 @@ impl<'key> ServiceSession<'key> {
         {
             let now = self.now()?;
             self.pairing.poll(self.engine.boot_epoch(), now);
+            if self.pairing.wants_preparation_context() {
+                // One native-worker owner supplies the current registry/engine
+                // checkpoint and real PC identity. No foreign context or grant.
+                let checkpoint = self.current_registry_checkpoint()?;
+                let key = &self.key;
+                self.pairing.maintain_original(
+                    self.engine.boot_epoch(),
+                    self.engine.pc_identity(),
+                    &self.pc_key,
+                    &checkpoint,
+                    || key.public(),
+                );
+            }
         }
         self.revalidate_peers()?;
         if self.reap_finished() != 0 {
@@ -727,6 +741,9 @@ impl<'key> ServiceSession<'key> {
         Ok(now)
     }
     fn check_registry(&mut self) -> Result<(), PeerRuntimeError> {
+        self.current_registry_checkpoint().map(|_| ())
+    }
+    fn current_registry_checkpoint(&mut self) -> Result<RegistryCheckpoint, PeerRuntimeError> {
         let checkpoint = self
             .registry
             .as_mut()
@@ -735,7 +752,7 @@ impl<'key> ServiceSession<'key> {
         if checkpoint != self.engine.registry_checkpoint_for_privileged_host() {
             return Err(PeerRuntimeError::Registry);
         }
-        Ok(())
+        Ok(checkpoint)
     }
     fn revalidate_peers(&mut self) -> Result<(), PeerRuntimeError> {
         self.check_registry()?;
