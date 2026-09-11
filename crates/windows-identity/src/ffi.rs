@@ -244,6 +244,8 @@ fn validate_key(key: &OwnedKey, service_sid: &[u8; 32]) -> Result<(), IdentityEr
         descriptor_parts().0,
         operation,
     )?;
+    #[cfg(feature = "lab-software-identity")]
+    crate::lab::record_descriptor(&descriptor);
     validate_descriptor(&descriptor, service_sid)
 }
 

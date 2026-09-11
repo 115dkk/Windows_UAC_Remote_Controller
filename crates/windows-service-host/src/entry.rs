@@ -134,7 +134,7 @@ impl Reporter {
         checkpoint: u32,
         failure: Option<ServiceError>,
     ) -> Result<(), ServiceError> {
-        #[cfg(feature = "lab-software-identity")]
+        #[cfg(all(windows, feature = "lab-software-identity"))]
         if let Some(failure) = &failure {
             crate::lab::record_failure(failure);
         }

@@ -22,7 +22,8 @@ const ACCEPTED_IMPLEMENTATION: (u32, u32) = (2, !1);
 pub(super) const MAX_DESCRIPTOR_BYTES: usize = 4096;
 pub(super) const SYSTEM_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 // GENERIC_ALL. Both exact principals need key administration during explicit
-// initialization under SERVICE_SID_TYPE_RESTRICTED's second access check.
+// initialization. The service SID is SERVICE_SID_TYPE_UNRESTRICTED (ADR 0028):
+// a write-restricted token is refused by the key storage providers themselves.
 const EXPECTED_ACE_MASK: u32 = 0x1000_0000;
 
 /// Ownership state, not authorization. In particular, a failed finalization is

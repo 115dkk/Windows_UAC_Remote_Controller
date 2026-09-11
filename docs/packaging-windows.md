@@ -127,7 +127,7 @@ Installation runs only these fixed installed CLI operations:
 An existing service must stop before its binaries are replaced. A missing old
 helper is accepted only with actual SCM service absence; no temporary helper is
 launched as a fallback. The existing Rust `install` operation starts disabled,
-hardens the service DACL, configures Restricted service SID, provisions the fixed
+hardens the service DACL, configures the Unrestricted service SID (ADR 0028), provisions the fixed
 activity/trust directories, and **only then** configures AutoStart. `start` must
 return success before NSIS finishes successfully. The service's runtime can
 still fail TPM/key/registry initialization; those gates are not bypassed.

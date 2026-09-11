@@ -153,7 +153,7 @@ pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, Se
     if service
         .get_config_service_sid_info()
         .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
-        != ServiceSidType::Restricted
+        != ServiceSidType::Unrestricted
     {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -189,7 +189,7 @@ fn pairing_client_service_pid(service: &Service, executable: &Path) -> Result<u3
     if service
         .get_config_service_sid_info()
         .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
-        != ServiceSidType::Restricted
+        != ServiceSidType::Unrestricted
     {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -259,7 +259,7 @@ pub(crate) fn request_probe_once() -> Result<crate::ProbeRequestAccepted, Servic
     if service
         .get_config_service_sid_info()
         .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?
-        != ServiceSidType::Restricted
+        != ServiceSidType::Unrestricted
     {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -302,7 +302,7 @@ pub(crate) fn probe_control_registration_ready(executable: &Path) -> Result<(), 
     if service
         .get_config_service_sid_info()
         .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?
-        != ServiceSidType::Restricted
+        != ServiceSidType::Unrestricted
     {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -354,7 +354,7 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
     let sid = service
         .get_config_service_sid_info()
         .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?;
-    if sid != ServiceSidType::Restricted {
+    if sid != ServiceSidType::Unrestricted {
         return Err(ServiceError::ConfigurationConflict);
     }
     let began = Instant::now();
@@ -399,7 +399,7 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
                     let sid = service
                         .get_config_service_sid_info()
                         .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?;
-                    if sid != ServiceSidType::Restricted {
+                    if sid != ServiceSidType::Unrestricted {
                         return Err(ServiceError::ConfigurationConflict);
                     }
                     return Ok(snapshot(status(&service)?));
@@ -426,7 +426,7 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
     let prepare = || -> Result<(), ServiceError> {
         ffi::harden_service(&service)?;
         service
-            .set_config_service_sid_info(ServiceSidType::Restricted)
+            .set_config_service_sid_info(ServiceSidType::Unrestricted)
             .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
         ffi::provision_activity_directory()?;
         ffi::provision_trust_directory()?;

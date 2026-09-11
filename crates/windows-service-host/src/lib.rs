@@ -19,7 +19,7 @@ mod contract;
 mod diagnostic;
 /// Disposable lab builds only: the SCM exit code drops HRESULTs, so the lab
 /// keeps the failure text next to the activity journal for the evidence upload.
-#[cfg(feature = "lab-software-identity")]
+#[cfg(all(windows, feature = "lab-software-identity"))]
 mod lab {
     pub(crate) fn record_failure(failure: &crate::ServiceError) {
         let Some(root) = std::env::var_os("ProgramData") else {
@@ -28,7 +28,15 @@ mod lab {
         let path = std::path::Path::new(&root)
             .join(crate::INSTALLATION_FOLDER)
             .join("lab-failure.txt");
-        let _ = std::fs::write(path, format!("{failure}\n{failure:?}\n"));
+        let mut text = format!("{failure}\n{failure:?}\n");
+        if let Some(descriptor) = windows_identity::lab::take_descriptor() {
+            text.push_str("last-key-descriptor-hex: ");
+            for byte in descriptor {
+                text.push_str(&format!("{byte:02x}"));
+            }
+            text.push('\n');
+        }
+        let _ = std::fs::write(path, text);
     }
 }
 #[cfg(any(all(windows, target_pointer_width = "64"), test))]

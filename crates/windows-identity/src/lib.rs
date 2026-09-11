@@ -35,6 +35,26 @@ pub const IDENTITY_PROVIDER_PROFILE: &str = "platform-crypto-provider";
 #[cfg(feature = "lab-software-identity")]
 pub const IDENTITY_PROVIDER_PROFILE: &str = "lab-software-ksp-do-not-ship";
 
+/// Lab builds only: the last key security descriptor the policy examined, so a
+/// disposable runner can record what its software KSP actually returned when
+/// the descriptor policy rejects it. Never compiled into a release binary.
+#[cfg(feature = "lab-software-identity")]
+pub mod lab {
+    use std::sync::Mutex;
+
+    static LAST_DESCRIPTOR: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+    pub(crate) fn record_descriptor(bytes: &[u8]) {
+        if let Ok(mut slot) = LAST_DESCRIPTOR.lock() {
+            *slot = Some(bytes.to_vec());
+        }
+    }
+
+    pub fn take_descriptor() -> Option<Vec<u8>> {
+        LAST_DESCRIPTOR.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 /// Observe the current thread/process's fixed service identity without opening
 /// or creating a key. This is a point-in-time check, not a transferable grant:
 /// callers must recheck at each protected operation and must never impersonate
