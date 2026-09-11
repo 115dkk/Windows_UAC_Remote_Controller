@@ -5,6 +5,67 @@ Last fully passing quality revision: `cbac9627a4889db6b74d1015ff9cf7a23d3ec1ec` 
 `codex/native-runtime`. New Windows renderer-bootstrap changes are in progress
 after that revision and require their own ROOT checks. No prerelease is published.
 
+## Latest evidence — September 11 night (Claude root)
+
+Everything here is backed by exact local gate runs or CI run ids; device and UAC behaviour remain
+unverified.
+
+- `15e6043`, `a8f5467`, `cfb2604`: the service watch session (W6b), relay configuration and registry
+  device routes (W3 parts A and B), the phone-side enrollment ceremony, relay dialer and version 2
+  associations (W4, ABI 11) and the Kotlin ceremony wiring (W7) landed after root validation (fmt,
+  crate tests, Clippy with all features, the Rust Analyzer gate). Worker code needed real fixes before
+  it passed: the scan-derived clock refused the native creation callback, synthetic certificates
+  lacked a DER header, a fake PC queued frames before TLS readiness, a test mock kept the owner lease
+  alive through a reference cycle.
+- Lab runs 34601162152 and 34609160710: the hosted runner's Software KSP reports implementation flags
+  34 (software plus virtual isolation) and answers `NTE_BAD_KEY_STATE` to property reads on an
+  unfinalized key; with the restricted service SID `NCryptFinalizeKey` fails with `NTE_PERM`
+  (`0x80090010`). Restarted with an unrestricted service SID the same binary created the key and
+  stopped at the descriptor policy (`ProtectedServiceDaclRequired`). ADR 0028 therefore registers the
+  service with `SERVICE_SID_TYPE_UNRESTRICTED` (`89c1a74`). Run 34610113157 then showed the Software
+  KSP mapping each ACE mask to `0xD01F01FF`; the descriptor policy accepts that mapped full-control
+  form for the two fixed principals (`130a325`). Release packaging refuses lab-profile binaries.
+- Lab run 34611959940 (`a5c4fa3`): the service reached `Running` on a hosted runner for the first
+  time (key created, trust journal and activity journal written, `probe-once` accepted). The probe
+  supervisor then refused with `restricted_token_mismatch` (fixed in `2ebfa6c`, together with the
+  helper's own token check), and the scheduled-task elevation request produced no `consent.exe`
+  within 15 s; the next lab run records a 40 s process timeline and the task's status.
+- Android signing: a repository keystore and the four `ANDROID_*` secrets now exist, so `release.yml`
+  signs the APK with a stable key and embeds its digest into the Windows build.
+- The lifecycle READ probe expected snapshot schema 3; the app has published schema 4 since the
+  pairing view landed. Fixed in `cfb2604`; the scanner extension is still unproven.
+- `4594449`: the PC side of the enrollment ceremony landed (W3b): invitation from the protected relay
+  endpoint, enrollment stream over the relay with attestation verification and mutually pinned TLS,
+  frozen candidate signed by the PC identity key, comparison on the renderer, registry commit and
+  engine mirror, signed acceptance, and a dedicated dialer that keeps one relay connection per
+  enrolled device after Ready. 234 host tests pass in the service crate; loopback fixtures needed
+  Windows-specific socket handling (resets on early drop, nonblocking accepted sockets).
+- Lab at `733cc57`: probe-once was refused by the supervisor's token facts (TokenHasRestrictions
+  answered with fewer than four bytes; now read as a flag). No consent.exe appeared because the
+  runner administrator has no filtered token and a SAFER basic-user token elevates silently; the
+  lab now creates a standard user and requests elevation through Secondary Logon.
+- Lab run 34618803758 (`8606928`): a standard user created on the disposable runner requested
+  elevation through Secondary Logon and a real `consent.exe` appeared in the interactive session
+  while the service was Running. The probe supervisor then stopped at
+  `SetTokenInformation(TokenSessionId)` with `E_ACCESSDENIED` although SeTcbPrivilege was observed
+  enabled (and explicitly enabling it changed nothing, run 34620877517). A SYSTEM scheduled task
+  reproducing the exact call sequence (run 34622593419) showed the cause: a duplicate requested with
+  the explicit `QUERY | DUPLICATE | ASSIGN_PRIMARY | ADJUST_SESSIONID` mask is refused, while
+  `MAXIMUM_ALLOWED` and `TOKEN_ALL_ACCESS` duplicates accept the session change. The next run
+  isolates the missing right so the supervisor can request the minimal mask.
+- Scanner extension at `8606928` and `32d3baa`: the native gate opens, the client renders and
+  clicks the button, and the Kotlin open path is never reached (`launch=null`, no plugin log, no
+  visible notice). The cause is the Tauri capability: `src-tauri/capabilities/main.json` allowed
+  nine of the eleven registered commands and never listed `open_pairing_scanner` or
+  `request_details`, so Tauri 2 rejected both invokes at the IPC boundary. Fixed with the two
+  permissions and a quality-gate test that keeps the handler, the capability and the permission
+  files in step. Lifecycle run 34622848234 (`2049da8`) then passed every original phase, the first
+  unlock and both scanner cases (secure native Dialog opened from the client button, cancelled on
+  host stop, 68 no-QR view renders). At `2049da8` Quality, lifecycle, both packages and the gallery
+  are all green.
+- What remained at that point (W9, W10, green CI, the lab's session change) is recorded in the next
+  section.
+
 ## Latest evidence — September 11 evening (Claude root)
 
 Codex froze product work at `6da41e0`; Claude Fable 5.1 continues on `codex/native-runtime`.
@@ -515,3 +576,49 @@ ROOT remains the only validation executor. Child work is source authoring or
 static review, not proof. Preserve the last preauthorized reset credit until the
 user's remaining-usage threshold is met; an available credit is not itself
 permission to consume it early.
+
+## Latest evidence — September 12 early morning (Claude root)
+
+- `d6e6c9b`: the live consent prompt now reaches the phone and the phone's decision is
+  applied to the exact target (W10b, Daybreak Blue, with the root's fixes after a static
+  review by ASTRA). One live prompt per session, one engine request per `Appeared`, the
+  signed `Opened` published only to connections whose clock exchange is complete and
+  re-sent once to a connection that completes it during the prompt, a matching signed
+  decision applied once through the `PromptApply` seam to the same target and observed
+  content digest, `Gone`, expiry and replacement resolving the previous request, `Applied`
+  outcomes mapped to Approved, Denied or Failed, and engine requests consumed or dropped
+  by a decision settling the live prompt at once. `RequestContent` accepts an empty path;
+  the program name leaves out a Text label that would exceed its bound.
+- `026c5c8`: lab run 34624753134 isolated the missing token right: the helper launch
+  duplicate needs `TOKEN_ADJUST_DEFAULT` with `TOKEN_ADJUST_SESSIONID`. The next lab run
+  (34635739158) launched the helper into the interactive session and a real consent
+  prompt stayed on screen for over twelve seconds, but the journal recorded no
+  observation, and `probe-once` now answers Busy because the running service owns the
+  watcher. `74c80a6` journals the watcher's lifecycle (`watcher_started`, `watcher_alive`,
+  `watcher_restarted`, `watcher_unavailable`) so the lab can tell a dead helper from a
+  helper that scans and does not qualify the window; the lab now fails unless the
+  journal holds an observed request. Its first run (34638615635) then showed a different
+  failure: with the management pipe (W9) on a real service for the first time, the service
+  entered Running and stopped one second later with WorkerFailed, before the watcher
+  started. The next revision makes management activation non-fatal (journal kind
+  `management_unavailable`, reason in the lab notes) so the watcher runs regardless.
+- `f43df5a`: the android-bindings intake tests read the durable history under their own
+  admission (the bare lock raced the reactor on windows-2025, run 34624753189).
+- `9d0bf7a`: the management pipe (W9, Daybreak Blue, isolated worktree). The service verifies
+  the connecting process (pipe client PID and session, process creation time, image pinned
+  to the installed controller or service, token facts, session epoch); an installed
+  medium-integrity GUI may query, the elevated CLI image may remove a device or set the
+  relay. The controller runtime and the device panel show paired phones with their
+  connection state and take the relay address; `set_relay` is registered in the handler,
+  build manifest, capability and permission together. The worker's code did not compile
+  as delivered (module depth, re-exports, serde for the device id, a changed read bound);
+  the root fixed and validated it.
+- `74c80a6`: the Linux quality and Android core checks failed on f43df5a because the
+  watch session's `PromptApply` impl referenced the Windows-only peer runtime; the Tamarin
+  gate's reviewed-source hash for `approval-protocol` is rebound to the empty-path change.
+- Known limitations carried into the alpha: the helper's `Apply` message carries no
+  original deadline, so a slow UI Automation invoke can land after the 110 s TTL on the
+  same exact target; the Android pairing ceremony loses its one-shot objects when
+  admission is busy (retry restarts the ceremony); the scanner instrumentation failed
+  once with the owner closed and the camera reported unavailable (run 34624753148) and
+  passed on the next run; the developer PC has not been re-tested (user deferred).
