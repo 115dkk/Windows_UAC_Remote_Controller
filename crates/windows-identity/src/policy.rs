@@ -14,10 +14,11 @@ pub(super) const PROVIDER_NAME: &str = "Microsoft Software Key Storage Provider"
 /// NCRYPT_IMPL_HARDWARE_FLAG; hardware RNG (16) is optional in production.
 #[cfg(not(feature = "lab-software-identity"))]
 const ACCEPTED_IMPLEMENTATION: (u32, u32) = (1, 1 | 16);
-/// NCRYPT_IMPL_SOFTWARE_FLAG for the lab software provider; a hardware RNG flag
-/// (16) may accompany it on virtual machines and is tolerated there only.
+/// NCRYPT_IMPL_SOFTWARE_FLAG for the lab software provider. The runner's
+/// software KSP reports extra flags that the lab workflow records as evidence;
+/// the lab refuses only the hardware flag so it can never hide a TPM.
 #[cfg(feature = "lab-software-identity")]
-const ACCEPTED_IMPLEMENTATION: (u32, u32) = (2, 2 | 16);
+const ACCEPTED_IMPLEMENTATION: (u32, u32) = (2, !1);
 pub(super) const MAX_DESCRIPTOR_BYTES: usize = 4096;
 pub(super) const SYSTEM_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 // GENERIC_ALL. Both exact principals need key administration during explicit
@@ -323,11 +324,12 @@ mod tests {
 
     #[cfg(feature = "lab-software-identity")]
     #[test]
-    fn lab_feature_accepts_only_the_software_provider_with_the_exact_software_flag() {
+    fn lab_feature_accepts_only_the_software_provider_without_the_hardware_flag() {
         let name = wide(PROVIDER_NAME);
-        assert!(validate_provider(&name, 2, 1).is_ok());
-        assert!(validate_provider(&name, 18, 1).is_ok());
-        for flags in [0, 1, 3, 8, 17, 0x20, u32::MAX] {
+        for flags in [2, 18, 0x22, 2 | 8 | 16 | 0x20, !1u32] {
+            assert!(validate_provider(&name, flags, 1).is_ok());
+        }
+        for flags in [0, 1, 3, 8, 16, 17, 0x20, u32::MAX] {
             assert!(validate_provider(&name, flags, 1).is_err());
         }
         assert!(validate_provider(&name, 2, 0).is_err());

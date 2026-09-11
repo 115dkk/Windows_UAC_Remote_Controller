@@ -93,6 +93,34 @@ jobs:
             Write-Output ("{0}: {1} bytes, sha256 {2}" -f $leaf, $bytes.Length, (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant())
           }
           (Get-Acl -LiteralPath $env:LAB_DIR).Sddl
+      - name: Record the software KSP provider facts (read-only property queries)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:LAB_EVIDENCE | Out-Null
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LabNcrypt {
+              [DllImport("ncrypt.dll")] public static extern int NCryptOpenStorageProvider(out IntPtr provider, [MarshalAs(UnmanagedType.LPWStr)] string name, uint flags);
+              [DllImport("ncrypt.dll")] public static extern int NCryptGetProperty(IntPtr handle, [MarshalAs(UnmanagedType.LPWStr)] string property, byte[] output, uint size, out uint written, uint flags);
+              [DllImport("ncrypt.dll")] public static extern int NCryptFreeObject(IntPtr handle);
+          }
+          '@
+          $lines = foreach ($name in 'Microsoft Software Key Storage Provider', 'Microsoft Platform Crypto Provider') {
+            $handle = [IntPtr]::Zero
+            $rc = [LabNcrypt]::NCryptOpenStorageProvider([ref]$handle, $name, 0)
+            if ($rc -ne 0) { '{0}: open failed 0x{1:X8}' -f $name, $rc; continue }
+            foreach ($property in 'Impl Type', 'Security Descr Support') {
+              $buffer = New-Object byte[] 4; $written = [uint32]0
+              $rc = [LabNcrypt]::NCryptGetProperty($handle, $property, $buffer, 4, [ref]$written, 0)
+              if ($rc -eq 0) { '{0}: {1} = {2}' -f $name, $property, [BitConverter]::ToUInt32($buffer, 0) } else { '{0}: {1} query failed 0x{2:X8}' -f $name, $property, $rc }
+            }
+            $buffer = New-Object byte[] 512; $written = [uint32]0
+            $rc = [LabNcrypt]::NCryptGetProperty($handle, 'Name', $buffer, 512, [ref]$written, 0)
+            if ($rc -eq 0) { '{0}: Name = {1}' -f $name, [Text.Encoding]::Unicode.GetString($buffer, 0, [Math]::Max(0, [int]$written - 2)) } else { '{0}: Name query failed 0x{1:X8}' -f $name, $rc }
+            [void][LabNcrypt]::NCryptFreeObject($handle)
+          }
+          $lines | Tee-Object -FilePath "$env:LAB_EVIDENCE/ksp-provider-facts.txt"
       - name: Register and start the service through its fixed CLI, then wait for product Running
         shell: pwsh
         run: |
