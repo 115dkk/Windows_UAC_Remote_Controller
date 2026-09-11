@@ -256,7 +256,17 @@ fn run(
                 if cancellation_requested(stop) {
                     return Ok(());
                 }
-                session.activate_pairing(ready).map_err(session_error)?;
+                if let Some(reason) = session.activate_pairing(ready).map_err(session_error)? {
+                    // Fixed kind only; the reason itself stays out of the journal.
+                    append(
+                        &mut journal,
+                        ActivityEvent::Service(ServiceOutcome::ManagementUnavailable),
+                    )?;
+                    #[cfg(feature = "lab-software-identity")]
+                    crate::lab::record_note(&format!("management listener unavailable: {reason}"));
+                    #[cfg(not(feature = "lab-software-identity"))]
+                    drop(reason);
+                }
                 session
                     .configure_relay_after_ready(relay)
                     .map_err(session_error)?;

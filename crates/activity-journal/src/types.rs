@@ -203,6 +203,8 @@ pub enum ServiceOutcome {
     WatcherRestarted,
     /// The watcher gave up; prompts are not observed until the service restarts.
     WatcherUnavailable,
+    /// The local management pipe could not be offered; prompts and phones are unaffected.
+    ManagementUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

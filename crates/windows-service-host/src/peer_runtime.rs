@@ -601,17 +601,25 @@ impl<'key> ServiceSession<'key> {
     /// Only the worker receiving entry's exact full-Ready acknowledgement may
     /// activate these native endpoints. Shared/test constructors remain dormant.
     #[cfg(windows)]
+    /// Activates pairing and then the management pipe. The management pipe is an
+    /// auxiliary surface: when it cannot be offered the service still observes
+    /// prompts and serves enrolled phones, and the reason comes back as fixed
+    /// text for the caller's journal and lab notes (`Ok(Some(reason))`).
     pub(crate) fn activate_pairing(
         &mut self,
         ready: crate::startup_phase::ScmReadyPermit,
-    ) -> Result<(), PeerRuntimeError> {
+    ) -> Result<Option<String>, PeerRuntimeError> {
         if self.closing {
             return Err(PeerRuntimeError::Closed);
         }
         #[cfg(target_pointer_width = "64")]
         {
             self.pairing.activate(ready, self.engine.boot_epoch())?;
-            self.management.activate().map_err(|_| PeerRuntimeError::Io)
+            Ok(self
+                .management
+                .activate()
+                .err()
+                .map(|error| error.to_string()))
         }
         #[cfg(not(target_pointer_width = "64"))]
         {

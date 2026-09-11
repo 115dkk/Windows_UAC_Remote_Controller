@@ -174,12 +174,14 @@ pub fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     }
 }
 
-/// Elevated CLI verb only: stores the numeric relay endpoint in the protected
-/// trust directory. It enrolls nothing and opens no connection by itself.
+/// Read-only snapshot for the installed medium-integrity GUI over the verified
+/// management pipe: public registry metadata only, never a mutation.
 pub fn management_query() -> Result<management_protocol::ManagementResponse, ServiceError> {
     management_exchange(management_protocol::ManagementRequest::Query)
 }
 
+/// Elevated CLI verbs only (`remove`, `relay`); the service refuses other clients.
+#[cfg(windows)]
 pub(crate) fn management_mutation(
     request: management_protocol::ManagementRequest,
 ) -> Result<(), ServiceError> {
