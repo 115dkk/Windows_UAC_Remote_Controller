@@ -230,8 +230,8 @@ fn check_material(value: &Prepared, pending: PendingElevationId) -> Result<(), P
         || challenge.iter().all(|byte| *byte == 0)
         || recipient.iter().all(|byte| *byte == 0)
         || nonce == challenge
-        || nonce == &pending.bytes()
-        || challenge == &pending.bytes()
+        || nonce == pending.bytes()
+        || challenge == pending.bytes()
         || nonce == value.origin.epoch.as_bytes()
         || challenge == value.origin.epoch.as_bytes()
         || nonce == value.pc.as_bytes()

@@ -8,7 +8,8 @@ import { AVD, PACKAGE, TEST_PACKAGE, SOURCE_ROOTS, inspectTestManifest, isPassiv
   finalizeLifecycleResult, nativeOperationUnconfirmed } from './android-lifecycle-ci.mjs';
 import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, extensionCommandLimits, requireFirstUnlockDevice,
   frameworkUserState, isPassiveWaitingForUnlock, hierarchyPath, requireHierarchyCompletion,
-  requireHierarchyFresh, parseSystemUiHierarchy, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
+  FIRST_UNLOCK_MAX_RECAPTURES, FIRST_UNLOCK_MAX_HIERARCHIES, requireHierarchyFresh, parseSystemUiHierarchy,
+  requireFirstUnlockUiCurrent, guardedHierarchyInput, performFirstUnlockUi, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
 
 test('host admission refuses local, non-Linux and external ADB routing', () => {
   const env = { CI: 'true', GITHUB_ACTIONS: 'true', GITHUB_SHA: 'a'.repeat(40), GITHUB_WORKSPACE: '/workspace' };
@@ -284,6 +285,9 @@ test('first-unlock extension preserves the original ceiling and reserves bounded
   // observation retry sets must fit without consuming diagnostic capacity.
   const maximumNominalOperations = 223 + 180 + (9 * 4 * 2);
   assert.ok(extensionCommandLimits(272).operational - 272 >= maximumNominalOperations);
+  // Each extra capture costs13 commands and another post-capture guard8. The
+  // optional recovery spends the SAME budget, so all maxima together must fail.
+  assert.ok(maximumNominalOperations + 2 * (13 + 8) > extensionCommandLimits(272).operational - 272);
   for (const start of [0, -1, 401, 1.5, NaN]) assert.throws(() => extensionCommandLimits(start));
   assert.doesNotThrow(() => requireFirstUnlockDevice('0\n', 'file\n'));
   for (const [user, fbe] of [['10', 'file'], ['current', 'file'], ['0', 'block'], ['0', 'emulated'], ['0', '']]) {
@@ -347,12 +351,198 @@ test('fresh shell XML completion and <=5s post-guard age are mandatory even with
     [`UI hierchary dumped to: ${path}`, 'ERROR: failed'], ['UI hierchary dumped to: /sdcard/old.xml', '']]) {
     assert.throws(() => requireHierarchyCompletion(out, err, path));
   }
-  for (const index of [-1, 7, 0.5]) assert.throws(() => hierarchyPath('a'.repeat(32), index));
+  assert.equal(FIRST_UNLOCK_MAX_RECAPTURES, 2);
+  assert.equal(FIRST_UNLOCK_MAX_HIERARCHIES, 9);
+  const lastPath = hierarchyPath('a'.repeat(32), 8);
+  assert.doesNotThrow(() => requireHierarchyCompletion(`UI hierchary dumped to: ${lastPath}`, '', lastPath));
+  for (const index of [-1, 9, 0.5]) assert.throws(() => hierarchyPath('a'.repeat(32), index));
+  assert.throws(() => requireHierarchyCompletion(`UI hierchary dumped to: ${lastPath.replace('-8.xml', '-9.xml')}`, '', lastPath.replace('-8.xml', '-9.xml')));
   assert.throws(() => hierarchyPath('../foreign', 0));
   assert.doesNotThrow(() => requireHierarchyFresh(100, 5100));
   for (const [before, after] of [[100, 5101], [100, 99], [-1, 0], [NaN, 1], [0, Infinity]]) {
     assert.throws(() => requireHierarchyFresh(before, after));
   }
+});
+
+test('only expired valid monotonic age yields a typed outcome with zero input dispatch', async () => {
+  let calls = 0;
+  const input = async () => { calls++; return ''; };
+  const stale = await guardedHierarchyInput(100, 5101, input);
+  assert.deepEqual(stale, { kind: 'PRE_DISPATCH_STALE', capturedAt: 100, observedAt: 5101, ageMs: 5001, inputIssued: false });
+  assert.ok(Object.isFrozen(stale)); assert.equal(calls, 0);
+  assert.equal((await guardedHierarchyInput(100, 5100, input)).kind, 'INPUT_COMPLETED');
+  assert.equal(calls, 1);
+  for (const [before, after] of [[100, 99], [-1, 6000], [NaN, 6000], [0, Infinity], [0, NaN],
+    [0, Number.MAX_SAFE_INTEGER + 1], ['0', 6000], [0, '6000'], [undefined, 6000], [0, null]]) {
+    await assert.rejects(guardedHierarchyInput(before, after, input), /Invalid or regressed/);
+  }
+  assert.equal(calls, 1);
+  await assert.rejects(guardedHierarchyInput(100, 101, async () => undefined), /completion was not confirmed/);
+  const uncertain = Object.assign(new Error('input completion uncertain'), { kind: 'PRE_DISPATCH_STALE' });
+  await assert.rejects(guardedHierarchyInput(100, 101, async () => { throw uncertain; }), error => error === uncertain);
+});
+
+// Synthetic raw XML and transcript labels only. No adb/native input runs here.
+// The actual orchestration and post-guard dispatch helper are shared with CI.
+function uiCeremonyFixture({ xmls = [], ages = [], capturedTimes = [], afterGuard, onCapture, onInput } = {}) {
+  const nonce = 'a'.repeat(32), bootId = '22345678-1234-1234-1234-123456789abc';
+  const runtime = { now: 2000, wall: 10_000, state: { aborted: false, cancelled: false,
+    cleanupIncomplete: false, deviceOperationMayContinue: false, commandIndex: 0, commandLimit: 100 } };
+  const deadline = runtime.wall + 120_000;
+  const paths = [], guards = [], issued = [], actions = [], discarded = [];
+  const checkCurrent = () => requireFirstUnlockUiCurrent(runtime.state, deadline, runtime.wall);
+  const options = { nonce, bootId, checkCurrent, monotonicNow: () => runtime.now,
+    capture: async path => {
+      const index = paths.length; paths.push(path);
+      runtime.now += 10; runtime.wall += 10;
+      onCapture?.(runtime, index);
+      return { xml: xmls[index] ?? pinXml(), path, bootId, xmlSha256: 'd'.repeat(64),
+        capturedAt: Object.hasOwn(capturedTimes, index) ? capturedTimes[index] : runtime.now };
+    },
+    dispatch: async (argv, capturedAt) => {
+      const index = guards.length; guards.push({ argv, capturedAt });
+      const age = ages[index] ?? 1;
+      runtime.now = capturedAt + age; runtime.wall += age;
+      afterGuard?.(runtime, index);
+      checkCurrent(); // Same fatal state/deadline precedence as the actual caller.
+      return guardedHierarchyInput(capturedAt, runtime.now, async () => {
+        issued.push(argv); runtime.now += 10; runtime.wall += 10;
+        return onInput ? onInput(runtime, issued.length - 1) : '';
+      });
+    },
+    onAction: step => actions.push(step), onDiscard: step => discarded.push(step) };
+  return { options, runtime, deadline, paths, guards, issued, actions, discarded };
+}
+
+test('one stale reveal is recaptured without dispatch, then each actual reveal/digit/enter occurs once', async () => {
+  const value = uiCeremonyFixture({ xmls: [lockXml(), lockXml()], ages: [5001] });
+  assert.deepEqual(await performFirstUnlockUi(value.options), { captures: 7, recaptures: 1 });
+  const controls = parseSystemUiHierarchy(pinXml()).controls;
+  assert.deepEqual(value.issued, [['swipe', '540', '1800', '540', '600', '400'],
+    ...[...SYNTHETIC_CI_PIN, 'enter'].map(name => ['tap', ...controls[name].map(String)])]);
+  assert.deepEqual(value.actions.map(step => step.action), ['reveal', 'digit-0', 'digit-1', 'digit-2', 'digit-3', 'enter']);
+  assert.deepEqual(value.paths, Array.from({ length: 7 }, (_, index) => hierarchyPath(value.options.nonce, index)));
+  assert.equal(value.discarded.length, 1); assert.equal(value.discarded[0].inputIssued, false);
+  assert.equal(value.discarded[0].pendingAction, 'reveal'); assert.equal(value.discarded[0].ageMs, 5001);
+  assert.equal(value.actions[0].path, value.paths[1]);
+});
+
+test('two recaptures are shared across the whole PIN ceremony, not renewed per action', async () => {
+  for (const ages of [[5001, 5001], [5001, 1, 5001]]) {
+    const value = uiCeremonyFixture({ ages });
+    assert.deepEqual(await performFirstUnlockUi(value.options), { captures: 7, recaptures: 2 });
+    assert.equal(value.issued.length, 5); assert.equal(value.actions.length, 5); assert.equal(value.discarded.length, 2);
+    assert.equal(new Set(value.paths).size, 7);
+  }
+  const sharedWithReveal = uiCeremonyFixture({ xmls: [lockXml(), lockXml()], ages: [5001, 1, 5001] });
+  assert.deepEqual(await performFirstUnlockUi(sharedWithReveal.options), { captures: 8, recaptures: 2 });
+  assert.deepEqual(sharedWithReveal.discarded.map(step => step.pendingAction), ['reveal', 'digit-0']);
+  assert.equal(sharedWithReveal.issued.length, 6);
+  const exhausted = uiCeremonyFixture({ ages: [5001, 1, 5001, 1, 5001] });
+  await assert.rejects(performFirstUnlockUi(exhausted.options), /recapture budget exhausted/);
+  assert.equal(exhausted.paths.length, 5); assert.equal(exhausted.guards.length, 5);
+  assert.deepEqual(exhausted.actions.map(step => step.action), ['digit-0', 'digit-1']);
+  assert.equal(exhausted.issued.length, 2); assert.equal(exhausted.discarded.length, 3);
+});
+
+test('fresh XML is reparsed, controls are newly derived and current action expectations cannot be skipped', async () => {
+  const moved = pinXml().replace('[300,550][400,650]', '[320,560][420,660]');
+  const value = uiCeremonyFixture({ xmls: [pinXml(), moved], ages: [5001] });
+  await performFirstUnlockUi(value.options);
+  assert.deepEqual(value.issued[0], ['tap', '370', '610']);
+  const filled = pinXml().replace('password="true" text=""', 'password="true" text="x"');
+  for (const changed of [lockXml(), filled, pinXml().replace('rotation="0"', 'rotation="1"'),
+    pinXml().replace('key4"', 'unknown_key"'), '<hierarchy rotation="0"/>']) {
+    const bad = uiCeremonyFixture({ xmls: [pinXml(), changed], ages: [5001] });
+    await assert.rejects(performFirstUnlockUi(bad.options));
+    assert.equal(bad.paths.length, 2); assert.equal(bad.guards.length, 1);
+    assert.equal(bad.issued.length, 0); assert.equal(bad.actions.length, 0);
+  }
+  for (const changed of [pinXml(), lockXml().replace('rotation="0"', 'rotation="1"')]) {
+    const bad = uiCeremonyFixture({ xmls: [lockXml(), changed], ages: [5001] });
+    await assert.rejects(performFirstUnlockUi(bad.options), /layout\/stage changed/);
+    assert.equal(bad.issued.length, 0);
+  }
+});
+
+test('invalid or regressed clocks are fatal rather than recapture outcomes at every measured boundary', async () => {
+  for (const capturedAt of [NaN, Infinity, undefined, '2000', -1, 1999]) {
+    const value = uiCeremonyFixture({ capturedTimes: [capturedAt] });
+    await assert.rejects(performFirstUnlockUi(value.options), /Invalid or regressed/);
+    assert.equal(value.guards.length, 0); assert.equal(value.discarded.length, 0);
+  }
+  for (const now of [NaN, Infinity, '9000', 2000]) {
+    const value = uiCeremonyFixture({ afterGuard: state => { state.now = now; } });
+    await assert.rejects(performFirstUnlockUi(value.options), /Invalid or regressed/);
+    assert.equal(value.issued.length, 0); assert.equal(value.paths.length, 1); assert.equal(value.discarded.length, 0);
+  }
+  const regressedRecapture = uiCeremonyFixture({ ages: [5001], capturedTimes: [2010, 6000] });
+  await assert.rejects(performFirstUnlockUi(regressedRecapture.options), /Invalid or regressed/);
+  assert.equal(regressedRecapture.guards.length, 1); assert.equal(regressedRecapture.issued.length, 0);
+  const regressedCompletion = uiCeremonyFixture({ onInput: state => { state.now = 1; return ''; } });
+  await assert.rejects(performFirstUnlockUi(regressedCompletion.options), /Invalid or regressed/);
+  assert.equal(regressedCompletion.issued.length, 1); assert.equal(regressedCompletion.paths.length, 1);
+});
+
+test('original deadline, cancellation, uncertainty and unchanged command ceiling override stale recovery', async () => {
+  const changes = ['aborted', 'cancelled', 'cleanupIncomplete', 'deviceOperationMayContinue'].map(key =>
+    state => { state.state[key] = true; });
+  changes.push(state => { state.wall = 130_000; }, state => { state.wall = NaN; },
+    state => { state.state.commandIndex = state.state.commandLimit; }, state => { state.state.commandLimit = 913; },
+    state => { state.state.cancelled = 'false'; });
+  for (const change of changes) {
+    const value = uiCeremonyFixture({ ages: [5001], afterGuard: change });
+    await assert.rejects(performFirstUnlockUi(value.options));
+    assert.equal(value.paths.length, 1); assert.equal(value.issued.length, 0); assert.equal(value.discarded.length, 0);
+  }
+  const expiresAfterRecapture = uiCeremonyFixture({ ages: [5001, 5001],
+    afterGuard: (state, index) => { if (index === 1) state.wall = 130_000; } });
+  await assert.rejects(performFirstUnlockUi(expiresAfterRecapture.options), /interaction deadline/);
+  assert.equal(expiresAfterRecapture.deadline, 130_000); assert.equal(expiresAfterRecapture.paths.length, 2);
+  assert.equal(expiresAfterRecapture.discarded.length, 1); assert.equal(expiresAfterRecapture.issued.length, 0);
+  const cancelledCapture = uiCeremonyFixture({ ages: [5001],
+    onCapture: (state, index) => { if (index === 1) state.state.aborted = true; } });
+  await assert.rejects(performFirstUnlockUi(cancelledCapture.options), /cannot continue/);
+  assert.equal(cancelledCapture.guards.length, 1); assert.equal(cancelledCapture.issued.length, 0);
+});
+
+test('failed native operations, forged stale errors/results and late cancellation never retry input', async () => {
+  const failure = Object.assign(new Error('uncertain native operation'), { kind: 'PRE_DISPATCH_STALE' });
+  for (const callbacks of [{ onCapture: () => { throw failure; } }, { afterGuard: () => { throw failure; } },
+    { onInput: () => { throw failure; } }]) {
+    const value = uiCeremonyFixture(callbacks);
+    await assert.rejects(performFirstUnlockUi(value.options), error => error === failure);
+    assert.equal(value.paths.length, 1); assert.equal(value.discarded.length, 0); assert.equal(value.actions.length, 0);
+    assert.equal(value.issued.length, callbacks.onInput ? 1 : 0);
+  }
+  const forged = uiCeremonyFixture();
+  forged.options.dispatch = async (_, capturedAt) => ({ kind: 'PRE_DISPATCH_STALE', capturedAt, observedAt: capturedAt + 5001 });
+  await assert.rejects(performFirstUnlockUi(forged.options), /Unrecognized/);
+  assert.equal(forged.paths.length, 1); assert.equal(forged.discarded.length, 0);
+  const failedRecapture = uiCeremonyFixture({ ages: [5001], onCapture: (_, index) => { if (index === 1) throw failure; } });
+  await assert.rejects(performFirstUnlockUi(failedRecapture.options), error => error === failure);
+  assert.equal(failedRecapture.paths.length, 2); assert.equal(failedRecapture.discarded.length, 1);
+  assert.equal(failedRecapture.issued.length, 0);
+  const partialPin = uiCeremonyFixture({ onInput: (_, index) => { if (index === 1) throw failure; return ''; } });
+  await assert.rejects(performFirstUnlockUi(partialPin.options), error => error === failure);
+  assert.equal(partialPin.issued.length, 2); assert.equal(partialPin.actions.length, 1); assert.equal(partialPin.paths.length, 2);
+  const late = uiCeremonyFixture({ onInput: state => { state.state.cancelled = true; return ''; } });
+  await assert.rejects(performFirstUnlockUi(late.options), /cannot continue/);
+  assert.equal(late.issued.length, 1); assert.equal(late.actions.length, 1); assert.equal(late.discarded.length, 0);
+});
+
+test('CI uses the shared orchestration only after full guards with its original deadline and conservative capture age', () => {
+  const source = readFileSync(new URL('./android-lifecycle-ci.mjs', import.meta.url), 'utf8');
+  const mutate = source.slice(source.indexOf('async function mutate('), source.indexOf('const selected = {}'));
+  assert.ok(mutate.indexOf('await guard();') < mutate.indexOf('requireUiCurrent(deadline);'));
+  assert.ok(mutate.indexOf('requireUiCurrent(deadline);') < mutate.indexOf('return guardedHierarchyInput('));
+  assert.ok(mutate.includes('guardedHierarchyInput(uiCapturedAt, performance.now(), () =>'));
+  const ceremony = source.slice(source.indexOf('const uiDeadline = Date.now() + 120_000;'), source.indexOf('first.ready = await observeFirstUnlock(false);'));
+  assert.ok(ceremony.indexOf('const capturedAt = performance.now();') < ceremony.indexOf("'uiautomator', 'dump', path"));
+  assert.ok(ceremony.includes('await performFirstUnlockUi('));
+  assert.ok(ceremony.includes("mutate(['shell', 'input', ...argv], 15_000, undefined, null, uiDeadline, capturedAt)"));
+  assert.ok(ceremony.includes('onAction: step => first.ui.push(step), onDiscard: snapshot => first.discardedUi.push(snapshot)'));
+  assert.equal((ceremony.match(/120_000/g) ?? []).length, 1);
 });
 
 test('secure-lock instrumentation needs actual before/after framework observations', () => {
@@ -403,5 +593,30 @@ test('first-unlock coverage rejects crossed boots, partial locked observations, 
     const changed = structuredClone(good);
     changed.ready.native[key] = typeof current === 'boolean' ? !current : key === 'boot_component' ? 'DISABLED' : 'UNAVAILABLE';
     assert.throws(() => requireFirstUnlockEvidence(changed, changed.ready), key);
+  }
+});
+
+test('discarded recaptures explain unique path gaps but never count as completed input or first-unlock proof', async () => {
+  const ceremony = uiCeremonyFixture({ ages: [5001, 1, 5001] });
+  await performFirstUnlockUi(ceremony.options);
+  const good = unlockEvidence();
+  good.ui = ceremony.actions; good.discardedUi = ceremony.discarded;
+  good.ready.observedAtMonotonicMs = ceremony.runtime.now + 1000;
+  assert.doesNotThrow(() => requireFirstUnlockEvidence(good, good.ready));
+  assert.equal(good.ui.length, 5); assert.equal(good.discardedUi.length, 2);
+  for (const change of [value => { delete value.discardedUi; }, value => { value.discardedUi = null; },
+    value => { value.discardedUi.pop(); }, value => { value.discardedUi.push(value.discardedUi[0]); },
+    value => { value.discardedUi[0].path = value.ui[0].path; }, value => { value.discardedUi.reverse(); },
+    value => { value.discardedUi[0].reason = 'INPUT_FAILED'; }, value => { value.discardedUi[0].inputIssued = true; },
+    value => { value.discardedUi[0].action = 'digit-0'; }, value => { value.discardedUi[0].pendingAction = 'enter'; },
+    value => { value.discardedUi[0].kind = 'lockscreen'; }, value => { value.discardedUi[0].xmlSha256 = ''; },
+    value => { value.discardedUi[0].bootId = value.beforeBoot; }, value => { value.discardedUi[0].ageMs = 5000; },
+    value => { value.discardedUi[0].capturedAt = NaN; }, value => { value.discardedUi[0].observedAt = Infinity; },
+    value => { value.discardedUi[0].observedAt = value.ui[0].inputCompletedAtMonotonicMs; },
+    value => { value.discardedUi[0].observedAt = value.discardedUi[0].capturedAt - 1; },
+    value => { value.ui[0] = { ...value.discardedUi[0], action: 'digit-0' }; },
+    value => { value.ui.pop(); }, value => { value.ready.frameworkUserState = 'RUNNING_LOCKED'; }]) {
+    const bad = structuredClone(good); change(bad);
+    assert.throws(() => requireFirstUnlockEvidence(bad, bad.ready));
   }
 });

@@ -5,12 +5,15 @@ import { JSDOM } from 'jsdom';
 export const SYNTHETIC_CI_PIN = '4938'; // Public test fixture; NEVER a real credential.
 export const FIRST_UNLOCK_PHASES = Object.freeze(['verify-no-secure-lock', 'verify-first-unlock']);
 // The optional-reveal path uses223 commands before boot/owner polling.
-// Preserve room for bounded polling plus failure evidence, never queue retries.
+// Fresh recaptures spend this same ceiling; worst-case polling plus recaptures
+// need not fit. Exhaustion fails without consuming the diagnostic reserve.
 export const FIRST_UNLOCK_COMMANDS = 512;
 export const FIRST_UNLOCK_DIAGNOSTIC_RESERVE = 32;
 export const MAX_LIFECYCLE_COMMANDS = 400 + FIRST_UNLOCK_COMMANDS;
 export const FIRST_UNLOCK_XML_LIMIT = 256 * 1024;
 export const FIRST_UNLOCK_UI_MAX_AGE_MS = 5000;
+export const FIRST_UNLOCK_MAX_RECAPTURES = 2;
+export const FIRST_UNLOCK_MAX_HIERARCHIES = 7 + FIRST_UNLOCK_MAX_RECAPTURES;
 const SYSTEM_UI = 'com.android.systemui';
 const requireThat = (value, message) => { if (!value) throw new Error(message); };
 
@@ -42,20 +45,55 @@ export function isPassiveWaitingForUnlock(fields) {
 }
 
 export function hierarchyPath(nonce, index) {
-  requireThat(/^[0-9a-f]{32}$/.test(nonce) && Number.isSafeInteger(index) && index >= 0 && index < 7, 'Invalid bounded hierarchy identity.');
+  requireThat(/^[0-9a-f]{32}$/.test(nonce) && Number.isSafeInteger(index) && index >= 0 && index < FIRST_UNLOCK_MAX_HIERARCHIES, 'Invalid bounded hierarchy identity.');
   return `/data/local/tmp/uac-first-unlock-${nonce}-${index}.xml`;
 }
 
 export function requireHierarchyCompletion(stdout, stderr, path) {
-  requireThat(/^\/data\/local\/tmp\/uac-first-unlock-[0-9a-f]{32}-[0-6]\.xml$/.test(path) &&
+  requireThat(/^\/data\/local\/tmp\/uac-first-unlock-[0-9a-f]{32}-[0-8]\.xml$/.test(path) &&
     typeof stdout === 'string' && typeof stderr === 'string' &&
     stdout.trim() === `UI hierchary dumped to: ${path}` && stderr.trim() === '',
   'UI hierarchy command did not confirm the exact fresh file.');
 }
 
+function validMonotonic(value) {
+  return Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+}
+function hierarchyAge(capturedAt, now) {
+  requireThat(validMonotonic(capturedAt) && validMonotonic(now) && now >= capturedAt,
+    'Invalid or regressed SystemUI monotonic clock.');
+  return now - capturedAt;
+}
 export function requireHierarchyFresh(capturedAt, now) {
-  requireThat(Number.isFinite(capturedAt) && capturedAt >= 0 && Number.isFinite(now) && now >= capturedAt &&
-    now - capturedAt <= FIRST_UNLOCK_UI_MAX_AGE_MS, 'SystemUI hierarchy is stale before input dispatch.');
+  requireThat(hierarchyAge(capturedAt, now) <= FIRST_UNLOCK_UI_MAX_AGE_MS,
+    'SystemUI hierarchy is stale before input dispatch.');
+}
+
+export function requireFirstUnlockUiCurrent(state, deadline, now) {
+  requireThat(state && ['aborted', 'cancelled', 'cleanupIncomplete', 'deviceOperationMayContinue'].every(key => state[key] === false) &&
+    Number.isSafeInteger(state.commandIndex) && state.commandIndex >= 0 &&
+    Number.isSafeInteger(state.commandLimit) && state.commandIndex < state.commandLimit && state.commandLimit <= MAX_LIFECYCLE_COMMANDS,
+  'Cancelled/uncertain/bounded SystemUI ceremony cannot continue.');
+  requireThat(Number.isFinite(deadline) && Number.isFinite(now) && now >= 0 && now < deadline,
+    'SystemUI credential interaction deadline.');
+}
+
+// Only this post-guard helper can mint a recoverable PRE_DISPATCH_STALE result.
+// Invalid clocks and every input failure throw; neither can become a retry.
+// This is a CI orchestration seam, not native input/credential authority.
+const dispatchOutcomes = new WeakSet();
+export async function guardedHierarchyInput(capturedAt, observedAt, input) {
+  requireThat(typeof input === 'function', 'Missing guarded SystemUI input operation.');
+  const ageMs = hierarchyAge(capturedAt, observedAt);
+  const stale = ageMs > FIRST_UNLOCK_UI_MAX_AGE_MS;
+  if (!stale) {
+    const stdout = await input();
+    requireThat(typeof stdout === 'string', 'SystemUI input completion was not confirmed.');
+  }
+  const outcome = Object.freeze({ kind: stale ? 'PRE_DISPATCH_STALE' : 'INPUT_COMPLETED',
+    capturedAt, observedAt, ageMs, inputIssued: !stale });
+  dispatchOutcomes.add(outcome);
+  return outcome;
 }
 
 function bounds(node) {
@@ -127,6 +165,101 @@ export function parseSystemUiHierarchy(xml) {
   } finally { dom.window.close(); }
 }
 
+// The actual CI caller supplies guarded native capture/dispatch, the ORIGINAL
+// deadline/cancellation check and transcript metadata. Fixtures exercise this
+// same closed one-PIN orchestration, but never establish native behavior.
+export async function performFirstUnlockUi({ nonce, bootId, capture, dispatch, checkCurrent, monotonicNow, onAction, onDiscard }) {
+  requireThat([capture, dispatch, checkCurrent, monotonicNow, onAction, onDiscard].every(value => typeof value === 'function'),
+    'Incomplete closed SystemUI ceremony.');
+  let captures = 0, recaptures = 0, monotonicFloor = 0;
+  const observeClock = value => {
+    requireThat(validMonotonic(value) && value >= monotonicFloor, 'Invalid or regressed SystemUI monotonic clock.');
+    monotonicFloor = value;
+    return value;
+  };
+  checkCurrent(); observeClock(monotonicNow());
+  async function freshScreen() {
+    checkCurrent();
+    const path = hierarchyPath(nonce, captures++);
+    const snapshot = await capture(path);
+    checkCurrent();
+    requireThat(snapshot?.path === path && snapshot.bootId === bootId && /^[0-9a-f]{64}$/.test(snapshot.xmlSha256),
+      'SystemUI capture identity or transcript metadata changed.');
+    observeClock(snapshot.capturedAt);
+    // Reparse each fresh XML, never borrow controls or stage from a stale reply.
+    return { ...parseSystemUiHierarchy(snapshot.xml), path, bootId,
+      xmlSha256: snapshot.xmlSha256, capturedAt: snapshot.capturedAt };
+  }
+  async function action(screen, name, kind, rotation, empty, control) {
+    for (;;) {
+      checkCurrent();
+      requireThat(screen.kind === kind && screen.rotation === rotation && (!empty || screen.empty === true),
+        'SystemUI action layout/stage changed during the sole PIN attempt.');
+      const point = kind === 'pin' ? screen.controls[control] : null;
+      const argv = kind === 'pin' ? ['tap', ...point.map(String)] : ['swipe', ...screen.swipe.map(String)];
+      const outcome = await dispatch(argv, screen.capturedAt);
+      requireThat(dispatchOutcomes.has(outcome) && outcome.capturedAt === screen.capturedAt,
+        'Unrecognized SystemUI pre-dispatch/completion outcome.');
+      dispatchOutcomes.delete(outcome); // Each genuine outcome is consumed once.
+      observeClock(outcome.observedAt);
+      const metadata = { kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId };
+      if (outcome.kind === 'PRE_DISPATCH_STALE') {
+        checkCurrent(); // Cancellation, original deadline or uncertainty wins.
+        onDiscard({ ...metadata, pendingAction: name, reason: 'PRE_DISPATCH_STALE', inputIssued: false,
+          capturedAt: outcome.capturedAt, observedAt: outcome.observedAt, ageMs: outcome.ageMs });
+        requireThat(recaptures < FIRST_UNLOCK_MAX_RECAPTURES, 'SystemUI pre-dispatch recapture budget exhausted.');
+        recaptures++;
+        screen = await freshScreen();
+        continue;
+      }
+      requireThat(outcome.kind === 'INPUT_COMPLETED' && outcome.inputIssued === true, 'SystemUI input completion unavailable.');
+      const completed = Math.floor(observeClock(monotonicNow()));
+      onAction({ ...metadata, action: name, ...(point === null ? {} : { point }), inputCompletedAtMonotonicMs: completed });
+      checkCurrent(); // A completed command is retained even if the ceremony now fails.
+      return;
+    }
+  }
+  let screen = await freshScreen();
+  if (screen.kind === 'lockscreen') {
+    await action(screen, 'reveal', 'lockscreen', screen.rotation, false, null);
+    screen = await freshScreen();
+  }
+  requireThat(screen.kind === 'pin' && screen.empty === true, 'Expected an empty recognized PIN entry; no credential guessing or clearing.');
+  const rotation = screen.rotation;
+  for (let index = 0; index < SYNTHETIC_CI_PIN.length; index++) {
+    if (index !== 0) screen = await freshScreen();
+    await action(screen, `digit-${index}`, 'pin', rotation, index === 0, SYNTHETIC_CI_PIN[index]);
+  }
+  screen = await freshScreen();
+  await action(screen, 'enter', 'pin', rotation, false, 'enter');
+  return { captures, recaptures }; // Counts only, never a passing native receipt.
+}
+
+function requireUiCaptureSequence(evidence) {
+  const discarded = evidence.discardedUi === undefined ? [] : evidence.discardedUi;
+  requireThat(Array.isArray(discarded) && discarded.length <= FIRST_UNLOCK_MAX_RECAPTURES,
+    'Invalid discarded SystemUI capture evidence.');
+  const paths = Array.from({ length: FIRST_UNLOCK_MAX_HIERARCHIES }, (_, index) => hierarchyPath(evidence.nonce, index));
+  const indices = evidence.ui.map(step => paths.indexOf(step.path));
+  const discardedIndices = discarded.map(step => paths.indexOf(step.path));
+  requireThat(indices.every((value, index) => value >= 0 && (index === 0 || value > indices[index - 1])) &&
+    discardedIndices.every((value, index) => value >= 0 && (index === 0 || value > discardedIndices[index - 1])) &&
+    [...indices, ...discardedIndices].sort((a, b) => a - b).every((value, index) => value === index),
+  'Missing, reused or crossed fresh SystemUI capture paths.');
+  for (const [index, step] of discarded.entries()) {
+    const next = evidence.ui.find((_, uiIndex) => indices[uiIndex] > discardedIndices[index]);
+    const previous = evidence.ui.findLast((_, uiIndex) => indices[uiIndex] < discardedIndices[index]);
+    requireThat(next && step.pendingAction === next.action && step.kind === next.kind && step.bootId === evidence.bootId &&
+      /^[0-9a-f]{64}$/.test(step.xmlSha256) && step.reason === 'PRE_DISPATCH_STALE' && step.inputIssued === false &&
+      !Object.hasOwn(step, 'action') && validMonotonic(step.capturedAt) && validMonotonic(step.observedAt) &&
+      step.capturedAt >= (previous?.inputCompletedAtMonotonicMs ?? evidence.locked[2].observedAtMonotonicMs) &&
+      step.observedAt - step.capturedAt === step.ageMs && step.ageMs > FIRST_UNLOCK_UI_MAX_AGE_MS &&
+      step.observedAt < next.inputCompletedAtMonotonicMs &&
+      (index === 0 || step.capturedAt >= discarded[index - 1].observedAt),
+    'Discarded stale XML cannot supply input or first-unlock proof.');
+  }
+}
+
 export function requireFirstUnlockEvidence(evidence, ready) {
   const boot = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
   requireThat(evidence?.scope === 'DISPOSABLE_API36_X86_64_FIRST_UNLOCK' && boot.test(evidence.beforeBoot) &&
@@ -151,8 +284,7 @@ export function requireFirstUnlockEvidence(evidence, ready) {
   const actions = evidence.ui?.filter(step => step.action !== 'reveal');
   requireThat(Array.isArray(actions) && actions.length === SYNTHETIC_CI_PIN.length + 1 &&
     evidence.ui.length <= SYNTHETIC_CI_PIN.length + 2 &&
-    evidence.ui.every((step, index) => step.path === hierarchyPath(evidence.nonce, index) &&
-      step.bootId === evidence.bootId && /^[0-9a-f]{64}$/.test(step.xmlSha256) &&
+    evidence.ui.every((step, index) => step.bootId === evidence.bootId && /^[0-9a-f]{64}$/.test(step.xmlSha256) &&
       Number.isSafeInteger(step.inputCompletedAtMonotonicMs) && step.inputCompletedAtMonotonicMs >
         (index === 0 ? evidence.locked[2].observedAtMonotonicMs : evidence.ui[index - 1].inputCompletedAtMonotonicMs)) &&
     (evidence.ui.length === actions.length || (evidence.ui[0].action === 'reveal' && evidence.ui[0].kind === 'lockscreen')) &&
@@ -160,6 +292,7 @@ export function requireFirstUnlockEvidence(evidence, ready) {
       step.kind === 'pin' && Array.isArray(step.point) && step.point.length === 2 &&
       step.point.every(value => Number.isSafeInteger(value) && value >= 0 && value <= 8192)),
   'Missing recognized one-attempt SystemUI PIN input sequence.');
+  requireUiCaptureSequence(evidence);
   requireThat(ready?.bootId === evidence.bootId && ready.frameworkUserState === 'RUNNING_UNLOCKED' && ready.presence === 'foreground' &&
     ready.beforeActivityOrInstrumentation === true && Number.isSafeInteger(ready.observedAtMonotonicMs) &&
     ready.observedAtMonotonicMs > evidence.ui.at(-1).inputCompletedAtMonotonicMs &&

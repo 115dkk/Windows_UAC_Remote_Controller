@@ -418,9 +418,8 @@ impl Inner {
     }
     fn drain_uac_policy(&mut self) -> Result<(), Error> {
         if let Some(connection) = self.connection.as_mut() {
-            connection.drain_uac_policy().map_err(|error| {
+            connection.drain_uac_policy().inspect_err(|&error| {
                 self.cleanup_failure.get_or_insert(error);
-                error
             })?;
         }
         Ok(())

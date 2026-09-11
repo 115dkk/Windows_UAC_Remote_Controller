@@ -11,8 +11,8 @@ import { onlyIsolatedEmulator, requireBroadcastBarrier } from './android-notific
 import { inspectApk } from './verify-android-apk.mjs';
 import { inspectBootManifest } from './verify-android-boot-manifest.mjs';
 import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, FIRST_UNLOCK_XML_LIMIT, MAX_LIFECYCLE_COMMANDS, extensionCommandLimits,
-  requireFirstUnlockDevice, frameworkUserState, isPassiveWaitingForUnlock, hierarchyPath,
-  requireHierarchyCompletion, requireHierarchyFresh, parseSystemUiHierarchy, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
+  requireFirstUnlockDevice, frameworkUserState, isPassiveWaitingForUnlock, requireHierarchyCompletion,
+  requireFirstUnlockUiCurrent, guardedHierarchyInput, performFirstUnlockUi, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
 
 export const PACKAGE = 'dev.dkk115.uacremote';
 export const TEST_PACKAGE = `${PACKAGE}.test`;
@@ -310,13 +310,25 @@ export async function main(args = process.argv.slice(2)) {
       if (firstUnlockDeviceRequired) requireFirstUnlockDevice(await read(['shell', 'am', 'get-current-user']), await read(['shell', 'getprop', 'ro.crypto.type']));
       if (protectedBoot !== null) requireSameBoot(protectedBoot, await bootId());
     }
+    function requireUiCurrent(deadline) {
+      requireFirstUnlockUiCurrent({ aborted: controller.signal.aborted, cancelled: result.cancelled,
+        cleanupIncomplete: result.cleanupIncomplete, deviceOperationMayContinue: result.deviceOperationMayContinue,
+        commandIndex, commandLimit }, deadline, Date.now());
+    }
     async function mutate(argv, timeout = 30_000, limit, uiDumpPath = null, deadline = null, uiCapturedAt = null) {
       await guard();
       if (deadline !== null) {
         const remaining = deadline - Date.now(); requireThat(remaining > 0, 'Device input deadline elapsed before dispatch.');
         timeout = Math.min(timeout, remaining);
       }
-      if (uiCapturedAt !== null) requireHierarchyFresh(uiCapturedAt, performance.now());
+      if (uiCapturedAt !== null) {
+        // Only after the FULL guard and original deadline/state checks can valid
+        // age expiry become a no-dispatch recapture outcome. Failed commands,
+        // cancellation and uncertain native operations never take that path.
+        requireUiCurrent(deadline);
+        return guardedHierarchyInput(uiCapturedAt, performance.now(), () =>
+          command(adb, ['-s', SERIAL, ...argv], timeout, true, limit, uiDumpPath));
+      }
       return command(adb, ['-s', SERIAL, ...argv], timeout, true, limit, uiDumpPath);
     }
     const selected = {};
@@ -451,7 +463,7 @@ export async function main(args = process.argv.slice(2)) {
     commandLimit = extensionLimits.operational; diagnosticCommandLimit = extensionLimits.diagnostics;
     firstUnlockDeviceRequired = true;
     const first = { scope: 'DISPOSABLE_API36_X86_64_FIRST_UNLOCK', nonce: randomBytes(16).toString('hex'),
-      syntheticCredentialFixture: true, setupConfirmed: false, locked: [], ui: [],
+      syntheticCredentialFixture: true, setupConfirmed: false, locked: [], ui: [], discardedUi: [],
       commandBudget: { start: extensionStart, operational: commandLimit, includingDiagnostics: diagnosticCommandLimit } };
     result.firstUnlock = first;
     await guard();
@@ -512,12 +524,10 @@ export async function main(args = process.argv.slice(2)) {
     }
     await mutate(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
     const uiDeadline = Date.now() + 120_000;
-    let hierarchyIndex = 0;
-    async function currentCredentialUi() {
-      requireThat(Date.now() < uiDeadline, 'SystemUI credential interaction deadline.');
+    async function currentCredentialUi(path) {
+      requireUiCurrent(uiDeadline);
       requireSameBoot(first.bootId, await bootId());
       requireThat(frameworkUserState(await read(['shell', 'dumpsys', 'user'])) === 'RUNNING_LOCKED', 'Credential input requires actual locked user0.');
-      const path = hierarchyPath(first.nonce, hierarchyIndex++);
       await read(['shell', 'test', '!', '-e', path]); // Never reuse/overwrite an earlier hierarchy.
       await guard();
       const remaining = uiDeadline - Date.now(); requireThat(remaining > 0, 'SystemUI capture deadline elapsed.');
@@ -527,31 +537,12 @@ export async function main(args = process.argv.slice(2)) {
       await command(adb, ['-s', SERIAL, 'shell', 'uiautomator', 'dump', path], Math.min(15_000, remaining), true, FIRST_UNLOCK_XML_LIMIT, path);
       const xml = await read(['shell', 'cat', path]);
       requireThat(Date.now() < uiDeadline, 'SystemUI hierarchy arrived after its interaction deadline.');
-      const screen = parseSystemUiHierarchy(xml);
-      return { ...screen, path, xmlSha256: sha(xml), bootId: first.bootId, capturedAt };
+      return { xml, path, xmlSha256: sha(xml), bootId: first.bootId, capturedAt };
     }
-    let screen = await currentCredentialUi();
-    if (screen.kind === 'lockscreen') {
-      await mutate(['shell', 'input', 'swipe', ...screen.swipe.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
-      first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
-        action: 'reveal', inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
-      screen = await currentCredentialUi();
-    }
-    requireThat(screen.kind === 'pin' && screen.empty, 'Expected an empty recognized PIN entry; no credential guessing or clearing.');
-    const rotation = screen.rotation;
-    for (let index = 0; index < SYNTHETIC_CI_PIN.length; index++) {
-      if (index !== 0) screen = await currentCredentialUi();
-      requireThat(screen.kind === 'pin' && screen.rotation === rotation && Date.now() < uiDeadline, 'PIN layout changed during the sole attempt.');
-      const point = screen.controls[SYNTHETIC_CI_PIN[index]];
-      await mutate(['shell', 'input', 'tap', ...point.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
-      first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
-        action: `digit-${index}`, point, inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
-    }
-    screen = await currentCredentialUi();
-    requireThat(screen.kind === 'pin' && screen.rotation === rotation && Date.now() < uiDeadline, 'PIN submit control unavailable.');
-    await mutate(['shell', 'input', 'tap', ...screen.controls.enter.map(String)], 15_000, undefined, null, uiDeadline, screen.capturedAt);
-    first.ui.push({ kind: screen.kind, path: screen.path, xmlSha256: screen.xmlSha256, bootId: first.bootId,
-      action: 'enter', point: screen.controls.enter, inputCompletedAtMonotonicMs: Math.floor(performance.now()) });
+    await performFirstUnlockUi({ nonce: first.nonce, bootId: first.bootId, capture: currentCredentialUi,
+      dispatch: (argv, capturedAt) => mutate(['shell', 'input', ...argv], 15_000, undefined, null, uiDeadline, capturedAt),
+      checkCurrent: () => requireUiCurrent(uiDeadline), monotonicNow: () => performance.now(),
+      onAction: step => first.ui.push(step), onDiscard: snapshot => first.discardedUi.push(snapshot) });
     first.ready = await observeFirstUnlock(false);
     // Only now may instrumentation launch the product. It cannot establish the
     // preceding boot/unlock transition; it verifies the real PIN stayed configured.
