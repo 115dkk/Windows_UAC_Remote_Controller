@@ -11,12 +11,16 @@ use crate::{
         AttemptWindow, ListenProgress, RendererRegistration, StarterAdmission,
         UnboundPairingListener, check_renderer_cutoff, renderer_original_cutoff,
     },
-    pairing_handoff::{Frame, RendererProcess, RendererRequest, ServiceHandoff, ServiceSide},
+    pairing_handoff::{
+        ComparisonDigits, Frame, InvitationText, RendererProcess, RendererRequest, ServiceHandoff,
+        ServiceSide,
+    },
     startup_phase::ScmReadyPermit,
 };
 use approval_core::RegistryCheckpoint;
 use approval_protocol::{BootEpoch, PcIdentity};
 use secure_channel::TlsPublicKey;
+use service_protocol::PairingComparisonCode;
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -34,7 +38,7 @@ enum State {
     Unavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Failure {
+pub(super) enum Failure {
     Native(PairingPeerError),
     Protocol,
     Random,
@@ -72,6 +76,8 @@ enum RendererParent {
     RegisterWrite,
     Done,
 }
+// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RendererIo {
     Connect,
@@ -79,20 +85,40 @@ enum RendererIo {
     ObjectsRead,
     BoundWrite,
     Idle,
+    InvitationWrite,
+    ComparisonWrite,
+    DecisionRead,
+    OutcomeWrite,
     CloseWrite,
     AckRead,
     Acknowledged,
     TransportClosed,
     Drained,
 }
-struct RendererRun {
+// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContentAction {
+    Invitation,
+    Comparison,
+    Outcome,
+}
+// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
+#[allow(dead_code)]
+pub(super) struct RendererRun {
     request: RendererRequest,
     pipe: PairingPipe,
     registration: RendererRegistration,
     parent: RendererParent,
     io: RendererIo,
+    invitation_sent: bool,
+    comparison_sent: bool,
+    decision_received: bool,
+    decision: Option<bool>,
+    outcome_sent: bool,
     cleanup_failed: bool,
 }
+#[allow(dead_code)] // Renderer content API awaits the W3 orchestration.
 impl RendererRun {
     fn awaiting_parent(&self) -> bool {
         matches!(
@@ -124,6 +150,110 @@ impl RendererRun {
         self.parent == RendererParent::Done
             && self.io == RendererIo::Idle
             && self.registration.objects_bound()
+    }
+    fn content_state_allows(
+        io: RendererIo,
+        invitation_sent: bool,
+        comparison_sent: bool,
+        outcome_sent: bool,
+        action: ContentAction,
+    ) -> bool {
+        if io != RendererIo::Idle {
+            return false;
+        }
+        match action {
+            ContentAction::Invitation => !invitation_sent,
+            ContentAction::Comparison => invitation_sent && !comparison_sent,
+            // A failure outcome is legal as soon as the invitation is shown; the
+            // caller only sends `enrolled: true` after both confirmations.
+            ContentAction::Outcome => invitation_sent && !outcome_sent,
+        }
+    }
+    pub(super) fn ready_for_invitation(&self) -> bool {
+        self.parent == RendererParent::Done
+            && self.registration.objects_bound()
+            && Self::content_state_allows(
+                self.io,
+                self.invitation_sent,
+                self.comparison_sent,
+                self.outcome_sent,
+                ContentAction::Invitation,
+            )
+    }
+    pub(super) fn send_invitation(&mut self, text: &InvitationText) -> Result<(), Failure> {
+        if !self.ready_for_invitation() {
+            return Err(Failure::Protocol);
+        }
+        self.begin_renderer_write(
+            Frame::RendererInvitation {
+                invocation: self.request.invocation,
+                text: text.clone(),
+            },
+            RendererIo::InvitationWrite,
+        )?;
+        self.invitation_sent = true;
+        Ok(())
+    }
+    pub(super) fn send_comparison(&mut self, code: &PairingComparisonCode) -> Result<(), Failure> {
+        if !self.ready_idle()
+            || !Self::content_state_allows(
+                self.io,
+                self.invitation_sent,
+                self.comparison_sent,
+                self.outcome_sent,
+                ContentAction::Comparison,
+            )
+        {
+            return Err(Failure::Protocol);
+        }
+        let code = ComparisonDigits::from_code(code).map_err(|_| Failure::Protocol)?;
+        self.begin_renderer_write(
+            Frame::RendererComparison {
+                invocation: self.request.invocation,
+                code,
+            },
+            RendererIo::ComparisonWrite,
+        )?;
+        self.comparison_sent = true;
+        Ok(())
+    }
+    pub(super) fn take_decision(&mut self) -> Option<bool> {
+        self.decision.take()
+    }
+    pub(super) fn send_outcome(&mut self, enrolled: bool) -> Result<(), Failure> {
+        if !self.ready_idle()
+            || !Self::content_state_allows(
+                self.io,
+                self.invitation_sent,
+                self.comparison_sent,
+                self.outcome_sent,
+                ContentAction::Outcome,
+            )
+        {
+            return Err(Failure::Protocol);
+        }
+        self.begin_renderer_write(
+            Frame::RendererOutcome {
+                invocation: self.request.invocation,
+                enrolled,
+            },
+            RendererIo::OutcomeWrite,
+        )?;
+        self.outcome_sent = true;
+        Ok(())
+    }
+    pub(super) fn is_idle(&self) -> bool {
+        self.io == RendererIo::Idle
+    }
+    fn begin_renderer_write(&mut self, frame: Frame, next: RendererIo) -> Result<(), Failure> {
+        if self.io != RendererIo::Idle {
+            return Err(Failure::Protocol);
+        }
+        self.registration.check_connected(&mut self.pipe)?;
+        self.pipe
+            .begin_write(&frame.encode().map_err(|_| Failure::Protocol)?)?;
+        self.io = next;
+        Ok(())
     }
     fn begin_close(&mut self) -> Result<(), Failure> {
         if !self.ready_idle() {
@@ -216,6 +346,32 @@ impl RendererRun {
             (RendererIo::Idle, PairingPipeProgress::Idle) => {
                 self.registration.check_connected(&mut self.pipe)?;
                 self.pipe.check_input_quiet()?;
+            }
+            (RendererIo::InvitationWrite, PairingPipeProgress::Written)
+            | (RendererIo::OutcomeWrite, PairingPipeProgress::Written) => {
+                self.registration.check_connected(&mut self.pipe)?;
+                self.io = RendererIo::Idle;
+            }
+            (RendererIo::ComparisonWrite, PairingPipeProgress::Written) => {
+                self.registration.check_connected(&mut self.pipe)?;
+                self.pipe.begin_read()?;
+                self.io = RendererIo::DecisionRead;
+            }
+            (RendererIo::DecisionRead, PairingPipeProgress::Read(bytes)) => {
+                let Frame::RendererDecision {
+                    invocation,
+                    confirmed,
+                } = Frame::decode(&bytes).map_err(|_| Failure::Protocol)?
+                else {
+                    return Err(Failure::Protocol);
+                };
+                if invocation != self.request.invocation || self.decision_received {
+                    return Err(Failure::Protocol);
+                }
+                self.registration.check_connected(&mut self.pipe)?;
+                self.decision_received = true;
+                self.decision = Some(confirmed);
+                self.io = RendererIo::Idle;
             }
             (RendererIo::CloseWrite, PairingPipeProgress::Written) => {
                 self.pipe.begin_read()?;
@@ -921,6 +1077,11 @@ impl ServicePairing {
             registration: RendererRegistration::new(),
             parent: RendererParent::PrepareWrite,
             io: RendererIo::Connect,
+            invitation_sent: false,
+            comparison_sent: false,
+            decision_received: false,
+            decision: None,
+            outcome_sent: false,
             cleanup_failed: false,
         });
         self.match_pair()?;
@@ -1113,6 +1274,14 @@ impl ServicePairing {
         self.shutdown();
         self.drain_step();
     }
+    #[allow(dead_code)] // W3 orchestration entry.
+    pub(super) fn renderer_mut(&mut self) -> Option<&mut RendererRun> {
+        self.renderer.as_mut()
+    }
+    #[allow(dead_code)] // W3 orchestration entry.
+    pub(super) fn renderer(&self) -> Option<&RendererRun> {
+        self.renderer.as_ref()
+    }
     pub(super) fn remaining_owners(&self) -> usize {
         usize::from(
             self.starter
@@ -1147,6 +1316,37 @@ mod tests {
             fail,
             idle: false,
         })
+    }
+    #[test]
+    fn renderer_content_order_rejects_comparison_first_and_duplicate_invitation() {
+        assert!(!RendererRun::content_state_allows(
+            RendererIo::Idle,
+            false,
+            false,
+            false,
+            ContentAction::Comparison,
+        ));
+        assert!(RendererRun::content_state_allows(
+            RendererIo::Idle,
+            false,
+            false,
+            false,
+            ContentAction::Invitation,
+        ));
+        assert!(!RendererRun::content_state_allows(
+            RendererIo::Idle,
+            true,
+            false,
+            false,
+            ContentAction::Invitation,
+        ));
+        assert!(!RendererRun::content_state_allows(
+            RendererIo::DecisionRead,
+            true,
+            true,
+            false,
+            ContentAction::Outcome,
+        ));
     }
     #[test]
     fn late_stop_blocks_producer_eligibility_but_not_mock_cleanup() {

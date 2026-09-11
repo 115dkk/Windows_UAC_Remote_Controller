@@ -3,14 +3,23 @@
 #![forbid(unsafe_code)]
 
 use crate::{PendingElevationId, RendererInvocation};
-use std::fmt;
+use service_protocol::{
+    MAX_PAIRING_INVITATION_QR_TEXT_BYTES, MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
+    PairingComparisonCode, PairingInvitation,
+};
+use std::{fmt, str};
 
 const HEADER: &[u8; 4] = b"UCPH";
 const VERSION: u8 = 1;
 const SHORT_FRAME: usize = 40;
 const LAUNCH_FRAME: usize = 52;
+const RENDERER_PREFIX: usize = 72;
+const INVITATION_MIN_FRAME: usize = RENDERER_PREFIX + 2 + MIN_PAIRING_INVITATION_QR_TEXT_BYTES;
+const INVITATION_MAX_FRAME: usize = RENDERER_PREFIX + 2 + MAX_PAIRING_INVITATION_QR_TEXT_BYTES;
+const COMPARISON_FRAME: usize = RENDERER_PREFIX + 6;
+const BOOLEAN_FRAME: usize = RENDERER_PREFIX + 1;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum Frame {
     Offer(PendingElevationId),
     HelperLaunched {
@@ -34,6 +43,78 @@ pub(crate) enum Frame {
         objects: RendererObjects,
     },
     RendererBound(RendererRequest),
+    RendererInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    RendererComparison {
+        invocation: RendererInvocation,
+        code: ComparisonDigits,
+    },
+    RendererDecision {
+        invocation: RendererInvocation,
+        confirmed: bool,
+    },
+    RendererOutcome {
+        invocation: RendererInvocation,
+        enrolled: bool,
+    },
+}
+
+pub(crate) struct InvitationText(String);
+impl InvitationText {
+    pub(crate) fn new(text: String) -> Result<Self, HandoffError> {
+        PairingInvitation::from_qr_text(&text).map_err(|_| HandoffError::Frame)?;
+        Ok(Self(text))
+    }
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Clone for InvitationText {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl Eq for InvitationText {}
+impl PartialEq for InvitationText {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl fmt::Debug for InvitationText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InvitationText(redacted)")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ComparisonDigits([u8; 6]);
+impl ComparisonDigits {
+    // Called by the enrollment orchestration (ADR 0027, W3); unused until then.
+    #[allow(dead_code)]
+    pub(crate) fn from_code(code: &PairingComparisonCode) -> Result<Self, HandoffError> {
+        let bytes: [u8; 6] = code
+            .as_str()
+            .as_bytes()
+            .try_into()
+            .map_err(|_| HandoffError::Frame)?;
+        Self::new(bytes)
+    }
+    fn new(bytes: [u8; 6]) -> Result<Self, HandoffError> {
+        if !bytes.iter().all(u8::is_ascii_digit) {
+            return Err(HandoffError::Frame);
+        }
+        Ok(Self(bytes))
+    }
+    pub(crate) fn as_str(&self) -> &str {
+        str::from_utf8(&self.0).expect("comparison digits are validated ASCII")
+    }
+}
+impl fmt::Debug for ComparisonDigits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ComparisonDigits(redacted)")
+    }
 }
 
 /// Shape-only, public-correlation fields. Only original native owners interpret
@@ -96,6 +177,10 @@ impl fmt::Debug for Frame {
             Self::RendererHello(_) => "RendererHello(redacted)",
             Self::RendererObjects { .. } => "RendererObjects(redacted)",
             Self::RendererBound(_) => "RendererBound(redacted)",
+            Self::RendererInvitation { .. } => "RendererInvitation(redacted)",
+            Self::RendererComparison { .. } => "RendererComparison(redacted)",
+            Self::RendererDecision { .. } => "RendererDecision(redacted)",
+            Self::RendererOutcome { .. } => "RendererOutcome(redacted)",
         })
     }
 }
@@ -276,7 +361,7 @@ impl ServiceHandoff {
     }
 }
 impl Frame {
-    fn kind(self) -> u8 {
+    fn kind(&self) -> u8 {
         match self {
             Self::Offer(_) => 1,
             Self::HelperLaunched { .. } => 2,
@@ -290,16 +375,20 @@ impl Frame {
             Self::RendererHello(_) => 10,
             Self::RendererObjects { .. } => 11,
             Self::RendererBound(_) => 12,
+            Self::RendererInvitation { .. } => 13,
+            Self::RendererComparison { .. } => 14,
+            Self::RendererDecision { .. } => 15,
+            Self::RendererOutcome { .. } => 16,
         }
     }
-    fn id(self) -> PendingElevationId {
+    fn id(&self) -> PendingElevationId {
         match self {
             Self::Offer(id)
             | Self::Hello(id)
             | Self::Bound(id)
             | Self::Close(id)
             | Self::CloseAck(id)
-            | Self::HelperLaunched { id, .. } => id,
+            | Self::HelperLaunched { id, .. } => *id,
             Self::PrepareRenderer(value)
             | Self::RendererRegistered(value)
             | Self::RendererBound(value)
@@ -307,16 +396,28 @@ impl Frame {
             | Self::RendererHello(value) => value.invocation.pending(),
             Self::RendererObjects {
                 invocation: value, ..
+            }
+            | Self::RendererInvitation {
+                invocation: value, ..
+            }
+            | Self::RendererComparison {
+                invocation: value, ..
+            }
+            | Self::RendererDecision {
+                invocation: value, ..
+            }
+            | Self::RendererOutcome {
+                invocation: value, ..
             } => value.pending(),
         }
     }
-    pub(crate) fn encode(self) -> Result<Vec<u8>, HandoffError> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, HandoffError> {
         let mut bytes = Vec::with_capacity(LAUNCH_FRAME);
         bytes.extend_from_slice(HEADER);
         bytes.extend_from_slice(&[VERSION, self.kind(), 0, 0]);
         bytes.extend_from_slice(&self.id().bytes());
         if let Self::HelperLaunched { pid, created, .. } = self {
-            if pid == 0 || created == 0 {
+            if *pid == 0 || *created == 0 {
                 return Err(HandoffError::Frame);
             }
             bytes.extend_from_slice(&pid.to_le_bytes());
@@ -354,12 +455,48 @@ impl Frame {
                 bytes.extend_from_slice(&objects.desktop.to_le_bytes());
                 bytes.extend_from_slice(&objects.station.to_le_bytes());
             }
+            Self::RendererInvitation { invocation, text } => {
+                PairingInvitation::from_qr_text(text.as_str()).map_err(|_| HandoffError::Frame)?;
+                bytes.extend_from_slice(&invocation.display().bytes());
+                let length = u16::try_from(text.as_str().len()).map_err(|_| HandoffError::Frame)?;
+                bytes.extend_from_slice(&length.to_be_bytes());
+                bytes.extend_from_slice(text.as_str().as_bytes());
+            }
+            Self::RendererComparison { invocation, code } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.extend_from_slice(code.as_str().as_bytes());
+            }
+            Self::RendererDecision {
+                invocation,
+                confirmed,
+            } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.push(u8::from(*confirmed));
+            }
+            Self::RendererOutcome {
+                invocation,
+                enrolled,
+            } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.push(u8::from(*enrolled));
+            }
             _ => (),
         }
         Ok(bytes)
     }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, HandoffError> {
-        if ![SHORT_FRAME, LAUNCH_FRAME, 80, 92, 96].contains(&bytes.len())
+        if ![
+            SHORT_FRAME,
+            LAUNCH_FRAME,
+            80,
+            92,
+            96,
+            INVITATION_MIN_FRAME,
+            INVITATION_MAX_FRAME,
+            COMPARISON_FRAME,
+            BOOLEAN_FRAME,
+        ]
+        .contains(&bytes.len())
             || !bytes.starts_with(HEADER)
             || bytes[4] != VERSION
             || bytes[6..8] != [0, 0]
@@ -370,7 +507,7 @@ impl Frame {
             bytes[8..40].try_into().map_err(|_| HandoffError::Frame)?,
         )
         .map_err(|_| HandoffError::Frame)?;
-        if (7..=12).contains(&bytes[5]) {
+        if (7..=16).contains(&bytes[5]) {
             if bytes.len() < 72 {
                 return Err(HandoffError::Frame);
             }
@@ -431,6 +568,49 @@ impl Frame {
                             Ok(Self::RendererLaunched { request, process })
                         }
                         _ => Err(HandoffError::Frame),
+                    };
+                }
+                (13, INVITATION_MIN_FRAME | INVITATION_MAX_FRAME) => {
+                    let length = usize::from(u16::from_be_bytes(
+                        bytes[72..74].try_into().map_err(|_| HandoffError::Frame)?,
+                    ));
+                    if length + 74 != bytes.len()
+                        || ![
+                            MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
+                            MAX_PAIRING_INVITATION_QR_TEXT_BYTES,
+                        ]
+                        .contains(&length)
+                    {
+                        return Err(HandoffError::Frame);
+                    }
+                    let text = str::from_utf8(&bytes[74..]).map_err(|_| HandoffError::Frame)?;
+                    return Ok(Self::RendererInvitation {
+                        invocation,
+                        text: InvitationText::new(text.to_owned())?,
+                    });
+                }
+                (14, COMPARISON_FRAME) => {
+                    let code = ComparisonDigits::new(
+                        bytes[72..78].try_into().map_err(|_| HandoffError::Frame)?,
+                    )?;
+                    return Ok(Self::RendererComparison { invocation, code });
+                }
+                (15 | 16, BOOLEAN_FRAME) => {
+                    let value = match bytes[72] {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(HandoffError::Frame),
+                    };
+                    return if bytes[5] == 15 {
+                        Ok(Self::RendererDecision {
+                            invocation,
+                            confirmed: value,
+                        })
+                    } else {
+                        Ok(Self::RendererOutcome {
+                            invocation,
+                            enrolled: value,
+                        })
                     };
                 }
                 _ => return Err(HandoffError::Frame),
@@ -644,6 +824,36 @@ impl Handoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approval_protocol::{DeviceId, PcIdentity};
+    use p256::{ecdsa::SigningKey, pkcs8::EncodePublicKey};
+    use service_protocol::{PairingChallenge, PairingInvitationFields, PairingNonce};
+    use std::net::SocketAddr;
+
+    fn invitation_text() -> InvitationText {
+        let public = |seed: u8| {
+            let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
+            let public = p256::PublicKey::from_sec1_bytes(
+                signing.verifying_key().to_encoded_point(false).as_bytes(),
+            )
+            .unwrap();
+            secure_channel::TlsPublicKey::from_spki_der(
+                public.to_public_key_der().unwrap().as_bytes(),
+            )
+            .unwrap()
+        };
+        let invitation = PairingInvitation::new(PairingInvitationFields {
+            ceremony_nonce: PairingNonce::from_bytes([1; 32]).unwrap(),
+            attestation_challenge: PairingChallenge::from_bytes([2; 32]).unwrap(),
+            pc: PcIdentity::from_bytes([3; 32]).unwrap(),
+            recipient_device: DeviceId::from_bytes([4; 16]).unwrap(),
+            pc_signing_key: public(5),
+            pc_transport_key: public(6),
+            relay_address: SocketAddr::from(([192, 0, 2, 42], 7443)),
+            route: [7; 32],
+        })
+        .unwrap();
+        InvitationText::new(invitation.to_qr_text()).unwrap()
+    }
     fn id(value: u8) -> PendingElevationId {
         PendingElevationId::from_bytes([value; 32]).unwrap()
     }
@@ -655,6 +865,70 @@ mod tests {
         helper.written().unwrap();
         helper.receive(Frame::Bound(id(1))).unwrap();
         helper
+    }
+    #[test]
+    fn renderer_display_frames_roundtrip_and_reject_bad_payloads() {
+        let invocation = renderer_request().invocation;
+        let text = invitation_text();
+        let frames = [
+            Frame::RendererInvitation {
+                invocation,
+                text: text.clone(),
+            },
+            Frame::RendererComparison {
+                invocation,
+                code: ComparisonDigits::new(*b"123456").unwrap(),
+            },
+            Frame::RendererDecision {
+                invocation,
+                confirmed: true,
+            },
+            Frame::RendererOutcome {
+                invocation,
+                enrolled: false,
+            },
+        ];
+        for frame in frames {
+            let bytes = frame.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
+            for length in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..length]).is_err());
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(Frame::decode(&extra).is_err());
+            assert!(!format!("{frame:?}").contains("123456"));
+        }
+        let mut bad_text = Frame::RendererInvitation { invocation, text }
+            .encode()
+            .unwrap();
+        bad_text[74] = b'!';
+        assert!(Frame::decode(&bad_text).is_err());
+        let mut bad_length = bad_text;
+        bad_length[72..74].copy_from_slice(&473u16.to_be_bytes());
+        assert!(Frame::decode(&bad_length).is_err());
+        let mut bad_digits = Frame::RendererComparison {
+            invocation,
+            code: ComparisonDigits::new(*b"123456").unwrap(),
+        }
+        .encode()
+        .unwrap();
+        bad_digits[77] = b'x';
+        assert!(Frame::decode(&bad_digits).is_err());
+        for frame in [
+            Frame::RendererDecision {
+                invocation,
+                confirmed: false,
+            },
+            Frame::RendererOutcome {
+                invocation,
+                enrolled: true,
+            },
+        ] {
+            let mut bytes = frame.encode().unwrap();
+            bytes[72] = 2;
+            assert!(Frame::decode(&bytes).is_err());
+        }
     }
     #[test]
     fn renderer_frames_are_exact_bounded_and_never_accept_crossed_shapes() {
@@ -683,7 +957,7 @@ mod tests {
         ];
         for frame in frames {
             let bytes = frame.encode().unwrap();
-            assert_eq!(Frame::decode(&bytes), Ok(frame));
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
             assert!([80, 92, 96].contains(&bytes.len()));
             for length in 0..bytes.len() {
                 assert!(Frame::decode(&bytes[..length]).is_err());
@@ -806,7 +1080,7 @@ mod tests {
             Frame::CloseAck(id(1)),
         ] {
             let bytes = frame.encode().unwrap();
-            assert_eq!(Frame::decode(&bytes), Ok(frame));
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
             for length in 0..bytes.len() {
                 assert!(Frame::decode(&bytes[..length]).is_err());
             }

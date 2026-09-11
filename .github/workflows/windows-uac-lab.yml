@@ -17,7 +17,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'codex/native-runtime']
-    paths: ['.github/workflows/windows-uac-lab.yml']
+    paths:
+      - '.github/workflows/windows-uac-lab.yml'
+      - 'crates/windows-service-host/**'
+      - 'crates/windows-identity/**'
+      - 'crates/windows-prompt-probe/**'
+      - 'crates/windows-observer/**'
+      - 'Cargo.lock'
 
 permissions:
   contents: read

@@ -1,23 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Read-only capability observations, never Windows request or approval proof.
+//! Supervised consent-UI observation and exact-target watch support.
 //!
-//! Call only inside the future fixed-installed, supervised native helper. This
-//! blocking function is NOT a hard five-second boundary: a native/UIA call may
-//! block despite configured timeouts. A separate process supervisor must enforce
-//! the five-second helper lifetime. No service launch/supervisor is wired here.
-//! All owned handles/interfaces are scoped before a result is returned. An
-//! observed cleanup failure is retained alongside the original failure.
+//! The argument-free one-shot observation remains read-only. Watch mode accepts
+//! actions only from the authenticated service channel and invokes one matching
+//! UIA button after target and content checks. Native/UIA calls may still block
+//! despite configured timeouts, so the service must supervise this process.
+//! Owned handles and interfaces remain scoped, and cleanup uncertainty changes a
+//! would-be successful result into failure.
 #![deny(unsafe_code)]
 
-use std::fmt;
+use std::{ffi::OsStr, fmt};
 
+mod action;
+pub use action::{ActionSelectionError, ActionTarget, PromptAction, select_action_target};
 mod content;
 pub use content::{
-    LabelKind, MAX_PROMPT_CONTENT_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS,
-    MAX_RUNTIME_ID_VALUES, PromptContentError, PromptContentObservation, PromptLabel,
-    prompt_text_from_utf16,
+    LabelKind, MAX_BUTTON_METADATA_UTF16_UNITS, MAX_PROMPT_CONTENT_UTF8_BYTES,
+    MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS, MAX_RUNTIME_ID_VALUES, PromptContentError,
+    PromptContentObservation, PromptLabel, prompt_text_from_utf16,
 };
 pub mod supervision;
+
+pub fn run_watch_helper() -> supervision::HelperExit {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::pipe_client::run_watch()
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        supervision::HelperExit::Rejected
+    }
+}
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[allow(unsafe_code)]
@@ -30,6 +43,35 @@ pub const MAX_UIA_ELEMENTS: usize = 128;
 pub const MAX_UIA_DEPTH: u8 = 16;
 pub const SUPERVISOR_BUDGET_MILLIS: u64 = 5_000;
 pub const UIA_TIMEOUT_MILLIS: u32 = 1_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command {
+    ObserveOnce,
+    Watch,
+}
+impl Command {
+    pub fn parse<I, S>(arguments: I) -> Result<Self, CommandParseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut arguments = arguments.into_iter();
+        match (arguments.next(), arguments.next()) {
+            (None, None) => Ok(Self::ObserveOnce),
+            (Some(argument), None) if argument.as_ref() == OsStr::new("watch") => Ok(Self::Watch),
+            _ => Err(CommandParseError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandParseError;
+impl fmt::Display for CommandParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid helper command")
+    }
+}
+impl std::error::Error for CommandParseError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOperation {
@@ -222,6 +264,20 @@ pub(crate) fn finish_with_cleanup<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_parser_accepts_only_no_arguments_or_exact_watch() {
+        assert_eq!(Command::parse(Vec::<&str>::new()), Ok(Command::ObserveOnce));
+        assert_eq!(Command::parse(["watch"]), Ok(Command::Watch));
+        for arguments in [
+            vec!["WATCH"],
+            vec!["watch", "extra"],
+            vec!["observe"],
+            vec![""],
+        ] {
+            assert_eq!(Command::parse(arguments), Err(CommandParseError));
+        }
+    }
 
     #[test]
     fn primary_failure_is_preserved_alongside_cleanup_failure() {

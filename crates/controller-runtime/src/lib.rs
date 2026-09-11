@@ -10,6 +10,8 @@ mod storage;
 mod unwired;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod windows_pairing;
 
 pub use contract::*;
 pub use notification_policy::{AlertMode, NotificationPolicy, Schedule};
@@ -25,8 +27,9 @@ pub use phone_requests::{
 };
 pub use runtime::{
     AppRuntime, DecisionIntent, MAX_COMPUTER_NAME_BYTES, MAX_COMPUTER_NAME_CHARACTERS,
-    ObservedServiceState, PlatformAdapter, PlatformError, ServiceCommandOutcome,
-    ServiceObservation, UnavailablePlatformAdapter,
+    ObservedServiceState, PairingAttemptHandle, PairingFailure, PairingStarter, PairingUiPhase,
+    PairingUiState, PlatformAdapter, PlatformError, ServiceCommandOutcome, ServiceObservation,
+    UnavailablePairingStarter, UnavailablePlatformAdapter,
 };
 pub use storage::{
     AppPrivateDirectory, MAX_POLICY_DOCUMENT_BYTES, POLICY_DOCUMENT_VERSION, POLICY_FILE_NAME,
@@ -36,3 +39,5 @@ pub use storage::{
 pub use unwired::UnwiredCapability;
 #[cfg(windows)]
 pub use windows::WindowsPlatformAdapter;
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub use windows_pairing::WindowsPairingStarter;

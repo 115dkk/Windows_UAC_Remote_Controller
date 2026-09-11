@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Fixed helper-side channel. A name/challenge is never server authentication.
-//! All calls are private and argument-free at the library boundary. Synchronous
-//! helper calls may block; the owning service must supervise this PROCESS.
+//! One-shot calls are synchronous. Watch mode retains one overlapped service read
+//! and issues at most one helper write at a time. The service supervises this process.
 use super::{resources::CleanupLog, security};
 use crate::supervision::{
-    CHALLENGE_BYTES, Challenge, HelperExit, INSTALLATION_FOLDER, PIPE_PREFIX, PROBE_EXECUTABLE,
-    SERVICE_EXECUTABLE, SERVICE_NAME, encode_report,
+    CHALLENGE_BYTES, Challenge, HelperExit, HelperMessage, INSTALLATION_FOLDER,
+    MAX_WATCH_MESSAGE_BYTES, PIPE_PREFIX, PROBE_EXECUTABLE, SERVICE_EXECUTABLE, SERVICE_NAME,
+    ServiceMessage, encode_report,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, UnsafeCell},
     mem,
     path::PathBuf,
     rc::Rc,
@@ -16,13 +17,18 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{
+            CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_MORE_DATA,
+            ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, HANDLE,
+        },
         Security::{LookupAccountNameW, PSID, SID_NAME_USE, SidTypeWellKnownGroup},
         Storage::FileSystem::{
-            CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, OPEN_EXISTING,
-            ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+            CreateFileW, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_SHARE_MODE, OPEN_EXISTING, ReadFile, SECURITY_IDENTIFICATION,
+            SECURITY_SQOS_PRESENT, WriteFile,
         },
         System::{
+            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Pipes::{
                 GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_MESSAGE,
                 SetNamedPipeHandleState,
@@ -34,8 +40,8 @@ use windows::{
                 SERVICE_RUNNING, SERVICE_STATUS_PROCESS, SERVICE_WIN32_OWN_PROCESS,
             },
             Threading::{
-                GetCurrentProcess, GetCurrentProcessId, OpenProcess,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcess,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
             },
         },
     },
@@ -52,6 +58,22 @@ pub(crate) fn run() -> HelperExit {
     // All scoped process/pipe/SCM/token owners were dropped before the exit code
     // becomes visible. A report already written is NOT accepted by the service
     // if final cleanup changes this exit to3; no stdout/native handle escapes.
+    if close.get()
+        || cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_some()
+    {
+        HelperExit::CleanupUnconfirmed
+    } else {
+        result.unwrap_or(HelperExit::Rejected)
+    }
+}
+
+pub(crate) fn run_watch() -> HelperExit {
+    let cleanup: CleanupLog = Arc::new(Mutex::new(None));
+    let close = Rc::new(Cell::new(false));
+    let result = scoped_watch(&cleanup, &close);
     if close.get()
         || cleanup
             .lock()
@@ -183,6 +205,323 @@ fn scoped(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
     Ok(exit)
 }
 
+fn scoped_watch(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
+    let (pipe, peer) = connect_authenticated(cleanup, close)?;
+    let mut channel = WatchChannel::new(pipe)?;
+    crate::ffi::watch::run(&mut channel, cleanup, || peer.recheck(cleanup))?;
+    Ok(HelperExit::Observed)
+}
+
+fn connect_authenticated(cleanup: &CleanupLog, close: &CloseLog) -> Result<(Kernel, Peer)> {
+    security::reject_impersonation(cleanup).map_err(|_| ())?;
+    // SAFETY: borrowed current-process pseudo-handle and scalar ID, never closed.
+    let (own, own_pid) = unsafe { (GetCurrentProcess(), GetCurrentProcessId()) };
+    security::native64(own).map_err(|_| ())?;
+    let session = security::process_identity(own, own_pid, None, cleanup).map_err(|_| ())?;
+    let service_sid = service_sid()?;
+    security::service_identity(own, own_pid, session, &service_sid, cleanup).map_err(|_| ())?;
+    let expected = expected_service()?;
+    let service = Scm::open(close)?;
+    let expected_pid = service.verify(&expected)?;
+    let name: Vec<u16> = format!("{PIPE_PREFIX}{own_pid}\0").encode_utf16().collect();
+    // SAFETY: fixed local pipe from our PID, no wait or fallback. Identification
+    // QoS forbids service impersonation of this SYSTEM client.
+    let raw = unsafe {
+        CreateFileW(
+            PCWSTR(name.as_ptr()),
+            FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+            None,
+        )
+    }
+    .map_err(|_| ())?;
+    let pipe = Kernel::new(raw, close)?;
+    let (mut pid, mut server_session) = (0, u32::MAX);
+    // SAFETY: connected owned local pipe and distinct scalar outputs.
+    unsafe { GetNamedPipeServerProcessId(pipe.raw, &mut pid) }.map_err(|_| ())?;
+    // SAFETY: same retained endpoint, query only.
+    unsafe { GetNamedPipeServerSessionId(pipe.raw, &mut server_session) }.map_err(|_| ())?;
+    if pid == 0 || pid != expected_pid || server_session != 0 {
+        return Err(());
+    }
+    // SAFETY: query/synchronize only the authenticated server PID.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    }
+    .map_err(|_| ())?;
+    let server = Kernel::new(raw, close)?;
+    let creation = super::process_creation(server.raw).map_err(|_| ())?;
+    let peer = Peer {
+        process: server,
+        pid,
+        creation,
+        expected,
+        service,
+        sid: service_sid,
+    };
+    peer.recheck(cleanup)?;
+    // SAFETY: retained endpoint, message mode only.
+    unsafe { SetNamedPipeHandleState(pipe.raw, Some(&PIPE_READMODE_MESSAGE), None, None) }
+        .map_err(|_| ())?;
+    Ok((pipe, peer))
+}
+
+pub(super) enum WatchRead {
+    Pending,
+    Message(ServiceMessage),
+    Eof,
+}
+
+struct IoStorage {
+    overlapped: OVERLAPPED,
+    bytes: Box<[u8]>,
+}
+
+pub(super) struct WatchChannel {
+    pipe: Kernel,
+    read_event: Kernel,
+    read: Box<UnsafeCell<IoStorage>>,
+    in_flight: bool,
+}
+impl WatchChannel {
+    fn new(pipe: Kernel) -> Result<Self> {
+        // SAFETY: private unnamed manual-reset event, noninheritable and initially clear.
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(|_| ())?;
+        let event = match Kernel::new(event, &pipe.close) {
+            Ok(event) => event,
+            Err(()) => {
+                // SAFETY: CreateEventW succeeded but the defensive validity check failed.
+                let _ = unsafe { CloseHandle(event) };
+                return Err(());
+            }
+        };
+        let mut channel = Self {
+            pipe,
+            read_event: event,
+            read: Box::new(UnsafeCell::new(IoStorage {
+                overlapped: OVERLAPPED::default(),
+                bytes: vec![0; MAX_WATCH_MESSAGE_BYTES].into_boxed_slice(),
+            })),
+            in_flight: false,
+        };
+        channel.start_read()?;
+        Ok(channel)
+    }
+
+    fn start_read(&mut self) -> Result<()> {
+        if self.in_flight {
+            return Err(());
+        }
+        // SAFETY: owned manual-reset event, no prior read remains pending.
+        unsafe { ResetEvent(self.read_event.raw) }.map_err(|_| ())?;
+        // SAFETY: unique channel access, stable boxed storage and one read operation.
+        let storage = unsafe { &mut *self.read.get() };
+        storage.overlapped = OVERLAPPED {
+            hEvent: self.read_event.raw,
+            ..OVERLAPPED::default()
+        };
+        match unsafe {
+            ReadFile(
+                self.pipe.raw,
+                Some(&mut storage.bytes),
+                None,
+                Some(&mut storage.overlapped),
+            )
+        } {
+            Ok(()) => self.in_flight = true,
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_IO_PENDING.0) =>
+            {
+                self.in_flight = true;
+            }
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0) =>
+            {
+                self.in_flight = false;
+            }
+            Err(_) => return Err(()),
+        }
+        Ok(())
+    }
+
+    pub(super) fn poll_read(&mut self) -> Result<WatchRead> {
+        if !self.in_flight {
+            return Ok(WatchRead::Eof);
+        }
+        let mut count = 0;
+        // SAFETY: exact retained pipe and stable pending OVERLAPPED, no waiting.
+        let result = unsafe {
+            GetOverlappedResult(
+                self.pipe.raw,
+                std::ptr::addr_of!((*self.read.get()).overlapped),
+                &mut count,
+                false,
+            )
+        };
+        match result {
+            Ok(()) => {
+                self.in_flight = false;
+                let count = count as usize;
+                if count == 0 || count > MAX_WATCH_MESSAGE_BYTES {
+                    return Err(());
+                }
+                // SAFETY: successful completion ended kernel writes; count is bounded.
+                let message = &unsafe { &*self.read.get() }.bytes[..count];
+                let message = ServiceMessage::from_wire(message).map_err(|_| ())?;
+                self.start_read()?;
+                Ok(WatchRead::Message(message))
+            }
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_IO_INCOMPLETE.0) =>
+            {
+                Ok(WatchRead::Pending)
+            }
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0) =>
+            {
+                self.in_flight = false;
+                Ok(WatchRead::Eof)
+            }
+            Err(error)
+                if [ERROR_MORE_DATA.0, ERROR_OPERATION_ABORTED.0]
+                    .into_iter()
+                    .any(|code| error.code() == windows::core::HRESULT::from_win32(code)) =>
+            {
+                self.in_flight = false;
+                Err(())
+            }
+            Err(_) => Err(()),
+        }
+    }
+
+    pub(super) fn write(&mut self, message: &HelperMessage) -> Result<()> {
+        let bytes = message.to_wire().map_err(|_| ())?;
+        // SAFETY: private unnamed manual-reset event, noninheritable and clear.
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(|_| ())?;
+        let event = match Kernel::new(event, &self.pipe.close) {
+            Ok(event) => event,
+            Err(()) => {
+                // SAFETY: CreateEventW succeeded but the defensive validity check failed.
+                let _ = unsafe { CloseHandle(event) };
+                return Err(());
+            }
+        };
+        let storage = Box::new(UnsafeCell::new(IoStorage {
+            overlapped: OVERLAPPED {
+                hEvent: event.raw,
+                ..OVERLAPPED::default()
+            },
+            bytes: bytes.into_boxed_slice(),
+        }));
+        // SAFETY: stable storage and event remain owned through terminal completion.
+        let result = unsafe {
+            let storage = &mut *storage.get();
+            WriteFile(
+                self.pipe.raw,
+                Some(&storage.bytes),
+                None,
+                Some(&mut storage.overlapped),
+            )
+        };
+        match result {
+            Ok(()) => {}
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_IO_PENDING.0) => {}
+            Err(_) => return Err(()),
+        }
+        let mut written = 0;
+        // SAFETY: exact write storage and pipe are retained; wait ends the kernel borrow.
+        unsafe {
+            GetOverlappedResult(
+                self.pipe.raw,
+                std::ptr::addr_of!((*storage.get()).overlapped),
+                &mut written,
+                true,
+            )
+        }
+        .map_err(|_| ())?;
+        // SAFETY: terminal completion permits immutable buffer length inspection.
+        if written as usize != unsafe { &*storage.get() }.bytes.len() {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(&mut self) -> Result<()> {
+        if !self.in_flight {
+            return Ok(());
+        }
+        // SAFETY: cancel only this channel's retained pending read.
+        let cancel_failed = match unsafe {
+            CancelIoEx(
+                self.pipe.raw,
+                Some(std::ptr::addr_of!((*self.read.get()).overlapped)),
+            )
+        } {
+            Ok(()) => false,
+            Err(error) if error.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) => {
+                false
+            }
+            Err(_) => true,
+        };
+        let mut count = 0;
+        // SAFETY: wait for the cancelled or concurrently completed exact operation.
+        let result = unsafe {
+            GetOverlappedResult(
+                self.pipe.raw,
+                std::ptr::addr_of!((*self.read.get()).overlapped),
+                &mut count,
+                true,
+            )
+        };
+        self.in_flight = false;
+        if cancel_failed {
+            return Err(());
+        }
+        match result {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.code()
+                    == windows::core::HRESULT::from_win32(ERROR_OPERATION_ABORTED.0) =>
+            {
+                Ok(())
+            }
+            Err(error)
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err(()),
+        }
+    }
+}
+impl Drop for WatchChannel {
+    fn drop(&mut self) {
+        if self.in_flight {
+            // Keep kernel-borrowed storage and pipe alive if explicit drain failed.
+            let read = std::mem::replace(
+                &mut self.read,
+                Box::new(UnsafeCell::new(IoStorage {
+                    overlapped: OVERLAPPED::default(),
+                    bytes: Box::new([]),
+                })),
+            );
+            let event = std::mem::replace(&mut self.read_event, Kernel::invalid());
+            let pipe = std::mem::replace(&mut self.pipe, Kernel::invalid());
+            std::mem::forget(read);
+            std::mem::forget(event);
+            std::mem::forget(pipe);
+        }
+    }
+}
+
 struct Peer {
     process: Kernel,
     pid: u32,
@@ -223,9 +562,19 @@ impl Kernel {
             close: Rc::clone(close),
         })
     }
+
+    fn invalid() -> Self {
+        Self {
+            raw: HANDLE::default(),
+            close: Rc::new(Cell::new(false)),
+        }
+    }
 }
 impl Drop for Kernel {
     fn drop(&mut self) {
+        if self.raw.is_invalid() {
+            return;
+        }
         // SAFETY: uniquely acquired real kernel handle with all sync borrows
         // ended; not a pseudo handle. No broad Send/Sync implementation exists.
         if unsafe { CloseHandle(self.raw) }.is_err() {

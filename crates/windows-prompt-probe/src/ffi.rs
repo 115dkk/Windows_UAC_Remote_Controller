@@ -35,6 +35,7 @@ pub(super) mod pipe_client;
 mod resources;
 mod security;
 mod uia;
+mod watch;
 use resources::{CleanupLog, OwnedDesktop, OwnedHandle};
 
 const MAX_NAME_UNITS: usize = 128;
@@ -162,7 +163,7 @@ fn worker_probe(
     Ok(report)
 }
 
-fn verify_window_station() -> Result<(), ProbeError> {
+pub(super) fn verify_window_station() -> Result<(), ProbeError> {
     // SAFETY: current process window station is borrowed and never closed/set.
     let station = unsafe { GetProcessWindowStation() }
         .map_err(|error| native_error(NativeOperation::WindowStation, error))?;
@@ -193,7 +194,7 @@ fn verify_window_station() -> Result<(), ProbeError> {
     Ok(())
 }
 
-fn verify_input_desktop(desktop: HDESK) -> Result<(), ProbeError> {
+pub(super) fn verify_input_desktop(desktop: HDESK) -> Result<(), ProbeError> {
     let name = object_name(HANDLE(desktop.0), NativeOperation::DesktopName)?;
     let mut receives_input = BOOL::default();
     let mut returned = 0;
@@ -220,7 +221,10 @@ fn verify_input_desktop(desktop: HDESK) -> Result<(), ProbeError> {
     Ok(())
 }
 
-fn object_name(handle: HANDLE, operation: NativeOperation) -> Result<String, ProbeError> {
+pub(super) fn object_name(
+    handle: HANDLE,
+    operation: NativeOperation,
+) -> Result<String, ProbeError> {
     let mut units = [0xffff_u16; MAX_NAME_UNITS];
     let mut returned = 0;
     // SAFETY: live borrowed station/desktop and fixed read-only UOI_NAME. Storage
@@ -238,7 +242,7 @@ fn object_name(handle: HANDLE, operation: NativeOperation) -> Result<String, Pro
     policy::strict_name(&units, returned).ok_or_else(|| malformed(operation))
 }
 
-fn system_consent_path() -> Result<Vec<u16>, ProbeError> {
+pub(super) fn system_consent_path() -> Result<Vec<u16>, ProbeError> {
     let mut units = [0xffff_u16; MAX_IMAGE_UNITS];
     // SAFETY: native OS directory query into initialized bounded UTF-16 storage;
     // no environment/user path or filesystem mutation is involved.
@@ -255,7 +259,7 @@ fn system_consent_path() -> Result<Vec<u16>, ProbeError> {
     Ok(path)
 }
 
-fn image_matches(process: HANDLE, expected: &[u16]) -> Result<bool, ProbeError> {
+pub(super) fn image_matches(process: HANDLE, expected: &[u16]) -> Result<bool, ProbeError> {
     let mut units = [0xffff_u16; MAX_IMAGE_UNITS];
     let mut count = units.len() as u32;
     // SAFETY: retained QUERY_LIMITED process, fixed Win32 path format, exclusive
@@ -299,7 +303,7 @@ pub(super) fn window_owner(hwnd: HWND) -> Result<(u32, u32), ProbeError> {
     Ok((thread, pid))
 }
 
-fn process_creation(process: HANDLE) -> Result<u64, ProbeError> {
+pub(super) fn process_creation(process: HANDLE) -> Result<u64, ProbeError> {
     let (mut creation, mut exit, mut kernel, mut user) = (
         FILETIME::default(),
         FILETIME::default(),
@@ -317,7 +321,7 @@ fn process_creation(process: HANDLE) -> Result<u64, ProbeError> {
     Ok(identity)
 }
 
-fn alive(process: HANDLE) -> Result<(), ProbeError> {
+pub(super) fn alive(process: HANDLE) -> Result<(), ProbeError> {
     // SAFETY: retained SYNCHRONIZE process handle, zero-time read-only wait. This
     // does not confuse a process exit code of STILL_ACTIVE with actual liveness.
     match unsafe { WaitForSingleObject(process, 0) } {
@@ -330,15 +334,20 @@ fn alive(process: HANDLE) -> Result<(), ProbeError> {
     }
 }
 
-struct Candidate {
-    hwnd: HWND,
-    pid: u32,
+pub(super) struct Candidate {
+    pub(super) hwnd: HWND,
+    pub(super) pid: u32,
     thread: u32,
-    creation: u64,
+    pub(super) creation: u64,
     process: OwnedHandle,
 }
 impl Candidate {
-    fn recheck(&self, session: u32, image: &[u16], cleanup: &CleanupLog) -> Result<(), ProbeError> {
+    pub(super) fn recheck(
+        &self,
+        session: u32,
+        image: &[u16],
+        cleanup: &CleanupLog,
+    ) -> Result<(), ProbeError> {
         alive(self.process.raw())?;
         if window_owner(self.hwnd)? != (self.thread, self.pid)
             || process_creation(self.process.raw())? != self.creation
@@ -351,7 +360,7 @@ impl Candidate {
     }
 }
 
-fn candidate_for(
+pub(super) fn candidate_for(
     hwnd: HWND,
     session: u32,
     expected_image: &[u16],
@@ -389,7 +398,7 @@ fn candidate_for(
 
 struct Enumeration {
     windows: Vec<HWND>,
-    began: Instant,
+    began: Option<Instant>,
     failure: Option<ProbeFailure>,
 }
 
@@ -399,7 +408,9 @@ unsafe extern "system" fn enum_window(hwnd: HWND, parameter: LPARAM) -> BOOL {
     // no other thread accesses it until enumeration returns.
     let collector = unsafe { &mut *(parameter.0 as *mut Enumeration) };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if let Err(error) = policy::budget(collector.began.elapsed()) {
+        if let Some(began) = collector.began
+            && let Err(error) = policy::budget(began.elapsed())
+        {
             collector.failure = Some(error.failure());
             return false;
         }
@@ -419,7 +430,15 @@ unsafe extern "system" fn enum_window(hwnd: HWND, parameter: LPARAM) -> BOOL {
     }
 }
 
-fn enumerate(desktop: HDESK, began: Instant) -> Result<Vec<HWND>, ProbeError> {
+pub(super) fn enumerate(desktop: HDESK, began: Instant) -> Result<Vec<HWND>, ProbeError> {
+    enumerate_inner(desktop, Some(began))
+}
+
+pub(super) fn enumerate_without_budget(desktop: HDESK) -> Result<Vec<HWND>, ProbeError> {
+    enumerate_inner(desktop, None)
+}
+
+fn enumerate_inner(desktop: HDESK, began: Option<Instant>) -> Result<Vec<HWND>, ProbeError> {
     let mut collector = Enumeration {
         windows: Vec::with_capacity(MAX_TOP_LEVEL_WINDOWS),
         began,

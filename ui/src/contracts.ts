@@ -72,8 +72,14 @@ export interface ActivityView {
     | 'expired' | 'cancelled' | 'approved' | 'denied' | 'failure' | 'pc_completed';
 }
 export interface AppIssue { readonly code: string; readonly message: string; readonly nextAction: string | null }
+export interface PairingView {
+  readonly phase: 'connecting' | 'waiting_for_admin' | 'helper_running' | 'finished' | 'failed';
+  readonly message: string;
+  readonly failure: null | 'service_not_ready' | 'user_cancelled' | 'helper_failed' | 'timeout' | 'relay_unconfigured' | 'unavailable';
+}
 export interface AppSnapshot {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
+  readonly pairing: PairingView | null;
   readonly platform: Platform;
   readonly computerName: string;
   readonly service: ServiceView | null;

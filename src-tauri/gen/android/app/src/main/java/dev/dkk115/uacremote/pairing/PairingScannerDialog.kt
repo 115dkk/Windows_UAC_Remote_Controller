@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.pairing
 
+import android.util.Log
 import android.Manifest
 import android.app.Dialog
 import android.app.KeyguardManager
@@ -72,7 +73,7 @@ internal class PairingScannerDialog(
 
     fun show(): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (!live()) return false
+        if (!live()) { Log.i("UacScan", "stage=show reason=not_live"); return false }
         dialog.setContentView(content)
         dialog.setCanceledOnTouchOutside(false)
         dialog.setOnCancelListener { close() }
@@ -88,9 +89,10 @@ internal class PairingScannerDialog(
         }
         showAttempted = true // Show may throw after partially attaching its decor.
         dialog.show()
+        Log.i("UacScan", "stage=show shown=${dialog.isShowing}")
         window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         content.focusHeading()
-        if (!live() || !dialog.isShowing) { close(); return false }
+        if (!live() || !dialog.isShowing) { Log.i("UacScan", "stage=show reason=not_live_after_show"); close(); return false }
         val now = SystemClock.elapsedRealtime()
         if (!PairingScanRules.current(started, now)) { close(); return false }
         val remaining = PairingScanRules.LIFETIME_MILLIS - (now - started)
@@ -98,6 +100,7 @@ internal class PairingScannerDialog(
         actorReleased = false
         val owned = actor.beginPairingScan(ticket, { result ->
             if (!live()) { close(); return@beginPairingScan }
+            Log.i("UacScan", "stage=begin_scan result=${result.name} cancelled=${ticket.isCancelled()}")
             if (result != PairingScanStart.READY || ticket.isCancelled()) terminal(PairingScannerState.UNAVAILABLE)
             else { coreReady = true; permissionOrCamera() }
         }, { actorReleased = true; finishIfReleased() })

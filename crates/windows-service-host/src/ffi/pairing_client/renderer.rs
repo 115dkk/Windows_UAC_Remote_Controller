@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Fixed final renderer bootstrap on its initial private desktop. NONVISUAL:
-//! no window, QR, bitmap, font, switch, network, secret input or grant exists.
+//! Fixed pairing renderer on its initial private desktop. The authenticated
+//! service pipe supplies public invitation text and comparison state only. The
+//! window records one local comparison decision and creates no grant or key.
 
 use super::{
     ClientEndpoint, Error as ClientError, PairingClient, PairingClientProgress, Stage,
     helper_launch::{PairingLaunchError as Error, RendererTerminal},
     peer_error_at,
+    renderer_ui::{RendererWindow, UiEvent},
 };
 use crate::{
     RendererInvocation,
@@ -34,16 +36,24 @@ enum Phase {
     ObjectsWrite,
     AwaitBound,
     Bound,
+    Invitation,
+    Comparison,
+    DecisionWrite,
+    AwaitOutcome,
+    Outcome,
     Terminal,
 }
 struct Owner {
     client: Option<PairingClient>,
     terminal: Option<RendererTerminal>,
+    window: Option<RendererWindow>,
     phase: Phase,
     invocation: RendererInvocation,
     objects: RendererObjects,
     cutoff: u64,
     deadline: Instant,
+    decision_sent: bool,
+    cleanup_failed: bool,
 }
 fn mapped(error: crate::PairingPeerError) -> Error {
     peer_error_at(Stage::QueryOwnIdentity, error).into()
@@ -100,11 +110,14 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
     let mut owner = Owner {
         client: Some(client),
         terminal: None,
+        window: None,
         phase: Phase::HelloWrite,
         invocation,
         objects,
         cutoff,
         deadline,
+        decision_sent: false,
+        cleanup_failed: false,
     };
     let outcome = (|| {
         let hello = Frame::RendererHello(
@@ -150,13 +163,37 @@ impl Owner {
             return Err(ClientError::DeadlineElapsed.into());
         }
         native_renderer::check_cutoff(self.cutoff).map_err(mapped)?;
-        if !matches!(self.phase, Phase::Bound | Phase::Terminal) {
+        if matches!(
+            self.phase,
+            Phase::HelloWrite | Phase::ObjectsWrite | Phase::AwaitBound
+        ) {
             native_renderer::check_setup_cutoff(self.cutoff).map_err(mapped)?;
         }
         Ok(())
     }
     fn step(&mut self) -> Result<bool, Error> {
         self.budget()?;
+        let event = if let Some(window) = self.window.as_mut() {
+            window.pump().map_err(|_| Error::Protocol)?
+        } else {
+            None
+        };
+        if let Some(event) = event {
+            let confirmed = match event {
+                UiEvent::Confirmed => true,
+                UiEvent::Cancelled => false,
+            };
+            self.begin_decision(confirmed, false)?;
+        }
+        if self.phase == Phase::Comparison
+            && Instant::now()
+                >= self
+                    .deadline
+                    .checked_sub(Duration::from_secs(40))
+                    .ok_or(Error::Protocol)?
+        {
+            self.begin_decision(false, true)?;
+        }
         if self.phase == Phase::Terminal {
             let terminal = self.terminal.as_mut().ok_or(Error::InvalidPhase)?;
             if terminal.poll()? {
@@ -182,7 +219,14 @@ impl Owner {
                 self.client_mut()?.begin_read()?;
                 self.phase = Phase::AwaitBound;
             }
-            (Phase::AwaitBound | Phase::Bound, PairingClientProgress::Read(bytes)) => {
+            (
+                Phase::AwaitBound
+                | Phase::Bound
+                | Phase::Invitation
+                | Phase::AwaitOutcome
+                | Phase::Outcome,
+                PairingClientProgress::Read(bytes),
+            ) => {
                 // Only an actual normally authenticated completion reaches this
                 // decoder. The terminal transfer cannot accept external bytes.
                 match Frame::decode(&bytes).map_err(|_| Error::Protocol)? {
@@ -197,7 +241,53 @@ impl Owner {
                         self.phase = Phase::Bound;
                         self.client_mut()?.begin_read()?;
                     }
-                    Frame::Close(id) if id == self.invocation.pending() => {
+                    Frame::RendererInvitation { invocation, text }
+                        if self.phase == Phase::Bound && invocation == self.invocation =>
+                    {
+                        self.window = Some(
+                            RendererWindow::show_invitation(text.as_str(), self.deadline)
+                                .map_err(|_| Error::Protocol)?,
+                        );
+                        self.phase = Phase::Invitation;
+                        self.client_mut()?.begin_read()?;
+                    }
+                    Frame::RendererComparison { invocation, code }
+                        if self.phase == Phase::Invitation && invocation == self.invocation =>
+                    {
+                        self.window
+                            .as_mut()
+                            .ok_or(Error::InvalidPhase)?
+                            .show_comparison(code.as_str())
+                            .map_err(|_| Error::Protocol)?;
+                        self.phase = Phase::Comparison;
+                    }
+                    // A failure outcome may arrive before any comparison (for
+                    // example an unreachable relay); success only after a decision.
+                    Frame::RendererOutcome {
+                        invocation,
+                        enrolled,
+                    } if matches!(self.phase, Phase::Invitation | Phase::AwaitOutcome)
+                        && invocation == self.invocation
+                        && (!enrolled || self.phase == Phase::AwaitOutcome) =>
+                    {
+                        self.window
+                            .as_mut()
+                            .ok_or(Error::InvalidPhase)?
+                            .show_outcome(enrolled)
+                            .map_err(|_| Error::Protocol)?;
+                        self.phase = Phase::Outcome;
+                        self.client_mut()?.begin_read()?;
+                    }
+                    // The service may close at any read-capable phase: before an
+                    // invitation exists (Bound), after a failure outcome, or on
+                    // expiry. The window, if any, is closed before the terminal.
+                    Frame::Close(id)
+                        if matches!(
+                            self.phase,
+                            Phase::Bound | Phase::Invitation | Phase::AwaitOutcome | Phase::Outcome
+                        ) && id == self.invocation.pending() =>
+                    {
+                        self.close_window()?;
                         let client = self.client.take().ok_or(Error::InvalidPhase)?;
                         self.terminal = Some(RendererTerminal::after_close(client, id));
                         self.phase = Phase::Terminal; // Retain before possibly pending Ack.
@@ -206,12 +296,52 @@ impl Owner {
                     _ => return Err(Error::Protocol),
                 }
             }
+            (Phase::DecisionWrite, PairingClientProgress::Written) => {
+                self.client_mut()?.begin_read()?;
+                self.phase = Phase::AwaitOutcome;
+            }
             _ => return Err(Error::Protocol),
         }
         self.budget()?;
         Ok(false)
     }
+    fn begin_decision(&mut self, confirmed: bool, expired: bool) -> Result<(), Error> {
+        if self.phase != Phase::Comparison || self.decision_sent {
+            return Err(Error::Protocol);
+        }
+        self.decision_sent = true;
+        if expired {
+            self.window
+                .as_mut()
+                .ok_or(Error::InvalidPhase)?
+                .show_expired()
+                .map_err(|_| Error::Protocol)?;
+        }
+        let frame = Frame::RendererDecision {
+            invocation: self.invocation,
+            confirmed,
+        };
+        self.client_mut()?
+            .begin_write(&frame.encode().map_err(|_| Error::Protocol)?)?;
+        self.phase = Phase::DecisionWrite;
+        Ok(())
+    }
+    fn close_window(&mut self) -> Result<(), Error> {
+        if let Some(mut window) = self.window.take()
+            && window.close().is_err()
+        {
+            self.cleanup_failed = true;
+            return Err(Error::CleanupUnconfirmed);
+        }
+        if self.cleanup_failed {
+            return Err(Error::CleanupUnconfirmed);
+        }
+        Ok(())
+    }
     fn cancel(&mut self) {
+        if self.close_window().is_err() {
+            self.cleanup_failed = true;
+        }
         if let Some(client) = self.client.as_mut() {
             client.cancel();
         }
@@ -220,10 +350,18 @@ impl Owner {
         }
     }
     fn drain(&mut self) -> Result<bool, Error> {
+        self.close_window()?;
         if let Some(client) = self.client.as_mut() {
             return client.drain().map_err(Into::into);
         }
         self.terminal.as_mut().ok_or(Error::InvalidPhase)?.drain()
+    }
+}
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if self.close_window().is_err() {
+            self.cleanup_failed = true;
+        }
     }
 }
 fn cutoff_record(values: impl IntoIterator<Item = (OsString, OsString)>) -> Result<u64, Error> {

@@ -175,7 +175,7 @@ export async function main(args = process.argv.slice(2)) {
       ['dumpsys-activity-top', ['shell', 'dumpsys', 'activity', 'top']],
       ['dumpsys-service', ['shell', 'dumpsys', 'activity', 'service', `${PACKAGE}/.background.ControllerForegroundService`]],
       ['dumpsys-package', ['shell', 'dumpsys', 'package', PACKAGE]],
-      ['logcat-runtime', ['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '4000', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I', 'UacBoot:I', 'chromium:W', 'cr_*:W', 'CameraX:W', 'Camera*:W', '*:S']],
+      ['logcat-runtime', ['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '4000', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I', 'UacBoot:I', 'UacScan:I', 'chromium:W', 'cr_*:W', 'CameraX:W', 'Camera*:W', '*:S']],
       ['logcat-activity', ['shell', 'logcat', '-d', '-v', 'threadtime', '-t', '2000', 'ActivityManager:I', 'ActivityTaskManager:I', 'WindowManager:I', 'InputDispatcher:W', '*:S']],
     ];
     result.failureDiagnostics = [];

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote
 
+import android.util.Log
 import android.app.Application
 import android.app.Activity
 import android.content.Intent
@@ -160,12 +161,16 @@ class ControllerApplication : Application() {
     internal fun openPairingScanner(activity: MainActivity, origin: Any, originCurrent: () -> Boolean,
         callback: (PairingScannerLaunch) -> Unit) {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (!isCurrentForegroundControllerHost(activity) || !originCurrent()) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+        // Bounded fixed-token diagnostics for CI: outcome and branch only, never payloads.
+        val report = { result: PairingScannerLaunch, reason: String ->
+            Log.i("UacScan", "stage=open result=${result.name} reason=$reason"); callback(result)
+        }
+        if (!isCurrentForegroundControllerHost(activity) || !originCurrent()) { report(PairingScannerLaunch.UNAVAILABLE, "host_or_origin"); return }
         if (pairingScanner != null || activity.pairingPermissionPending() || policyActor?.hasPendingPairingScan() == true) {
-            callback(PairingScannerLaunch.BUSY); return
+            report(PairingScannerLaunch.BUSY, "existing_flow"); return
         }
         val actor = policyActor
-        if (actor == null || !canOpenPairingScanner(activity)) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+        if (actor == null || !canOpenPairingScanner(activity)) { report(PairingScannerLaunch.UNAVAILABLE, "actor_or_gate"); return }
         val flow = try { PairingScannerDialog(activity, origin, actor,
             { policyActor === actor && actor.lifecyclePhase() == PolicyOwnerPhase.READY &&
                 serviceWanted && serviceToken != null && !explicitStopRequested && controllerBootActivationEnabled() &&
@@ -175,14 +180,14 @@ class ControllerApplication : Application() {
                 // One zero-payload snapshot invalidation after ACTUAL release,
                 // never to a replacement Activity/WebView or while resources remain.
                 if (isCurrentForegroundControllerHost(activity) && originCurrent()) requestSnapshotChanged()
-            } }) } catch (_: Exception) { callback(PairingScannerLaunch.UNAVAILABLE); return }
+            } }) } catch (error: Exception) { report(PairingScannerLaunch.UNAVAILABLE, "construct:${error.javaClass.simpleName}"); return }
         pairingScanner = flow
         try {
             val opened = flow.show()
             if (!opened || !flow.isShowing() || !isCurrentForegroundControllerHost(activity) || !originCurrent()) {
-                flow.close(); callback(PairingScannerLaunch.UNAVAILABLE)
-            } else callback(PairingScannerLaunch.OPENED)
-        } catch (_: Exception) { flow.close(); callback(PairingScannerLaunch.UNAVAILABLE) }
+                flow.close(); report(PairingScannerLaunch.UNAVAILABLE, "show_returned_false")
+            } else report(PairingScannerLaunch.OPENED, "ok")
+        } catch (error: Exception) { flow.close(); report(PairingScannerLaunch.UNAVAILABLE, "show:${error.javaClass.simpleName}") }
     }
 
     internal fun retirePairingScanner(activity: MainActivity, origin: Any) {

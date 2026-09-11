@@ -5,6 +5,38 @@ Last fully passing quality revision: `cbac9627a4889db6b74d1015ff9cf7a23d3ec1ec` 
 `codex/native-runtime`. New Windows renderer-bootstrap changes are in progress
 after that revision and require their own ROOT checks. No prerelease is published.
 
+## Latest evidence — September 11 evening (Claude root)
+
+Codex froze product work at `6da41e0`; Claude Fable 5.1 continues on `codex/native-runtime`.
+This section records what is verified by exact runs; everything else below it is history.
+
+- `ff3a111`: the stale ABI 9 assertion and the lifecycle WebView wait (one evaluateJavascript
+  reply capped at 2 s inside a 30 s deadline) were corrected. Lifecycle run 34591263495 then
+  completed every original phase and the first unlock; its new scanner extension failed at the
+  native Dialog wait (no window within 30 s). Bounded failure diagnostics were added for the
+  next run; the cause is not yet established.
+- Hosted `windows-2025` runners (probe run 34591263436) have an interactive admin console
+  session, `ConsentPromptBehaviorAdmin=0`, `PromptOnSecureDesktop=1` and NO TPM; opening the
+  Platform Crypto Provider there returns `0x80090030`, the same code the installed service
+  reports on the developer PC. ADR 0027 therefore adds a compile-time `lab-software-identity`
+  feature (Software KSP) for a disposable CI lab; release packaging must reject it.
+- ADR 0027 fixes the prerelease design: relay-rendezvous enrollment stream (plaintext
+  `CandidateSubmission`, attestation verification, TLS upgrade, frozen candidate, phone and PC
+  confirmations, signed acceptance), a protected QR/code display in the existing renderer child,
+  a service-owned outbound relay dialer, protected relay configuration and a build-time Android
+  signer digest. `service-protocol` gained the two new codecs (53 host tests, Clippy clean).
+- A tag-driven release workflow (`release.yml`) builds the Windows installer, a signed arm64 APK
+  (repository keystore or a documented ephemeral key), relay binaries and SHA256SUMS, and
+  publishes a GitHub PRERELEASE with notes from `docs/RELEASE_NOTES_TEMPLATE.md`. Publication is
+  packaging evidence only.
+- In progress under root validation: renderer UI (W2), prompt watcher and exact-target Invoke in
+  the helper (W6a), phone ceremony worker and dialer (W4, ABI 11), Windows shell pairing entry
+  (W5), scanner Dialog states (W8, landed at `22c8459`; Android package CI passed). Still to
+  start: service enrollment carrier and dialer (W3), watcher supervision (W6b), Kotlin wiring
+  (W7), management query pipe (W9), prompt-to-phone-to-apply session integration (W10).
+- Unchanged: no new personal-PC UAC/TPM experiment; the restricted-token hypothesis for
+  `0x80090030` awaits the user's decision on the staged one-shot diagnostic.
+
 ## Latest evidence — September 11
 
 Latest user steering replaces bespoke license investigations and collection with

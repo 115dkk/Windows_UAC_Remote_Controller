@@ -8,7 +8,7 @@ use controller_runtime::{
     AppPrivateDirectory, AppRuntime, Availability, ControlHint, DecisionIntent, MobileReadiness,
     NotificationPermission, ObservedServiceState, Platform, PlatformAdapter, PlatformError,
     ScreenLockState, ServiceAction, ServiceCommandOutcome, ServiceObservation, ServiceState,
-    UnavailablePlatformAdapter,
+    UnavailablePairingStarter, UnavailablePlatformAdapter,
 };
 use serde_json::json;
 
@@ -82,12 +82,13 @@ fn installed(state: ServiceState) -> ServiceObservation {
 }
 
 fn windows_runtime(directory: &tempfile::TempDir, owner: SyntheticOwner) -> AppRuntime {
-    AppRuntime::open(
+    AppRuntime::open_with_pairing(
         AppPrivateDirectory::from_native_app_data(directory.path())
             .expect("trusted synthetic directory"),
         Platform::Windows,
         Some("합성-PC"),
         Box::new(owner),
+        Box::new(UnavailablePairingStarter),
     )
     .expect("synthetic runtime")
 }
@@ -444,8 +445,11 @@ fn unavailable_owners_return_explicit_errors_and_do_not_create_data() {
     let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
     let mut runtime = windows_runtime(&directory, owner.clone());
     assert_eq!(
-        runtime.begin_pairing().expect_err("pairing not wired").code,
-        "pairing_unavailable"
+        runtime
+            .begin_pairing()
+            .expect_err("pairing starter unavailable")
+            .code,
+        "service_not_ready"
     );
     assert_eq!(
         runtime
@@ -518,7 +522,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
     assert_eq!(
         json,
         json!({
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "platform": "windows",
             "computerName": "합성-PC",
             "service": {
@@ -530,6 +534,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,
             "dataAvailability": {"devices": "unavailable", "requests": "unavailable", "activity": "unavailable"},
+            "pairing": null,
             "canPair": false, "canUnpair": false, "canClearActivity": false, "issue": null
         })
     );
@@ -579,7 +584,7 @@ fn scanner_readiness_is_required_native_input_only_and_never_enables_pairing() {
             controller_runtime::NotificationPolicy::default(),
             readiness,
         );
-        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.schema_version, 4);
         assert_eq!(snapshot.mobile.unwrap().can_open_pairing_scanner, available);
         assert!(!snapshot.can_pair && !snapshot.can_unpair);
         assert!(snapshot.devices.is_empty());
@@ -617,11 +622,12 @@ fn display_names_are_bounded_control_free_nonidentities() {
     ];
     for name in invalid {
         let directory = tempfile::tempdir().expect("isolated fixture");
-        let mut runtime = AppRuntime::open(
+        let mut runtime = AppRuntime::open_with_pairing(
             AppPrivateDirectory::from_native_app_data(directory.path()).expect("fixture directory"),
             Platform::Windows,
             Some(&name),
             Box::new(UnavailablePlatformAdapter),
+            Box::new(UnavailablePairingStarter),
         )
         .expect("synthetic runtime");
         assert!(runtime.snapshot().computer_name.is_empty());

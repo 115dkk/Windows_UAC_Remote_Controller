@@ -198,6 +198,15 @@ pub struct RequestView {
     pub can_deny: bool,
 }
 
+/// Fixed presentation only. Native details and ceremony material never enter it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingView {
+    pub phase: &'static str,
+    pub message: String,
+    pub failure: Option<&'static str>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityKind {
@@ -274,6 +283,7 @@ pub struct AppSnapshot {
     pub request_review: Option<crate::RequestReviewView>,
     pub activity: Vec<ActivityView>,
     pub data_availability: DataAvailability,
+    pub pairing: Option<PairingView>,
     pub can_pair: bool,
     pub can_unpair: bool,
     pub can_clear_activity: bool,
@@ -284,7 +294,7 @@ impl AppSnapshot {
     /// Remains renderable while the Android policy owner is stopped/unavailable.
     pub fn from_android_service(service: PhoneServiceView, readiness: MobileReadiness) -> Self {
         Self {
-            schema_version: 3,
+            schema_version: 4,
             platform: Platform::Android,
             computer_name: String::new(),
             service: None,
@@ -297,6 +307,7 @@ impl AppSnapshot {
             request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
+            pairing: None,
             can_pair: false,
             can_unpair: false,
             can_clear_activity: false,
@@ -323,7 +334,7 @@ impl AppSnapshot {
     /// remain unavailable, never an apparently confirmed empty collection.
     pub fn from_android_policy(policy: NotificationPolicy, readiness: MobileReadiness) -> Self {
         Self {
-            schema_version: 3,
+            schema_version: 4,
             platform: Platform::Android,
             computer_name: String::new(),
             service: None,
@@ -336,6 +347,7 @@ impl AppSnapshot {
             request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
+            pairing: None,
             can_pair: false,
             can_unpair: false,
             can_clear_activity: false,

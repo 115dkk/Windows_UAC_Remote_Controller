@@ -41,7 +41,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         assert!(!debug.contains(secret));
     }
     let snapshot = AppSnapshot {
-        schema_version: 3,
+        schema_version: 4,
         platform: Platform::Android,
         computer_name: secret.into(),
         service: None,
@@ -54,6 +54,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         request_review: None,
         activity: vec![activity],
         data_availability: DataAvailability::UNAVAILABLE,
+        pairing: None,
         can_pair: false,
         can_unpair: false,
         can_clear_activity: false,

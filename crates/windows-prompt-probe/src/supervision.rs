@@ -17,8 +17,14 @@ pub const CHALLENGE_BYTES: usize = 40;
 pub const REPORT_HEADER_BYTES: usize = 80;
 pub const MAX_REPORT_BYTES: usize = 512 * 1024;
 pub const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
+pub const MAX_WATCH_MESSAGE_BYTES: usize = PIPE_BUFFER_BYTES as usize;
 const CHALLENGE_MAGIC: &[u8; 8] = b"WPRBC002";
 const REPORT_MAGIC: &[u8; 8] = b"WPRBR002";
+const HELPER_MESSAGE_MAGIC: &[u8; 8] = b"WPHM0001";
+const SERVICE_MESSAGE_MAGIC: &[u8; 8] = b"WPSM0001";
+const WATCH_REPORT_CHALLENGE: [u8; 32] = [0x57; 32];
+const WATCH_HEADER_BYTES: usize = 16;
+const TARGET_BYTES: usize = 24;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Challenge([u8; 32]);
@@ -57,6 +63,342 @@ impl fmt::Display for ReportProtocolError {
     }
 }
 impl std::error::Error for ReportProtocolError {}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct TargetIdentity {
+    pub hwnd: u64,
+    pub pid: u32,
+    pub created: u64,
+    pub sequence: u32,
+}
+impl fmt::Debug for TargetIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TargetIdentity([redacted])")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoneReason {
+    Closed,
+    Replaced,
+    DesktopChanged,
+    Ambiguous,
+    VerificationFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefusalReason {
+    UnknownTarget,
+    TargetChanged,
+    ContentChanged,
+    UnrecognizedButtons,
+    AmbiguousButtons,
+    PatternUnavailable,
+    InvokeFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplyOutcome {
+    Gone,
+    StillPresent,
+    Refused(RefusalReason),
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum HelperMessage {
+    Appeared {
+        target: TargetIdentity,
+        report: ProbeReport,
+    },
+    Gone {
+        target: TargetIdentity,
+        reason: GoneReason,
+    },
+    Applied {
+        target: TargetIdentity,
+        outcome: ApplyOutcome,
+    },
+    Heartbeat {
+        sequence: u32,
+    },
+}
+impl fmt::Debug for HelperMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Appeared { report, .. } => formatter
+                .debug_struct("Appeared")
+                .field("target", &"[redacted]")
+                .field("report", report)
+                .finish(),
+            Self::Gone { reason, .. } => formatter
+                .debug_struct("Gone")
+                .field("target", &"[redacted]")
+                .field("reason", reason)
+                .finish(),
+            Self::Applied { outcome, .. } => formatter
+                .debug_struct("Applied")
+                .field("target", &"[redacted]")
+                .field("outcome", outcome)
+                .finish(),
+            Self::Heartbeat { sequence } => formatter
+                .debug_struct("Heartbeat")
+                .field("sequence", sequence)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum ServiceMessage {
+    Apply {
+        target: TargetIdentity,
+        action: crate::PromptAction,
+        content_digest: [u8; 32],
+    },
+    Stop,
+}
+impl fmt::Debug for ServiceMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Apply { action, .. } => formatter
+                .debug_struct("Apply")
+                .field("target", &"[redacted]")
+                .field("action", action)
+                .field("content_digest", &"[redacted]")
+                .finish(),
+            Self::Stop => formatter.write_str("Stop"),
+        }
+    }
+}
+
+impl HelperMessage {
+    pub fn to_wire(&self) -> Result<Vec<u8>, ReportProtocolError> {
+        let mut payload = Vec::new();
+        let tag = match self {
+            Self::Appeared { target, report } => {
+                append_target(&mut payload, *target);
+                let challenge = Challenge::new(WATCH_REPORT_CHALLENGE)?;
+                payload.extend_from_slice(&encode_report(challenge, Ok(report.clone()))?);
+                1
+            }
+            Self::Gone { target, reason } => {
+                append_target(&mut payload, *target);
+                payload.push(gone_reason_tag(*reason));
+                2
+            }
+            Self::Applied { target, outcome } => {
+                append_target(&mut payload, *target);
+                append_apply_outcome(&mut payload, *outcome);
+                3
+            }
+            Self::Heartbeat { sequence } => {
+                payload.extend_from_slice(&sequence.to_be_bytes());
+                4
+            }
+        };
+        frame(HELPER_MESSAGE_MAGIC, tag, &payload)
+    }
+
+    pub fn from_wire(bytes: &[u8]) -> Result<Self, ReportProtocolError> {
+        let (tag, payload) = unframe(bytes, HELPER_MESSAGE_MAGIC)?;
+        match tag {
+            1 => {
+                if payload.len() <= TARGET_BYTES {
+                    return Err(ReportProtocolError);
+                }
+                let (target, report) = split_target(payload)?;
+                let challenge = Challenge::new(WATCH_REPORT_CHALLENGE)?;
+                match decode_report(report, challenge)? {
+                    ReportOutcome::Observed(report) => Ok(Self::Appeared { target, report }),
+                    ReportOutcome::Unavailable(_) => Err(ReportProtocolError),
+                }
+            }
+            2 if payload.len() == TARGET_BYTES + 1 => {
+                let (target, rest) = split_target(payload)?;
+                Ok(Self::Gone {
+                    target,
+                    reason: decode_gone_reason(rest[0])?,
+                })
+            }
+            3 if [TARGET_BYTES + 1, TARGET_BYTES + 2].contains(&payload.len()) => {
+                let (target, rest) = split_target(payload)?;
+                Ok(Self::Applied {
+                    target,
+                    outcome: decode_apply_outcome(rest)?,
+                })
+            }
+            4 if payload.len() == 4 => Ok(Self::Heartbeat {
+                sequence: u32::from_be_bytes(payload.try_into().map_err(|_| ReportProtocolError)?),
+            }),
+            _ => Err(ReportProtocolError),
+        }
+    }
+}
+
+impl ServiceMessage {
+    pub fn to_wire(&self) -> Result<Vec<u8>, ReportProtocolError> {
+        let mut payload = Vec::new();
+        let tag = match self {
+            Self::Apply {
+                target,
+                action,
+                content_digest,
+            } => {
+                append_target(&mut payload, *target);
+                payload.push(match action {
+                    crate::PromptAction::Approve => 1,
+                    crate::PromptAction::Deny => 2,
+                });
+                payload.extend_from_slice(content_digest);
+                1
+            }
+            Self::Stop => 2,
+        };
+        frame(SERVICE_MESSAGE_MAGIC, tag, &payload)
+    }
+
+    pub fn from_wire(bytes: &[u8]) -> Result<Self, ReportProtocolError> {
+        let (tag, payload) = unframe(bytes, SERVICE_MESSAGE_MAGIC)?;
+        match tag {
+            1 if payload.len() == TARGET_BYTES + 33 => {
+                let (target, rest) = split_target(payload)?;
+                let action = match rest[0] {
+                    1 => crate::PromptAction::Approve,
+                    2 => crate::PromptAction::Deny,
+                    _ => return Err(ReportProtocolError),
+                };
+                Ok(Self::Apply {
+                    target,
+                    action,
+                    content_digest: rest[1..].try_into().map_err(|_| ReportProtocolError)?,
+                })
+            }
+            2 if payload.is_empty() => Ok(Self::Stop),
+            _ => Err(ReportProtocolError),
+        }
+    }
+}
+
+fn frame(magic: &[u8; 8], tag: u8, payload: &[u8]) -> Result<Vec<u8>, ReportProtocolError> {
+    let length = WATCH_HEADER_BYTES
+        .checked_add(payload.len())
+        .filter(|value| *value <= MAX_WATCH_MESSAGE_BYTES)
+        .ok_or(ReportProtocolError)?;
+    let payload_length = u32::try_from(payload.len()).map_err(|_| ReportProtocolError)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| ReportProtocolError)?;
+    bytes.extend_from_slice(magic);
+    bytes.push(tag);
+    bytes.extend_from_slice(&[0; 3]);
+    bytes.extend_from_slice(&payload_length.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    Ok(bytes)
+}
+
+fn unframe<'a>(bytes: &'a [u8], magic: &[u8; 8]) -> Result<(u8, &'a [u8]), ReportProtocolError> {
+    if bytes.len() < WATCH_HEADER_BYTES
+        || bytes.len() > MAX_WATCH_MESSAGE_BYTES
+        || &bytes[..8] != magic
+        || bytes[8] == 0
+        || bytes[9..12] != [0; 3]
+    {
+        return Err(ReportProtocolError);
+    }
+    let payload_length = usize::try_from(u32::from_be_bytes(
+        bytes[12..16].try_into().map_err(|_| ReportProtocolError)?,
+    ))
+    .map_err(|_| ReportProtocolError)?;
+    if WATCH_HEADER_BYTES.checked_add(payload_length) != Some(bytes.len()) {
+        return Err(ReportProtocolError);
+    }
+    Ok((bytes[8], &bytes[WATCH_HEADER_BYTES..]))
+}
+
+fn append_target(bytes: &mut Vec<u8>, target: TargetIdentity) {
+    bytes.extend_from_slice(&target.hwnd.to_be_bytes());
+    bytes.extend_from_slice(&target.pid.to_be_bytes());
+    bytes.extend_from_slice(&target.created.to_be_bytes());
+    bytes.extend_from_slice(&target.sequence.to_be_bytes());
+}
+
+fn split_target(bytes: &[u8]) -> Result<(TargetIdentity, &[u8]), ReportProtocolError> {
+    if bytes.len() < TARGET_BYTES {
+        return Err(ReportProtocolError);
+    }
+    let target = TargetIdentity {
+        hwnd: u64::from_be_bytes(bytes[0..8].try_into().map_err(|_| ReportProtocolError)?),
+        pid: u32::from_be_bytes(bytes[8..12].try_into().map_err(|_| ReportProtocolError)?),
+        created: u64::from_be_bytes(bytes[12..20].try_into().map_err(|_| ReportProtocolError)?),
+        sequence: u32::from_be_bytes(bytes[20..24].try_into().map_err(|_| ReportProtocolError)?),
+    };
+    if target.hwnd == 0 || target.pid == 0 || target.created == 0 || target.sequence == 0 {
+        return Err(ReportProtocolError);
+    }
+    Ok((target, &bytes[TARGET_BYTES..]))
+}
+
+fn gone_reason_tag(reason: GoneReason) -> u8 {
+    match reason {
+        GoneReason::Closed => 1,
+        GoneReason::Replaced => 2,
+        GoneReason::DesktopChanged => 3,
+        GoneReason::Ambiguous => 4,
+        GoneReason::VerificationFailed => 5,
+    }
+}
+fn decode_gone_reason(value: u8) -> Result<GoneReason, ReportProtocolError> {
+    match value {
+        1 => Ok(GoneReason::Closed),
+        2 => Ok(GoneReason::Replaced),
+        3 => Ok(GoneReason::DesktopChanged),
+        4 => Ok(GoneReason::Ambiguous),
+        5 => Ok(GoneReason::VerificationFailed),
+        _ => Err(ReportProtocolError),
+    }
+}
+fn refusal_tag(reason: RefusalReason) -> u8 {
+    match reason {
+        RefusalReason::UnknownTarget => 1,
+        RefusalReason::TargetChanged => 2,
+        RefusalReason::ContentChanged => 3,
+        RefusalReason::UnrecognizedButtons => 4,
+        RefusalReason::AmbiguousButtons => 5,
+        RefusalReason::PatternUnavailable => 6,
+        RefusalReason::InvokeFailed => 7,
+    }
+}
+fn decode_refusal(value: u8) -> Result<RefusalReason, ReportProtocolError> {
+    match value {
+        1 => Ok(RefusalReason::UnknownTarget),
+        2 => Ok(RefusalReason::TargetChanged),
+        3 => Ok(RefusalReason::ContentChanged),
+        4 => Ok(RefusalReason::UnrecognizedButtons),
+        5 => Ok(RefusalReason::AmbiguousButtons),
+        6 => Ok(RefusalReason::PatternUnavailable),
+        7 => Ok(RefusalReason::InvokeFailed),
+        _ => Err(ReportProtocolError),
+    }
+}
+fn append_apply_outcome(bytes: &mut Vec<u8>, outcome: ApplyOutcome) {
+    match outcome {
+        ApplyOutcome::Gone => bytes.push(1),
+        ApplyOutcome::StillPresent => bytes.push(2),
+        ApplyOutcome::Refused(reason) => {
+            bytes.push(3);
+            bytes.push(refusal_tag(reason));
+        }
+    }
+}
+fn decode_apply_outcome(bytes: &[u8]) -> Result<ApplyOutcome, ReportProtocolError> {
+    match bytes {
+        [1] => Ok(ApplyOutcome::Gone),
+        [2] => Ok(ApplyOutcome::StillPresent),
+        [3, reason] => Ok(ApplyOutcome::Refused(decode_refusal(*reason)?)),
+        _ => Err(ReportProtocolError),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReportOutcome {
@@ -273,9 +615,9 @@ pub fn report_total_bytes(
     let code = i32::from_be_bytes(header[44..48].try_into().map_err(|_| ReportProtocolError)?);
     match header[40] {
         0 => {
-            // One runtime ID, caption length, label count and one nonempty
-            // label require at least 21 bytes. Counts-only success is forbidden.
-            if header[41] != 0 || header[42] != 255 || code != 0 || payload < 21 {
+            // One runtime ID, caption length, label count and one nonempty label
+            // with both metadata lengths require 29 bytes. Counts-only success fails.
+            if header[41] != 0 || header[42] != 255 || code != 0 || payload < 29 {
                 return Err(ReportProtocolError);
             }
             if !valid_counts(decode_counts(header)?) {
@@ -363,6 +705,7 @@ fn decode_failure(bytes: &[u8]) -> Result<ProbeFailure, ReportProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{LabelKind, PromptLabel};
 
     // Synthetic protocol metadata only. Never invoke probe_once, a helper,
     // service, token, desktop, GUI, native process or Windows API in these tests.
@@ -615,7 +958,7 @@ mod tests {
         assert!(report_total_bytes(&bytes, challenge()).is_err());
         for payload in [
             0_u32,
-            20,
+            28,
             (MAX_REPORT_BYTES - REPORT_HEADER_BYTES + 1) as u32,
             u32::MAX,
         ] {
@@ -641,8 +984,8 @@ mod tests {
             Err(ProbeError::new(ProbeFailure::ContentLimit)),
         )
         .unwrap();
-        failure[72..76].copy_from_slice(&21_u32.to_be_bytes());
-        failure.extend_from_slice(&[0; 21]);
+        failure[72..76].copy_from_slice(&29_u32.to_be_bytes());
+        failure.extend_from_slice(&[0; 29]);
         assert!(report_total_bytes(&failure[..REPORT_HEADER_BYTES], challenge()).is_err());
         assert!(decode_report(&failure, challenge()).is_err());
     }
@@ -656,13 +999,20 @@ mod tests {
         let label_count = caption_start + sample.caption().len();
         let first_label = label_count + 2;
         let first_text = first_label + 9;
-        let second_label = first_text + sample.labels()[0].text().len();
+        let first_automation_id = first_text + sample.labels()[0].text().len();
+        let first_class_name = first_automation_id + 4;
+        let second_label = first_class_name + 4;
         for runtime_count in [0, 33, u8::MAX] {
             let mut invalid = bytes.clone();
             invalid[REPORT_HEADER_BYTES] = runtime_count;
             assert!(decode_report(&invalid, challenge()).is_err());
         }
-        for offset in [caption_length, first_label + 5] {
+        for offset in [
+            caption_length,
+            first_label + 5,
+            first_automation_id,
+            first_class_name,
+        ] {
             let mut invalid = bytes.clone();
             invalid[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
             assert!(decode_report(&invalid, challenge()).is_err());
@@ -770,7 +1120,7 @@ mod tests {
                 + 4 * MAX_RUNTIME_ID_VALUES
                 + 4
                 + 2
-                + 9 * MAX_PROMPT_LABELS
+                + 17 * MAX_PROMPT_LABELS
                 + MAX_PROMPT_CONTENT_UTF8_BYTES
         );
         assert_eq!(
@@ -781,11 +1131,11 @@ mod tests {
             decode_report(&bytes, challenge()),
             Ok(ReportOutcome::Observed(report))
         );
-        // The final empty label becomes one ASCII byte: its field/count/tags
-        // remain valid, while aggregate text alone exceeds 384 KiB by one.
+        // Add one ASCII byte to the final label's empty ClassName. Its field and
+        // label remain valid, while aggregate text exceeds 384 KiB by one.
         let mut over = bytes;
-        let final_text_length = over.len() - 4;
-        over[final_text_length..].copy_from_slice(&1_u32.to_be_bytes());
+        let final_class_name_length = over.len() - 4;
+        over[final_class_name_length..].copy_from_slice(&1_u32.to_be_bytes());
         over.push(b'a');
         let payload_length = (over.len() - REPORT_HEADER_BYTES) as u32;
         over[72..76].copy_from_slice(&payload_length.to_be_bytes());
@@ -802,6 +1152,166 @@ mod tests {
         assert!(!text.contains("Synthetic button"));
         assert!(!text.contains("[1, -2, 3]"));
     }
+    #[test]
+    fn watch_messages_round_trip_with_exact_targets_and_redacted_debug() {
+        let target = TargetIdentity {
+            hwnd: 0x1234,
+            pid: 77,
+            created: 88,
+            sequence: 1,
+        };
+        let messages = [
+            HelperMessage::Appeared {
+                target,
+                report: report(),
+            },
+            HelperMessage::Gone {
+                target,
+                reason: GoneReason::Ambiguous,
+            },
+            HelperMessage::Applied {
+                target,
+                outcome: ApplyOutcome::Gone,
+            },
+            HelperMessage::Applied {
+                target,
+                outcome: ApplyOutcome::Refused(RefusalReason::ContentChanged),
+            },
+            HelperMessage::Heartbeat { sequence: 9 },
+        ];
+        for message in messages {
+            let wire = message.to_wire().unwrap();
+            assert!(wire.len() <= MAX_WATCH_MESSAGE_BYTES);
+            assert_eq!(HelperMessage::from_wire(&wire), Ok(message.clone()));
+        }
+        let service = [
+            ServiceMessage::Apply {
+                target,
+                action: crate::PromptAction::Approve,
+                content_digest: [3; 32],
+            },
+            ServiceMessage::Apply {
+                target,
+                action: crate::PromptAction::Deny,
+                content_digest: [4; 32],
+            },
+            ServiceMessage::Stop,
+        ];
+        for message in service {
+            assert_eq!(
+                ServiceMessage::from_wire(&message.to_wire().unwrap()),
+                Ok(message)
+            );
+        }
+        let debug = format!(
+            "{:?} {:?}",
+            TargetIdentity {
+                hwnd: 0xfeed,
+                ..target
+            },
+            ServiceMessage::Apply {
+                target,
+                action: crate::PromptAction::Approve,
+                content_digest: [0xaa; 32],
+            }
+        );
+        assert!(!debug.contains("feed"));
+        assert!(!debug.contains("170"));
+    }
+
+    #[test]
+    fn watch_codecs_reject_every_truncation_extension_reserved_byte_and_wrong_magic() {
+        let target = TargetIdentity {
+            hwnd: 1,
+            pid: 2,
+            created: 3,
+            sequence: 4,
+        };
+        let helper = HelperMessage::Gone {
+            target,
+            reason: GoneReason::Closed,
+        }
+        .to_wire()
+        .unwrap();
+        for end in 0..helper.len() {
+            assert!(HelperMessage::from_wire(&helper[..end]).is_err());
+        }
+        let mut invalid = helper.clone();
+        invalid.push(0);
+        assert!(HelperMessage::from_wire(&invalid).is_err());
+        for offset in [0, 7, 9, 10, 11, 12, 13, 14, 15] {
+            let mut invalid = helper.clone();
+            invalid[offset] ^= 1;
+            assert!(
+                HelperMessage::from_wire(&invalid).is_err(),
+                "offset={offset}"
+            );
+        }
+        let service = ServiceMessage::Apply {
+            target,
+            action: crate::PromptAction::Approve,
+            content_digest: [7; 32],
+        }
+        .to_wire()
+        .unwrap();
+        assert!(HelperMessage::from_wire(&service).is_err());
+        assert!(ServiceMessage::from_wire(&helper).is_err());
+        let mut unknown_tag = service.clone();
+        unknown_tag[8] = 99;
+        assert!(ServiceMessage::from_wire(&unknown_tag).is_err());
+        let mut unknown_action = service;
+        unknown_action[WATCH_HEADER_BYTES + TARGET_BYTES] = 3;
+        assert!(ServiceMessage::from_wire(&unknown_action).is_err());
+    }
+
+    #[test]
+    fn watch_codecs_reject_zero_target_fields_unknown_outcomes_and_oversize_reports() {
+        let target = TargetIdentity {
+            hwnd: 1,
+            pid: 2,
+            created: 3,
+            sequence: 4,
+        };
+        let sample = HelperMessage::Gone {
+            target,
+            reason: GoneReason::Closed,
+        }
+        .to_wire()
+        .unwrap();
+        for range in [16..24, 24..28, 28..36, 36..40] {
+            let mut invalid = sample.clone();
+            invalid[range].fill(0);
+            assert!(HelperMessage::from_wire(&invalid).is_err());
+        }
+        let mut invalid_reason = sample;
+        invalid_reason[WATCH_HEADER_BYTES + TARGET_BYTES] = 0;
+        assert!(HelperMessage::from_wire(&invalid_reason).is_err());
+        let oversized_label = "界".repeat(22_000);
+        let content = PromptContentObservation::from_parts(
+            vec![1],
+            String::new(),
+            vec![PromptLabel::new(1, 1, LabelKind::Text, true, oversized_label).unwrap()],
+        )
+        .unwrap();
+        let report = ProbeReport::from_observation(
+            ProbeCounts {
+                top_level_windows: 1,
+                qualified_candidates: 1,
+                elements: 2,
+                enabled_elements: 2,
+                maximum_depth: 1,
+                ..ProbeCounts::default()
+            },
+            content,
+        )
+        .unwrap();
+        assert!(
+            HelperMessage::Appeared { target, report }
+                .to_wire()
+                .is_err()
+        );
+    }
+
     #[test]
     fn helper_entry_has_no_target_endpoint_or_action_arguments() {
         let _entry: fn() -> HelperExit = run_supervised_helper;

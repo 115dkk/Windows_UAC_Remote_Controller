@@ -4,7 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import type { AppSnapshot, ControllerBridge, ServiceAction } from './contracts';
+import { DevicesPanel } from './CollectionPanels';
+import type { AppSnapshot, ControllerBridge, PairingView, ServiceAction } from './contracts';
 import { ko, serviceActionText, serviceStateText } from './messages.ko';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 
@@ -157,6 +158,65 @@ describe('native snapshot truth in the client', () => {
     expect(screen.getByText(ko.loadFailure)).toBeInTheDocument();
     expect(screen.queryByText(/INTERNAL_CODE/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: ko.refresh })).toBeEnabled();
+  });
+});
+
+describe('pairing progress in the device collection', () => {
+  it.each(['connecting', 'waiting_for_admin', 'helper_running'] as const)('shows %s progress and blocks another attempt', (phase) => {
+    const pairing: PairingView = { phase, message: '기기 연결을 준비하고 있어요.', failure: null };
+    for (const devices of ['available', 'unavailable'] as const) {
+      for (const canPair of [true, false]) {
+        const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair,
+          dataAvailability: { devices, requests: 'available', activity: 'available' } };
+        const onPair = vi.fn();
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} />);
+        expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+        expect(screen.queryByText(ko.pairingUnavailable)).not.toBeInTheDocument();
+        if (devices === 'unavailable') expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
+        const button = screen.getByRole('button', { name: ko.pairPhone });
+        expect(button).toBeDisabled(); fireEvent.click(button);
+        expect(onPair).not.toHaveBeenCalled();
+        view.unmount();
+      }
+    }
+  });
+
+  it.each(['finished', 'failed'] as const)('shows %s text and permits retry only when otherwise enabled', (phase) => {
+    const pairing: PairingView = { phase, message: '기기 연결 화면을 닫았어요.', failure: phase === 'failed' ? 'user_cancelled' : null };
+    for (const devices of ['available', 'unavailable'] as const) {
+      const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair: true,
+        dataAvailability: { devices, requests: 'available', activity: 'available' } };
+      const onPair = vi.fn(), onRemove = vi.fn();
+      const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} />);
+      expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+      expect(screen.queryByText('user_cancelled')).not.toBeInTheDocument();
+      const button = screen.getByRole('button', { name: ko.pairPhone });
+      expect(button).toBeEnabled(); fireEvent.click(button);
+      expect(onPair).toHaveBeenCalledOnce();
+      view.rerender(<DevicesPanel snapshot={snapshot} disabled onPair={onPair} onRemove={onRemove} />);
+      expect(button).toBeDisabled(); fireEvent.click(button);
+      expect(onPair).toHaveBeenCalledOnce();
+      view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} />);
+      expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+      expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it('keeps unavailable collections honest while exposing only the Windows pairing capability', () => {
+    for (const platform of ['windows', 'android'] as const) {
+      for (const canPair of [true, false]) {
+        const snapshot: AppSnapshot = { ...exampleSnapshot(platform), schemaVersion: 4, pairing: null, canPair,
+          dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' } };
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} />);
+        expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: ko.noPhones })).not.toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: ko.noComputers })).not.toBeInTheDocument();
+        if (platform === 'windows' && canPair) expect(screen.getByRole('button', { name: ko.pairPhone })).toBeEnabled();
+        else expect(screen.queryByRole('button')).not.toBeInTheDocument();
+        view.unmount();
+      }
+    }
   });
 });
 

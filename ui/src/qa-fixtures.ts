@@ -8,7 +8,7 @@ export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientP
 
 export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): AppSnapshot {
   return {
-    schemaVersion: 3, platform, computerName: '화면 예시 PC',
+    schemaVersion: 4, platform, computerName: '화면 예시 PC',
     service: platform === 'windows' ? { installed: false, state: null, allowedActions: [], controlHint: 'needs_installer', remoteRequestsReady: false } : null,
     phoneService: platform === 'android' ? { state: 'local_settings_ready', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: true } : null,
     mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false, canOpenPairingScanner: false } : null,
@@ -17,6 +17,7 @@ export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): Ap
     requestCatalog: platform === 'android' ? { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 1 } : null,
     requestReview: null,
     dataAvailability: { devices: 'available', requests: 'available', activity: 'available' },
+    pairing: null,
     canPair: false, canUnpair: false, canClearActivity: false, issue: null,
   };
 }

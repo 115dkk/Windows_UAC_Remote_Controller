@@ -42,7 +42,7 @@ impl fmt::Debug for Context<'_> {
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PreparationError {
+pub(in crate::peer_runtime) enum PreparationError {
     Cancelled,
     Window,
     Context,

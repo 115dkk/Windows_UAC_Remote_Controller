@@ -233,12 +233,22 @@ impl RuntimeCapabilities {
     };
 }
 
+/// Compile-time identity provider profile of THIS binary (ADR 0027). Only the
+/// platform value ships; a lab build embeds a do-not-ship marker that release
+/// packaging rejects. This is a build fact, not a runtime observation.
+#[cfg(windows)]
+pub const IDENTITY_PROVIDER_PROFILE: &str = windows_identity::IDENTITY_PROVIDER_PROFILE;
+#[cfg(not(windows))]
+pub const IDENTITY_PROVIDER_PROFILE: &str = "unsupported-platform";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ServiceSnapshot {
     pub installation: InstallationState,
     pub state: Option<ServiceState>,
     pub process_id: Option<u32>,
     pub capabilities: RuntimeCapabilities,
+    /// Build profile of the queried CLI binary, never of the running service.
+    pub identity_provider: &'static str,
 }
 
 impl ServiceSnapshot {
@@ -249,6 +259,7 @@ impl ServiceSnapshot {
             state: None,
             process_id: None,
             capabilities: RuntimeCapabilities::UNIMPLEMENTED,
+            identity_provider: IDENTITY_PROVIDER_PROFILE,
         }
     }
 
@@ -259,6 +270,7 @@ impl ServiceSnapshot {
             state: Some(state),
             process_id: process_id.filter(|pid| *pid != 0 && state == ServiceState::Running),
             capabilities: RuntimeCapabilities::UNIMPLEMENTED,
+            identity_provider: IDENTITY_PROVIDER_PROFILE,
         }
     }
 }
@@ -986,6 +998,9 @@ mod tests {
         let wire = serde_json::to_value(snapshot).unwrap();
         assert_eq!(wire["state"], "running");
         assert_eq!(wire["capabilities"]["remote_approval"], false);
+        assert_eq!(wire["identity_provider"], IDENTITY_PROVIDER_PROFILE);
+        #[cfg(not(feature = "lab-software-identity"))]
+        assert!(!IDENTITY_PROVIDER_PROFILE.contains("do-not-ship"));
     }
 
     #[test]

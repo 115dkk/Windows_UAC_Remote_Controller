@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use notification_policy::NotificationPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ActivityView, AppIssue, AppPrivateDirectory, AppSnapshot, ControlHint, DataAvailability,
-    MobileReadiness, Platform, ScreenLockState, ServiceAction, ServiceState, ServiceView,
-    storage::PreferenceStore,
+    MobileReadiness, PairingView, Platform, ScreenLockState, ServiceAction, ServiceState,
+    ServiceView, storage::PreferenceStore,
 };
 
 pub const MAX_COMPUTER_NAME_BYTES: usize = 256;
@@ -89,6 +92,107 @@ pub trait PlatformAdapter: Send {
     ) -> Result<ServiceCommandOutcome, PlatformError>;
 }
 
+/// Published state and cancellation seam for one asynchronous pairing attempt.
+pub trait PairingAttemptHandle: Send {
+    fn state(&self) -> PairingUiState;
+    fn cancel(&mut self);
+    fn join_until(&mut self, deadline: Instant) -> bool;
+}
+
+/// Starts only the fixed native pairing ceremony. No path or ceremony data is accepted.
+pub trait PairingStarter: Send {
+    fn available(&self) -> bool;
+    fn start(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingFailure {
+    ServiceNotReady,
+    UserCancelled,
+    HelperFailed,
+    Timeout,
+    RelayUnconfigured,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingUiPhase {
+    Connecting,
+    WaitingForAdmin,
+    HelperRunning,
+    Finished,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PairingUiState {
+    pub phase: PairingUiPhase,
+    pub failure: Option<PairingFailure>,
+    pub started_at: Instant,
+    pub terminal_at: Option<Instant>,
+}
+
+impl PairingUiState {
+    pub fn connecting(started_at: Instant) -> Self {
+        Self {
+            phase: PairingUiPhase::Connecting,
+            failure: None,
+            started_at,
+            terminal_at: None,
+        }
+    }
+
+    pub fn running(phase: PairingUiPhase, started_at: Instant) -> Self {
+        assert!(matches!(
+            phase,
+            PairingUiPhase::Connecting
+                | PairingUiPhase::WaitingForAdmin
+                | PairingUiPhase::HelperRunning
+        ));
+        Self {
+            phase,
+            failure: None,
+            started_at,
+            terminal_at: None,
+        }
+    }
+
+    pub fn finished(started_at: Instant, terminal_at: Instant) -> Self {
+        Self {
+            phase: PairingUiPhase::Finished,
+            failure: None,
+            started_at,
+            terminal_at: Some(terminal_at),
+        }
+    }
+
+    pub fn failure(failure: PairingFailure, started_at: Instant, terminal_at: Instant) -> Self {
+        Self {
+            phase: PairingUiPhase::Failed,
+            failure: Some(failure),
+            started_at,
+            terminal_at: Some(terminal_at),
+        }
+    }
+
+    fn view(self) -> PairingView {
+        pairing_view(self.phase, self.failure)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailablePairingStarter;
+
+impl PairingStarter for UnavailablePairingStarter {
+    fn available(&self) -> bool {
+        false
+    }
+
+    fn start(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure> {
+        Err(PairingFailure::Unavailable)
+    }
+}
+
 /// Production default for targets without a connected service owner. It never
 /// invents absent services, devices, approvals or successful mutations.
 #[derive(Clone, Copy, Debug, Default)]
@@ -137,6 +241,8 @@ pub struct AppRuntime {
     service_issue: Option<AppIssue>,
     mobile: MobileReadiness,
     control_progress: ControlProgress,
+    pairing_starter: Box<dyn PairingStarter>,
+    pairing_attempt: Option<Box<dyn PairingAttemptHandle>>,
 }
 
 impl fmt::Debug for AppRuntime {
@@ -160,6 +266,31 @@ impl AppRuntime {
         computer_name: Option<&str>,
         adapter: Box<dyn PlatformAdapter>,
     ) -> Result<Self, AppIssue> {
+        let pairing_starter: Box<dyn PairingStarter> = {
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            {
+                if platform == Platform::Windows {
+                    Box::new(crate::WindowsPairingStarter)
+                } else {
+                    Box::new(UnavailablePairingStarter)
+                }
+            }
+            #[cfg(not(all(windows, target_pointer_width = "64")))]
+            {
+                Box::new(UnavailablePairingStarter)
+            }
+        };
+        Self::open_with_pairing(directory, platform, computer_name, adapter, pairing_starter)
+    }
+
+    /// Explicit pairing seam for the Windows host and portable unit tests.
+    pub fn open_with_pairing(
+        directory: AppPrivateDirectory,
+        platform: Platform,
+        computer_name: Option<&str>,
+        adapter: Box<dyn PlatformAdapter>,
+        pairing_starter: Box<dyn PairingStarter>,
+    ) -> Result<Self, AppIssue> {
         let (storage, policy) = PreferenceStore::open(directory).map_err(AppIssue::from)?;
         Ok(Self {
             storage,
@@ -171,6 +302,8 @@ impl AppRuntime {
             service_issue: None,
             mobile: MobileReadiness::UNAVAILABLE,
             control_progress: ControlProgress::Idle,
+            pairing_starter,
+            pairing_attempt: None,
         })
     }
 
@@ -294,7 +427,37 @@ impl AppRuntime {
     }
 
     pub fn begin_pairing(&mut self) -> Result<AppSnapshot, AppIssue> {
-        Err(crate::UnwiredCapability::Pairing.issue())
+        if self.platform != Platform::Windows {
+            return Err(pairing_issue(PairingFailure::Unavailable));
+        }
+        if self
+            .pairing_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.state().terminal_at.is_none())
+        {
+            return Err(AppIssue {
+                code: "pairing_in_progress",
+                message: "휴대폰 연결이 이미 진행 중이에요.",
+                next_action: Some("진행 중인 연결 절차가 끝날 때까지 기다려 주세요."),
+            });
+        }
+        if let Some(mut retained) = self.pairing_attempt.take() {
+            retained.cancel();
+            let _ = retained.join_until(Instant::now() + Duration::from_millis(250));
+        }
+        let observation = self
+            .adapter
+            .observe_service()
+            .map_err(|_| service_not_ready())?;
+        self.accept_service_observation(observation);
+        if observation.state != ObservedServiceState::Installed(ServiceState::Running)
+            || observation.control != Ok(ControlHint::Available)
+            || !self.pairing_starter.available()
+        {
+            return Err(service_not_ready());
+        }
+        self.pairing_attempt = Some(self.pairing_starter.start().map_err(pairing_issue)?);
+        Ok(self.present())
     }
 
     pub fn remove_device(&mut self, _device_id: &str) -> Result<AppSnapshot, AppIssue> {
@@ -364,7 +527,23 @@ impl AppRuntime {
         }
     }
 
-    fn present(&self) -> AppSnapshot {
+    fn pairing_view(&mut self) -> Option<PairingView> {
+        let state = self
+            .pairing_attempt
+            .as_ref()
+            .map(|attempt| attempt.state())?;
+        if state.terminal_at.is_some_and(|terminal| {
+            Instant::now().saturating_duration_since(terminal) >= Duration::from_secs(60)
+        }) {
+            self.pairing_attempt = None;
+            None
+        } else {
+            Some(state.view())
+        }
+    }
+
+    fn present(&mut self) -> AppSnapshot {
+        let pairing = self.pairing_view();
         let progress_issue = self.progress_issue().map(|mut issue| {
             if self.service_issue.is_some_and(|status| status.code == "service_status_stale") {
                 issue.message = "휴대폰 승인의 현재 상태를 확인하지 못했습니다. 이전 상태를 표시하며 설정 변경이 끝났는지도 확인되지 않았습니다.";
@@ -381,7 +560,7 @@ impl AppRuntime {
                 })
         });
         AppSnapshot {
-            schema_version: 3,
+            schema_version: 4,
             platform: self.platform,
             computer_name: self.computer_name.clone(),
             service: self.last_service.clone(),
@@ -394,11 +573,125 @@ impl AppRuntime {
             request_review: None,
             activity: Vec::new(),
             data_availability: DataAvailability::UNAVAILABLE,
-            can_pair: false,
+            pairing,
+            can_pair: self.platform == Platform::Windows
+                && self.last_service.as_ref().is_some_and(|service| {
+                    service.state == Some(ServiceState::Running)
+                        && service.control_hint == ControlHint::Available
+                })
+                && self.service_issue.is_none()
+                && self
+                    .pairing_attempt
+                    .as_ref()
+                    .is_none_or(|attempt| attempt.state().terminal_at.is_some())
+                && self.pairing_starter.available(),
             can_unpair: false,
             can_clear_activity: false,
             issue,
         }
+    }
+}
+
+impl Drop for AppRuntime {
+    fn drop(&mut self) {
+        let Some(attempt) = self.pairing_attempt.as_mut() else {
+            return;
+        };
+        if attempt.state().terminal_at.is_none() {
+            attempt.cancel();
+        }
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let _ = attempt.join_until(deadline);
+    }
+}
+
+fn service_not_ready() -> AppIssue {
+    AppIssue {
+        code: "service_not_ready",
+        message: "먼저 PC 승인 서비스를 시작해 주세요.",
+        next_action: Some("PC 승인 서비스를 시작한 뒤 다시 시도해 주세요."),
+    }
+}
+
+fn pairing_issue(failure: PairingFailure) -> AppIssue {
+    match failure {
+        PairingFailure::ServiceNotReady => service_not_ready(),
+        PairingFailure::UserCancelled => AppIssue {
+            code: "pairing_user_cancelled",
+            message: "관리자 확인을 취소했어요.",
+            next_action: Some("연결하려면 다시 시도해 주세요."),
+        },
+        PairingFailure::HelperFailed => AppIssue {
+            code: "pairing_helper_failed",
+            message: "연결 절차가 중단됐어요. 다시 시도해 주세요.",
+            next_action: Some("잠시 뒤 다시 시도해 주세요."),
+        },
+        PairingFailure::Timeout => AppIssue {
+            code: "pairing_timeout",
+            message: "연결 시간이 지났어요. 다시 시도해 주세요.",
+            next_action: Some("연결을 다시 시작해 주세요."),
+        },
+        PairingFailure::RelayUnconfigured => AppIssue {
+            code: "pairing_relay_unconfigured",
+            message: "중계 서버 주소를 먼저 설정해 주세요.",
+            next_action: Some("관리자에게 중계 서버 설정을 요청해 주세요."),
+        },
+        PairingFailure::Unavailable => AppIssue {
+            code: "pairing_unavailable",
+            message: "지금은 연결을 시작할 수 없어요.",
+            next_action: Some("잠시 뒤 다시 시도해 주세요."),
+        },
+    }
+}
+
+fn pairing_view(phase: PairingUiPhase, failure: Option<PairingFailure>) -> PairingView {
+    match phase {
+        PairingUiPhase::Connecting => PairingView {
+            phase: "connecting",
+            message: "PC 승인 서비스에 연결하고 있어요.".to_owned(),
+            failure: None,
+        },
+        PairingUiPhase::WaitingForAdmin => PairingView {
+            phase: "waiting_for_admin",
+            message: "관리자 확인 창에서 [예]를 눌러 주세요.".to_owned(),
+            failure: None,
+        },
+        PairingUiPhase::HelperRunning => PairingView {
+            phase: "helper_running",
+            message: "PC 화면의 연결 안내를 따라 주세요. 휴대폰 승인 앱에서 QR을 읽고 여섯 자리 숫자를 비교합니다."
+                .to_owned(),
+            failure: None,
+        },
+        PairingUiPhase::Finished => PairingView {
+            phase: "finished",
+            message: "연결 절차가 끝났어요. 잠시 뒤 목록에서 휴대폰을 확인해 주세요."
+                .to_owned(),
+            failure: None,
+        },
+        PairingUiPhase::Failed => pairing_failure_view(failure.unwrap_or(PairingFailure::Unavailable)),
+    }
+}
+
+fn pairing_failure_view(failure: PairingFailure) -> PairingView {
+    let (message, code) = match failure {
+        PairingFailure::ServiceNotReady => {
+            ("PC 승인 서비스가 준비되지 않았어요.", "service_not_ready")
+        }
+        PairingFailure::UserCancelled => ("관리자 확인을 취소했어요.", "user_cancelled"),
+        PairingFailure::HelperFailed => (
+            "연결 절차가 중단됐어요. 다시 시도해 주세요.",
+            "helper_failed",
+        ),
+        PairingFailure::Timeout => ("연결 시간이 지났어요. 다시 시도해 주세요.", "timeout"),
+        PairingFailure::RelayUnconfigured => {
+            ("중계 서버 주소를 먼저 설정해 주세요.", "relay_unconfigured")
+        }
+        PairingFailure::Unavailable => ("지금은 연결을 시작할 수 없어요.", "unavailable"),
+    };
+    PairingView {
+        phase: "failed",
+        message: message.to_owned(),
+        failure: Some(code),
     }
 }
 
