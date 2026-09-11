@@ -643,3 +643,20 @@ permission to consume it early.
   times while the dialog was shown. consent.exe owns hidden top-level windows besides the
   dialog (one per GUI thread, such as the IME windows). `f9c9055` counts only shown
   windows as candidates; the next lab run tells whether the census now qualifies the dialog.
+## The watcher observes a real consent prompt (September 12, ~07:00)
+
+- Three helper fixes, each named by the previous lab run's notes: `f9c9055` counts only shown
+  windows (consent.exe owns hidden IME windows per GUI thread); `26aa610` treats a failed UI
+  Automation inspection as that cycle's verdict instead of a helper failure and drops owned,
+  tool and no-activate windows (the input indicator and the secure background window);
+  `fd300d1` reads pattern-availability properties with the provider default, because the
+  XAML-hosted dialog answered the reserved not-supported object for elements that do not
+  implement a pattern and the strict check refused the whole dialog every cycle.
+- Lab run 34650918887 (`fd300d1`) then passed: with a real `consent.exe` on the secure
+  desktop of a hosted windows-2025 runner, the census settled on the single
+  `Credential Dialog Xaml Host` window, the helper reported `Appeared`, the service opened a
+  request and journaled `observed`, and the same dialog was tracked for 64 cycles until the
+  lab dismissed it. This is observation only: no phone was enrolled, so no request was sent
+  and nothing was applied; the phone-side decision and the exact-target apply remain
+  unverified on a real prompt.
+- `v0.1.0-alpha.2` carries these fixes; the release notes table records the lab observation.
