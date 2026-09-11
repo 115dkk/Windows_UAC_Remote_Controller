@@ -230,16 +230,11 @@ impl TokenBuffer {
         ))
     }
     /// TokenHasRestrictions is documented as a DWORD, but the runner's service
-    /// token answered with a longer buffer (lab run 34615972812, token.rs:229).
-    /// Read the leading DWORD and ignore trailing bytes for that class only.
-    fn leading_u32(&self) -> Result<u32, Error> {
-        Ok(u32::from_ne_bytes(
-            self.bytes()
-                .get(..4)
-                .ok_or_else(|| unsupported_at(line!()))?
-                .try_into()
-                .map_err(|_| unsupported_at(line!()))?,
-        ))
+    /// token answered with a buffer that is not four bytes long (lab runs
+    /// 34615972812 and 34616687635). The fact is a flag: nonzero means the
+    /// token has ever been filtered, so any nonzero byte in the answer counts.
+    fn flag(&self) -> u32 {
+        u32::from(self.bytes().iter().any(|byte| *byte != 0))
     }
 }
 
@@ -345,7 +340,7 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
         groups: regular,
         restricted,
         privileges: values,
-        has_restrictions: TokenBuffer::read(token, TokenHasRestrictions)?.leading_u32()?,
+        has_restrictions: TokenBuffer::read(token, TokenHasRestrictions)?.flag(),
     })
 }
 fn luid(value: LUID) -> u64 {

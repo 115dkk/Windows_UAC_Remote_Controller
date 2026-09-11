@@ -188,12 +188,20 @@ jobs:
           Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA, ConsentPromptBehaviorAdmin, PromptOnSecureDesktop | Format-List | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/uac-policy.txt"
           # A LIMITED scheduled task in the interactive session gives a filtered (medium) token; its elevation request
           # produces the actual consent.exe prompt. The elevated child would only sleep; it is never approved here.
-          # The runner's interactive administrator has no filtered token (run 34615972812 logged elevated=True even
-          # under a LIMITED scheduled task), so a real prompt needs a basic-user token: runas /trustlevel creates one
-          # in this same interactive session, and the script's own ShellExecute runas then reaches AppInfo and consent.exe.
-          # The script records its identity, elevation state and outcome as evidence.
-          $requestScript = Join-Path $env:RUNNER_TEMP 'uac-lab-elevation-request.ps1'
-          $requestLog = Join-Path $env:LAB_EVIDENCE 'elevation-request.log'
+          # The runner's interactive administrator has no filtered token (run 34615972812: elevated=True under a LIMITED
+          # scheduled task) and a SAFER basic-user token of that same account elevates silently (run 34616687635: cmd
+          # started, no consent.exe). A real prompt therefore comes from a separate standard user: the runner creates one
+          # for this disposable machine and starts the request script through Secondary Logon in this interactive
+          # session, so the script's ShellExecute runas reaches AppInfo and consent.exe on the secure desktop.
+          $publicDir = Join-Path $env:SystemDrive 'Users\Public'
+          $requestScript = Join-Path $publicDir 'uac-lab-elevation-request.ps1'
+          $requestLog = Join-Path $publicDir 'uac-lab-elevation-request.log'
+          $labUser = 'uaclabuser'
+          $labPassword = -join ((1..20) | ForEach-Object { [char](Get-Random -InputObject ([int[]](48..57) + [int[]](65..90) + [int[]](97..122))) }) + 'aZ9!'
+          net.exe user $labUser $labPassword /add /y | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/lab-user-create.txt"
+          net.exe localgroup Administrators $labUser /delete 2>$null | Out-Null
+          net.exe user $labUser | Select-String 'Local Group Memberships' | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/lab-user-groups.txt"
+          $labCredential = New-Object System.Management.Automation.PSCredential($labUser, (ConvertTo-SecureString $labPassword -AsPlainText -Force))
           @(
             '$ErrorActionPreference = ''Stop''',
             ('$log = ''{0}''' -f $requestLog),
@@ -208,8 +216,12 @@ jobs:
             '  exit 3',
             '}'
           ) | Set-Content -Path $requestScript -Encoding ascii
-          $trigger = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $requestScript
-          runas.exe /trustlevel:0x20000 $trigger 2>&1 | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/runas-basic-user.txt"
+          try {
+            $request = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $requestScript -Credential $labCredential -WorkingDirectory $publicDir -PassThru
+            "secondary logon started powershell pid={0}" -f $request.Id | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
+          } catch {
+            "secondary logon failed: {0}" -f $_.Exception.Message | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
+          }
           $consent = $null
           $timeline = @()
           for ($i = 0; $i -lt 80; $i++) {
@@ -219,7 +231,7 @@ jobs:
             Start-Sleep -Milliseconds 500
           }
           $timeline | Set-Content -Path "$env:LAB_EVIDENCE/consent-timeline.txt"
-          if (Test-Path -LiteralPath $requestLog) { Get-Content -LiteralPath $requestLog } else { Write-Output 'elevation request script left no log' }
+          if (Test-Path -LiteralPath $requestLog) { Copy-Item -LiteralPath $requestLog -Destination "$env:LAB_EVIDENCE/elevation-request.log"; Get-Content -LiteralPath $requestLog } else { Write-Output 'elevation request script left no log' }
           if ($consent) { Write-Output ("consent.exe present: pid {0} session {1}" -f $consent.Id, $consent.SessionId) } else { Write-Output 'consent.exe did not appear within 40 s.' }
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-before-probe.txt"
           Start-Sleep -Seconds 2
