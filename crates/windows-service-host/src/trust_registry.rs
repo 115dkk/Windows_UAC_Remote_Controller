@@ -50,6 +50,11 @@ pub struct CommittedRegistryChange {
     revision: u64,
 }
 impl CommittedRegistryChange {
+    #[cfg(test)]
+    pub(crate) const fn for_test(device: DeviceId, revision: u64) -> Self {
+        Self { device, revision }
+    }
+
     pub const fn affected_device(&self) -> DeviceId {
         self.device
     }
@@ -93,6 +98,9 @@ impl ServiceRegistry<'_> {
         }
     }
 
+    /// Steady-state routes for the service dialer. The dialer (W3b) is the only
+    /// caller; until it lands, non-Windows test builds see no use of it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn device_routes(&mut self) -> Result<Vec<(DeviceId, SocketAddr, RouteId)>, RegistryError> {
         #[cfg(windows)]
         {
@@ -102,6 +110,14 @@ impl ServiceRegistry<'_> {
         {
             Err(RegistryError::UnsupportedPlatform)
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn read_relay_endpoint(&mut self) -> Result<Option<SocketAddr>, RegistryError> {
+        let _ = self.healthy()?;
+        self.file
+            .read_relay_endpoint()
+            .map_err(|_| RegistryError::Unavailable)
     }
 
     pub fn transport_key(

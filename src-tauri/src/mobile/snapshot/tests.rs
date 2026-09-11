@@ -132,7 +132,7 @@ impl OwnerPort for Port {
 fn stopped_owner_still_has_recovery_surface_without_policy_or_history_calls() {
     let port = Port::new(&[stopped()]);
     let view = snapshot(&port, OwnerOperation::Read).unwrap();
-    assert_eq!(view.schema_version, 3);
+    assert_eq!(view.schema_version, 4);
     assert_eq!(view.phone_service, Some(stopped()));
     assert!(view.policy.is_none() && view.issue.is_none());
     assert_eq!(
