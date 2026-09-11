@@ -141,6 +141,10 @@ impl ProjectionAnchor {
     pub(crate) fn coordinate(self) -> Instant {
         self.coordinate
     }
+    /// Native monotonic value captured with this exact coordinate.
+    pub(crate) fn native_nanos(self) -> u64 {
+        self.native
+    }
 }
 /// ONE instance per socket or dedicated bounded native ceremony. Never shares
 /// another operation's clock floor or the business owner's serialized floor.

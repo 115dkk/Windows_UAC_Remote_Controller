@@ -14,7 +14,7 @@ use std::{
 use android_controller::{
     CommittedPairingAcceptance, DurableInbox, LocalAttestationChallenge, LocalKeyHandle,
     LocalKeyMutationError, LocalKeySetDescriptor, MAX_PAIRING_ACCEPTANCE_LIFETIME,
-    PairingAcceptanceContext, PairingAcceptanceError, PendingPairingAcceptance,
+    PairingAcceptanceContext, PairingAcceptanceError, PendingPairingAcceptance, RelayEndpoint,
 };
 use approval_protocol::{DeviceId, PcIdentity};
 use framed_transport::SocketClock;
@@ -27,7 +27,11 @@ use service_protocol::{
 
 use crate::{BridgeError, MobileController, native_clock::native_callback};
 
+mod ceremony;
 mod native_scan;
+pub use ceremony::{
+    NativeCeremonyFailure, NativeCeremonyPhase, NativeCeremonyStatus, NativePairingCeremony,
+};
 pub use native_scan::{NativePairingScan, NativePairingScanResult};
 
 pub const MAX_CREATION_CERTIFICATES: usize = 8;
@@ -52,6 +56,7 @@ pub struct KeyCreationContext {
     pub recipient_device: DeviceId,
     pub pc_signing_key: TlsPublicKey,
     pub pc_transport_key: TlsPublicKey,
+    pub relay: RelayEndpoint,
     pub invitation_context: InvitationContextDigest,
     pub clock: Arc<dyn SocketClock>,
     pub started_at: Instant,
@@ -69,6 +74,11 @@ pub(crate) struct CreationState {
     original: KeyCreationContext,
     observed: Mutex<Instant>,
     cancelled: AtomicBool,
+}
+impl CreationState {
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
 }
 impl CreationState {
     fn check_owner(&self, controller: &Arc<MobileController>) -> Result<(), BridgeError> {
@@ -136,7 +146,7 @@ pub struct KeyCreationIntent {
 }
 impl KeyCreationIntent {
     pub fn cancel(&self) {
-        self.state.cancelled.store(true, Ordering::Release);
+        self.state.cancel();
     }
 }
 impl fmt::Debug for KeyCreationIntent {
@@ -314,8 +324,11 @@ impl CreatedPairingKeys {
     pub fn unverified_evidence(&self) -> &NativeCreatedKeyEvidence {
         &self.evidence
     }
+    pub(super) fn cancellation_state(&self) -> Arc<CreationState> {
+        Arc::clone(&self.state)
+    }
     pub fn cancel(&self) {
-        self.state.cancelled.store(true, Ordering::Release);
+        self.state.cancel();
         self.pending.cancel();
     }
 }
@@ -503,6 +516,7 @@ impl MobileController {
                     pc: original.pc,
                     pc_signing_key: original.pc_signing_key.clone(),
                     pc_transport_key: original.pc_transport_key.clone(),
+                    relay: original.relay,
                     ceremony_nonce: original.ceremony_nonce,
                     clock: Arc::new(CreationClock {
                         state: Arc::downgrade(&intent.state),
@@ -548,33 +562,42 @@ impl MobileController {
         created: CreatedPairingKeys,
         wire: &[u8],
     ) -> Result<FrozenCreatedPairing, BridgeError> {
-        let _admission = self.enter()?;
-        created.state.check_owner(self)?;
-        let original = &created.state.original;
-        let expected = FrozenCandidateContext {
-            ceremony_nonce: original.ceremony_nonce,
-            attestation_challenge: PairingChallenge::from_bytes(*original.challenge.as_bytes())
+        let result = (|| {
+            let _admission = self.enter()?;
+            created.state.check_owner(self)?;
+            let original = &created.state.original;
+            let expected = FrozenCandidateContext {
+                ceremony_nonce: original.ceremony_nonce,
+                attestation_challenge: PairingChallenge::from_bytes(*original.challenge.as_bytes())
+                    .map_err(|_| BridgeError::InvalidObservation)?,
+                pc: original.pc,
+                recipient_device: original.recipient_device,
+                phone_keys: PhoneKeyDigest::from_keys(
+                    created.local_keys.approval_key(),
+                    created.local_keys.denial_key(),
+                    created.local_keys.transport_key(),
+                )
                 .map_err(|_| BridgeError::InvalidObservation)?,
-            pc: original.pc,
-            recipient_device: original.recipient_device,
-            phone_keys: PhoneKeyDigest::from_keys(
-                created.local_keys.approval_key(),
-                created.local_keys.denial_key(),
-                created.local_keys.transport_key(),
-            )
-            .map_err(|_| BridgeError::InvalidObservation)?,
-            pc_signing_key: original.pc_signing_key.clone(),
-            pc_transport_key: original.pc_transport_key.clone(),
-            invitation_context: original.invitation_context,
-        };
-        let matched = SignedFrozenCandidate::from_wire(wire)
-            .and_then(|signed| signed.verify(&original.pc_signing_key))
-            .and_then(|verified| verified.match_original(&expected))
-            .map_err(|_| BridgeError::InvalidObservation)?;
-        // Native cancellation, stop, expiry or regression during parsing and
-        // signature work cannot publish a live code/commit-bearing wrapper.
-        created.state.check_owner(self)?;
-        Ok(FrozenCreatedPairing { created, matched })
+                pc_signing_key: original.pc_signing_key.clone(),
+                pc_transport_key: original.pc_transport_key.clone(),
+                invitation_context: original.invitation_context,
+            };
+            let matched = SignedFrozenCandidate::from_wire(wire)
+                .and_then(|signed| signed.verify(&original.pc_signing_key))
+                .and_then(|verified| verified.match_original(&expected))
+                .map_err(|_| BridgeError::InvalidObservation)?;
+            // Native cancellation, stop, expiry or regression during parsing and
+            // signature work cannot publish a live code/commit-bearing wrapper.
+            created.state.check_owner(self)?;
+            Ok(matched)
+        })();
+        match result {
+            Ok(matched) => Ok(FrozenCreatedPairing { created, matched }),
+            Err(error) => {
+                created.cancel();
+                Err(error)
+            }
+        }
     }
 
     /// Requires the exact retained frozen candidate, then reuses the existing
@@ -586,28 +609,33 @@ impl MobileController {
         frozen: FrozenCreatedPairing,
         wire: &[u8],
     ) -> Result<CommittedPairingAcceptance, CreatedPairingCommitError> {
-        let _admission = self.enter().map_err(CreatedPairingCommitError::Rejected)?;
-        frozen
-            .created
-            .state
-            .check_owner(self)
-            .map_err(CreatedPairingCommitError::Rejected)?;
-        frozen
-            .check_acceptance(wire)
-            .map_err(CreatedPairingCommitError::Rejected)?;
-        frozen
-            .created
-            .state
-            .check_current()
-            .map_err(CreatedPairingCommitError::Rejected)?;
+        let checked = (|| {
+            let admission = self.enter()?;
+            frozen.created.state.check_owner(self)?;
+            frozen.check_acceptance(wire)?;
+            frozen.created.state.check_current()?;
+            Ok(admission)
+        })();
+        let _admission = match checked {
+            Ok(admission) => admission,
+            Err(error) => {
+                frozen.cancel();
+                return Err(CreatedPairingCommitError::Rejected(error));
+            }
+        };
         let created = frozen.created;
-        let committed = self
-            .with_inbox(|owner| {
-                owner
-                    .commit_pairing_acceptance(created.pending, wire)
-                    .map_err(pairing_error)
-            })
-            .map_err(CreatedPairingCommitError::Rejected)?;
+        let state = Arc::clone(&created.state);
+        let committed = match self.with_inbox(|owner| {
+            owner
+                .commit_pairing_acceptance(created.pending, wire)
+                .map_err(pairing_error)
+        }) {
+            Ok(committed) => committed,
+            Err(error) => {
+                state.cancel();
+                return Err(CreatedPairingCommitError::Rejected(error));
+            }
+        };
         // Preserve an actual completed local commit if stop/expiry arrives
         // during blocking flush or this final native observation. Never return
         // Ok for lost liveness and never report that its bytes rolled back.

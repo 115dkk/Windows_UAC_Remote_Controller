@@ -6,6 +6,7 @@
 
 mod approval;
 mod bootstrap;
+mod connectivity;
 mod denial;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod denial_fixture;
@@ -24,6 +25,7 @@ mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
 };
+pub use connectivity::NativeConnectivityStatus;
 pub use denial::{
     NativeApprovalDrainState, NativeDenialAdvance, NativeDenialAttempt, NativeDenialOperationState,
     NativeDenialScope, NativeDenialWait,
@@ -34,8 +36,9 @@ pub use local_keys::NativeLocalKeySet;
 pub use native_clock::NativePresentationClock;
 pub use pairing::{
     CreatedPairingCommitError, CreatedPairingKeys, FrozenCreatedPairing, KeyCreationContext,
-    KeyCreationIntent, NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
-    NativeKeyCreationRequest, NativePairingScan, NativePairingScanResult,
+    KeyCreationIntent, NativeCeremonyFailure, NativeCeremonyPhase, NativeCeremonyStatus,
+    NativeCreatedKeyEvidence, NativeCreatedRoleEvidence, NativeKeyCreationInput,
+    NativeKeyCreationRequest, NativePairingCeremony, NativePairingScan, NativePairingScanResult,
 };
 pub use request_projection::{
     NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
@@ -237,6 +240,7 @@ pub struct MobileController {
     denial_state: Mutex<denial::DenialState>,
     projections: Mutex<request_projection::ProjectionRegistry>,
     intake: Arc<intake::IntakeOwner>,
+    connectivity: Arc<connectivity::ConnectivityOwner>,
     approval_alive: Arc<AtomicBool>,
     active: AtomicBool,
     cleanup_pending: AtomicBool,
@@ -257,6 +261,7 @@ impl Drop for MobileController {
         // Last-resort downward invalidation only. Native actor must retain this
         // object until explicit cleanup succeeds; Drop claims no quiescence.
         self.approval_alive.store(false, Ordering::Release);
+        self.connectivity.stop();
         self.intake.stop();
         let _ = self
             .projections
@@ -269,7 +274,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    10
+    11
 }
 
 #[uniffi::export]
@@ -384,6 +389,7 @@ impl MobileController {
     /// is in progress. Actual cleanup remains on the admitted continuation path.
     pub fn stop_intake(&self) {
         self.approval_alive.store(false, Ordering::Release);
+        self.connectivity.stop();
         self.intake.stop();
         let _ = self
             .projections
@@ -556,6 +562,7 @@ impl MobileController {
                     denial_state: Mutex::new(denial_state),
                     projections: Mutex::new(request_projection::ProjectionRegistry::default()),
                     intake: Arc::new(intake::IntakeOwner::default()),
+                    connectivity: Arc::new(connectivity::ConnectivityOwner::default()),
                     approval_alive: Arc::new(AtomicBool::new(true)),
                     active: AtomicBool::new(false),
                     cleanup_pending: AtomicBool::new(false),
@@ -629,6 +636,7 @@ impl MobileController {
     }
     fn drop_owner(&self) -> bool {
         self.approval_alive.store(false, Ordering::Release);
+        self.connectivity.stop();
         self.intake.stop();
         let _ = self
             .projections
@@ -971,6 +979,7 @@ mod tests {
             denial_state: Mutex::new(denial::DenialState::new(&owner, boot).unwrap()),
             projections: Mutex::new(request_projection::ProjectionRegistry::default()),
             intake: Arc::new(intake::IntakeOwner::default()),
+            connectivity: Arc::new(connectivity::ConnectivityOwner::default()),
             state: Mutex::new(Some(owner)),
             creation_slot: Mutex::new(std::sync::Weak::<pairing::CreationState>::new()),
             active: AtomicBool::new(false),

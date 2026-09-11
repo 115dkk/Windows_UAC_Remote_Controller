@@ -9,7 +9,7 @@ use crate::{
     native_clock::{NativeSocketClock, ProjectionAnchor, callback_active, native_callback},
 };
 use android_controller::{
-    LocalAttestationChallenge, LocalKeyHandle, MAX_PAIRING_ACCEPTANCE_LIFETIME,
+    LocalAttestationChallenge, LocalKeyHandle, MAX_PAIRING_ACCEPTANCE_LIFETIME, RelayEndpoint,
 };
 use framed_transport::{SocketClock, SocketClockUnavailable};
 use service_protocol::{MAX_PAIRING_INVITATION_QR_TEXT_BYTES, PairingInvitation};
@@ -46,6 +46,7 @@ struct ScanGuard {
     clock: Arc<NativeSocketClock>,
     started: Instant,
     deadline: Instant,
+    deadline_nanos: u64,
     cancelled: AtomicBool,
     // These outlive foreign copies and the actual retained CreationState clock.
     // No second business/store owner is constructed during scan or handoff.
@@ -73,6 +74,23 @@ impl ScanGuard {
             return Err(BridgeError::InvalidObservation);
         }
         Ok(())
+    }
+    /// Clock reads for the retained creation intent. The native platform takes
+    /// the creation input from inside its own callback, so this path must stay
+    /// re-entrant: it keeps the liveness and window checks but never blocks on
+    /// `callback_active` and never calls back into the platform beyond the clock.
+    fn observe_clock(&self) -> Result<Instant, BridgeError> {
+        self.ensure_open()?;
+        let now = self.clock.now().map_err(|_| {
+            self.cancel();
+            BridgeError::NativeUnavailable
+        })?;
+        if now < self.started || now >= self.deadline {
+            self.cancel();
+            return Err(BridgeError::Closed);
+        }
+        self.ensure_open()?;
+        Ok(now)
     }
     fn observe(&self) -> Result<Instant, BridgeError> {
         struct Observation<'a> {
@@ -131,7 +149,7 @@ impl ScanGuard {
 struct ScanClock(Arc<ScanGuard>);
 impl SocketClock for ScanClock {
     fn now(&self) -> Result<Instant, SocketClockUnavailable> {
-        self.0.observe().map_err(|_| SocketClockUnavailable)
+        self.0.observe_clock().map_err(|_| SocketClockUnavailable)
     }
 }
 struct Accepted {
@@ -198,6 +216,15 @@ impl From<BridgeError> for AcceptError {
     }
 }
 impl NativePairingScan {
+    pub(super) fn ceremony_deadline(&self) -> Instant {
+        self.guard.deadline
+    }
+    pub(super) fn ceremony_deadline_nanos(&self) -> u64 {
+        self.guard.deadline_nanos
+    }
+    pub(super) fn ceremony_clock(&self) -> Arc<dyn SocketClock> {
+        Arc::new(ScanClock(Arc::clone(&self.guard)))
+    }
     fn accept_with(
         &self,
         text: String,
@@ -254,6 +281,8 @@ impl NativePairingScan {
                 recipient_device: fields.recipient_device,
                 pc_signing_key: fields.pc_signing_key.clone(),
                 pc_transport_key: fields.pc_transport_key.clone(),
+                relay: RelayEndpoint::new(fields.relay_address, fields.route)
+                    .map_err(|_| AcceptError::Invalid)?,
                 invitation_context: invitation.context_digest(),
                 clock: Arc::new(ScanClock(Arc::clone(&self.guard))),
                 started_at: self.guard.started,
@@ -344,12 +373,22 @@ impl MobileController {
         let deadline = started
             .checked_add(MAX_PAIRING_ACCEPTANCE_LIFETIME)
             .ok_or(BridgeError::InvalidObservation)?;
+        let deadline_nanos = anchor
+            .native_nanos()
+            .checked_add(
+                MAX_PAIRING_ACCEPTANCE_LIFETIME
+                    .as_nanos()
+                    .try_into()
+                    .map_err(|_| BridgeError::InvalidObservation)?,
+            )
+            .ok_or(BridgeError::InvalidObservation)?;
         let guard = Arc::new(ScanGuard {
             controller: Arc::downgrade(self),
             alive: Arc::clone(&self.approval_alive),
             clock: anchor.clock(Arc::clone(&self.platform)),
             started,
             deadline,
+            deadline_nanos,
             cancelled: AtomicBool::new(false),
             _reservation: reservation,
             _owner_lease: Arc::clone(&self._owner_lease),

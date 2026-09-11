@@ -17,7 +17,11 @@
 //! No signing, networking, native key generation, pairing UI, bulk replacement,
 //! key deletion, hidden ban list, authentication boolean or automatic recovery.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+};
 
 use approval_protocol::{DeviceId, PcIdentity};
 use secure_channel::TlsPublicKey;
@@ -27,12 +31,34 @@ use crate::{LocalKeyHandle, LocalKeyLedger};
 
 pub const MAX_PEER_ASSOCIATIONS: usize = 32;
 const MAGIC: &[u8; 8] = b"UACPEER\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
+const LEGACY_VERSION: u16 = 1;
 const HEADER_BYTES: usize = 24;
-const RECORD_BYTES: usize = 32 + 16 + 8 + 32 + 91 + 91 + 8;
-/// Exact v1 maximum: header24 + 32 fixed278-byte active association records.
+const LEGACY_RECORD_BYTES: usize = 32 + 16 + 8 + 32 + 91 + 91 + 8;
+const RELAY_RECORD_BYTES: usize = 1 + 1 + 2 + 16 + 32;
+const RECORD_BYTES: usize = LEGACY_RECORD_BYTES + RELAY_RECORD_BYTES;
+/// Exact v2 maximum: header24 + 32 fixed330-byte active association records.
 pub const MAX_PEER_ASSOCIATION_LEDGER_BYTES: usize =
     HEADER_BYTES + MAX_PEER_ASSOCIATIONS * RECORD_BYTES;
+
+/// Numeric public rendezvous coordinates retained from the original invitation.
+/// They identify a relay meeting point but grant no authority and contain no secret.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RelayEndpoint {
+    pub address: SocketAddr,
+    pub route: [u8; 32],
+}
+impl RelayEndpoint {
+    pub fn new(address: SocketAddr, route: [u8; 32]) -> Result<Self, PeerAssociationError> {
+        validate_relay(address, &route)?;
+        Ok(Self { address, route })
+    }
+}
+impl fmt::Debug for RelayEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RelayEndpoint([redacted], public_rendezvous_only)")
+    }
+}
 
 /// Immutable host-supplied relationship, not a verified PC receipt. TlsPublicKey
 /// is reused as the canonical 91-byte P-256 SPKI representation for BOTH PC roles;
@@ -45,6 +71,7 @@ pub struct PeerAssociationDescriptor {
     local_key_handle: LocalKeyHandle,
     pc_signing_key: TlsPublicKey,
     pc_transport_key: TlsPublicKey,
+    relay: Option<RelayEndpoint>,
 }
 
 impl PeerAssociationDescriptor {
@@ -68,7 +95,16 @@ impl PeerAssociationDescriptor {
             local_key_handle,
             pc_signing_key,
             pc_transport_key,
+            relay: None,
         })
+    }
+    pub fn with_relay(
+        mut self,
+        address: SocketAddr,
+        route: [u8; 32],
+    ) -> Result<Self, PeerAssociationError> {
+        self.relay = Some(RelayEndpoint::new(address, route)?);
+        Ok(self)
     }
     pub const fn pc(&self) -> PcIdentity {
         self.pc
@@ -87,6 +123,12 @@ impl PeerAssociationDescriptor {
     }
     pub const fn pc_transport_key(&self) -> &TlsPublicKey {
         &self.pc_transport_key
+    }
+    pub const fn relay(&self) -> Option<(SocketAddr, [u8; 32])> {
+        match self.relay {
+            Some(relay) => Some((relay.address, relay.route)),
+            None => None,
+        }
     }
     fn pc_keys(&self) -> [&TlsPublicKey; 2] {
         [&self.pc_signing_key, &self.pc_transport_key]
@@ -305,11 +347,13 @@ impl PeerAssociationLedger {
             bytes.extend_from_slice(descriptor.pc_signing_key.as_spki_der());
             bytes.extend_from_slice(descriptor.pc_transport_key.as_spki_der());
             bytes.extend_from_slice(&entry.generation.to_be_bytes());
+            write_relay(&mut bytes, descriptor.relay);
         }
         Ok(bytes)
     }
 
-    /// Strict fixed-record v1 restore; no truncation/default/reordering on error.
+    /// Strict fixed-record v1/v2 restore; no truncation/default/reordering on error.
+    /// V1 rows receive no relay endpoint. All newly written rows use v2.
     /// Preserves even an empty ledger's highwater, including u64::MAX exhaustion.
     /// Decoding proves neither current disk provenance nor native enrollment.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PeerAssociationError> {
@@ -320,9 +364,12 @@ impl PeerAssociationLedger {
         if input.take::<8>()? != *MAGIC {
             return Err(PeerAssociationError::InvalidEncoding);
         }
-        if u16::from_be_bytes(input.take()?) != VERSION {
-            return Err(PeerAssociationError::UnsupportedVersion);
-        }
+        let version = u16::from_be_bytes(input.take()?);
+        let record_bytes = match version {
+            LEGACY_VERSION => LEGACY_RECORD_BYTES,
+            VERSION => RECORD_BYTES,
+            _ => return Err(PeerAssociationError::UnsupportedVersion),
+        };
         if input.take::<2>()? != [0; 2] {
             return Err(PeerAssociationError::InvalidEncoding);
         }
@@ -334,7 +381,7 @@ impl PeerAssociationLedger {
         if count > MAX_PEER_ASSOCIATIONS {
             return Err(PeerAssociationError::CapacityReached);
         }
-        if input.take::<2>()? != [0; 2] || bytes.len() != HEADER_BYTES + count * RECORD_BYTES {
+        if input.take::<2>()? != [0; 2] || bytes.len() != HEADER_BYTES + count * record_bytes {
             return Err(PeerAssociationError::InvalidEncoding);
         }
         let mut entries = BTreeMap::new();
@@ -359,9 +406,17 @@ impl PeerAssociationLedger {
             let signing = read_key(&mut input)?;
             let transport = read_key(&mut input)?;
             let generation = u64::from_be_bytes(input.take()?);
-            let descriptor = PeerAssociationDescriptor::new(
+            let relay = if version == VERSION {
+                read_relay(&mut input)?
+            } else {
+                None
+            };
+            let mut descriptor = PeerAssociationDescriptor::new(
                 pc, recipient, revision, handle, signing, transport,
             )?;
+            if let Some(relay) = relay {
+                descriptor = descriptor.with_relay(relay.address, relay.route)?;
+            }
             entries.insert(
                 pc,
                 PeerAssociation {
@@ -395,6 +450,9 @@ impl PeerAssociationLedger {
             if entry.descriptor.pc_registry_revision == 0 {
                 return Err(PeerAssociationError::InvalidPcRegistryRevision);
             }
+            if let Some(relay) = entry.descriptor.relay {
+                validate_relay(relay.address, &relay.route)?;
+            }
             for previous in self.entries.values().take(index) {
                 if previous.generation == entry.generation {
                     return Err(PeerAssociationError::DuplicateGeneration);
@@ -403,6 +461,68 @@ impl PeerAssociationLedger {
             }
         }
         Ok(())
+    }
+}
+
+fn validate_relay(address: SocketAddr, route: &[u8; 32]) -> Result<(), PeerAssociationError> {
+    if address.port() == 0 {
+        return Err(PeerAssociationError::InvalidRelayPort);
+    }
+    if route.iter().all(|byte| *byte == 0) {
+        return Err(PeerAssociationError::InvalidRelayRoute);
+    }
+    Ok(())
+}
+
+fn write_relay(bytes: &mut Vec<u8>, relay: Option<RelayEndpoint>) {
+    let Some(relay) = relay else {
+        bytes.extend_from_slice(&[0; RELAY_RECORD_BYTES]);
+        return;
+    };
+    bytes.push(1);
+    match relay.address.ip() {
+        IpAddr::V4(address) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&relay.address.port().to_be_bytes());
+            bytes.extend_from_slice(&address.octets());
+            bytes.extend_from_slice(&[0; 12]);
+        }
+        IpAddr::V6(address) => {
+            bytes.push(6);
+            bytes.extend_from_slice(&relay.address.port().to_be_bytes());
+            bytes.extend_from_slice(&address.octets());
+        }
+    }
+    bytes.extend_from_slice(&relay.route);
+}
+
+fn read_relay(input: &mut Input<'_>) -> Result<Option<RelayEndpoint>, PeerAssociationError> {
+    let present = input.take::<1>()?[0];
+    let family = input.take::<1>()?[0];
+    let port = u16::from_be_bytes(input.take()?);
+    let address = input.take::<16>()?;
+    let route = input.take::<32>()?;
+    match present {
+        0 if family == 0 && port == 0 && address == [0; 16] && route == [0; 32] => Ok(None),
+        0 => Err(PeerAssociationError::InvalidRelayEncoding),
+        1 => {
+            if port == 0 {
+                return Err(PeerAssociationError::InvalidRelayPort);
+            }
+            if route.iter().all(|byte| *byte == 0) {
+                return Err(PeerAssociationError::InvalidRelayRoute);
+            }
+            let ip = match family {
+                4 if address[4..] == [0; 12] => IpAddr::V4(Ipv4Addr::new(
+                    address[0], address[1], address[2], address[3],
+                )),
+                4 => return Err(PeerAssociationError::InvalidRelayEncoding),
+                6 => IpAddr::V6(Ipv6Addr::from(address)),
+                _ => return Err(PeerAssociationError::InvalidRelayFamily),
+            };
+            RelayEndpoint::new(SocketAddr::new(ip, port), route).map(Some)
+        }
+        _ => Err(PeerAssociationError::InvalidRelayEncoding),
     }
 }
 
@@ -494,6 +614,14 @@ pub enum PeerAssociationError {
     InvalidPublicKey,
     #[error("peer association encoding is invalid")]
     InvalidEncoding,
+    #[error("peer association relay endpoint encoding is invalid")]
+    InvalidRelayEncoding,
+    #[error("peer association relay address family is invalid")]
+    InvalidRelayFamily,
+    #[error("peer association relay port must be nonzero")]
+    InvalidRelayPort,
+    #[error("peer association relay route must be nonzero")]
+    InvalidRelayRoute,
     #[error("peer association version is unsupported")]
     UnsupportedVersion,
     #[error("peer association encoding exceeds its byte limit")]

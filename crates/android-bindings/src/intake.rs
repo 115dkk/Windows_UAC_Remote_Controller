@@ -59,6 +59,7 @@ enum PeerCommand {
 }
 struct RuntimeState {
     sender: mpsc::Sender<AttachInput>,
+    dial_sender: mpsc::Sender<crate::connectivity::DialRequest>,
     thread: JoinHandle<()>,
     finished: Arc<AtomicBool>,
 }
@@ -67,6 +68,7 @@ struct Inner {
     runtime: Option<RuntimeState>,
     peers: Vec<Arc<PeerControl>>,
     pending: Vec<DeliveryCommand>,
+    dial_completions: Vec<crate::connectivity::DialCompletion>,
     next_id: u64,
 }
 pub(crate) struct IntakeOwner {
@@ -154,6 +156,56 @@ impl IntakeOwner {
                     peer.active.load(Ordering::Acquire) && peer.connected.load(Ordering::Acquire)
                 })
                 .count() as u8,
+        )
+    }
+    pub(crate) fn has_live_peer(&self, reference: PeerAssociationRef) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .peers
+            .iter()
+            .any(|peer| {
+                peer.reference == reference
+                    && peer.active.load(Ordering::Acquire)
+                    && !peer.stop.is_cancelled()
+            })
+    }
+    pub(crate) fn has_connected_peer(&self, reference: PeerAssociationRef) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .peers
+            .iter()
+            .any(|peer| {
+                peer.reference == reference
+                    && peer.active.load(Ordering::Acquire)
+                    && peer.connected.load(Ordering::Acquire)
+                    && !peer.stop.is_cancelled()
+            })
+    }
+    pub(crate) fn spawn_dial(
+        &self,
+        request: crate::connectivity::DialRequest,
+    ) -> Result<(), crate::connectivity::DialRequest> {
+        let sender = self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.dial_sender.clone());
+        let Some(sender) = sender else {
+            return Err(request);
+        };
+        sender.try_send(request).map_err(|error| error.into_inner())
+    }
+    pub(crate) fn take_dial_completions(&self) -> Vec<crate::connectivity::DialCompletion> {
+        std::mem::take(
+            &mut self
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .dial_completions,
         )
     }
     pub(crate) fn awaiting_temporal_refresh(&self) -> bool {
@@ -473,8 +525,21 @@ impl MobileController {
                 intake: Arc::clone(&self.intake),
             },
         };
-        let result = sender.try_send(input);
-        result.map_err(|_| BridgeError::Busy)?;
+        if sender.try_send(input).is_err() {
+            let mut inner = self.intake.inner.lock().map_err(|_| BridgeError::Closed)?;
+            if let Some(peer) = inner
+                .peers
+                .iter()
+                .find(|peer| peer.reference == association)
+            {
+                peer.active.store(false, Ordering::Release);
+                peer.stop.cancel();
+            }
+            inner
+                .peers
+                .retain(|peer| peer.active.load(Ordering::Acquire));
+            return Err(BridgeError::Busy);
+        }
         Ok(id)
     }
     pub(crate) fn start_intake_reactor(self: &Arc<Self>) -> Result<(), BridgeError> {
@@ -493,6 +558,7 @@ impl MobileController {
         }
         let anchor = ProjectionAnchor::capture(&*self.platform, self.boot)?;
         let (sender, receiver) = mpsc::channel(MAX_PEERS);
+        let (dial_sender, dial_receiver) = mpsc::channel(MAX_PEERS);
         let weak = Arc::downgrade(self);
         let intake = Arc::clone(&self.intake);
         let platform = Arc::clone(&self.platform);
@@ -521,6 +587,7 @@ impl MobileController {
                         Arc::clone(&platform),
                         anchor,
                         receiver,
+                        dial_receiver,
                     ));
                     drop(runtime);
                     Ok::<(), ()>(())
@@ -548,6 +615,7 @@ impl MobileController {
             .map_err(|_| BridgeError::Closed)?
             .runtime = Some(RuntimeState {
             sender,
+            dial_sender,
             thread,
             finished,
         });
@@ -607,9 +675,11 @@ async fn reactor(
     platform: Arc<dyn NativePlatform>,
     anchor: ProjectionAnchor,
     mut attach: mpsc::Receiver<AttachInput>,
+    mut dial: mpsc::Receiver<crate::connectivity::DialRequest>,
 ) {
     let budget = Arc::new(ConnectionBudget::new(MAX_PEERS).expect("fixed nonzero peer capacity"));
     let mut jobs: JoinSet<ParkedPeer> = JoinSet::new();
+    let mut dial_jobs: JoinSet<crate::connectivity::DialCompletion> = JoinSet::new();
     let mut parked: VecDeque<Parked> = VecDeque::new();
     let mut blocked = false;
     let mut last_local: Option<(notification_policy::LocalTime, u64)> = None;
@@ -712,6 +782,32 @@ async fn reactor(
                     }
                 } else { break; }
             }
+            request = dial.recv() => {
+                if let Some(request) = request {
+                    dial_jobs.spawn(crate::connectivity::run_dial(
+                        controller.clone(),
+                        intake.stop.child_token(),
+                        request,
+                    ));
+                } else { break; }
+            }
+            completed = dial_jobs.join_next(), if !dial_jobs.is_empty() => {
+                match completed {
+                    Some(Ok(completion)) => {
+                        intake
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .dial_completions
+                            .push(completion);
+                    }
+                    Some(Err(_)) => {
+                        intake.failed.store(true, Ordering::Release);
+                        intake.stop.cancel();
+                    }
+                    None => (),
+                }
+            }
             completed = jobs.join_next(), if !jobs.is_empty() => {
                 match completed {
                     Some(Ok(peer)) => parked.push_back(Parked::Peer(Box::new(peer))),
@@ -727,10 +823,14 @@ async fn reactor(
     }
     intake.stop.cancel();
     attach.close();
+    dial.close();
     while attach.try_recv().is_ok() {}
+    while dial.try_recv().is_ok() {}
     parked.clear();
     jobs.abort_all();
+    dial_jobs.abort_all();
     while jobs.join_next().await.is_some() {}
+    while dial_jobs.join_next().await.is_some() {}
     if intake.failed.load(Ordering::Acquire)
         && let Some(owner) = Weak::<MobileController>::upgrade(&controller)
     {

@@ -324,12 +324,14 @@ fn all_512_original_sources_and_four_maximum_components_fit_without_new_cap() {
     // peer codec is valid; only the cross-component relationship is invalid.
     let mut active_alias = peer_bytes.clone();
     const PEER_HEADER_BYTES: usize = 24;
-    const PEER_ROW_BYTES: usize = 278;
+    const PEER_ROW_BYTES: usize = 330;
+    // A v2 row is the 278-byte legacy row (generation in its last 8 bytes)
+    // followed by the 52-byte relay extension.
+    const PEER_LEGACY_ROW_BYTES: usize = 278;
     // The first row is PC1, which legitimately owns historical generation1.
     // Assign that generation to the SECOND row (PC2) to create a real conflict.
-    active_alias
-        [PEER_HEADER_BYTES + 2 * PEER_ROW_BYTES - 8..PEER_HEADER_BYTES + 2 * PEER_ROW_BYTES]
-        .copy_from_slice(&1_u64.to_be_bytes());
+    let generation_end = PEER_HEADER_BYTES + PEER_ROW_BYTES + PEER_LEGACY_ROW_BYTES;
+    active_alias[generation_end - 8..generation_end].copy_from_slice(&1_u64.to_be_bytes());
     let aliased = PeerAssociationLedger::from_bytes(&active_alias).unwrap();
     assert_eq!(aliased.lookup_current(pc(2)).unwrap().generation(), 1);
     assert!(

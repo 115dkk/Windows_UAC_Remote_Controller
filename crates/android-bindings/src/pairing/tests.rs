@@ -2,7 +2,7 @@
 //! Real host store/controller composition plus synthetic public key evidence.
 //! Callback counters/opaque certificate bytes are NOT Android/attestation QA.
 
-use android_controller::{ControllerCheckpoint, LocalKeySetPhase};
+use android_controller::{ControllerCheckpoint, LocalKeySetPhase, PeerAssociationRef};
 use notification_policy::{CapacityLimits, NotificationPolicy};
 use p256::{
     ecdsa::{Signature, SigningKey, signature::Signer},
@@ -12,14 +12,23 @@ use phone_state_store::{
     NativePrivateDirectory, SNAPSHOT_FILE_NAME, STAGING_FILE_NAME, SnapshotStore,
 };
 use service_protocol::{
-    EnrollmentAcceptanceFields, FrozenCandidateFields, MAX_FROZEN_CANDIDATE_BYTES,
-    UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate,
+    CandidateSubmission, EnrollmentAcceptanceFields, FrozenCandidateFields,
+    MAX_FROZEN_CANDIDATE_BYTES, PairingConfirmation, PairingInvitation, PairingInvitationFields,
+    UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate, candidate_digest,
+    plaintext_submission_length,
 };
 use std::{
     fs,
-    sync::atomic::{AtomicU64, AtomicUsize},
+    net::SocketAddr,
+    sync::{
+        Barrier,
+        atomic::{AtomicU64, AtomicUsize},
+        mpsc as sync_mpsc,
+    },
+    thread,
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::*;
@@ -96,6 +105,8 @@ struct Platform {
     saw_preparing: AtomicBool,
     saw_busy: AtomicBool,
     request: Mutex<Option<Arc<NativeKeyCreationRequest>>>,
+    transport_binding: Mutex<Option<Arc<NativeTransportBinding>>>,
+    transport_releases: AtomicUsize,
 }
 
 fn public(seed: u8) -> TlsPublicKey {
@@ -106,11 +117,18 @@ fn public(seed: u8) -> TlsPublicKey {
     .unwrap();
     TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
 }
+/// Synthetic 16-byte certificate with a valid outer DER SEQUENCE header, which
+/// the submission codec requires; it is still not a signed X.509 certificate.
+fn synthetic_certificate(seed: u8) -> Vec<u8> {
+    let mut certificate = vec![0x30, 14];
+    certificate.extend_from_slice(&[seed; 14]);
+    certificate
+}
 fn evidence(input: NativeKeyCreationInput) -> NativeCreatedKeyEvidence {
     let role = |seed| NativeCreatedRoleEvidence {
         spki: public(seed).as_spki_der().to_vec(),
         // Explicitly opaque synthetic public evidence, not signed X.509.
-        certificates: vec![vec![seed; 16]],
+        certificates: vec![synthetic_certificate(seed)],
     };
     NativeCreatedKeyEvidence {
         handle: input.handle,
@@ -130,7 +148,7 @@ fn snapshot(path: &str) -> ControllerCheckpoint {
 
 impl NativePlatform for Platform {
     fn secure_lock_configured(&self) -> Result<bool, BridgeError> {
-        Err(BridgeError::NativeUnavailable)
+        Ok(true)
     }
 
     fn create_local_key_set(
@@ -138,11 +156,10 @@ impl NativePlatform for Platform {
         request: Arc<NativeKeyCreationRequest>,
     ) -> Result<NativeCreatedKeyEvidence, BridgeError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
+        let expected_handle = request.state.original.handle;
         let checkpoint = snapshot(&self.path);
         assert!(matches!(
-            checkpoint
-                .local_keys()
-                .get(LocalKeyHandle::from_bytes([1; 32]).unwrap()),
+            checkpoint.local_keys().get(expected_handle),
             Some(LocalKeySetPhase::Preparing { .. })
         ));
         assert!(
@@ -167,9 +184,9 @@ impl NativePlatform for Platform {
             Mode::ClockFailsBeforeTake => self.clock.fail.store(true, Ordering::Release),
             Mode::NoTake => {
                 return Ok(evidence(NativeKeyCreationInput {
-                    handle: vec![1; 32],
-                    challenge: vec![65; 32],
-                    ceremony_nonce: vec![2; 32],
+                    handle: request.state.original.handle.as_bytes().to_vec(),
+                    challenge: request.state.original.challenge.as_bytes().to_vec(),
+                    ceremony_nonce: request.state.original.ceremony_nonce.as_bytes().to_vec(),
                 }));
             }
             _ => (),
@@ -214,7 +231,29 @@ impl NativePlatform for Platform {
         Ok(value)
     }
     fn presentation_clock(&self) -> Result<NativePresentationClock, BridgeError> {
-        Err(BridgeError::NativeUnavailable)
+        let nanos = 100_000_000_u64
+            .checked_add(
+                self.clock
+                    .seconds
+                    .load(Ordering::Acquire)
+                    .checked_mul(1_000_000_000)
+                    .ok_or(BridgeError::InvalidObservation)?,
+            )
+            .ok_or(BridgeError::InvalidObservation)?;
+        let wall = 1_700_000_000_000_u64
+            .checked_add(nanos / 1_000_000)
+            .ok_or(BridgeError::InvalidObservation)?;
+        Ok(NativePresentationClock {
+            boot_count: 1,
+            elapsed_before_nanos: nanos,
+            elapsed_after_nanos: nanos,
+            wall_before_millis: wall,
+            wall_after_millis: wall,
+            weekday: 0,
+            minute: 600,
+            millis_within_minute: 0,
+            time_epoch: 1,
+        })
     }
     fn publish_pending_request(
         &self,
@@ -242,16 +281,57 @@ impl NativePlatform for Platform {
     fn release_denial_scope(&self, _: Arc<NativeDenialScope>) -> Result<(), BridgeError> {
         Ok(())
     }
-    fn prepare_transport_signer(&self, _: Arc<NativeTransportBinding>) -> Result<(), BridgeError> {
-        Err(BridgeError::NativeUnavailable)
+    fn prepare_transport_signer(
+        &self,
+        binding: Arc<NativeTransportBinding>,
+    ) -> Result<(), BridgeError> {
+        let mut retained = self.transport_binding.lock().unwrap();
+        if retained
+            .as_ref()
+            .is_some_and(|current| !current.is_closed())
+        {
+            return Err(BridgeError::Busy);
+        }
+        *retained = Some(binding);
+        Ok(())
     }
     fn sign_client_certificate_verify(
         &self,
-        _: Arc<NativeCertificateVerify>,
+        input: Arc<NativeCertificateVerify>,
     ) -> Result<Vec<u8>, BridgeError> {
-        Err(BridgeError::NativeUnavailable)
+        let binding = self
+            .transport_binding
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .ok_or(BridgeError::NativeUnavailable)?;
+        if !input.belongs_to(binding) {
+            return Err(BridgeError::InvalidObservation);
+        }
+        let bytes = input.take_bytes()?;
+        let signature: Signature = SigningKey::from_slice(&[5; 32])
+            .map_err(|_| BridgeError::NativeUnavailable)?
+            .sign(&bytes);
+        Ok(signature.to_der().as_bytes().to_vec())
     }
-    fn release_transport_signer(&self, _: Arc<NativeTransportBinding>) -> Result<(), BridgeError> {
+    fn release_transport_signer(
+        &self,
+        binding: Arc<NativeTransportBinding>,
+    ) -> Result<(), BridgeError> {
+        if !binding.is_closed() {
+            return Err(BridgeError::InvalidObservation);
+        }
+        let retained = self
+            .transport_binding
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(BridgeError::NativeUnavailable)?;
+        if !binding.same_binding(retained) {
+            return Err(BridgeError::InvalidObservation);
+        }
+        self.transport_releases.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
     fn state_directory(&self) -> Result<String, BridgeError> {
@@ -329,6 +409,8 @@ impl Fixture {
             saw_preparing: AtomicBool::new(false),
             saw_busy: AtomicBool::new(false),
             request: Mutex::new(None),
+            transport_binding: Mutex::new(None),
+            transport_releases: AtomicUsize::new(0),
         });
         let (boot, reading) = map_clock(platform.clock().unwrap()).unwrap();
         let (owner, _) = DurableInbox::create_fresh_host_model(
@@ -349,6 +431,7 @@ impl Fixture {
             denial_state: Mutex::new(crate::denial::DenialState::new(&owner, boot).unwrap()),
             projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
             intake: Arc::new(crate::intake::IntakeOwner::default()),
+            connectivity: Arc::new(crate::connectivity::ConnectivityOwner::default()),
             state: Mutex::new(Some(owner)),
             creation_slot: Mutex::new(Weak::<CreationState>::new()),
             approval_alive: Arc::new(AtomicBool::new(true)),
@@ -378,6 +461,7 @@ impl Fixture {
             recipient_device: DeviceId::from_bytes([1; 16]).unwrap(),
             pc_signing_key: public(20),
             pc_transport_key: public(21),
+            relay: RelayEndpoint::new("127.0.0.1:7002".parse().unwrap(), [72; 32]).unwrap(),
             // Synthetic original invitation digest, NOT QR/native proof.
             invitation_context: InvitationContextDigest::from_bytes([71; 32]),
             clock: self.clock.clone(),
@@ -400,6 +484,16 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.controller.shutdown_native_owner();
+        // The mock retains the last creation request for assertions. A request
+        // minted from a QR scan reaches the scan guard through its clock, and the
+        // guard reaches this platform through the native socket clock, so the
+        // retained request would form a cycle that keeps the process owner lease
+        // alive across tests. Kotlin closes its request instead of retaining it.
+        self.platform
+            .request
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }
 fn acceptance_fields(created: &CreatedPairingKeys, nonce: u8) -> EnrollmentAcceptanceFields {
@@ -464,13 +558,759 @@ fn freeze(f: &Fixture, created: CreatedPairingKeys) -> FrozenCreatedPairing {
     f.controller.match_frozen_candidate(created, &wire).unwrap()
 }
 
+struct CeremonyPcSigner;
+impl secure_channel::PlatformTlsSigner for CeremonyPcSigner {
+    fn public_key(&self) -> Result<TlsPublicKey, secure_channel::SignerError> {
+        Ok(public(21))
+    }
+
+    fn sign_certificate_verify(
+        &self,
+        input: secure_channel::CertificateVerifyInput<'_>,
+    ) -> Result<secure_channel::CertificateVerifySignature, secure_channel::SignerError> {
+        let signature: Signature = SigningKey::from_slice(&[21; 32])
+            .map_err(|_| secure_channel::SignerError::Unavailable)?
+            .sign(input.as_bytes());
+        secure_channel::CertificateVerifySignature::from_der(signature.to_der().as_bytes())
+            .map_err(|_| secure_channel::SignerError::InvalidSignature)
+    }
+}
+
+struct CeremonyPcClock;
+impl SocketClock for CeremonyPcClock {
+    fn now(&self) -> Result<Instant, framed_transport::SocketClockUnavailable> {
+        Ok(Instant::now())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CeremonyPcMode {
+    Complete,
+    WrongFrozenContext,
+    EofBeforeCandidate,
+    WaitAtCompare,
+}
+
+fn wrong_frozen_mode(mode: CeremonyPcMode) -> bool {
+    matches!(mode, CeremonyPcMode::WrongFrozenContext)
+}
+
+struct CeremonyPcResult {
+    comparison_code: Option<String>,
+    submission: CandidateSubmission,
+    confirmation: Option<PairingConfirmation>,
+}
+
+fn ceremony_invitation(address: SocketAddr) -> PairingInvitation {
+    PairingInvitation::new(PairingInvitationFields {
+        ceremony_nonce: PairingNonce::from_bytes([2; 32]).unwrap(),
+        attestation_challenge: PairingChallenge::from_bytes([65; 32]).unwrap(),
+        pc: PcIdentity::from_bytes([1; 32]).unwrap(),
+        recipient_device: DeviceId::from_bytes([1; 16]).unwrap(),
+        pc_signing_key: public(20),
+        pc_transport_key: public(21),
+        relay_address: address,
+        route: [72; 32],
+    })
+    .unwrap()
+}
+
+async fn read_exact_async(stream: &tokio::net::TcpStream, bytes: &mut [u8]) {
+    let mut read = 0;
+    while read < bytes.len() {
+        stream.readable().await.unwrap();
+        match stream.try_read(&mut bytes[read..]) {
+            Ok(0) => panic!("ceremony peer closed early"),
+            Ok(count) => read += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => panic!("ceremony read failed: {error}"),
+        }
+    }
+}
+
+async fn write_all_async(stream: &tokio::net::TcpStream, bytes: &[u8]) {
+    let mut written = 0;
+    while written < bytes.len() {
+        stream.writable().await.unwrap();
+        match stream.try_write(&bytes[written..]) {
+            Ok(0) => panic!("ceremony peer accepted no bytes"),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => panic!("ceremony write failed: {error}"),
+        }
+    }
+}
+
+async fn next_ceremony_frame(driver: &mut framed_transport::SocketDriver) -> Vec<u8> {
+    loop {
+        match driver.next_event().await.unwrap() {
+            framed_transport::SocketEvent::Ready
+            | framed_transport::SocketEvent::OutboundDrained => continue,
+            framed_transport::SocketEvent::Frame(frame) => return frame.into_bytes(),
+            framed_transport::SocketEvent::PeerClosed
+            | framed_transport::SocketEvent::LocallyClosed => {
+                panic!("ceremony peer closed before its frame")
+            }
+        }
+    }
+}
+
+fn start_ceremony_pc(
+    listener: std::net::TcpListener,
+    invitation: PairingInvitation,
+    mode: CeremonyPcMode,
+    compare_ready: Arc<Barrier>,
+) -> thread::JoinHandle<CeremonyPcResult> {
+    let (started, ready) = sync_mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async move {
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            started.send(()).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let expected_registration = relay_service::Registration::new(
+                relay_service::Role::Phone,
+                relay_service::RouteId::new(invitation.fields().route).unwrap(),
+            )
+            .to_wire();
+            let mut registration = vec![0; expected_registration.len()];
+            read_exact_async(&stream, &mut registration).await;
+            assert_eq!(registration, expected_registration);
+            write_all_async(&stream, relay_service::READY_MARKER).await;
+
+            let mut prefix = [0; 4];
+            read_exact_async(&stream, &mut prefix).await;
+            let mut body = vec![0; plaintext_submission_length(prefix).unwrap()];
+            read_exact_async(&stream, &mut body).await;
+            let submission = CandidateSubmission::from_wire(&body).unwrap();
+            let invitation_fields = invitation.fields();
+            let submission_fields = submission.fields();
+            assert_eq!(
+                submission_fields.ceremony_nonce,
+                invitation_fields.ceremony_nonce
+            );
+            assert_eq!(
+                submission_fields.attestation_challenge,
+                invitation_fields.attestation_challenge
+            );
+            assert_eq!(submission_fields.pc, invitation_fields.pc);
+            assert_eq!(
+                submission_fields.recipient_device,
+                invitation_fields.recipient_device
+            );
+            assert_eq!(
+                submission_fields.invitation_context,
+                invitation.context_digest()
+            );
+            assert_eq!(submission_fields.approval_key, public(3));
+            assert_eq!(submission_fields.denial_key, public(4));
+            assert_eq!(submission_fields.transport_key, public(5));
+            assert_eq!(submission.approval_chain(), &[synthetic_certificate(3)]);
+            assert_eq!(submission.denial_chain(), &[synthetic_certificate(4)]);
+            assert_eq!(submission.transport_chain(), &[synthetic_certificate(5)]);
+
+            if matches!(mode, CeremonyPcMode::EofBeforeCandidate) {
+                return CeremonyPcResult {
+                    comparison_code: None,
+                    submission,
+                    confirmation: None,
+                };
+            }
+
+            let identity = secure_channel::TlsIdentity::from_trusted_host(
+                secure_channel::EndpointRole::Server,
+                Arc::new(CeremonyPcSigner),
+            )
+            .unwrap();
+            let transport = framed_transport::PeerTransport::server(
+                Arc::new(framed_transport::ConnectionBudget::new(1).unwrap()),
+                identity,
+                submission_fields.transport_key.clone(),
+                Instant::now(),
+            )
+            .unwrap();
+            let mut driver = framed_transport::SocketDriver::new(
+                stream,
+                transport,
+                Arc::new(CeremonyPcClock),
+                framed_transport::SocketLimits::default(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+            let mut context = FrozenCandidateContext {
+                ceremony_nonce: submission_fields.ceremony_nonce,
+                attestation_challenge: submission_fields.attestation_challenge,
+                pc: submission_fields.pc,
+                recipient_device: submission_fields.recipient_device,
+                phone_keys: submission.phone_keys(),
+                pc_signing_key: invitation_fields.pc_signing_key.clone(),
+                pc_transport_key: invitation_fields.pc_transport_key.clone(),
+                invitation_context: submission_fields.invitation_context,
+            };
+            let original_context = context.clone();
+            if wrong_frozen_mode(mode) {
+                context.recipient_device = DeviceId::from_bytes([99; 16]).unwrap();
+            }
+            let frozen_fields = FrozenCandidateFields {
+                context,
+                intended_registry_revision: 1,
+            };
+            let frozen_wire = signed_frozen(frozen_fields.clone(), 20);
+            let expected_code = if wrong_frozen_mode(mode) {
+                None
+            } else {
+                Some(
+                    SignedFrozenCandidate::from_wire(&frozen_wire)
+                        .unwrap()
+                        .verify(&invitation_fields.pc_signing_key)
+                        .unwrap()
+                        .match_original(&original_context)
+                        .unwrap()
+                        .comparison_code()
+                        .as_str()
+                        .to_owned(),
+                )
+            };
+            // Application frames are accepted only after the TLS handshake.
+            loop {
+                match driver.next_event().await {
+                    Ok(framed_transport::SocketEvent::Ready) => break,
+                    Ok(_) => continue,
+                    Err(_) if matches!(mode, CeremonyPcMode::WrongFrozenContext) => {
+                        return CeremonyPcResult {
+                            comparison_code: expected_code.clone(),
+                            submission,
+                            confirmation: None,
+                        };
+                    }
+                    Err(error) => panic!("ceremony PC handshake failed: {error}"),
+                }
+            }
+            driver
+                .queue_frame(service_protocol::encode_frame(&frozen_wire).unwrap())
+                .unwrap();
+            loop {
+                match driver.next_event().await {
+                    Ok(framed_transport::SocketEvent::OutboundDrained) => break,
+                    Ok(_) => continue,
+                    Err(_) if matches!(mode, CeremonyPcMode::WrongFrozenContext) => {
+                        return CeremonyPcResult {
+                            comparison_code: expected_code.clone(),
+                            submission,
+                            confirmation: None,
+                        };
+                    }
+                    Err(error) => panic!("candidate send failed: {error}"),
+                }
+            }
+            if wrong_frozen_mode(mode) {
+                loop {
+                    match driver.next_event().await {
+                        Ok(framed_transport::SocketEvent::PeerClosed)
+                        | Ok(framed_transport::SocketEvent::LocallyClosed)
+                        | Err(_) => {
+                            return CeremonyPcResult {
+                                comparison_code: None,
+                                submission,
+                                confirmation: None,
+                            };
+                        }
+                        Ok(framed_transport::SocketEvent::Frame(_)) => {
+                            panic!("mismatched candidate received an application reply")
+                        }
+                        Ok(_) => continue,
+                    }
+                }
+            }
+            if matches!(mode, CeremonyPcMode::WaitAtCompare) {
+                compare_ready.wait();
+                loop {
+                    match driver.next_event().await {
+                        Ok(framed_transport::SocketEvent::Frame(frame)) => {
+                            return CeremonyPcResult {
+                                comparison_code: expected_code.clone(),
+                                submission,
+                                confirmation: PairingConfirmation::from_wire(&frame.into_bytes())
+                                    .ok(),
+                            };
+                        }
+                        Ok(framed_transport::SocketEvent::PeerClosed)
+                        | Ok(framed_transport::SocketEvent::LocallyClosed)
+                        | Err(_) => {
+                            return CeremonyPcResult {
+                                comparison_code: expected_code.clone(),
+                                submission,
+                                confirmation: None,
+                            };
+                        }
+                        Ok(_) => continue,
+                    }
+                }
+            }
+            let confirmation_wire = next_ceremony_frame(&mut driver).await;
+            let confirmation = PairingConfirmation::from_wire(&confirmation_wire).unwrap();
+            assert_eq!(
+                confirmation.fields().ceremony_nonce,
+                invitation_fields.ceremony_nonce
+            );
+            assert_eq!(confirmation.fields().phone_keys, submission.phone_keys());
+            assert_eq!(
+                confirmation.fields().candidate_digest,
+                candidate_digest(&frozen_wire)
+            );
+            assert!(confirmation.fields().confirmed);
+            let acceptance = signed_acceptance(
+                EnrollmentAcceptanceFields {
+                    ceremony_nonce: invitation_fields.ceremony_nonce,
+                    attestation_challenge: submission_fields.attestation_challenge,
+                    pc: invitation_fields.pc,
+                    recipient_device: invitation_fields.recipient_device,
+                    registry_revision: frozen_fields.intended_registry_revision,
+                    phone_keys: submission.phone_keys(),
+                    pc_signing_key: invitation_fields.pc_signing_key.clone(),
+                    pc_transport_key: invitation_fields.pc_transport_key.clone(),
+                },
+                20,
+            );
+            driver
+                .queue_frame(service_protocol::encode_frame(&acceptance).unwrap())
+                .unwrap();
+            while !matches!(
+                driver.next_event().await,
+                Ok(framed_transport::SocketEvent::OutboundDrained)
+            ) {}
+            CeremonyPcResult {
+                comparison_code: expected_code,
+                submission,
+                confirmation: Some(confirmation),
+            }
+        });
+        drop(runtime);
+        result
+    });
+    ready.recv().unwrap();
+    thread
+}
+
+fn enroll_association_with_endpoint(
+    fixture: &Fixture,
+    address: SocketAddr,
+    route: [u8; 32],
+) -> PeerAssociationRef {
+    let mut context = fixture.context(2);
+    context.relay = RelayEndpoint::new(address, route).unwrap();
+    let intent = fixture
+        .controller
+        .begin_key_creation_from_trusted_host(context)
+        .unwrap();
+    let created = fixture.controller.create_pairing_keys(intent).unwrap();
+    let acceptance = signed(&created, 2);
+    let frozen = freeze(fixture, created);
+    fixture
+        .controller
+        .commit_created_pairing(frozen, &acceptance)
+        .unwrap()
+        .association()
+}
+
+fn start_steady_pc(
+    listener: std::net::TcpListener,
+    route: [u8; 32],
+) -> (
+    sync_mpsc::Receiver<()>,
+    sync_mpsc::SyncSender<()>,
+    thread::JoinHandle<()>,
+) {
+    let (listening, listener_ready) = sync_mpsc::sync_channel(1);
+    let (tls_ready, ready) = sync_mpsc::sync_channel(1);
+    let (release, released) = sync_mpsc::sync_channel(1);
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            listening.send(()).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let expected = relay_service::Registration::new(
+                relay_service::Role::Phone,
+                relay_service::RouteId::new(route).unwrap(),
+            )
+            .to_wire();
+            let mut registration = vec![0; expected.len()];
+            read_exact_async(&stream, &mut registration).await;
+            assert_eq!(registration, expected);
+            write_all_async(&stream, relay_service::READY_MARKER).await;
+            let identity = secure_channel::TlsIdentity::from_trusted_host(
+                secure_channel::EndpointRole::Server,
+                Arc::new(CeremonyPcSigner),
+            )
+            .unwrap();
+            let transport = framed_transport::PeerTransport::server(
+                Arc::new(framed_transport::ConnectionBudget::new(1).unwrap()),
+                identity,
+                public(5),
+                Instant::now(),
+            )
+            .unwrap();
+            let mut driver = framed_transport::SocketDriver::new(
+                stream,
+                transport,
+                Arc::new(CeremonyPcClock),
+                framed_transport::SocketLimits::default(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+            loop {
+                match driver.next_event().await.unwrap() {
+                    framed_transport::SocketEvent::Ready => {
+                        tls_ready.send(()).unwrap();
+                        break;
+                    }
+                    framed_transport::SocketEvent::PeerClosed
+                    | framed_transport::SocketEvent::LocallyClosed => {
+                        panic!("steady peer closed before TLS readiness")
+                    }
+                    _ => continue,
+                }
+            }
+            // Keep driving the socket: the phone reports Ready only after the
+            // server has processed its Finished and answered, and a real PC
+            // keeps polling its peer for as long as the connection lives.
+            loop {
+                if released.try_recv().is_ok() {
+                    break;
+                }
+                match tokio::time::timeout(Duration::from_millis(50), driver.next_event()).await {
+                    Ok(Ok(
+                        framed_transport::SocketEvent::PeerClosed
+                        | framed_transport::SocketEvent::LocallyClosed,
+                    )) => panic!("steady peer closed before release"),
+                    Ok(Ok(_)) | Err(_) => continue,
+                    Ok(Err(error)) => panic!("steady peer failed before release: {error}"),
+                }
+            }
+            drop(driver);
+        });
+        drop(runtime);
+    });
+    listener_ready.recv().unwrap();
+    (ready, release, thread)
+}
+
+fn wait_for_ceremony_phase(
+    ceremony: &NativePairingCeremony,
+    phase: NativeCeremonyPhase,
+) -> NativeCeremonyStatus {
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = ceremony.status();
+        if status.phase == phase || status.phase == NativeCeremonyPhase::Failed {
+            return status;
+        }
+        assert!(Instant::now() < limit, "ceremony phase wait timed out");
+        thread::yield_now();
+    }
+}
+
+fn wait_for_ceremony_settled(ceremony: &NativePairingCeremony) -> NativeCeremonyStatus {
+    let limit = Instant::now() + Duration::from_secs(5);
+    while !ceremony.is_settled() {
+        assert!(Instant::now() < limit, "ceremony settlement wait timed out");
+        thread::yield_now();
+    }
+    ceremony.status()
+}
+
+#[test]
+fn ceremony_loopback_commits_endpoint_and_releases_the_created_signer() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let invitation = ceremony_invitation(address);
+    let compare_ready = Arc::new(Barrier::new(1));
+    let pc = start_ceremony_pc(
+        listener,
+        invitation.clone(),
+        CeremonyPcMode::Complete,
+        compare_ready,
+    );
+    let scan = fixture.controller.begin_pairing_scan().unwrap();
+    assert_eq!(
+        scan.accept_invitation(invitation.to_qr_text()),
+        NativePairingScanResult::Read
+    );
+    let ceremony = fixture
+        .controller
+        .begin_pairing_ceremony(Arc::clone(&scan))
+        .unwrap();
+    let original_deadline = ceremony.status().deadline_nanos;
+    let compare = wait_for_ceremony_phase(&ceremony, NativeCeremonyPhase::Compare);
+    assert_eq!(compare.deadline_nanos, original_deadline);
+    let code = compare.comparison_code.clone().unwrap();
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+    ceremony.confirm().unwrap();
+    assert_eq!(ceremony.confirm(), Err(BridgeError::InvalidObservation));
+    let terminal = wait_for_ceremony_settled(&ceremony);
+    assert_eq!(terminal.phase, NativeCeremonyPhase::Enrolled);
+    assert_eq!(terminal.deadline_nanos, original_deadline);
+    assert_eq!(terminal.failure, None);
+    assert_eq!(terminal.comparison_code, None);
+    let pc = pc.join().unwrap();
+    assert_eq!(pc.comparison_code.as_deref(), Some(code.as_str()));
+    assert!(pc.confirmation.is_some());
+    assert_eq!(pc.submission.fields().transport_key, public(5));
+    let checkpoint = fixture.checkpoint();
+    let association = checkpoint.peer_associations().entries().next().unwrap();
+    assert_eq!(association.descriptor().relay(), Some((address, [72; 32])));
+    assert_eq!(
+        fixture.platform.transport_releases.load(Ordering::Acquire),
+        1
+    );
+    assert!(fixture.platform.transport_binding.lock().unwrap().is_none());
+    assert!(ceremony.is_settled());
+}
+
+#[test]
+fn ceremony_consumes_a_read_scan_exactly_once() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let invitation = ceremony_invitation(listener.local_addr().unwrap());
+    let scan = fixture.controller.begin_pairing_scan().unwrap();
+    assert_eq!(
+        scan.accept_invitation(invitation.to_qr_text()),
+        NativePairingScanResult::Read
+    );
+    let ceremony = fixture
+        .controller
+        .begin_pairing_ceremony(Arc::clone(&scan))
+        .unwrap();
+    assert!(matches!(
+        fixture.controller.begin_pairing_ceremony(scan),
+        Err(BridgeError::Closed)
+    ));
+    ceremony.cancel();
+    let terminal = wait_for_ceremony_settled(&ceremony);
+    assert_eq!(terminal.phase, NativeCeremonyPhase::Failed);
+    assert_eq!(terminal.failure, Some(NativeCeremonyFailure::Cancelled));
+    drop(listener);
+}
+
+#[test]
+fn ceremony_wrong_frozen_context_fails_without_committing() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let invitation = ceremony_invitation(address);
+    let pc = start_ceremony_pc(
+        listener,
+        invitation.clone(),
+        CeremonyPcMode::WrongFrozenContext,
+        Arc::new(Barrier::new(1)),
+    );
+    let scan = fixture.controller.begin_pairing_scan().unwrap();
+    assert_eq!(
+        scan.accept_invitation(invitation.to_qr_text()),
+        NativePairingScanResult::Read
+    );
+    let ceremony = fixture.controller.begin_pairing_ceremony(scan).unwrap();
+    let terminal = wait_for_ceremony_settled(&ceremony);
+    assert_eq!(terminal.phase, NativeCeremonyPhase::Failed);
+    assert_eq!(terminal.failure, Some(NativeCeremonyFailure::Mismatch));
+    assert!(fixture.checkpoint().peer_associations().is_empty());
+    assert_eq!(
+        fixture.platform.transport_releases.load(Ordering::Acquire),
+        1
+    );
+    let result = pc.join().unwrap();
+    assert!(result.confirmation.is_none());
+}
+
+#[test]
+fn ceremony_eof_before_candidate_fails_as_network() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let invitation = ceremony_invitation(address);
+    let pc = start_ceremony_pc(
+        listener,
+        invitation.clone(),
+        CeremonyPcMode::EofBeforeCandidate,
+        Arc::new(Barrier::new(1)),
+    );
+    let scan = fixture.controller.begin_pairing_scan().unwrap();
+    assert_eq!(
+        scan.accept_invitation(invitation.to_qr_text()),
+        NativePairingScanResult::Read
+    );
+    let ceremony = fixture.controller.begin_pairing_ceremony(scan).unwrap();
+    let terminal = wait_for_ceremony_settled(&ceremony);
+    assert_eq!(terminal.phase, NativeCeremonyPhase::Failed);
+    assert_eq!(terminal.failure, Some(NativeCeremonyFailure::Network));
+    assert!(fixture.checkpoint().peer_associations().is_empty());
+    assert_eq!(
+        fixture.platform.transport_releases.load(Ordering::Acquire),
+        1
+    );
+    pc.join().unwrap();
+}
+
+#[test]
+fn ceremony_cancel_during_compare_fails_without_confirmation_or_commit() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let invitation = ceremony_invitation(address);
+    let compare_ready = Arc::new(Barrier::new(2));
+    let pc = start_ceremony_pc(
+        listener,
+        invitation.clone(),
+        CeremonyPcMode::WaitAtCompare,
+        Arc::clone(&compare_ready),
+    );
+    let scan = fixture.controller.begin_pairing_scan().unwrap();
+    assert_eq!(
+        scan.accept_invitation(invitation.to_qr_text()),
+        NativePairingScanResult::Read
+    );
+    let ceremony = fixture.controller.begin_pairing_ceremony(scan).unwrap();
+    let compare = wait_for_ceremony_phase(&ceremony, NativeCeremonyPhase::Compare);
+    assert!(compare.comparison_code.is_some(), "{compare:?}");
+    compare_ready.wait();
+    ceremony.cancel();
+    let terminal = wait_for_ceremony_settled(&ceremony);
+    assert_eq!(terminal.phase, NativeCeremonyPhase::Failed);
+    assert_eq!(terminal.failure, Some(NativeCeremonyFailure::Cancelled));
+    assert!(fixture.checkpoint().peer_associations().is_empty());
+    assert_eq!(
+        fixture.platform.transport_releases.load(Ordering::Acquire),
+        1
+    );
+    let pc = pc.join().unwrap();
+    assert!(pc.confirmation.is_none());
+    drop(ceremony);
+    drop(fixture);
+    // A settled ceremony must not keep the process owner lease alive.
+    let limit = Instant::now() + Duration::from_secs(3);
+    loop {
+        match OwnerLease::acquire() {
+            Ok(_) => break,
+            Err(_) if Instant::now() < limit => thread::sleep(Duration::from_millis(20)),
+            Err(error) => panic!("owner lease still held after the ceremony: {error:?}"),
+        }
+    }
+}
+
+#[test]
+fn maintain_connections_waits_for_ready_then_attaches_and_avoids_a_second_dial() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let route = [88; 32];
+    enroll_association_with_endpoint(&fixture, address, route);
+    let (pc_ready, release_pc, pc) = start_steady_pc(listener, route);
+
+    let first = fixture.controller.maintain_connections().unwrap();
+    assert_eq!(first.associations, 1);
+    assert_eq!(first.connected, 0);
+    assert_eq!(first.dialing, 1);
+    assert_eq!(first.without_endpoint, 0);
+    pc_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let limit = Instant::now() + Duration::from_secs(5);
+    let connected = loop {
+        let status = fixture.controller.maintain_connections().unwrap();
+        if status.connected == 1 {
+            break status;
+        }
+        assert!(Instant::now() < limit, "connected status wait timed out");
+        // Each call holds the controller admission; the intake reactor needs it
+        // to process the peer's TLS Ready event, so poll like the 15 s Kotlin
+        // tick does instead of spinning.
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(connected.associations, 1);
+    assert_eq!(connected.connected, 1);
+    assert_eq!(connected.dialing, 0);
+    assert_eq!(connected.without_endpoint, 0);
+    let repeated = fixture.controller.maintain_connections().unwrap();
+    assert_eq!(repeated.connected, 1);
+    assert_eq!(repeated.dialing, 0);
+
+    release_pc.send(()).unwrap();
+    pc.join().unwrap();
+}
+
+#[test]
+fn refused_connection_enters_five_second_backoff_without_redialing() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let reference = enroll_association_with_endpoint(&fixture, address, [89; 32]);
+
+    let first = fixture.controller.maintain_connections().unwrap();
+    assert_eq!(first.associations, 1);
+    assert_eq!(first.dialing, 1);
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = fixture.controller.maintain_connections().unwrap();
+        if status.dialing == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < limit,
+            "failed dial completion wait timed out"
+        );
+        thread::yield_now();
+    }
+    let key = crate::connectivity::ConnectivityOwner::key(reference);
+    let before = fixture.controller.connectivity.states.lock().unwrap()[&key];
+    assert_eq!(before.failures, 1);
+    assert!(before.retry_at.unwrap() > Instant::now());
+    let repeated = fixture.controller.maintain_connections().unwrap();
+    assert_eq!(repeated.connected, 0);
+    assert_eq!(repeated.dialing, 0);
+    let after = fixture.controller.connectivity.states.lock().unwrap()[&key];
+    assert_eq!(after.failures, 1);
+    assert_eq!(after.retry_at, before.retry_at);
+}
+
 #[test]
 fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptance_and_reopen() {
     let _serial = crate::tests::SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let f = Fixture::new();
-    assert_eq!(bridge_version(), 10);
+    assert_eq!(bridge_version(), 11);
     let before = f.bytes();
     let intent = f.intent();
     assert_eq!(f.bytes(), before);
@@ -492,7 +1332,7 @@ fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptanc
     assert_eq!(created.local_keys().approval_key(), &public(3));
     assert_eq!(
         created.unverified_evidence().denial.certificates,
-        vec![vec![4; 16]]
+        vec![synthetic_certificate(4)]
     );
     assert!(
         f.checkpoint()

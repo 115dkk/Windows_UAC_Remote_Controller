@@ -521,6 +521,7 @@ fn fixture() -> Fixture {
         denial_state: Mutex::new(crate::denial::DenialState::new(&owner, boot).unwrap()),
         projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
         intake: Arc::new(crate::intake::IntakeOwner::default()),
+        connectivity: Arc::new(crate::connectivity::ConnectivityOwner::default()),
         state: Mutex::new(Some(owner)),
         creation_slot: Mutex::new(std::sync::Weak::<crate::pairing::CreationState>::new()),
         approval_alive: Arc::new(AtomicBool::new(true)),

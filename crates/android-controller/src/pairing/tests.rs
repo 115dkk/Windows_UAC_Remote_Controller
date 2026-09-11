@@ -5,6 +5,7 @@
 use std::{
     collections::VecDeque,
     fs,
+    net::{Ipv4Addr, SocketAddr},
     sync::{Mutex, atomic::AtomicUsize},
 };
 
@@ -78,6 +79,14 @@ fn pc(value: u8) -> PcIdentity {
 
 fn nonce(value: u8) -> PairingNonce {
     PairingNonce::from_bytes([value; 32]).unwrap()
+}
+
+fn relay(value: u8) -> RelayEndpoint {
+    RelayEndpoint::new(
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 7000 + u16::from(value)),
+        [value; 32],
+    )
+    .unwrap()
 }
 
 fn directory(temp: &tempfile::TempDir) -> NativePrivateDirectory {
@@ -158,6 +167,7 @@ impl Fixture {
             pc: pc(1),
             pc_signing_key: public(20),
             pc_transport_key: public(21),
+            relay: relay(value),
             ceremony_nonce: nonce(value),
             clock: Arc::new(ControlledClock::new(self.base)),
             started_at: self.base,
@@ -257,6 +267,7 @@ fn signed_acceptance_commits_existing_full_owner_and_survives_reopen() {
     assert_eq!(descriptor.local_key_handle(), fixture.local.handle());
     assert_eq!(descriptor.pc_signing_key(), &public(20));
     assert_eq!(descriptor.pc_transport_key(), &public(21));
+    assert_eq!(descriptor.relay(), Some((relay(1).address, relay(1).route)));
     assert_eq!(fixture.owner.local_keys().unwrap(), &keys);
     assert_eq!(fixture.owner.policy().unwrap(), &policy);
     assert_eq!(fixture.owner.history().unwrap(), history);
@@ -278,6 +289,7 @@ fn signed_acceptance_commits_existing_full_owner_and_survives_reopen() {
         pc: pc(1),
         pc_signing_key: public(20),
         pc_transport_key: public(21),
+        relay: relay(2),
         ceremony_nonce: nonce(2),
         clock: Arc::new(ControlledClock::new(fixture.base)),
         started_at: fixture.base,
@@ -1232,6 +1244,7 @@ fn receiving_boundary_rechecks_full_key_tuple_not_only_handle() {
         pc: pc(1),
         pc_signing_key: public(20),
         pc_transport_key: public(21),
+        relay: relay(1),
         ceremony_nonce: nonce(1),
         cancelled: AtomicBool::new(false),
     });

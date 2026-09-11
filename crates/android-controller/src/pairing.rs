@@ -30,7 +30,7 @@ use service_protocol::{PairingError, PairingNonce, PhoneKeyDigest, SignedEnrollm
 use crate::{
     DurableFailure, DurableFault, DurableInbox, LocalKeyLedger, LocalKeySetDescriptor,
     PeerAssociationDescriptor, PeerAssociationLedger, PeerAssociationMutationError,
-    PeerAssociationRef,
+    PeerAssociationRef, RelayEndpoint,
 };
 
 pub const MAX_PENDING_PAIRING_ACCEPTANCES: usize = 32;
@@ -55,6 +55,7 @@ pub struct PairingAcceptanceContext {
     pub pc: PcIdentity,
     pub pc_signing_key: TlsPublicKey,
     pub pc_transport_key: TlsPublicKey,
+    pub relay: RelayEndpoint,
     pub ceremony_nonce: PairingNonce,
     pub clock: Arc<dyn SocketClock>,
     pub started_at: Instant,
@@ -71,6 +72,7 @@ struct PairingReservation {
     pc: PcIdentity,
     pc_signing_key: TlsPublicKey,
     pc_transport_key: TlsPublicKey,
+    relay: RelayEndpoint,
     ceremony_nonce: PairingNonce,
     cancelled: AtomicBool,
 }
@@ -110,6 +112,11 @@ impl PendingPairingAcceptance {
         if self.reservation.cancelled.load(Ordering::Acquire) {
             return Err(PairingAcceptanceError::Cancelled);
         }
+        RelayEndpoint::new(self.reservation.relay.address, self.reservation.relay.route).map_err(
+            |error| {
+                PairingAcceptanceError::Association(PeerAssociationMutationError::Rejected(error))
+            },
+        )?;
         self.reservation.check_current(
             owner.local_keys().map_err(owner_error)?,
             owner.peer_associations().map_err(owner_error)?,
@@ -166,6 +173,7 @@ impl PendingPairingAcceptance {
             expected.pc_signing_key.clone(),
             expected.pc_transport_key.clone(),
         )
+        .and_then(|descriptor| descriptor.with_relay(expected.relay.address, expected.relay.route))
         .map_err(|error| {
             PairingAcceptanceError::Association(PeerAssociationMutationError::Rejected(error))
         })
@@ -275,6 +283,7 @@ impl DurableInbox {
                 pc: context.pc,
                 pc_signing_key: context.pc_signing_key,
                 pc_transport_key: context.pc_transport_key,
+                relay: context.relay,
                 ceremony_nonce: context.ceremony_nonce,
                 cancelled: AtomicBool::new(false),
             }),

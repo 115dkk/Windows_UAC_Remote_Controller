@@ -275,6 +275,7 @@ fn with_fixture_deadlines(
         denial_state: Mutex::new(crate::denial::DenialState::new(&owner, boot).unwrap()),
         projections: Mutex::new(crate::request_projection::ProjectionRegistry::default()),
         intake: Arc::new(crate::intake::IntakeOwner::default()),
+        connectivity: Arc::new(crate::connectivity::ConnectivityOwner::default()),
         approval_alive: Arc::new(AtomicBool::new(true)),
         state: Mutex::new(Some(owner)),
         creation_slot: Mutex::new(std::sync::Weak::<crate::pairing::CreationState>::new()),
@@ -322,7 +323,7 @@ fn cancel_and_release(
 #[test]
 fn genuine_request_fence_and_one_shot_bytes_produce_only_prepared_unsent_denial() {
     with_fixture(1, |controller, platform, requests| {
-        assert_eq!(bridge_version(), 10);
+        assert_eq!(bridge_version(), 11);
         let scope = controller.reserve_denial(requests[0].clone()).unwrap();
         assert!(scope.same_scope(controller.reserve_denial(requests[0].clone()).unwrap()));
         assert_eq!(

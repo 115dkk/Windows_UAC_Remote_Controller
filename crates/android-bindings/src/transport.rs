@@ -3,7 +3,9 @@
 //! owner. No foreign/public constructor can manufacture the signing request.
 use crate::native_clock::native_callback;
 use crate::{BridgeError, NativeLocalKeySet, NativePlatform};
-use android_controller::{DurableInbox, NativePeerLease, PeerAssociationRef};
+use android_controller::{
+    DurableInbox, LocalKeySetDescriptor, NativePeerLease, PeerAssociationRef,
+};
 use secure_channel::{
     CertificateVerifyInput, CertificateVerifySignature, EndpointRole, PlatformTlsSigner,
     SignerError, TlsIdentity, TlsPublicKey,
@@ -18,10 +20,29 @@ use std::{
 
 static NEXT_BINDING: AtomicU64 = AtomicU64::new(1);
 
+enum BindingKeys {
+    Association(NativePeerLease),
+    Created(Box<LocalKeySetDescriptor>),
+}
+impl BindingKeys {
+    fn local_keys(&self) -> &LocalKeySetDescriptor {
+        match self {
+            Self::Association(lease) => lease.local_keys(),
+            Self::Created(keys) => keys,
+        }
+    }
+    fn is_revoked(&self) -> bool {
+        match self {
+            Self::Association(lease) => lease.is_revoked(),
+            Self::Created(_) => false,
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct NativeTransportBinding {
     reference: u64,
-    lease: NativePeerLease,
+    keys: BindingKeys,
     closed: AtomicBool,
     signing: AtomicBool,
     released: AtomicBool,
@@ -42,10 +63,10 @@ impl NativeTransportBinding {
         if self.is_closed() {
             return Err(BridgeError::NativeUnavailable);
         }
-        Ok(NativeLocalKeySet::from_descriptor(self.lease.local_keys()))
+        Ok(NativeLocalKeySet::from_descriptor(self.keys.local_keys()))
     }
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire) || self.lease.is_revoked()
+        self.closed.load(Ordering::Acquire) || self.keys.is_revoked()
     }
     pub fn close_binding(&self) {
         self.closed.store(true, Ordering::Release);
@@ -104,7 +125,7 @@ pub fn native_client_transport_identity(
     let lease = owner
         .lease_peer_association(association)
         .map_err(|_| BridgeError::LocalKeysUnavailable)?;
-    prepare_identity((), lease, platform).map(|(_, identity)| identity)
+    prepare_identity((), BindingKeys::Association(lease), platform).map(|(_, identity)| identity)
 }
 
 /// Fixed Client identity preparation off owner admission. Carrier drops BEFORE
@@ -114,21 +135,30 @@ pub(crate) fn native_identity_with_socket(
     lease: NativePeerLease,
     platform: Arc<dyn NativePlatform>,
 ) -> Result<(tokio::net::TcpStream, TlsIdentity), BridgeError> {
-    prepare_identity(socket, lease, platform)
+    prepare_identity(socket, BindingKeys::Association(lease), platform)
 }
+
+pub(crate) fn created_identity_with_socket(
+    socket: tokio::net::TcpStream,
+    local_keys: LocalKeySetDescriptor,
+    platform: Arc<dyn NativePlatform>,
+) -> Result<(tokio::net::TcpStream, TlsIdentity), BridgeError> {
+    prepare_identity(socket, BindingKeys::Created(Box::new(local_keys)), platform)
+}
+
 fn prepare_identity<C>(
     carrier: C,
-    lease: NativePeerLease,
+    keys: BindingKeys,
     platform: Arc<dyn NativePlatform>,
 ) -> Result<(C, TlsIdentity), BridgeError> {
     struct Owned<C> {
         carrier: Option<C>,
-        lease: Option<NativePeerLease>,
+        keys: Option<BindingKeys>,
         signer: Option<Arc<NativeClientSigner>>,
     }
     let mut owned = Owned {
         carrier: Some(carrier),
-        lease: Some(lease),
+        keys: Some(keys),
         signer: None,
     };
     let reference = NEXT_BINDING
@@ -138,7 +168,7 @@ fn prepare_identity<C>(
         .map_err(|_| BridgeError::NativeUnavailable)?;
     let binding = Arc::new(NativeTransportBinding {
         reference,
-        lease: owned.lease.take().ok_or(BridgeError::NativeUnavailable)?,
+        keys: owned.keys.take().ok_or(BridgeError::NativeUnavailable)?,
         closed: AtomicBool::new(false),
         signing: AtomicBool::new(false),
         released: AtomicBool::new(false),
@@ -172,7 +202,7 @@ impl PlatformTlsSigner for NativeClientSigner {
         if self.binding.is_closed() {
             return Err(SignerError::Unavailable);
         }
-        Ok(self.binding.lease.local_keys().transport_key().clone())
+        Ok(self.binding.keys.local_keys().transport_key().clone())
     }
     fn sign_certificate_verify(
         &self,

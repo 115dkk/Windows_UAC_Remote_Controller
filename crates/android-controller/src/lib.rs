@@ -58,7 +58,7 @@ pub use pairing::{
 pub use peer_associations::{
     MAX_PEER_ASSOCIATION_LEDGER_BYTES, MAX_PEER_ASSOCIATIONS, PeerAssociation,
     PeerAssociationDescriptor, PeerAssociationError, PeerAssociationLedger,
-    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval,
+    PeerAssociationMutation, PeerAssociationRef, PeerAssociationRemoval, RelayEndpoint,
 };
 pub use peer_socket::{
     ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, AssociatedPcSocket,
