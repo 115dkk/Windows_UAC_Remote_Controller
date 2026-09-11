@@ -195,6 +195,14 @@ pub enum ServiceOutcome {
     Started,
     Stopping,
     RecoveryRequired,
+    /// The prompt watcher helper was launched after full SCM readiness.
+    WatcherStarted,
+    /// The watcher helper delivered its first heartbeat: it polls the desktop.
+    WatcherAlive,
+    /// The watcher helper was relaunched after a failure.
+    WatcherRestarted,
+    /// The watcher gave up; prompts are not observed until the service restarts.
+    WatcherUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

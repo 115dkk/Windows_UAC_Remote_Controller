@@ -157,6 +157,7 @@ impl fmt::Debug for WatchSession {
         formatter.write_str("WatchSession(owned_service_only)")
     }
 }
+#[cfg(any(windows, test))]
 impl crate::peer_runtime::prompt::PromptApply for WatchSession {
     fn apply_prompt(
         &mut self,
@@ -182,6 +183,11 @@ impl WatchSession {
         {
             Err(ProbeSupervisorError::UnsupportedPlatform)
         }
+    }
+
+    /// Heartbeats accepted from the helper so far; liveness only, no content.
+    pub fn heartbeats(&self) -> u32 {
+        self.state.heartbeats()
     }
 
     pub fn poll(

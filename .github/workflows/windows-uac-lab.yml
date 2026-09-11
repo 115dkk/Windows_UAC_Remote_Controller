@@ -240,15 +240,16 @@ jobs:
           Write-Output "probe-once exit=$LASTEXITCODE"
           Start-Sleep -Seconds 12
           & $exe status | Tee-Object -FilePath "$env:LAB_EVIDENCE/status-after-probe.json"
-          # The service records the one-shot outcome itself; the CLI only requested it. Only an actual
-          # "observed" outcome (the helper ran in the interactive session and saw the consent window) passes.
+          # The running service owns the prompt watcher (probe-once answers Busy while it does). The
+          # watcher journals fixed kinds only: watcher_started, watcher_alive (first heartbeat), then an
+          # observed request when it saw the consent window. Only that observed record passes.
           $observed = 'false'
-          $outcomes = Get-ChildItem -LiteralPath (Join-Path $env:ProgramData '휴대폰 승인\activity') -Filter 'probe-once-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
-          foreach ($file in $outcomes) {
-            try { $record = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json } catch { continue }
-            Write-Output ("{0}: outcome={1}" -f $file.Name, ($record.outcome | ConvertTo-Json -Compress -Depth 6))
-            if ($record.outcome.kind -eq 'observed') { $observed = 'true' }
-          }
+          $journal = Join-Path $env:ProgramData '휴대폰 승인\activity\activity.jsonl'
+          if (Test-Path -LiteralPath $journal) {
+            $lines = Get-Content -LiteralPath $journal
+            $lines | Select-String -Pattern 'watcher_|"observed"|notification_sent|platform_unavailable' | ForEach-Object { Write-Output $_.Line }
+            if ($lines | Select-String -Pattern '"category":"request".*"observed"' -Quiet) { $observed = 'true' }
+          } else { Write-Output 'no activity journal' }
           "probe_observed=$observed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-after-probe.txt"
           # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
@@ -277,7 +278,7 @@ jobs:
           if (Test-Path -LiteralPath $exe) { & $exe stop | Set-Content -Path "$env:LAB_EVIDENCE/stop.json"; & $exe status | Set-Content -Path "$env:LAB_EVIDENCE/status-final.json" }
           sc.exe stop UacRemoteController | Out-Null
           exit 0
-      - name: Fail the job unless the product reached Running and probe-once observed the consent prompt
+      - name: Fail the job unless the product reached Running and the watcher observed the consent prompt
         if: ${{ always() && (steps.start.outputs.product_running != 'true' || steps.probe.outputs.probe_observed != 'true') }}
         shell: pwsh
         run: |

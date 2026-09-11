@@ -263,10 +263,15 @@ fn run(
                 watch = Some(
                     WatchSession::for_running_service().map_err(|_| ServiceError::WorkerFailed)?,
                 );
+                append(
+                    &mut journal,
+                    ActivityEvent::Service(ServiceOutcome::WatcherStarted),
+                )?;
                 if cancellation_requested(stop) {
                     return Ok(());
                 }
                 let mut last_purge = Instant::now();
+                let mut watcher_alive_journaled = false;
                 loop {
                     if cancellation_requested(stop) {
                         break;
@@ -277,10 +282,29 @@ fn run(
                         .poll(iteration_now)
                         .map_err(|_| ServiceError::WorkerFailed)?
                     {
+                        // Fixed lifecycle kinds only: the events carry no prompt content here.
+                        match &event {
+                            crate::WatchEvent::HelperRestarted { .. } => append(
+                                &mut journal,
+                                ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
+                            )?,
+                            crate::WatchEvent::HelperUnavailable => append(
+                                &mut journal,
+                                ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
+                            )?,
+                            _ => {}
+                        }
                         let progress = session
                             .handle_watch_event(event, iteration_now)
                             .map_err(session_error)?;
                         journal_prompt_progress(&mut journal, progress)?;
+                    }
+                    if !watcher_alive_journaled && watcher.heartbeats() > 0 {
+                        watcher_alive_journaled = true;
+                        append(
+                            &mut journal,
+                            ActivityEvent::Service(ServiceOutcome::WatcherAlive),
+                        )?;
                     }
                     if let Some(progress) = session
                         .prompt_deadline_step(iteration_now)

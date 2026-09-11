@@ -46,6 +46,7 @@ pub(crate) struct WatchMachine {
     running: bool,
     unavailable: bool,
     shutting_down: bool,
+    heartbeats: u32,
 }
 
 impl WatchMachine {
@@ -60,7 +61,13 @@ impl WatchMachine {
             running: true,
             unavailable: false,
             shutting_down: false,
+            heartbeats: 0,
         }
+    }
+
+    /// Accepted heartbeats since the watcher started (saturating).
+    pub(crate) fn heartbeats(&self) -> u32 {
+        self.heartbeats
     }
 
     pub(crate) fn ingest(
@@ -124,6 +131,7 @@ impl WatchMachine {
                 if sequence != expected {
                     return Err(MessageError::Protocol);
                 }
+                self.heartbeats = self.heartbeats.saturating_add(1);
                 Ok(())
             }
         }?;

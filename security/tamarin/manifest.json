@@ -5,7 +5,7 @@
     { "path": "crates/secure-channel/src/identity.rs", "sha256": "76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195" },
     { "path": "crates/secure-channel/src/config.rs", "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d" },
     { "path": "crates/secure-channel/src/channel.rs", "sha256": "910667dc62db172835763f250227c6690aaa7ca39b43a6ed8237f7e9482ffa80" },
-    { "path": "crates/approval-protocol/src/lib.rs", "sha256": "4434b763dd5864e93f81b1e6644a0a23c59989c3303fdc78735243090a55c0bd" },
+    { "path": "crates/approval-protocol/src/lib.rs", "sha256": "78fbb6770bca968005d7db1b3a571bdc37c54315ed22ce9e78bdc6ae99aa89c9" },
     { "path": "crates/approval-core/src/lib.rs", "sha256": "aba41c673fe61f29cf4931aa96c30a281e1c5a1627a78bb9da3bf80d1bb55b2d" }
   ],
   "models": [
