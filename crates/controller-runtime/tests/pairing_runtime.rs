@@ -131,7 +131,7 @@ fn fresh_running_service_and_helper_availability_are_both_required() {
         assert!(!runtime.snapshot().can_pair);
         let issue = runtime.begin_pairing().unwrap_err();
         assert_eq!(issue.code, "service_not_ready");
-        assert_eq!(issue.message, "먼저 PC 승인 서비스를 시작해 주세요.");
+        assert_eq!(issue.message, "먼저 PC에서 휴대폰 승인을 켜 주세요.");
         assert_eq!(starts.load(Ordering::SeqCst), 0);
     }
 }

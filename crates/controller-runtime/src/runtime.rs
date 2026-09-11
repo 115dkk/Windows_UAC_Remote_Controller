@@ -608,8 +608,8 @@ impl Drop for AppRuntime {
 fn service_not_ready() -> AppIssue {
     AppIssue {
         code: "service_not_ready",
-        message: "먼저 PC 승인 서비스를 시작해 주세요.",
-        next_action: Some("PC 승인 서비스를 시작한 뒤 다시 시도해 주세요."),
+        message: "먼저 PC에서 휴대폰 승인을 켜 주세요.",
+        next_action: Some("휴대폰 승인을 켠 뒤 다시 시도해 주세요."),
     }
 }
 
@@ -648,7 +648,7 @@ fn pairing_view(phase: PairingUiPhase, failure: Option<PairingFailure>) -> Pairi
     match phase {
         PairingUiPhase::Connecting => PairingView {
             phase: "connecting",
-            message: "PC 승인 서비스에 연결하고 있어요.".to_owned(),
+            message: "PC의 휴대폰 승인에 연결하고 있어요.".to_owned(),
             failure: None,
         },
         PairingUiPhase::WaitingForAdmin => PairingView {
@@ -675,7 +675,7 @@ fn pairing_view(phase: PairingUiPhase, failure: Option<PairingFailure>) -> Pairi
 fn pairing_failure_view(failure: PairingFailure) -> PairingView {
     let (message, code) = match failure {
         PairingFailure::ServiceNotReady => {
-            ("PC 승인 서비스가 준비되지 않았어요.", "service_not_ready")
+            ("PC의 휴대폰 승인이 준비되지 않았어요.", "service_not_ready")
         }
         PairingFailure::UserCancelled => ("관리자 확인을 취소했어요.", "user_cancelled"),
         PairingFailure::HelperFailed => (
