@@ -266,11 +266,19 @@ jobs:
           "@
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
           "identity={0} session={1}" -f $identity.Name, (Get-Process -Id $PID).SessionId | Out-File $log -Append -Encoding utf8
+          # Run 34622593419: the explicit QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_SESSIONID duplicate is refused (5)
+          # while MAXIMUM_ALLOWED and ALL_ACCESS duplicates succeed. Find the one missing right.
           foreach ($case in @(
-              @{ open = 0x000A; dup = 0x010B; name = 'open QUERY|DUPLICATE, dup QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_SESSIONID' },
-              @{ open = 0x000A; dup = 0x02000000; name = 'open QUERY|DUPLICATE, dup MAXIMUM_ALLOWED' },
-              @{ open = 0x000A; dup = 0; name = 'open QUERY|DUPLICATE, dup same-as-existing' },
-              @{ open = 0xF01FF; dup = 0x010B; name = 'open ALL_ACCESS, dup explicit' },
+              @{ open = 0x000A; dup = 0x010B; name = 'dup explicit 0x010B' },
+              @{ open = 0x000A; dup = 0x018B; name = 'dup explicit + ADJUST_DEFAULT (0x80)' },
+              @{ open = 0x000A; dup = 0x012B; name = 'dup explicit + ADJUST_PRIVILEGES (0x20)' },
+              @{ open = 0x000A; dup = 0x014B; name = 'dup explicit + ADJUST_GROUPS (0x40)' },
+              @{ open = 0x000A; dup = 0x011B; name = 'dup explicit + QUERY_SOURCE (0x10)' },
+              @{ open = 0x000A; dup = 0x010F; name = 'dup explicit + IMPERSONATE (0x04)' },
+              @{ open = 0x000A; dup = 0x0002010B; name = 'dup explicit + READ_CONTROL (0x20000)' },
+              @{ open = 0x000A; dup = 0x0004010B; name = 'dup explicit + WRITE_DAC (0x40000)' },
+              @{ open = 0x000A; dup = 0x000801FF; name = 'dup all specific rights + WRITE_OWNER' },
+              @{ open = 0x000A; dup = 0x000001FF; name = 'dup all specific rights (0x1FF)' },
               @{ open = 0xF01FF; dup = 0xF01FF; name = 'open ALL_ACCESS, dup ALL_ACCESS' }
           )) {
               $tok = [IntPtr]::Zero; $dup = [IntPtr]::Zero
