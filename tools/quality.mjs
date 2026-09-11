@@ -13,14 +13,13 @@ const commands = [
   [process.execPath, ['tools/ui-quality.mjs']],
   [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-abi.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs', 'tools/verify-android-apk.test.mjs']],
   [process.execPath, ['--test', 'tools/protocol-security.test.mjs', 'tools/prover-process.test.mjs', 'tools/protocol-diagnostic.test.mjs', 'tools/verify-android-boot-manifest.test.mjs']],
-  [process.execPath, ['--test', 'tools/windows-packaging.test.mjs', 'tools/windows-installer-contract.test.mjs', 'tools/license-materials.test.mjs']],
+  [process.execPath, ['--test', 'tools/windows-packaging.test.mjs', 'tools/windows-installer-contract.test.mjs']],
   ['cargo', ['fmt', '--all', '--', '--check']],
   ['cargo', ['clippy', '--workspace', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings']],
   ['cargo', ['test', '--workspace', '--all-targets', '--all-features', '--locked']],
   ['cargo', ['test', '--workspace', '--doc', '--all-features', '--locked']],
   [process.execPath, ['tools/rust-analyzer.mjs']],
   [process.execPath, ['tools/verify-analyzer-gate.mjs']],
-  [process.execPath, ['tools/license-inventory.mjs']],
 ];
 
 if (flags[0] === '--extended') {

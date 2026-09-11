@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[graph]
+all-features = true
+exclude-dev = false
+exclude-unpublished = false
+
+[licenses]
+include-dev = true
+include-build = true
+# GNU choices are explicit: original code stays GPL-2.0-or-later; the existing
+# Apache-dependent combined-binary route permits GPLv3-compatible dependencies.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-2.0-or-later",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-only",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# The policy also permits the user's selected GPL/LGPL families when not in use.
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = false

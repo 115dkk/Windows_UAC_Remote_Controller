@@ -1,6 +1,22 @@
-# Rust original notice material collection
+# Rust license checks and retained original materials
 
-The quality workflow keeps Cargo's complete metadata inventory and runs the
+## Current workflow: Cargo Deny
+
+Following the user's September11 instruction, the authoritative Rust license
+check is `cargo deny --locked --all-features --workspace check licenses` using
+`deny.toml`. CI runs upstream cargo-deny0.20.2 through its commit-pinned Docker
+action. Unaccepted or unidentified licenses fail the job; workspace, build and
+development dependencies are included. No target or package exclusions are set.
+
+Further bespoke notice/source searches and collection are stopped. The previous
+scripts and already retained files below remain historical/reference material;
+they are no longer called by the default quality workflow. Cargo Deny evaluates
+crate declarations/inferred licensing against policy; its result is not a notice
+archive or a corresponding-source publication.
+
+## Historical original-material collector
+
+The previous workflow kept Cargo's complete metadata inventory and ran the
 bounded offline collector in `tools/license-materials.mjs`. Its output records
 original material bytes, not license compatibility or distribution clearance.
 It is not a corresponding-source archive or an npm/Maven/native-library audit.

@@ -55,6 +55,9 @@
   required gates. Only root executes them locally. A passing gate must not be
   fabricated with skipped work, mocks presented as real devices or ignored exits.
 - License original project code as GPL-2.0-or-later; retain third-party notices.
+- Latest user steering: use Cargo Deny and deny.toml for Rust license checks.
+  Stop further bespoke license-source searches and original-material collection.
+  Preserve already collected material; legacy collector scripts are not CI gates.
 - Starting the Windows or Android service means boot auto-start is enabled by
   default. Windows installs AutoStart after hardening. Android must have an actual
   default-enabled boot/foreground-service path; Application launch alone is not

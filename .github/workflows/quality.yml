@@ -14,6 +14,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  licenses:
+    name: Cargo Deny licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Check locked workspace licenses with Cargo Deny
+        # Upstream action pins cargo-deny 0.20.2; Docker action, no Node 20 runtime.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          rust-version: '1.97.0'
+          arguments: --locked --all-features --workspace
+          command: check
+          command-arguments: licenses
+
   protocol-security:
     name: Protocol security (Tamarin)
     runs-on: ubuntu-24.04
@@ -114,30 +132,8 @@ jobs:
         run: npm ci
       - name: Install repository-pinned Rust components
         run: rustup show active-toolchain
-      - name: UI checks/build, full Rust quality, actual analyzer canaries and licenses
+      - name: UI checks/build, full Rust quality and actual analyzer canaries
         run: node tools/quality.mjs
-      - name: Retain exact-revision Rust license metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
-        with:
-          name: rust-license-metadata-${{ matrix.os }}-${{ github.sha }}
-          path: target/quality/license-inventory.json
-          if-no-files-found: error
-          retention-days: 14
-      - name: Collect original Rust license material from the cached sources
-        # The preceding locked inventory has populated exact package sources.
-        # This collector is offline and requires these trees to remain quiescent.
-        run: node tools/license-materials.mjs
-      - name: Retain successfully collected Rust license material
-        # Default success() is deliberate: failed collection can preserve unknown
-        # partial files, which must not be published as reviewed materials.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
-        with:
-          name: rust-license-materials-${{ matrix.os }}-${{ github.sha }}
-          path: |
-            target/license-materials/rust/manifest.json
-            target/license-materials/rust/materials/
-          if-no-files-found: error
-          retention-days: 14
 
   android-core:
     name: Android Rust core Clippy (not an Android app build)

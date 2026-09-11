@@ -7,6 +7,22 @@ experiments and unmerged protocol experiments. New edits require new ROOT checks
 
 ## Latest evidence — September 11
 
+Latest user steering replaces bespoke license investigations and collection with
+Cargo Deny. `deny.toml` and a commit-pinned upstream Docker action now own the
+Rust license CI check. ROOT executed official cargo-deny0.20.2 with locked,
+offline, all-feature workspace inputs and received `licenses ok`. The original
+material scripts/assets remain preserved but are removed from default quality
+checks/collection. No further manual notice search is planned.
+
+The Android pre-input freshness repair is frozen and source-reviewed; ROOT's
+38 harness fixtures passed. It keeps the original5s/120s/command limits and
+allows only two global recaptures before an input is dispatched. Native CI is
+still required. C4's first Windows quality run found three Clippy style errors;
+ROOT corrected the two extra public-ID references and map_err/inspect_err usage.
+No lint allowance or native behavior change was introduced for those findings.
+
+The checkpoints below retain their earlier revision-specific scope.
+
 At af1c5b9, both Windows/Linux code-quality steps passed, including the new
 Step3 Windows fixtures, Clippy, full tests and actual Analyzer/canaries. The
 overall Quality34556026261 failed only its later block2 notice collection.

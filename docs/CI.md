@@ -17,9 +17,12 @@ command, process launch failure, timeout or signal. It runs:
   native/Android target checks and host tests cover the different configurations.
 - Tests of the analyzer output/exit gate.
 - Real analyzer clean/error/warning canaries on both host operating systems.
-- Project license enforcement and a raw dependency license metadata inventory
-  under `target/quality/license-inventory.json`. This is not legal clearance or
-  a substitute for the release's corresponding-source and notice bundle.
+
+Rust license policy is checked separately by the `Cargo Deny licenses` CI job:
+`cargo deny --locked --all-features --workspace check licenses`. `deny.toml`
+includes workspace, build and development dependencies. Unaccepted/unknown
+licensing fails the job. The upstream Docker action is commit-pinned and uses
+cargo-deny0.20.2, with no Node20 action runtime.
 
 `node tools/quality.mjs --extended` additionally runs Android Rust **core** Clippy,
 excluding `controller-app` and the host-only `controller-uniffi-bindgen` tool.
@@ -169,29 +172,12 @@ release jobs. No `pull_request_target` or ignored failure is used.
 
 ## Incomplete release work
 
-After successful Windows/Linux quality checks, each job retains its existing
-`target/quality/license-inventory.json` as a commit- and runner-named
-`rust-license-metadata-<runner>-<commit>` artifact for14 days. Missing output
-fails the upload step. This preserves Cargo's metadata inventory for review;
-it is not the complete Rust/npm/Maven notices or corresponding-source bundle.
-
-The same jobs then run `tools/license-materials.mjs` against the cached exact
-Cargo sources with offline metadata. Collection requires trusted, quiescent
-checkout/cache/output trees; observed filesystem stability is not atomic
-containment against an adversarial path swap. The collector retains bounded
-original Rust LICENSE/LICENCE/COPYING/NOTICE material, existing workspace/vendor notices
-and a source-relative byte/digest manifest in a fresh output directory. Missing
-or unsupported material fails the job. Only successful collection uploads
-`rust-license-materials-<runner>-<commit>` for14 days; unknown/partial output from
-a failed collection is not uploaded. Its fixture tests run in host quality.
-This is original-text collection, not license compatibility clearance, npm/Maven
-coverage, corresponding-source production or publication of a release.
-
-Schema2 additionally records explicitly reviewed shared-notice relationships.
-The initial alloc-stdlib0.2.4 relation reuses the actual alloc-no-stdlib2.0.4
-LICENSE only with the fixed declared tuples,1483-byte length, SHA-256 and original
-consumer-commit upstream URL. The material keeps its real provider origin; other
-missing notices or cross-package references remain rejected.
+The user's September11 instruction replaces bespoke license checks/collection
+with Cargo Deny. Additional original-material searches and collection are stopped.
+Previous scripts, imported originals and generated evidence remain preserved as
+reference material, but are not default CI gates. Cargo Deny is a policy check,
+not a notice archive or a corresponding-source publisher. See
+[Rust license checks](RUST_NOTICE_MATERIALS.md) for the current command and scope.
 
 The current tree contains the native presentation shell and service foundations,
 not a functioning installable remote UAC controller.
