@@ -9,8 +9,9 @@ mod model;
 use android_attestation::{TrustedStatusSnapshot, VerificationPolicy, VerifiedKeyBundle};
 use approval_core::{EnrollmentError, RegistryCheckpoint};
 use approval_protocol::DeviceId;
+use relay_service::RouteId;
 use secure_channel::TlsPublicKey;
-use std::fmt;
+use std::{fmt, net::SocketAddr};
 use thiserror::Error;
 
 pub use model::RegisteredDeviceKeys;
@@ -46,10 +47,15 @@ pub enum RegistryError {
 #[derive(Debug)]
 pub struct CommittedRegistryChange {
     device: DeviceId,
+    revision: u64,
 }
 impl CommittedRegistryChange {
     pub const fn affected_device(&self) -> DeviceId {
         self.device
+    }
+
+    pub const fn registry_revision(&self) -> u64 {
+        self.revision
     }
 }
 
@@ -80,6 +86,17 @@ impl ServiceRegistry<'_> {
         #[cfg(windows)]
         {
             Ok(self.healthy()?.document.core.clone())
+        }
+        #[cfg(not(windows))]
+        {
+            Err(RegistryError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn device_routes(&mut self) -> Result<Vec<(DeviceId, SocketAddr, RouteId)>, RegistryError> {
+        #[cfg(windows)]
+        {
+            Ok(self.healthy()?.document.device_routes())
         }
         #[cfg(not(windows))]
         {
@@ -122,15 +139,25 @@ impl ServiceRegistry<'_> {
         proof: VerifiedKeyBundle,
         current_policy: &VerificationPolicy,
         current_status: &TrustedStatusSnapshot,
+        route: RouteId,
+        relay: SocketAddr,
     ) -> Result<CommittedRegistryChange, RegistryError> {
         #[cfg(windows)]
         {
             let keys = attested_keys(proof, current_policy, current_status)?;
-            self.change(device, RegistryChange::Enroll { device, keys })
+            self.change(
+                device,
+                RegistryChange::Enroll {
+                    device,
+                    keys,
+                    route,
+                    relay,
+                },
+            )
         }
         #[cfg(not(windows))]
         {
-            let _ = (device, proof, current_policy, current_status);
+            let _ = (device, proof, current_policy, current_status, route, relay);
             Err(RegistryError::UnsupportedPlatform)
         }
     }
@@ -151,15 +178,25 @@ impl ServiceRegistry<'_> {
         proof: VerifiedKeyBundle,
         current_policy: &VerificationPolicy,
         current_status: &TrustedStatusSnapshot,
+        route: RouteId,
+        relay: SocketAddr,
     ) -> Result<CommittedRegistryChange, RegistryError> {
         #[cfg(windows)]
         {
             let keys = attested_keys(proof, current_policy, current_status)?;
-            self.change(device, RegistryChange::Replace { device, keys })
+            self.change(
+                device,
+                RegistryChange::Replace {
+                    device,
+                    keys,
+                    route,
+                    relay,
+                },
+            )
         }
         #[cfg(not(windows))]
         {
-            let _ = (device, proof, current_policy, current_status);
+            let _ = (device, proof, current_policy, current_status, route, relay);
             Err(RegistryError::UnsupportedPlatform)
         }
     }
@@ -285,7 +322,13 @@ impl<'identity> ServiceRegistry<'identity> {
     ) -> Result<CommittedRegistryChange, RegistryError> {
         let prepared = self.healthy()?.prepare_change(change)?;
         self.publish(prepared)?;
-        Ok(CommittedRegistryChange { device })
+        let core = &self.healthy()?.document.core;
+        let revision = core
+            .entries()
+            .iter()
+            .find(|entry| entry.device_id() == device)
+            .map_or(core.next_revision() - 1, |entry| entry.revision());
+        Ok(CommittedRegistryChange { device, revision })
     }
 
     fn publish(&mut self, prepared: PreparedWrite) -> Result<(), RegistryError> {

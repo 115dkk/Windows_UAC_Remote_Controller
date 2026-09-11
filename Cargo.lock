@@ -5324,6 +5324,7 @@ dependencies = [
  "phone-request-core",
  "phone-state-store",
  "qrcode",
+ "relay-service",
  "rqrr",
  "secure-channel",
  "serde",

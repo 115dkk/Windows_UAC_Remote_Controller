@@ -2,7 +2,15 @@
 //! Dormant, OS-guarded service-only supervisor. No CLI/Tauri/runtime auto hook.
 #![forbid(unsafe_code)]
 use std::fmt;
-pub use windows_prompt_probe::supervision::ReportOutcome;
+#[cfg(all(windows, target_pointer_width = "64"))]
+use windows_prompt_probe::supervision::ServiceMessage;
+pub use windows_prompt_probe::{
+    ProbeReport, PromptAction,
+    supervision::{ApplyOutcome, GoneReason, ReportOutcome, TargetIdentity},
+};
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+const MAX_WATCH_MESSAGES_PER_POLL: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +80,7 @@ pub enum ProbeSupervisorError {
     TimedOut,
     CleanupUnconfirmed,
     Quarantined,
+    ApplyRefused,
     Native {
         stage: SupervisorStage,
         hresult: i32,
@@ -83,6 +92,310 @@ impl fmt::Display for ProbeSupervisorError {
     }
 }
 impl std::error::Error for ProbeSupervisorError {}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum WatchEvent {
+    Appeared {
+        target: TargetIdentity,
+        report: ProbeReport,
+        session: u32,
+    },
+    Gone {
+        target: TargetIdentity,
+        reason: GoneReason,
+    },
+    Applied {
+        target: TargetIdentity,
+        outcome: ApplyOutcome,
+    },
+    HelperRestarted {
+        attempt: u32,
+    },
+    HelperUnavailable,
+}
+impl fmt::Debug for WatchEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Appeared {
+                report, session, ..
+            } => formatter
+                .debug_struct("Appeared")
+                .field("target", &"[redacted]")
+                .field("report", report)
+                .field("session", session)
+                .finish(),
+            Self::Gone { reason, .. } => formatter
+                .debug_struct("Gone")
+                .field("target", &"[redacted]")
+                .field("reason", reason)
+                .finish(),
+            Self::Applied { outcome, .. } => formatter
+                .debug_struct("Applied")
+                .field("target", &"[redacted]")
+                .field("outcome", outcome)
+                .finish(),
+            Self::HelperRestarted { attempt } => formatter
+                .debug_struct("HelperRestarted")
+                .field("attempt", attempt)
+                .finish(),
+            Self::HelperUnavailable => formatter.write_str("HelperUnavailable"),
+        }
+    }
+}
+
+/// Thread-affine owner for the fixed protected watch helper. The session retains
+/// every native owner until shutdown confirms exit, I/O drain and job release.
+pub struct WatchSession {
+    state: crate::watch_session::WatchMachine,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    inner: crate::ffi::probe_supervisor::WatchOwner,
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    _unconstructible: std::convert::Infallible,
+}
+impl fmt::Debug for WatchSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WatchSession(owned_service_only)")
+    }
+}
+impl WatchSession {
+    pub fn for_running_service() -> Result<Self, ProbeSupervisorError> {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            let inner = crate::ffi::probe_supervisor::WatchOwner::new()?;
+            Ok(Self {
+                state: crate::watch_session::WatchMachine::new(std::time::Instant::now()),
+                inner,
+            })
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            Err(ProbeSupervisorError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn poll(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Result<Vec<WatchEvent>, ProbeSupervisorError> {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            if self.state.is_shutting_down() {
+                let _ = self.inner.poll_shutdown();
+                return Ok(self.state.drain());
+            }
+            if self.state.is_unavailable() {
+                self.inner.begin_shutdown();
+                let _ = self.inner.poll_shutdown();
+                return Ok(self.state.drain());
+            }
+            if self.state.retry_due(now) {
+                match self.inner.reap_current() {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(self.state.drain()),
+                    Err(_) => {
+                        self.state.make_unavailable();
+                        self.inner.begin_shutdown();
+                        return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                    }
+                }
+                match self.inner.relaunch() {
+                    Ok(()) => {
+                        if self.state.relaunched(now).is_err() {
+                            if self.inner.fail_current().is_err() {
+                                self.state.make_unavailable();
+                                return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                            }
+                            self.state.make_unavailable();
+                            self.inner.begin_shutdown();
+                            return Ok(self.state.drain());
+                        }
+                    }
+                    Err(_) if self.inner.is_quarantined() => {
+                        self.state.make_unavailable();
+                        self.inner.begin_shutdown();
+                        return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                    }
+                    Err(_) => {
+                        let disposition = self.state.failed(now);
+                        if matches!(
+                            disposition,
+                            crate::watch_session::FailureDisposition::Unavailable
+                        ) {
+                            self.inner.begin_shutdown();
+                        }
+                    }
+                }
+            }
+            if !self.state.is_running() {
+                return Ok(self.state.drain());
+            }
+            let heartbeat_was_expired = self.state.heartbeat_expired(now);
+            let mut received_message = false;
+            for _ in 0..MAX_WATCH_MESSAGES_PER_POLL {
+                let polled = match self.inner.poll() {
+                    Ok(polled) => polled,
+                    Err(_) => {
+                        if self.inner.fail_current().is_err() {
+                            self.state.make_unavailable();
+                            return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                        }
+                        if self.inner.is_quarantined() {
+                            self.state.make_unavailable();
+                            return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                        }
+                        let disposition = self.state.failed(now);
+                        if matches!(
+                            disposition,
+                            crate::watch_session::FailureDisposition::Unavailable
+                        ) {
+                            self.inner.begin_shutdown();
+                        }
+                        break;
+                    }
+                };
+                match polled {
+                    crate::ffi::probe_supervisor::WatchPoll::Pending => break,
+                    crate::ffi::probe_supervisor::WatchPoll::Message(message) => {
+                        if let Err(message_error) =
+                            self.state.ingest(message, self.inner.session(), now)
+                        {
+                            if self.inner.fail_current().is_err() {
+                                self.state.make_unavailable();
+                                return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                            }
+                            if self.inner.is_quarantined() {
+                                self.state.make_unavailable();
+                                return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                            }
+                            if matches!(message_error, crate::watch_session::MessageError::Overflow)
+                            {
+                                self.inner.begin_shutdown();
+                                break;
+                            }
+                            let disposition = self.state.failed(now);
+                            if matches!(
+                                disposition,
+                                crate::watch_session::FailureDisposition::Unavailable
+                            ) {
+                                self.inner.begin_shutdown();
+                            }
+                            break;
+                        }
+                        received_message = true;
+                    }
+                    crate::ffi::probe_supervisor::WatchPoll::Exited => {
+                        if self.inner.fail_current().is_err() {
+                            self.state.make_unavailable();
+                            return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                        }
+                        if self.inner.is_quarantined() {
+                            self.state.make_unavailable();
+                            return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                        }
+                        let disposition = self.state.failed(now);
+                        if matches!(
+                            disposition,
+                            crate::watch_session::FailureDisposition::Unavailable
+                        ) {
+                            self.inner.begin_shutdown();
+                        }
+                        break;
+                    }
+                }
+            }
+            if heartbeat_was_expired && !received_message && self.state.is_running() {
+                if self.inner.fail_current().is_err() {
+                    self.state.make_unavailable();
+                    return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                }
+                if self.inner.is_quarantined() {
+                    self.state.make_unavailable();
+                    return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                }
+                let disposition = self.state.failed(now);
+                if matches!(
+                    disposition,
+                    crate::watch_session::FailureDisposition::Unavailable
+                ) {
+                    self.inner.begin_shutdown();
+                }
+            }
+            Ok(self.state.drain())
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            let _ = now;
+            Err(ProbeSupervisorError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn apply(
+        &mut self,
+        target: TargetIdentity,
+        action: PromptAction,
+        content_digest: [u8; 32],
+    ) -> Result<(), ProbeSupervisorError> {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            if self.state.is_shutting_down() {
+                return Err(ProbeSupervisorError::ApplyRefused);
+            }
+            self.state.reserve_apply(target)?;
+            let message = ServiceMessage::Apply {
+                target,
+                action,
+                content_digest,
+            };
+            if let Err(error) = self.inner.write(message) {
+                if self.inner.fail_current().is_err() {
+                    self.state.make_unavailable();
+                    return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                }
+                if self.inner.is_quarantined() {
+                    self.state.make_unavailable();
+                    return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                }
+                let disposition = self.state.failed(std::time::Instant::now());
+                if matches!(
+                    disposition,
+                    crate::watch_session::FailureDisposition::Unavailable
+                ) {
+                    self.inner.begin_shutdown();
+                }
+                return Err(error);
+            }
+            Ok(())
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            let _ = (target, action, content_digest);
+            Err(ProbeSupervisorError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn begin_shutdown(&mut self) {
+        self.state.begin_shutdown();
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.inner.begin_shutdown();
+    }
+
+    pub fn poll_shutdown(&mut self) -> bool {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.begin_shutdown();
+            self.inner.poll_shutdown()
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            true
+        }
+    }
+}
+impl Drop for WatchSession {
+    fn drop(&mut self) {
+        self.begin_shutdown();
+    }
+}
 
 /// One thread-affine supervisor for the actual running protected service.
 /// No target/path/session/command is accepted. All launch facts are re-observed
@@ -169,6 +482,21 @@ pub(crate) fn wait_slice(elapsed: std::time::Duration) -> Result<u32, ProbeSuper
 }
 
 #[cfg(any(all(windows, target_pointer_width = "64"), test))]
+pub(crate) fn quoted_watch_command_line(image: &[u16]) -> Result<Vec<u16>, ProbeSupervisorError> {
+    let mut command = quoted_image_command_line(image)?;
+    command.pop();
+    command.extend_from_slice(&[
+        u16::from(b' '),
+        u16::from(b'w'),
+        u16::from(b'a'),
+        u16::from(b't'),
+        u16::from(b'c'),
+        u16::from(b'h'),
+        0,
+    ]);
+    Ok(command)
+}
+
 pub(crate) fn quoted_image_command_line(image: &[u16]) -> Result<Vec<u16>, ProbeSupervisorError> {
     // A fixed protected filename only, never arbitrary arguments. The Windows
     // API uses an unquoted application name as command line when it is null;
@@ -231,6 +559,20 @@ mod tests {
             ServiceProbeSupervisor::retry_cleanup;
         let _failure: fn(&ServiceProbeSupervisor) -> Option<ProbeSupervisorError> =
             ServiceProbeSupervisor::quarantined_cause;
+        let _watch_constructor: fn() -> Result<WatchSession, ProbeSupervisorError> =
+            WatchSession::for_running_service;
+        let _watch_poll: fn(
+            &mut WatchSession,
+            std::time::Instant,
+        ) -> Result<Vec<WatchEvent>, ProbeSupervisorError> = WatchSession::poll;
+        let _watch_apply: fn(
+            &mut WatchSession,
+            TargetIdentity,
+            PromptAction,
+            [u8; 32],
+        ) -> Result<(), ProbeSupervisorError> = WatchSession::apply;
+        let _watch_begin_shutdown: fn(&mut WatchSession) = WatchSession::begin_shutdown;
+        let _watch_poll_shutdown: fn(&mut WatchSession) -> bool = WatchSession::poll_shutdown;
         assert_eq!(
             crate::SERVICE_NAME,
             windows_prompt_probe::supervision::SERVICE_NAME
@@ -307,6 +649,11 @@ mod tests {
         assert_eq!(
             String::from_utf16(&quoted[..quoted.len() - 1]).unwrap(),
             format!("\"{module}\"")
+        );
+        let watch = quoted_watch_command_line(&input).unwrap();
+        assert_eq!(
+            String::from_utf16(&watch[..watch.len() - 1]).unwrap(),
+            format!("\"{module}\" watch")
         );
         for bad in [
             vec![],

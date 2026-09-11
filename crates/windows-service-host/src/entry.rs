@@ -134,6 +134,10 @@ impl Reporter {
         checkpoint: u32,
         failure: Option<ServiceError>,
     ) -> Result<(), ServiceError> {
+        #[cfg(feature = "lab-software-identity")]
+        if let Some(failure) = &failure {
+            crate::lab::record_failure(failure);
+        }
         let status = Self::status_for(phase, checkpoint, failure);
         self.send_status(&status)?;
         // Interrogation/progress repeat only a status actually accepted by SCM.

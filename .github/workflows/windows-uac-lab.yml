@@ -122,6 +122,7 @@ jobs:
           }
           $lines | Tee-Object -FilePath "$env:LAB_EVIDENCE/ksp-provider-facts.txt"
       - name: Register and start the service through its fixed CLI, then wait for product Running
+        id: start
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -143,14 +144,41 @@ jobs:
           sc.exe qc UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-qc.txt"
           sc.exe query UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-query.txt"
           sc.exe qsidtype UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-qsidtype.txt"
+          "product_running=$($running.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
           if (-not $running) {
             Get-WinEvent -LogName System -MaxEvents 200 | Where-Object { $_.ProviderName -eq 'Service Control Manager' } | Format-List TimeCreated, Id, Message | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/scm-events.txt"
-            Write-Output 'Service did not reach product Running.'
-            exit 1
+            Write-Output 'Service did not reach product Running (the job is failed by the last step; the experiment below runs first).'
+            exit 0
           }
           if ($startExit -ne 0) { Write-Output 'start returned nonzero although the service is running; recorded.' }
           exit 0
+      - name: Lab experiment (evidence only) - start the same service with an unrestricted service SID
+        id: experiment
+        if: ${{ steps.start.outputs.product_running != 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failureFile = Join-Path (Join-Path $env:ProgramData '휴대폰 승인') 'lab-failure.txt'
+          if (Test-Path -LiteralPath $failureFile) { Copy-Item -LiteralPath $failureFile -Destination "$env:LAB_EVIDENCE/lab-failure-restricted.txt"; Get-Content -LiteralPath $failureFile } else { Write-Output 'no lab-failure.txt after the restricted start' }
+          # Hypothesis under test: SERVICE_SID_TYPE_RESTRICTED (write-restricted token) blocks key persistence.
+          # The product CLI refuses non-restricted services on purpose, so sc.exe drives this experiment.
+          sc.exe sidtype UacRemoteController unrestricted | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-sidtype.txt"
+          sc.exe start UacRemoteController | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-start.txt"
+          $running = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            $query = sc.exe query UacRemoteController | Out-String
+            if ($query -match 'RUNNING') { $running = $true }
+            if ($query -match 'STOPPED') { break }
+            if ($running -and $i -ge 5) { break }
+            Start-Sleep -Seconds 2
+          }
+          sc.exe query UacRemoteController | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-sc-query.txt"
+          if (Test-Path -LiteralPath $failureFile) { Copy-Item -LiteralPath $failureFile -Destination "$env:LAB_EVIDENCE/lab-failure-unrestricted.txt" }
+          "running=$($running.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          Write-Output "experiment running=$running"
+          exit 0
       - name: Show a real consent prompt from a limited-token process and run the read-only probe
+        if: ${{ steps.start.outputs.product_running == 'true' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -198,7 +226,14 @@ jobs:
           Get-WinEvent -LogName Application -MaxEvents 300 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'uac-|UacRemote|consent' } | Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/application-events.txt"
           $exe = Join-Path $env:LAB_DIR 'uac-service.exe'
           if (Test-Path -LiteralPath $exe) { & $exe stop | Set-Content -Path "$env:LAB_EVIDENCE/stop.json"; & $exe status | Set-Content -Path "$env:LAB_EVIDENCE/status-final.json" }
+          sc.exe stop UacRemoteController | Out-Null
           exit 0
+      - name: Fail the job unless the product itself reached Running
+        if: ${{ always() && steps.start.outputs.product_running != 'true' }}
+        shell: pwsh
+        run: |
+          Write-Output "product_running=${{ steps.start.outputs.product_running }} experiment_running=${{ steps.experiment.outputs.running }}"
+          exit 1
       - name: Retain the lab evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24

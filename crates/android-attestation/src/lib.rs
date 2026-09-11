@@ -155,6 +155,66 @@ pub fn verify_key_bundle(
     verify_with_anchors(evidence, expected, policy, status, roots::google()?)
 }
 
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+pub fn verify_key_bundle_with_test_anchors(
+    evidence: &CandidateEvidence<'_>,
+    expected: &ExpectedKeyBundle,
+    policy: &VerificationPolicy,
+    status: &TrustedStatusSnapshot,
+    anchors: &[TestAttestationAnchor],
+) -> Result<VerifiedKeyBundle, VerificationError> {
+    let anchors: Vec<_> = anchors
+        .iter()
+        .map(|anchor| roots::Anchor {
+            der: anchor.der.clone(),
+            spki: anchor.spki.clone(),
+            kind: anchor.kind,
+        })
+        .collect();
+    verify_with_anchors(evidence, expected, policy, status, &anchors)
+}
+
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestAttestationRootKind {
+    FactoryRsa,
+    CurrentP384,
+}
+
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+#[derive(Clone)]
+pub struct TestAttestationAnchor {
+    der: Vec<u8>,
+    spki: Vec<u8>,
+    kind: roots::RootKind,
+}
+
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+impl TestAttestationAnchor {
+    pub fn from_self_signed_der(
+        encoded: Vec<u8>,
+        kind: TestAttestationRootKind,
+    ) -> Result<Self, VerificationError> {
+        let certificate = certificate::Certificate::parse(&encoded)?;
+        certificate.verify_issued_by(&certificate)?;
+        Ok(Self {
+            spki: certificate.spki().to_vec(),
+            der: encoded,
+            kind: match kind {
+                TestAttestationRootKind::FactoryRsa => roots::RootKind::FactoryRsa,
+                TestAttestationRootKind::CurrentP384 => roots::RootKind::CurrentP384,
+            },
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+impl fmt::Debug for TestAttestationAnchor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TestAttestationAnchor([redacted])")
+    }
+}
+
 fn verify_with_anchors(
     evidence: &CandidateEvidence<'_>,
     expected: &ExpectedKeyBundle,

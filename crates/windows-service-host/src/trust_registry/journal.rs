@@ -254,7 +254,7 @@ impl PreparedWrite {
 #[cfg(test)]
 mod semantic_tests {
     use super::*;
-    use crate::trust_registry::tests::{device, keys, pc};
+    use crate::trust_registry::tests::{device, keys, pc, relay, route};
     use approval_core::RegistryCheckpoint;
 
     #[test]
@@ -266,6 +266,8 @@ mod semantic_tests {
             .changed(RegistryChange::Enroll {
                 device: device(1),
                 keys: keys(2),
+                route: route(1),
+                relay: relay(1),
             })
             .unwrap();
         let base = Journal {
@@ -288,6 +290,8 @@ mod semantic_tests {
             .prepare_change(RegistryChange::Enroll {
                 device: device(1),
                 keys: keys(2),
+                route: route(1),
+                relay: relay(1),
             })
             .unwrap()
             .append_fixture(&mut original);

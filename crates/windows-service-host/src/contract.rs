@@ -3,7 +3,7 @@
 
 #[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
-use std::{ffi::OsStr, fmt};
+use std::{ffi::OsStr, fmt, net::SocketAddr};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,6 +19,7 @@ pub enum Command {
     Restart,
     Uninstall,
     ProbeOnce,
+    Relay(SocketAddr),
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
     Help,
@@ -130,7 +131,7 @@ impl ServiceControlIntent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ControlOutcome {
     UserCancelled,
@@ -146,6 +147,23 @@ pub enum ControlOutcome {
     CompletionStatusUnknown,
 }
 
+/// The relay endpoint is a numeric socket address only (ADR 0020): no DNS
+/// name, no zero port, no unspecified address, and for IPv6 no flow label,
+/// scope id or IPv4-mapped form, so the stored text has exactly one spelling.
+pub(crate) fn validate_relay_endpoint(endpoint: SocketAddr) -> Result<(), ServiceError> {
+    if endpoint.port() == 0 || endpoint.ip().is_unspecified() {
+        return Err(ServiceError::InvalidArguments);
+    }
+    if let SocketAddr::V6(address) = endpoint
+        && (address.flowinfo() != 0
+            || address.scope_id() != 0
+            || address.ip().to_ipv4_mapped().is_some())
+    {
+        return Err(ServiceError::InvalidArguments);
+    }
+    Ok(())
+}
+
 impl Command {
     /// Input excludes argv[0]. No arguments means read-only status.
     pub fn parse<I, S>(arguments: I) -> Result<Self, ServiceError>
@@ -159,6 +177,20 @@ impl Command {
         };
         let second = arguments.next();
         let third = arguments.next();
+        if first.as_ref().to_str() == Some("relay") {
+            if third.is_some() || arguments.next().is_some() {
+                return Err(ServiceError::InvalidArguments);
+            }
+            let endpoint = second
+                .ok_or(ServiceError::InvalidArguments)?
+                .as_ref()
+                .to_str()
+                .ok_or(ServiceError::InvalidArguments)?
+                .parse::<SocketAddr>()
+                .map_err(|_| ServiceError::InvalidArguments)?;
+            validate_relay_endpoint(endpoint)?;
+            return Ok(Self::Relay(endpoint));
+        }
         if first.as_ref().to_str() == Some("pair-renderer") {
             if arguments.next().is_some() {
                 return Err(ServiceError::InvalidArguments);
@@ -238,10 +270,12 @@ impl RuntimeCapabilities {
 /// packaging rejects. This is a build fact, not a runtime observation.
 #[cfg(windows)]
 pub const IDENTITY_PROVIDER_PROFILE: &str = windows_identity::IDENTITY_PROVIDER_PROFILE;
-#[cfg(not(windows))]
+// The snapshot constructors that read this are compiled on Windows and in
+// host tests only; other targets carry no profile string at all.
+#[cfg(all(not(windows), test))]
 pub const IDENTITY_PROVIDER_PROFILE: &str = "unsupported-platform";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ServiceSnapshot {
     pub installation: InstallationState,
     pub state: Option<ServiceState>,
@@ -249,17 +283,20 @@ pub struct ServiceSnapshot {
     pub capabilities: RuntimeCapabilities,
     /// Build profile of the queried CLI binary, never of the running service.
     pub identity_provider: &'static str,
+    /// Lowercase release signer digests compiled into this queried binary.
+    pub android_signer_digests: Vec<String>,
 }
 
 impl ServiceSnapshot {
     #[cfg(any(windows, test))]
-    pub(crate) const fn absent() -> Self {
+    pub(crate) fn absent() -> Self {
         Self {
             installation: InstallationState::NotInstalled,
             state: None,
             process_id: None,
             capabilities: RuntimeCapabilities::UNIMPLEMENTED,
             identity_provider: IDENTITY_PROVIDER_PROFILE,
+            android_signer_digests: crate::android_signer_digest_strings(),
         }
     }
 
@@ -271,6 +308,7 @@ impl ServiceSnapshot {
             process_id: process_id.filter(|pid| *pid != 0 && state == ServiceState::Running),
             capabilities: RuntimeCapabilities::UNIMPLEMENTED,
             identity_provider: IDENTITY_PROVIDER_PROFILE,
+            android_signer_digests: crate::android_signer_digest_strings(),
         }
     }
 }

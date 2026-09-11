@@ -12,8 +12,25 @@
 
 #![deny(unsafe_code)]
 
+mod build_policy {
+    include!(concat!(env!("OUT_DIR"), "/android_signers.rs"));
+}
 mod contract;
 mod diagnostic;
+/// Disposable lab builds only: the SCM exit code drops HRESULTs, so the lab
+/// keeps the failure text next to the activity journal for the evidence upload.
+#[cfg(feature = "lab-software-identity")]
+mod lab {
+    pub(crate) fn record_failure(failure: &crate::ServiceError) {
+        let Some(root) = std::env::var_os("ProgramData") else {
+            return;
+        };
+        let path = std::path::Path::new(&root)
+            .join(crate::INSTALLATION_FOLDER)
+            .join("lab-failure.txt");
+        let _ = std::fs::write(path, format!("{failure}\n{failure:?}\n"));
+    }
+}
 #[cfg(any(all(windows, target_pointer_width = "64"), test))]
 mod pairing_handoff;
 #[cfg(any(windows, test))]
@@ -22,11 +39,14 @@ mod probe_supervisor;
 #[cfg(any(windows, test))]
 pub mod tls_signer;
 mod trust_registry;
+mod watch_session;
 pub use diagnostic::{
     MAX_PROBE_DIAGNOSTIC_BYTES, PROBE_CONTROL_CODE, PROBE_DIAGNOSTIC_FILES, ProbeRequestAccepted,
 };
 pub use probe_supervisor::{
-    LaunchPrivilege, ProbeSupervisorError, ReportOutcome, ServiceProbeSupervisor, SupervisorStage,
+    ApplyOutcome, GoneReason, LaunchPrivilege, ProbeReport, ProbeSupervisorError, PromptAction,
+    ReportOutcome, ServiceProbeSupervisor, SupervisorStage, TargetIdentity, WatchEvent,
+    WatchSession,
 };
 pub use trust_registry::{
     CommittedRegistryChange, RegisteredDeviceKeys, RegistryError, ServiceRegistry,
@@ -69,6 +89,22 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 pub const SERVICE_DISPLAY_NAME: &str = "휴대폰 승인";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
+pub const ANDROID_SIGNER_SHA256: &[[u8; 32]] = build_policy::ANDROID_SIGNER_SHA256;
+
+pub(crate) fn android_signer_digest_strings() -> Vec<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    ANDROID_SIGNER_SHA256
+        .iter()
+        .map(|digest| {
+            let mut value = String::with_capacity(64);
+            for byte in digest {
+                value.push(char::from(HEX[usize::from(byte >> 4)]));
+                value.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            value
+        })
+        .collect()
+}
 
 /// One fixed helper invocation. Zero means only authenticated terminal close
 /// and local I/O drain, never a grant, enrollment or remote readiness result.
@@ -106,6 +142,20 @@ pub fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     }
     #[cfg(not(windows))]
     {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Elevated CLI verb only: stores the numeric relay endpoint in the protected
+/// trust directory. It enrolls nothing and opens no connection by itself.
+pub fn configure_relay(endpoint: std::net::SocketAddr) -> Result<(), ServiceError> {
+    #[cfg(windows)]
+    {
+        native::configure_relay(endpoint)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = endpoint;
         Err(ServiceError::UnsupportedPlatform)
     }
 }

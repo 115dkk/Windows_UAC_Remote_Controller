@@ -8,6 +8,9 @@ repository.workspace = true
 publish.workspace = true
 description = "Bounded PC-side Android key evidence verification, not enrollment authority"
 
+[features]
+test-attestation-anchors = []
+
 [dependencies]
 der = { version = "=0.8.2", features = ["std", "derive", "oid"] }
 x509-cert = { version = "=0.3.0", default-features = false, features = ["std", "pem"] }

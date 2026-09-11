@@ -12,6 +12,7 @@ description = "Fixed-identity Windows SCM lifecycle host with protected-installa
 # Forwarded lab-only identity provider (ADR 0027). Release packaging rejects a
 # service binary that carries the lab profile marker; never enable it to ship.
 lab-software-identity = ["windows-identity/lab-software-identity"]
+test-attestation-anchors = ["android-attestation/test-attestation-anchors"]
 
 [dependencies]
 thiserror.workspace = true
@@ -26,7 +27,8 @@ android-attestation = { path = "../android-attestation" }
 secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }
 framed-transport = { path = "../framed-transport" }
-tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros"] }
+relay-service = { path = "../relay-service" }
+tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
 qrcode = { version = "0.14", default-features = false }

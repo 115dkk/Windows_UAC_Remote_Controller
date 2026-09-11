@@ -83,7 +83,7 @@ pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
     Ok(job)
 }
 
-pub(super) fn child(run: &mut ActiveRun) -> Result<(), Error> {
+pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     let token = run
         .preflight
         .token
@@ -96,7 +96,11 @@ pub(super) fn child(run: &mut ActiveRun) -> Result<(), Error> {
         .map_err(|_| Error::ServiceConfiguration)?;
     let attributes = attributes(descriptor.ptr().0);
     let image = wide(run.preflight.pins.probe().as_os_str())?;
-    let mut command_line = crate::probe_supervisor::quoted_image_command_line(&image)?;
+    let mut command_line = if watch {
+        crate::probe_supervisor::quoted_watch_command_line(&image)?
+    } else {
+        crate::probe_supervisor::quoted_image_command_line(&image)?
+    };
     let directory = wide(
         run.preflight
             .pins
@@ -113,10 +117,13 @@ pub(super) fn child(run: &mut ActiveRun) -> Result<(), Error> {
         ..Default::default()
     };
     let mut info = PROCESS_INFORMATION::default();
-    run.budget()?;
+    if !watch {
+        run.budget()?;
+    }
     // SAFETY: only our checked duplicate primary token and fixed pinned binary.
-    // Only quoted argv[0] for that fixed module, no extra arguments, no std
-    // handles and bInheritHandles=false (Windows
+    // Only quoted argv[0] for one-shot, or that token plus the fixed `watch`
+    // argument for watch mode. No caller argument or standard handle is accepted,
+    // and bInheritHandles=false (Windows
     // disallows cross-session inheritance). Trusted minimal Unicode environment,
     // pinned working directory and fixed desktop all outlive this call. Tcb was
     // already enabled; quota/assignment privileges were present and not removed.

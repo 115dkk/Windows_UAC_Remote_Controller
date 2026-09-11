@@ -13,11 +13,16 @@ use windows::{
     Win32::{Foundation::HANDLE, System::Threading::CreateEventW},
     core::PCWSTR,
 };
-use windows_prompt_probe::supervision::MAX_REPORT_BYTES;
+use windows_prompt_probe::supervision::{MAX_REPORT_BYTES, MAX_WATCH_MESSAGE_BYTES};
 
 const LIMITS: BufferLimits = BufferLimits {
     max_read: MAX_REPORT_BYTES + 1,
     max_write: MAX_REPORT_BYTES,
+};
+
+const WATCH_LIMITS: BufferLimits = BufferLimits {
+    max_read: MAX_WATCH_MESSAGE_BYTES,
+    max_write: MAX_WATCH_MESSAGE_BYTES,
 };
 
 impl EventHandle for Handle {
@@ -29,6 +34,7 @@ impl EventHandle for Handle {
 pub(super) struct PendingIo {
     operation: PendingOperation<Handle>,
     stage: Stage,
+    expected_write: Option<usize>,
 }
 impl PendingIo {
     pub(super) fn start(
@@ -44,6 +50,10 @@ impl PendingIo {
                 .map_err(|error| native(stage, error))?,
             stage,
         )?;
+        let expected_write = match kind {
+            Kind::Write(bytes) => Some(bytes.len()),
+            Kind::Connect | Kind::Read(_) => None,
+        };
         let mut operation =
             PendingOperation::prepare(kind, LIMITS, event).map_err(|error| mapped(stage, error))?;
         // Event creation and ALL buffer/storage allocation precede this fresh
@@ -51,13 +61,43 @@ impl PendingIo {
         // if preparation exhausted it; dropping Prepared releases only owned data.
         crate::probe_supervisor::before_deadline(began.elapsed(), || operation.issue(pipe))?
             .map_err(|error| mapped(stage, error))?;
-        Ok(Self { operation, stage })
+        Ok(Self {
+            operation,
+            stage,
+            expected_write,
+        })
+    }
+    pub(super) fn start_watch(pipe: HANDLE, kind: Kind<'_>, stage: Stage) -> Result<Self, Error> {
+        // SAFETY: unnamed noninheritable manual-reset event. Watch operations have
+        // protocol bounds but no one-shot deadline; their owner polls without waits.
+        let event = Handle::new(
+            unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+                .map_err(|error| native(stage, error))?,
+            stage,
+        )?;
+        let expected_write = match kind {
+            Kind::Write(bytes) => Some(bytes.len()),
+            Kind::Connect | Kind::Read(_) => None,
+        };
+        let mut operation = PendingOperation::prepare(kind, WATCH_LIMITS, event)
+            .map_err(|error| mapped(stage, error))?;
+        operation
+            .issue(pipe)
+            .map_err(|error| mapped(stage, error))?;
+        Ok(Self {
+            operation,
+            stage,
+            expected_write,
+        })
     }
     pub(super) fn event(&self) -> HANDLE {
         self.operation.event()
     }
     pub(super) fn in_flight(&self) -> bool {
         self.operation.in_flight()
+    }
+    pub(super) fn expected_write_bytes(&self) -> Option<usize> {
+        self.expected_write
     }
     pub(super) fn poll(&mut self, pipe: HANDLE) -> Result<Option<Completed>, Error> {
         self.operation

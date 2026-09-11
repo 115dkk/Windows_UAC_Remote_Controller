@@ -7,7 +7,19 @@ use super::{
 };
 use approval_protocol::{DecisionPublicKey, DeviceId};
 use p256::{ecdsa::SigningKey, pkcs8::EncodePublicKey};
+use relay_service::RouteId;
 use secure_channel::TlsPublicKey;
+use std::net::{Ipv4Addr, SocketAddr};
+
+pub(super) fn route(seed: u8) -> RouteId {
+    RouteId::new([seed.max(1); 32]).unwrap()
+}
+pub(super) fn relay(seed: u8) -> SocketAddr {
+    SocketAddr::new(
+        Ipv4Addr::new(203, 0, 113, seed.max(1)).into(),
+        7000 + u16::from(seed),
+    )
+}
 
 fn point(seed: u8) -> DecisionPublicKey {
     let key = SigningKey::from_bytes((&[seed; 32]).into()).unwrap();
@@ -43,6 +55,8 @@ fn actual_composite_roundtrip_preserves_roles_revisions_and_empty_highwater() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -50,6 +64,8 @@ fn actual_composite_roundtrip_preserves_roles_revisions_and_empty_highwater() {
         .prepare_change(RegistryChange::Replace {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -65,6 +81,8 @@ fn actual_composite_roundtrip_preserves_roles_revisions_and_empty_highwater() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -86,12 +104,16 @@ fn role_separation_includes_pc_transport_and_other_devices() {
         .changed(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap();
     assert!(matches!(
         state.changed(RegistryChange::Enroll {
             device: device(2),
-            keys: keys(4)
+            keys: keys(4),
+            route: route(1),
+            relay: relay(1),
         }),
         Err(RegistryError::KeyReuse)
     ));
@@ -100,14 +122,18 @@ fn role_separation_includes_pc_transport_and_other_devices() {
             .unwrap()
             .changed(RegistryChange::Enroll {
                 device: device(1),
-                keys: keys(1)
+                keys: keys(1),
+                route: route(1),
+                relay: relay(1),
             }),
         Err(RegistryError::KeyReuse)
     ));
     assert!(matches!(
         state.changed(RegistryChange::Enroll {
             device: device(1),
-            keys: keys(5)
+            keys: keys(5),
+            route: route(1),
+            relay: relay(1),
         }),
         Err(RegistryError::Enrollment(_))
     ));
@@ -115,7 +141,9 @@ fn role_separation_includes_pc_transport_and_other_devices() {
         state
             .changed(RegistryChange::Replace {
                 device: device(2),
-                keys: keys(5)
+                keys: keys(5),
+                route: route(1),
+                relay: relay(1),
             })
             .is_err()
     );
@@ -135,18 +163,23 @@ fn maximum_composite_is_bounded_and_roundtrips_canonically() {
             .changed(RegistryChange::Enroll {
                 device: device(index + 1),
                 keys: keys(2 + index * 3),
+                route: route(1),
+                relay: relay(1),
             })
             .unwrap();
     }
     let bytes = state.encode();
-    assert_eq!(bytes.len(), 5806);
+    // 14-byte header plus 32 entries of 232 bytes (version 2 with routes).
+    assert_eq!(bytes.len(), 7438);
     assert_eq!(bytes.len(), MAX_DOCUMENT_BYTES);
     assert_eq!(Document::decode(pc(), &bytes).unwrap().encode(), bytes);
     assert!(
         state
             .changed(RegistryChange::Enroll {
                 device: device(33),
-                keys: keys(100)
+                keys: keys(100),
+                route: route(1),
+                relay: relay(1),
             })
             .is_err()
     );
@@ -159,6 +192,8 @@ fn malformed_composite_headers_id_revision_and_points_are_rejected() {
         .changed(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap();
     let bytes = state.encode();
@@ -194,6 +229,8 @@ fn corrupted_torn_or_trailing_transactions_never_fall_back_to_old_authority() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -225,6 +262,8 @@ fn complete_valid_prefix_rollback_is_explicitly_not_a_hash_chain_guarantee() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -297,6 +336,8 @@ fn failed_intent_commit_flush_or_length_closes_owner_without_success_or_rollback
                 .prepare_change(RegistryChange::Enroll {
                     device: device(1),
                     keys: keys(2),
+                    route: route(1),
+                    relay: relay(1),
                 })
                 .unwrap();
             let mut owner = Some(state);
@@ -326,6 +367,8 @@ fn unwind_closes_owner_before_storage_is_entered() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap();
     let mut owner = Some(state);
@@ -355,6 +398,8 @@ fn publication_occurs_after_two_confirmed_appends_and_reopens_exactly() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap();
     journal::publish(&mut owner, &mut sink, prepared).unwrap();
@@ -373,6 +418,8 @@ fn bounded_journal_requires_maintenance_instead_of_reset_or_unbounded_growth() {
         .prepare_change(RegistryChange::Enroll {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap()
         .append_fixture(&mut bytes);
@@ -383,6 +430,8 @@ fn bounded_journal_requires_maintenance_instead_of_reset_or_unbounded_growth() {
             .prepare_change(RegistryChange::Replace {
                 device: device(1),
                 keys: keys(2),
+                route: route(1),
+                relay: relay(1),
             })
             .unwrap()
             .append_fixture(&mut bytes);
@@ -391,6 +440,8 @@ fn bounded_journal_requires_maintenance_instead_of_reset_or_unbounded_growth() {
         .prepare_change(RegistryChange::Replace {
             device: device(1),
             keys: keys(2),
+            route: route(1),
+            relay: relay(1),
         })
         .unwrap();
     let mut owner = Some(state);

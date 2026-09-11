@@ -21,6 +21,7 @@ use std::{
     cell::Cell,
     fmt,
     mem::{ManuallyDrop, size_of},
+    net::SocketAddr,
     path::PathBuf,
     ptr,
     rc::Rc,
@@ -34,8 +35,8 @@ use windows::{
             FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_BEGIN, FILE_END, FILE_FLAG_OPEN_REPARSE_POINT,
             FILE_FLAG_WRITE_THROUGH, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ,
             FILE_GENERIC_WRITE, FILE_SHARE_MODE, FindClose, FindFirstFileW, FindNextFileW,
-            FlushFileBuffers, GetFileSizeEx, OPEN_EXISTING, ReadFile, SetFilePointerEx,
-            WIN32_FIND_DATAW, WriteFile,
+            FlushFileBuffers, GetFileSizeEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MoveFileExW, OPEN_EXISTING, ReadFile, SetFilePointerEx, WIN32_FIND_DATAW, WriteFile,
         },
     },
     core::HRESULT,
@@ -43,10 +44,19 @@ use windows::{
 
 const DIRECTORY_NAME: &str = "trust";
 const FILE_NAME: &str = "devices.journal";
+const RELAY_FILE_NAME: &str = "relay-endpoint.v1";
+const RELAY_STAGING_FILE_NAME: &str = "relay-endpoint.v1.staging";
+const MAX_RELAY_FILE_BYTES: u64 = 48;
 pub(crate) const MAX_TRUST_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
-const MAX_EMPTY_DIRECTORY_ENTRIES: usize = 4;
+const MAX_DIRECTORY_ENTRIES: usize = 7;
 type Poison = Rc<Cell<bool>>;
+
+#[derive(Clone, Copy)]
+enum AccessContext {
+    Service,
+    Elevated,
+}
 
 fn unavailable() -> ServiceError {
     ServiceError::RegistryUnavailable
@@ -101,6 +111,7 @@ pub(crate) struct TrustDirectory {
     sid: OwnServiceSid,
     pins: Vec<OwnedHandle>,
     poison: Poison,
+    context: AccessContext,
 }
 impl fmt::Debug for TrustDirectory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,6 +121,15 @@ impl fmt::Debug for TrustDirectory {
 impl TrustDirectory {
     pub(crate) fn open_for_service() -> Result<Self, ServiceError> {
         service_context()?;
+        Self::open(AccessContext::Service)
+    }
+
+    pub(crate) fn open_for_elevated_configuration() -> Result<Self, ServiceError> {
+        require_elevated()?;
+        Self::open(AccessContext::Elevated)
+    }
+
+    fn open(context: AccessContext) -> Result<Self, ServiceError> {
         let sid = OwnServiceSid::lookup().map_err(|_| unavailable())?;
         let mut trusted = policy::trusted_system_sids();
         trusted.push(sid.bytes());
@@ -121,6 +141,7 @@ impl TrustDirectory {
             sid,
             pins,
             poison: Rc::new(Cell::new(false)),
+            context,
         };
         owner.pins.push(
             open_checked(&product, true, ObjectPolicy::PrivateData, &owner.trusted)
@@ -149,7 +170,11 @@ impl TrustDirectory {
         if self.poison.get() {
             return Err(unavailable());
         }
-        service_context().inspect_err(|_| self.poison.set(true))
+        let result = match self.context {
+            AccessContext::Service => service_context(),
+            AccessContext::Elevated => require_elevated(),
+        };
+        result.inspect_err(|_| self.poison.set(true))
     }
     fn operate<T>(
         &mut self,
@@ -167,10 +192,10 @@ impl TrustDirectory {
     }
 
     /// A narrow storage observation only. true means the exact journal was
-    /// absent and this fixed pinned directory had no other entries. It is NOT
-    /// pairing/bootstrap authorization and cannot justify recreating a PC key.
-    /// A valid existing journal is false; malformed native metadata, unknown
-    /// directory contents, access failures and races are errors, never absence.
+    /// absent and the pinned directory contained only the optional relay file.
+    /// It is NOT pairing/bootstrap authorization and cannot justify recreating a
+    /// PC key. Unknown entries, a leftover staging file, access failures and
+    /// races are errors, never absence.
     pub(crate) fn is_empty_registry_absent(&mut self) -> Result<bool, ServiceError> {
         self.operate(|owner| {
             if let Some(file) = owner.open_exact(false)? {
@@ -178,7 +203,11 @@ impl TrustDirectory {
                 file.close()?;
                 return Ok(false);
             }
-            owner.require_empty_directory()?;
+            owner.require_known_directory_entries(false)?;
+            if let Some(file) = owner.open_named(RELAY_FILE_NAME, false)? {
+                owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+                file.close()?;
+            }
             // Recheck exact absence after enumeration. CREATE_NEW remains the
             // independent no-overwrite gate; no observation grants mutation.
             if let Some(file) = owner.open_exact(false)? {
@@ -187,6 +216,83 @@ impl TrustDirectory {
                 return Err(unavailable());
             }
             Ok(true)
+        })
+    }
+
+    /// Read by the enrollment orchestration before each invitation; until that
+    /// step lands the reader has no caller.
+    #[allow(dead_code)]
+    pub(crate) fn read_relay_endpoint(&mut self) -> Result<Option<SocketAddr>, ServiceError> {
+        self.operate(|owner| {
+            owner.require_known_directory_entries(false)?;
+            let Some(file) = owner.open_named(RELAY_FILE_NAME, false)? else {
+                return Ok(None);
+            };
+            let size = owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            let bytes = read_exact_bounded(&file, size, MAX_RELAY_FILE_BYTES)?;
+            owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            file.close()?;
+            parse_relay_endpoint(&bytes).map(Some)
+        })
+    }
+
+    pub(crate) fn write_relay_endpoint(
+        &mut self,
+        endpoint: SocketAddr,
+    ) -> Result<(), ServiceError> {
+        if !matches!(self.context, AccessContext::Elevated) {
+            return Err(unavailable());
+        }
+        validate_relay_endpoint(endpoint)?;
+        let bytes = format!("{endpoint}\n").into_bytes();
+        if bytes.len() as u64 > MAX_RELAY_FILE_BYTES {
+            return Err(unavailable());
+        }
+        self.operate(|owner| {
+            owner.require_known_directory_entries(false)?;
+            if owner.open_named(RELAY_STAGING_FILE_NAME, false)?.is_some() {
+                return Err(unavailable());
+            }
+            let staging = owner
+                .open_named(RELAY_STAGING_FILE_NAME, true)?
+                .ok_or_else(unavailable)?;
+            if owner.inspect_named_file(&staging, RELAY_STAGING_FILE_NAME, MAX_RELAY_FILE_BYTES)?
+                != 0
+            {
+                return Err(unavailable());
+            }
+            write_all_and_flush(&staging, &bytes)?;
+            owner.inspect_named_file(&staging, RELAY_STAGING_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            staging.close()?;
+
+            let source =
+                Wide::new(owner.named_path(RELAY_STAGING_FILE_NAME)).map_err(|_| unavailable())?;
+            let destination =
+                Wide::new(owner.named_path(RELAY_FILE_NAME)).map_err(|_| unavailable())?;
+            // SAFETY: both names are fixed children of retained, checked,
+            // non-reparse private parent pins. The source was CREATE_NEW with a
+            // private descriptor, flushed, inspected and closed above. The fixed
+            // destination is replaced on the same NTFS volume with write-through.
+            unsafe {
+                MoveFileExW(
+                    source.ptr(),
+                    destination.ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(|_| unavailable())?;
+
+            let file = owner
+                .open_named(RELAY_FILE_NAME, false)?
+                .ok_or_else(unavailable)?;
+            let size = owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            let stored = read_exact_bounded(&file, size, MAX_RELAY_FILE_BYTES)?;
+            owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            file.close()?;
+            if stored != bytes || parse_relay_endpoint(&stored)? != endpoint {
+                return Err(unavailable());
+            }
+            owner.require_known_directory_entries(false)
         })
     }
     pub(crate) fn open_existing(mut self) -> Result<ServiceTrustFile, ServiceError> {
@@ -216,11 +322,14 @@ impl TrustDirectory {
             directory: self,
         })
     }
-    fn file_path(&self) -> PathBuf {
-        self.path.join(FILE_NAME)
+    fn named_path(&self, name: &str) -> PathBuf {
+        self.path.join(name)
     }
     fn open_exact(&self, create: bool) -> Result<Option<TrustHandle>, ServiceError> {
-        let path = Wide::new(self.file_path()).map_err(|_| unavailable())?;
+        self.open_named(FILE_NAME, create)
+    }
+    fn open_named(&self, name: &str, create: bool) -> Result<Option<TrustHandle>, ServiceError> {
+        let path = Wide::new(self.named_path(name)).map_err(|_| unavailable())?;
         let descriptor = if create {
             Some(self.sid.private_descriptor().map_err(|_| unavailable())?)
         } else {
@@ -261,10 +370,18 @@ impl TrustDirectory {
         }
     }
     fn inspect_file(&self, file: &TrustHandle) -> Result<u64, ServiceError> {
+        self.inspect_named_file(file, FILE_NAME, MAX_TRUST_FILE_BYTES)
+    }
+    fn inspect_named_file(
+        &self,
+        file: &TrustHandle,
+        name: &str,
+        maximum: u64,
+    ) -> Result<u64, ServiceError> {
         let handle = file.handle()?;
         let info = inspect_open_handle(
             handle,
-            &self.file_path(),
+            &self.named_path(name),
             false,
             ObjectPolicy::PrivateData,
             &self.trusted,
@@ -276,12 +393,12 @@ impl TrustDirectory {
         require_ntfs(handle, info.dwVolumeSerialNumber)?;
         let size = file_size(handle)?;
         let metadata_size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
-        if size != metadata_size || size > MAX_TRUST_FILE_BYTES {
+        if size != metadata_size || size > maximum {
             return Err(unavailable());
         }
         Ok(size)
     }
-    fn require_empty_directory(&self) -> Result<(), ServiceError> {
+    fn require_known_directory_entries(&self, allow_staging: bool) -> Result<(), ServiceError> {
         let pattern = Wide::new(self.path.join("*")).map_err(|_| unavailable())?;
         let mut data = WIN32_FIND_DATAW::default();
         // SAFETY: fixed wildcard below our pinned private directory only. No
@@ -298,14 +415,19 @@ impl TrustDirectory {
             poison: Rc::clone(&self.poison),
         };
         let result = (|| {
-            for _ in 0..MAX_EMPTY_DIRECTORY_ENTRIES {
+            for _ in 0..MAX_DIRECTORY_ENTRIES {
                 let end = data
                     .cFileName
                     .iter()
                     .position(|unit| *unit == 0)
                     .ok_or_else(unavailable)?;
-                let name = &data.cFileName[..end];
-                if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+                let name = String::from_utf16(&data.cFileName[..end]).map_err(|_| unavailable())?;
+                if name != "."
+                    && name != ".."
+                    && name != FILE_NAME
+                    && name != RELAY_FILE_NAME
+                    && !(allow_staging && name == RELAY_STAGING_FILE_NAME)
+                {
                     return Err(unavailable());
                 }
                 // SAFETY: live owned search handle and bounded initialized
@@ -555,6 +677,105 @@ fn stable_read(before: u64, received: usize, after: u64) -> bool {
         && u64::try_from(received).ok() == Some(before)
 }
 
+/// Reads exactly `size` bytes (bounded by `maximum`) from the start of a
+/// small protected configuration file. One extra byte detects growth.
+fn read_exact_bounded(
+    file: &TrustHandle,
+    size: u64,
+    maximum: u64,
+) -> Result<Vec<u8>, ServiceError> {
+    if size > maximum || maximum > MAX_TRUST_FILE_BYTES {
+        return Err(unavailable());
+    }
+    let expected = usize::try_from(size).map_err(|_| unavailable())?;
+    let handle = file.handle()?;
+    seek(handle, FILE_BEGIN, 0)?;
+    let limit = expected + 1;
+    let mut bytes = Vec::with_capacity(limit);
+    let mut buffer = [0u8; 64];
+    while bytes.len() < limit {
+        let count = (limit - bytes.len()).min(buffer.len());
+        let mut received = 0;
+        // SAFETY: same owned exclusive synchronous file, initialized bounded
+        // slice and scalar output; no native pointer escapes.
+        unsafe {
+            ReadFile(
+                handle.0,
+                Some(&mut buffer[..count]),
+                Some(&mut received),
+                None,
+            )
+        }
+        .map_err(|_| unavailable())?;
+        if received as usize > count {
+            return Err(unavailable());
+        }
+        if received == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..received as usize]);
+    }
+    if bytes.len() != expected {
+        return Err(unavailable());
+    }
+    Ok(bytes)
+}
+
+/// Writes the whole content from the start of a freshly created empty file and
+/// flushes it. Partial writes advance once only; any failure poisons the owner.
+fn write_all_and_flush(file: &TrustHandle, bytes: &[u8]) -> Result<(), ServiceError> {
+    let handle = file.handle()?;
+    seek(handle, FILE_BEGIN, 0)?;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = (bytes.len() - offset).min(IO_CHUNK_BYTES);
+        let mut written = 0;
+        // SAFETY: fixed owned synchronous handle at offset zero of an empty
+        // CREATE_NEW file, bounded immutable caller-owned bytes and exclusive
+        // scalar output. The API retains neither pointer.
+        unsafe {
+            WriteFile(
+                handle.0,
+                Some(&bytes[offset..offset + count]),
+                Some(&mut written),
+                None,
+            )
+        }
+        .map_err(|_| unavailable())?;
+        if written == 0 || written as usize > count {
+            return Err(unavailable());
+        }
+        offset += written as usize;
+    }
+    // SAFETY: same still-exclusive file; acknowledge only an actual OS flush.
+    unsafe { FlushFileBuffers(handle.0) }.map_err(|_| unavailable())
+}
+
+/// The relay endpoint rules shared with the elevated CLI verb.
+fn validate_relay_endpoint(endpoint: SocketAddr) -> Result<(), ServiceError> {
+    crate::contract::validate_relay_endpoint(endpoint).map_err(|_| unavailable())
+}
+
+/// Accepts exactly the canonical `ip:port\n` spelling that the writer stores.
+/// Anything else (whitespace, names, a second line, a non-canonical address)
+/// is a corrupt or foreign file, reported as unavailable, never as absent.
+fn parse_relay_endpoint(bytes: &[u8]) -> Result<SocketAddr, ServiceError> {
+    if bytes.len() as u64 > MAX_RELAY_FILE_BYTES {
+        return Err(unavailable());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| unavailable())?;
+    let line = text.strip_suffix('\n').ok_or_else(unavailable)?;
+    if !line.is_ascii() || line.contains(char::is_whitespace) {
+        return Err(unavailable());
+    }
+    let endpoint = line.parse::<SocketAddr>().map_err(|_| unavailable())?;
+    validate_relay_endpoint(endpoint)?;
+    if format!("{endpoint}\n").as_bytes() != bytes {
+        return Err(unavailable());
+    }
+    Ok(endpoint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +864,29 @@ mod tests {
             MAX_TRUST_FILE_BYTES as usize + 1,
             MAX_TRUST_FILE_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn relay_endpoint_file_accepts_only_the_canonical_line() {
+        let endpoint = parse_relay_endpoint(b"203.0.113.5:7443\n").unwrap();
+        assert_eq!(endpoint.port(), 7443);
+        assert!(parse_relay_endpoint(b"[2001:db8::1]:7443\n").is_ok());
+        for bad in [
+            &b""[..],
+            b"203.0.113.5:7443",
+            b"203.0.113.5:7443\r\n",
+            b" 203.0.113.5:7443\n",
+            b"203.0.113.5:7443\n\n",
+            b"203.0.113.5:0\n",
+            b"0.0.0.0:7443\n",
+            b"relay.example:7443\n",
+            b"[::ffff:203.0.113.5]:7443\n",
+            b"[2001:0db8::1]:7443\n",
+            b"203.0.113.5:7443\nx",
+        ] {
+            assert!(parse_relay_endpoint(bad).is_err(), "{bad:?}");
+        }
+        let long = format!("{}:7443\n", "1".repeat(60));
+        assert!(parse_relay_endpoint(long.as_bytes()).is_err());
     }
 }

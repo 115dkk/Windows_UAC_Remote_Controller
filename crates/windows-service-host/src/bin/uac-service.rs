@@ -46,6 +46,10 @@ fn run() -> Result<(), ServiceError> {
         Command::Stop => windows_service_host::stop(),
         Command::Restart => windows_service_host::restart(),
         Command::Uninstall => windows_service_host::uninstall(),
+        Command::Relay(endpoint) => {
+            windows_service_host::configure_relay(endpoint)?;
+            windows_service_host::query_status()
+        }
         Command::Service
         | Command::Help
         | Command::ProbeOnce

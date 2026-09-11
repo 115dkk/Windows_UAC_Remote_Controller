@@ -234,6 +234,13 @@ pub(crate) fn query_status() -> Result<ServiceSnapshot, ServiceError> {
     Ok(snapshot(status(&service)?))
 }
 
+pub(crate) fn configure_relay(endpoint: std::net::SocketAddr) -> Result<(), ServiceError> {
+    ffi::require_elevated()?;
+    let _installation = ffi::validate_installation(true)?;
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_relay_endpoint(endpoint)
+}
+
 pub(crate) fn request_probe_once() -> Result<crate::ProbeRequestAccepted, ServiceError> {
     ffi::require_elevated()?;
     // Only the fixed installed helper may issue this CLI diagnostic. A caller
