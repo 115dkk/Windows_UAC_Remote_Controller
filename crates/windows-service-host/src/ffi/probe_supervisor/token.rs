@@ -9,11 +9,11 @@ use windows::{
         Security::{
             DuplicateTokenEx, GetTokenInformation, LookupPrivilegeValueW,
             SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_TCB_NAME, SID_AND_ATTRIBUTES,
-            SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_SESSIONID,
-            TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
-            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenGroups,
-            TokenHasRestrictions, TokenIntegrityLevel, TokenPrimary, TokenPrivileges,
-            TokenRestrictedSids, TokenSessionId, TokenType, TokenUser,
+            SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
+            TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS,
+            TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+            TOKEN_USER, TokenGroups, TokenHasRestrictions, TokenIntegrityLevel, TokenPrimary,
+            TokenPrivileges, TokenRestrictedSids, TokenSessionId, TokenType, TokenUser,
         },
         System::{
             SystemInformation::{
@@ -84,10 +84,17 @@ impl CurrentToken {
         // SAFETY: duplicate ONLY our retained own primary SYSTEM token. The
         // kernel retains restrictions; no group/privilege/DACL adjustment or
         // foreign token occurs. New token is primary/noninherited, fixed rights.
+        // SetTokenInformation(TokenSessionId) needs TOKEN_ADJUST_DEFAULT as well
+        // as TOKEN_ADJUST_SESSIONID: the lab (run 34624753134) refused the mask
+        // without it with ERROR_ACCESS_DENIED and accepted exactly this one.
         unsafe {
             DuplicateTokenEx(
                 self.handle.raw(),
-                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID,
+                TOKEN_QUERY
+                    | TOKEN_DUPLICATE
+                    | TOKEN_ASSIGN_PRIMARY
+                    | TOKEN_ADJUST_SESSIONID
+                    | TOKEN_ADJUST_DEFAULT,
                 None,
                 SecurityImpersonation,
                 TokenPrimary,

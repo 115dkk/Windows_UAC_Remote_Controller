@@ -178,6 +178,7 @@ jobs:
           Write-Output "experiment running=$running"
           exit 0
       - name: Show a real consent prompt from a limited-token process and run the read-only probe
+        id: probe
         if: ${{ steps.start.outputs.product_running == 'true' }}
         shell: pwsh
         run: |
@@ -239,64 +240,20 @@ jobs:
           Write-Output "probe-once exit=$LASTEXITCODE"
           Start-Sleep -Seconds 12
           & $exe status | Tee-Object -FilePath "$env:LAB_EVIDENCE/status-after-probe.json"
+          # The service records the one-shot outcome itself; the CLI only requested it. Only an actual
+          # "observed" outcome (the helper ran in the interactive session and saw the consent window) passes.
+          $observed = 'false'
+          $outcomes = Get-ChildItem -LiteralPath (Join-Path $env:ProgramData '휴대폰 승인\activity') -Filter 'probe-once-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
+          foreach ($file in $outcomes) {
+            try { $record = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json } catch { continue }
+            Write-Output ("{0}: outcome={1}" -f $file.Name, ($record.outcome | ConvertTo-Json -Compress -Depth 6))
+            if ($record.outcome.kind -eq 'observed') { $observed = 'true' }
+          }
+          "probe_observed=$observed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-after-probe.txt"
           # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
           Get-Process -Name consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           exit 0
-      - name: Lab experiment (evidence only) - session change on a SYSTEM token duplicate
-        if: ${{ always() }}
-        shell: pwsh
-        run: |
-          # Runs 34618803758 and 34620877517: the service (LocalSystem, SeTcb enabled) gets E_ACCESSDENIED from
-          # SetTokenInformation(TokenSessionId) on its own duplicated token. Reproduce the exact call sequence as
-          # SYSTEM through a scheduled task with several access-mask variants and record each Win32 error.
-          $script = Join-Path $env:RUNNER_TEMP 'uac-lab-token-session.ps1'
-          $log = Join-Path $env:ProgramData 'uac-lab-token-session.log'
-          @'
-          $log = Join-Path $env:ProgramData 'uac-lab-token-session.log'
-          Add-Type -TypeDefinition @"
-          using System; using System.Runtime.InteropServices;
-          public static class LabTok {
-              [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
-              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr tok);
-              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool DuplicateTokenEx(IntPtr tok, uint access, IntPtr attrs, int level, int type, out IntPtr dup);
-              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool SetTokenInformation(IntPtr tok, int cls, ref uint info, uint len);
-              [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
-          }
-          "@
-          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          "identity={0} session={1}" -f $identity.Name, (Get-Process -Id $PID).SessionId | Out-File $log -Append -Encoding utf8
-          # Run 34622593419: the explicit QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_SESSIONID duplicate is refused (5)
-          # while MAXIMUM_ALLOWED and ALL_ACCESS duplicates succeed. Find the one missing right.
-          foreach ($case in @(
-              @{ open = 0x000A; dup = 0x010B; name = 'dup explicit 0x010B' },
-              @{ open = 0x000A; dup = 0x018B; name = 'dup explicit + ADJUST_DEFAULT (0x80)' },
-              @{ open = 0x000A; dup = 0x012B; name = 'dup explicit + ADJUST_PRIVILEGES (0x20)' },
-              @{ open = 0x000A; dup = 0x014B; name = 'dup explicit + ADJUST_GROUPS (0x40)' },
-              @{ open = 0x000A; dup = 0x011B; name = 'dup explicit + QUERY_SOURCE (0x10)' },
-              @{ open = 0x000A; dup = 0x010F; name = 'dup explicit + IMPERSONATE (0x04)' },
-              @{ open = 0x000A; dup = 0x0002010B; name = 'dup explicit + READ_CONTROL (0x20000)' },
-              @{ open = 0x000A; dup = 0x0004010B; name = 'dup explicit + WRITE_DAC (0x40000)' },
-              @{ open = 0x000A; dup = 0x000801FF; name = 'dup all specific rights + WRITE_OWNER' },
-              @{ open = 0x000A; dup = 0x000001FF; name = 'dup all specific rights (0x1FF)' },
-              @{ open = 0xF01FF; dup = 0xF01FF; name = 'open ALL_ACCESS, dup ALL_ACCESS' }
-          )) {
-              $tok = [IntPtr]::Zero; $dup = [IntPtr]::Zero
-              if (-not [LabTok]::OpenProcessToken([LabTok]::GetCurrentProcess(), [uint32]$case.open, [ref]$tok)) { "{0}: open failed {1}" -f $case.name, [Runtime.InteropServices.Marshal]::GetLastWin32Error() | Out-File $log -Append -Encoding utf8; continue }
-              if (-not [LabTok]::DuplicateTokenEx($tok, [uint32]$case.dup, [IntPtr]::Zero, 2, 1, [ref]$dup)) { "{0}: duplicate failed {1}" -f $case.name, [Runtime.InteropServices.Marshal]::GetLastWin32Error() | Out-File $log -Append -Encoding utf8; [void][LabTok]::CloseHandle($tok); continue }
-              [uint32]$session = 2
-              $ok = [LabTok]::SetTokenInformation($dup, 12, [ref]$session, 4)
-              $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-              "{0}: set_session ok={1} error={2}" -f $case.name, $ok, $err | Out-File $log -Append -Encoding utf8
-              [void][LabTok]::CloseHandle($dup); [void][LabTok]::CloseHandle($tok)
-          }
-          '@ | Set-Content -Path $script -Encoding ascii
-          if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
-          schtasks.exe /Create /F /TN UacLabTokenSession /TR ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $script) /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST | Out-Null
-          schtasks.exe /Run /TN UacLabTokenSession | Out-Null
-          for ($i = 0; $i -lt 40; $i++) { if ((Test-Path -LiteralPath $log) -and (Select-String -Path $log -Pattern 'ALL_ACCESS, dup ALL_ACCESS' -Quiet)) { break }; Start-Sleep -Milliseconds 500 }
-          schtasks.exe /Delete /F /TN UacLabTokenSession | Out-Null
-          if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination "$env:LAB_EVIDENCE/token-session-experiment.txt"; Get-Content -LiteralPath $log } else { Write-Output 'token session experiment left no log' }
       - name: Collect service data, journal and diagnostics (read-only copies)
         if: ${{ always() }}
         shell: pwsh
@@ -320,11 +277,11 @@ jobs:
           if (Test-Path -LiteralPath $exe) { & $exe stop | Set-Content -Path "$env:LAB_EVIDENCE/stop.json"; & $exe status | Set-Content -Path "$env:LAB_EVIDENCE/status-final.json" }
           sc.exe stop UacRemoteController | Out-Null
           exit 0
-      - name: Fail the job unless the product itself reached Running
-        if: ${{ always() && steps.start.outputs.product_running != 'true' }}
+      - name: Fail the job unless the product reached Running and probe-once observed the consent prompt
+        if: ${{ always() && (steps.start.outputs.product_running != 'true' || steps.probe.outputs.probe_observed != 'true') }}
         shell: pwsh
         run: |
-          Write-Output "product_running=${{ steps.start.outputs.product_running }} experiment_running=${{ steps.experiment.outputs.running }}"
+          Write-Output "product_running=${{ steps.start.outputs.product_running }} probe_observed=${{ steps.probe.outputs.probe_observed }} experiment_running=${{ steps.experiment.outputs.running }}"
           exit 1
       - name: Retain the lab evidence
         if: ${{ always() }}
