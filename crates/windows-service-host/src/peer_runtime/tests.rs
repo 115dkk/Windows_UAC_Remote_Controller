@@ -57,13 +57,17 @@ pub(super) struct Identity {
     after_clock: RefCell<Option<Box<dyn FnMut()>>>,
 }
 impl Identity {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             public: public(20),
             key: SigningKey::from_slice(&[20; 32]).unwrap(),
             last_clock: RefCell::new(None),
             after_clock: RefCell::new(None),
         }
+    }
+    pub(super) fn sign_protocol(&self, bytes: &[u8]) -> Vec<u8> {
+        let signature: Signature = self.key.sign(bytes);
+        signature.to_der().as_bytes().to_vec()
     }
     pub(super) fn sign_clock(
         &self,
@@ -97,6 +101,10 @@ impl crate::tls_signer::tests::SyntheticKey for Identity {
 pub(super) struct RegistryFixture {
     pub(super) checkpoint: RegistryCheckpoint,
     pub(super) transport: BTreeMap<DeviceId, TlsPublicKey>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) relay: Option<std::net::SocketAddr>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) routes: BTreeMap<DeviceId, (std::net::SocketAddr, relay_service::RouteId)>,
     after_checkpoint: RefCell<Option<Box<dyn FnMut()>>>,
 }
 impl RegistryFixture {
@@ -128,6 +136,10 @@ fn registry() -> Rc<RefCell<RegistryFixture>> {
     Rc::new(RefCell::new(RegistryFixture {
         checkpoint: RegistryCheckpoint::new(32, 3, entries).unwrap(),
         transport: [(device(1), public(5)), (device(2), public(8))].into(),
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        relay: None,
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        routes: BTreeMap::new(),
         after_checkpoint: RefCell::new(None),
     }))
 }

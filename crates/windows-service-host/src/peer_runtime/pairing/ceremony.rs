@@ -6,9 +6,11 @@
 use super::CLOSE_RESERVE;
 use crate::PendingElevationId;
 use approval_core::RegistryCheckpoint;
-use approval_protocol::{BootEpoch, PcIdentity};
+use approval_protocol::{BootEpoch, DeviceId, PcIdentity};
 use p256::elliptic_curve::zeroize::Zeroizing;
+use relay_service::RouteId;
 use secure_channel::TlsPublicKey;
+use service_protocol::{PairingChallenge, PairingNonce};
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -62,9 +64,24 @@ struct Prepared {
     pc: PcIdentity,
     pc_key: TlsPublicKey,
     checkpoint: RegistryCheckpoint,
-    // No long-lived Copy nonce/challenge DTO exists. The same wiping owner is
-    // filled, validated by borrowed slices, retained, and wiped on every Drop.
-    material: Zeroizing<[u8; 80]>,
+    // Nonce, challenge, recipient and public route share one wiping owner.
+    material: Zeroizing<[u8; 112]>,
+}
+
+pub(super) struct PreparedOriginal {
+    pub(super) nonce: PairingNonce,
+    pub(super) challenge: PairingChallenge,
+    pub(super) recipient: DeviceId,
+    pub(super) route: RouteId,
+    pub(super) pc: PcIdentity,
+    pub(super) pc_key: TlsPublicKey,
+    pub(super) intended_revision: u64,
+    pub(super) deadline: Instant,
+}
+impl fmt::Debug for PreparedOriginal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PreparedOriginal([redacted], shape_only)")
+    }
 }
 pub(super) struct OriginalCeremony {
     phase: Phase,
@@ -151,7 +168,7 @@ impl OriginalCeremony {
             }
             validate_key()?; // Only the unclaimed path; never an idle-poll CNG loop.
             check_origin(context.origin, observe()?)?;
-            let mut material = Zeroizing::new([0_u8; 80]);
+            let mut material = Zeroizing::new([0_u8; 112]);
             fill(&mut material[..])?;
             let original = Prepared {
                 origin: context.origin,
@@ -182,6 +199,40 @@ impl OriginalCeremony {
         fill: impl FnMut(&mut [u8]) -> Result<(), PreparationError>,
     ) -> Result<(), PreparationError> {
         self.maintain_with_validation(context, observe, fill, || Ok(()))
+    }
+    pub(super) fn prepared(&self) -> Result<PreparedOriginal, PreparationError> {
+        let value = self.prepared.as_ref().ok_or(PreparationError::Consumed)?;
+        check_material(value, value.origin.pending_id)?;
+        Ok(PreparedOriginal {
+            nonce: PairingNonce::from_bytes(
+                value.material[..32]
+                    .try_into()
+                    .map_err(|_| PreparationError::Context)?,
+            )
+            .map_err(|_| PreparationError::Context)?,
+            challenge: PairingChallenge::from_bytes(
+                value.material[32..64]
+                    .try_into()
+                    .map_err(|_| PreparationError::Context)?,
+            )
+            .map_err(|_| PreparationError::Context)?,
+            recipient: DeviceId::from_bytes(
+                value.material[64..80]
+                    .try_into()
+                    .map_err(|_| PreparationError::Context)?,
+            )
+            .map_err(|_| PreparationError::Context)?,
+            route: RouteId::new(
+                value.material[80..112]
+                    .try_into()
+                    .map_err(|_| PreparationError::Context)?,
+            )
+            .map_err(|_| PreparationError::Context)?,
+            pc: value.pc,
+            pc_key: value.pc_key.clone(),
+            intended_revision: value.checkpoint.next_revision(),
+            deadline: value.origin.deadline,
+        })
     }
     pub(super) fn invalidate(&mut self) {
         self.burn(PreparationError::Cancelled);
@@ -225,11 +276,15 @@ fn check_origin(origin: Origin, now: Instant) -> Result<(), PreparationError> {
 fn check_material(value: &Prepared, pending: PendingElevationId) -> Result<(), PreparationError> {
     let nonce = &value.material[..32];
     let challenge = &value.material[32..64];
-    let recipient = &value.material[64..];
+    let recipient = &value.material[64..80];
+    let route = &value.material[80..112];
     if nonce.iter().all(|byte| *byte == 0)
         || challenge.iter().all(|byte| *byte == 0)
         || recipient.iter().all(|byte| *byte == 0)
+        || route.iter().all(|byte| *byte == 0)
         || nonce == challenge
+        || nonce == route
+        || challenge == route
         || nonce == pending.bytes()
         || challenge == pending.bytes()
         || nonce == value.origin.epoch.as_bytes()
@@ -288,7 +343,8 @@ mod tests {
     fn fill(bytes: &mut [u8]) -> Result<(), PreparationError> {
         bytes[..32].fill(7);
         bytes[32..64].fill(8);
-        bytes[64..].fill(9);
+        bytes[64..80].fill(9);
+        bytes[80..112].fill(10);
         Ok(())
     }
     #[test]
@@ -341,7 +397,7 @@ mod tests {
                         2 => bytes[32..64].fill(7),
                         3 => bytes[..32].copy_from_slice(&origin.pending_id.bytes()),
                         4 => bytes[32..64].fill(0),
-                        5 => bytes[64..].fill(0),
+                        5 => bytes[64..80].fill(0),
                         6 => bytes[..32].fill(3), // Current PC identity.
                         _ => bytes[32..64].copy_from_slice(origin.epoch.as_bytes()),
                     }
@@ -619,7 +675,7 @@ mod tests {
     fn owned_material_has_drop_wiping_and_no_plain_copy_nonce_storage() {
         use p256::elliptic_curve::zeroize::{Zeroize, ZeroizeOnDrop};
         fn requires_drop_wiping<T: ZeroizeOnDrop>() {}
-        requires_drop_wiping::<Zeroizing<[u8; 80]>>();
+        requires_drop_wiping::<Zeroizing<[u8; 112]>>();
         let mut material = Zeroizing::new([7_u8; 80]);
         material.zeroize();
         assert!(material.iter().all(|byte| *byte == 0));

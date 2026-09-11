@@ -4,6 +4,9 @@
 //! private preparation, NOT a consent receipt or QR/enrollment/signing grant.
 #![forbid(unsafe_code)]
 
+use super::enrollment::{
+    EnrollmentCarrier, EnrollmentInputs, EnrollmentProgress, ExpectedOriginal,
+};
 use crate::{
     PairingPeerError, PairingPipe, PairingPipeProgress, PairingServerEndpoints, PendingElevationId,
     RendererInvocation,
@@ -17,10 +20,15 @@ use crate::{
     },
     startup_phase::ScmReadyPermit,
 };
+use android_attestation::VerificationPolicy;
 use approval_core::RegistryCheckpoint;
-use approval_protocol::{BootEpoch, PcIdentity};
+use approval_protocol::{BootEpoch, DeviceId, PcIdentity};
+use relay_service::RouteId;
 use secure_channel::TlsPublicKey;
-use service_protocol::PairingComparisonCode;
+use service_protocol::{
+    PairingComparisonCode, PairingInvitation, PairingInvitationFields, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate,
+};
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -48,6 +56,9 @@ pub(super) enum Failure {
     Generation,
     Preparation(PreparationError),
     Identity,
+    RelayUnconfigured,
+    SignerPolicyUnavailable,
+    Enrollment,
 }
 impl From<PairingPeerError> for Failure {
     fn from(error: PairingPeerError) -> Self {
@@ -76,8 +87,6 @@ enum RendererParent {
     RegisterWrite,
     Done,
 }
-// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RendererIo {
     Connect,
@@ -95,16 +104,22 @@ enum RendererIo {
     TransportClosed,
     Drained,
 }
-// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContentAction {
     Invitation,
     Comparison,
     Outcome,
 }
-// Consumed by the enrollment orchestration (ADR 0027, W3); unused until it lands.
-#[allow(dead_code)]
+
+pub(super) enum CeremonyAction {
+    SignFrozen(Box<service_protocol::UnsignedFrozenCandidate>),
+    Commit {
+        relay: std::net::SocketAddr,
+        route: RouteId,
+    },
+    Enrolled(DeviceId),
+    Failed,
+}
 pub(super) struct RendererRun {
     request: RendererRequest,
     pipe: PairingPipe,
@@ -118,7 +133,6 @@ pub(super) struct RendererRun {
     outcome_sent: bool,
     cleanup_failed: bool,
 }
-#[allow(dead_code)] // Renderer content API awaits the W3 orchestration.
 impl RendererRun {
     fn awaiting_parent(&self) -> bool {
         matches!(
@@ -164,9 +178,9 @@ impl RendererRun {
         match action {
             ContentAction::Invitation => !invitation_sent,
             ContentAction::Comparison => invitation_sent && !comparison_sent,
-            // A failure outcome is legal as soon as the invitation is shown; the
-            // caller only sends `enrolled: true` after both confirmations.
-            ContentAction::Outcome => invitation_sent && !outcome_sent,
+            // A failure outcome is also legal when relay or policy setup fails
+            // before an invitation can be shown. Success still follows both confirmations.
+            ContentAction::Outcome => !outcome_sent,
         }
     }
     pub(super) fn ready_for_invitation(&self) -> bool {
@@ -241,9 +255,6 @@ impl RendererRun {
         )?;
         self.outcome_sent = true;
         Ok(())
-    }
-    pub(super) fn is_idle(&self) -> bool {
-        self.io == RendererIo::Idle
     }
     fn begin_renderer_write(&mut self, frame: Frame, next: RendererIo) -> Result<(), Failure> {
         if self.io != RendererIo::Idle {
@@ -523,6 +534,13 @@ pub(super) struct ServicePairing {
     pending_id: Option<PendingElevationId>,
     preparation: Option<OriginalCeremony>,
     renderer: Option<RendererRun>,
+    enrollment: Option<EnrollmentCarrier>,
+    enrollment_route: Option<(std::net::SocketAddr, RouteId)>,
+    enrollment_failed: bool,
+    enrollment_terminal: bool,
+    enrollment_reported: bool,
+    commit_requested: bool,
+    committed_device: Option<DeviceId>,
     renderer_attempted: bool,
     next_side: ServiceSide,
     first_failure: Option<Failure>,
@@ -554,6 +572,13 @@ impl ServicePairing {
             pending_id: None,
             preparation: None,
             renderer: None,
+            enrollment: None,
+            enrollment_route: None,
+            enrollment_failed: false,
+            enrollment_terminal: false,
+            enrollment_reported: false,
+            commit_requested: false,
+            committed_device: None,
             renderer_attempted: false,
             next_side: ServiceSide::Starter,
             first_failure: None,
@@ -601,6 +626,13 @@ impl ServicePairing {
             || self.pending_id.is_some()
             || self.preparation.is_some()
             || self.renderer.is_some()
+            || self.enrollment.is_some()
+            || self.enrollment_route.is_some()
+            || self.enrollment_failed
+            || self.enrollment_terminal
+            || self.enrollment_reported
+            || self.commit_requested
+            || self.committed_device.is_some()
             || self.renderer_attempted
         {
             return Err(Failure::Protocol);
@@ -870,6 +902,9 @@ impl ServicePairing {
                 .ok_or(Failure::Protocol)?
                 .is_closing()
         {
+            if self.enrollment.is_some() && !self.enrollment_terminal {
+                return Err(Failure::Window);
+            }
             if !self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound)
                 || !self.both_idle()
                 || self
@@ -888,7 +923,16 @@ impl ServicePairing {
                 .ok_or(Failure::Protocol)?
                 .start_close()
                 .map_err(|_| Failure::Protocol)?;
-            if let Some(renderer) = self.renderer.as_mut() {
+            if let Some(renderer) = self.renderer.as_mut()
+                && !matches!(
+                    renderer.io,
+                    RendererIo::CloseWrite
+                        | RendererIo::AckRead
+                        | RendererIo::Acknowledged
+                        | RendererIo::TransportClosed
+                        | RendererIo::Drained
+                )
+            {
                 renderer.begin_close()?;
             }
         }
@@ -1050,6 +1094,305 @@ impl ServicePairing {
             }
         }
     }
+    pub(super) fn enrollment_is_absent(&self) -> bool {
+        self.enrollment.is_none()
+    }
+
+    pub(super) fn begin_enrollment(
+        &mut self,
+        relay: std::net::SocketAddr,
+        policy: VerificationPolicy,
+        signer: std::sync::Arc<crate::tls_signer::ServiceTlsSigner>,
+        pc_transport_key: TlsPublicKey,
+    ) -> Result<(), Failure> {
+        if self.enrollment.is_some() || self.enrollment_route.is_some() {
+            return Err(Failure::Protocol);
+        }
+        let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
+        if !renderer.ready_for_invitation() {
+            return Err(Failure::Protocol);
+        }
+        let original = self
+            .preparation
+            .as_ref()
+            .ok_or(Failure::Protocol)?
+            .prepared()
+            .map_err(Failure::Preparation)?;
+        let invitation = PairingInvitation::new(PairingInvitationFields {
+            ceremony_nonce: original.nonce,
+            attestation_challenge: original.challenge,
+            pc: original.pc,
+            recipient_device: original.recipient,
+            pc_signing_key: original.pc_key.clone(),
+            pc_transport_key: pc_transport_key.clone(),
+            relay_address: relay,
+            route: *original.route.as_bytes(),
+        })
+        .map_err(|_| Failure::Protocol)?;
+        let invitation_text =
+            InvitationText::new(invitation.to_qr_text()).map_err(|_| Failure::Protocol)?;
+        let expected = ExpectedOriginal {
+            nonce: original.nonce,
+            challenge: original.challenge,
+            pc: original.pc,
+            recipient: original.recipient,
+            invitation_context: invitation.context_digest(),
+            intended_revision: original.intended_revision,
+            policy,
+        };
+        renderer.send_invitation(&invitation_text)?;
+        let enrollment = EnrollmentCarrier::start(EnrollmentInputs {
+            relay,
+            route: original.route,
+            invitation,
+            expected,
+            deadline: original
+                .deadline
+                .checked_sub(CLOSE_RESERVE)
+                .ok_or(Failure::Window)?,
+            signer,
+            pc_signing_key: original.pc_key,
+            pc_transport_key,
+            #[cfg(test)]
+            verification: None,
+        })
+        .map_err(|_| Failure::Enrollment)?;
+        self.enrollment_route = Some((relay, original.route));
+        self.enrollment = Some(enrollment);
+        Ok(())
+    }
+
+    pub(super) fn enrollment_action(&mut self, now: Instant) -> Option<CeremonyAction> {
+        if self.enrollment_terminal {
+            if self.enrollment_failed
+                && self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| !renderer.outcome_sent && renderer.ready_idle())
+            {
+                if self
+                    .renderer
+                    .as_mut()
+                    .is_none_or(|renderer| renderer.send_outcome(false).is_err())
+                {
+                    self.retire(Some(Failure::Enrollment), true);
+                }
+                return None;
+            }
+            let outcome_drained = self
+                .renderer
+                .as_ref()
+                .is_some_and(|renderer| renderer.outcome_sent && renderer.ready_idle());
+            if outcome_drained && !self.enrollment_reported {
+                self.enrollment_reported = true;
+                return if self.enrollment_failed {
+                    Some(CeremonyAction::Failed)
+                } else {
+                    self.committed_device.map(CeremonyAction::Enrolled)
+                };
+            }
+            if outcome_drained
+                && self.enrollment_reported
+                && let Err(error) = self.finish_enrollment_terminal()
+            {
+                self.retire(Some(error), true);
+            }
+            return None;
+        }
+        self.enrollment.as_ref()?;
+        let result = (|| {
+            let progress = self
+                .enrollment
+                .as_mut()
+                .ok_or(Failure::Protocol)?
+                .poll(now)
+                .map_err(|_| Failure::Enrollment)?;
+            match progress {
+                EnrollmentProgress::Verifying => {
+                    let carrier = self.enrollment.as_ref().ok_or(Failure::Protocol)?;
+                    if carrier.ready_for_frozen() {
+                        return Ok(Some(CeremonyAction::SignFrozen(Box::new(
+                            carrier.unsigned_frozen().map_err(|_| Failure::Enrollment)?,
+                        ))));
+                    }
+                }
+                EnrollmentProgress::CandidateSent { code } => {
+                    let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
+                    if !renderer.comparison_sent {
+                        renderer.send_comparison(&code)?;
+                    }
+                }
+                EnrollmentProgress::PhoneConfirmed | EnrollmentProgress::AwaitingPcDecision => {
+                    if let Some(decision) = self
+                        .renderer
+                        .as_mut()
+                        .ok_or(Failure::Protocol)?
+                        .take_decision()
+                    {
+                        self.enrollment
+                            .as_mut()
+                            .ok_or(Failure::Protocol)?
+                            .pc_decision(decision)
+                            .map_err(|_| Failure::Enrollment)?;
+                    }
+                    if !self.commit_requested
+                        && self
+                            .enrollment
+                            .as_ref()
+                            .is_some_and(EnrollmentCarrier::ready_to_commit)
+                    {
+                        let (relay, route) = self.enrollment_route.ok_or(Failure::Protocol)?;
+                        self.commit_requested = true;
+                        return Ok(Some(CeremonyAction::Commit { relay, route }));
+                    }
+                }
+                EnrollmentProgress::Accepted => {
+                    let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
+                    if !renderer.outcome_sent {
+                        renderer.send_outcome(true)?;
+                    }
+                }
+                EnrollmentProgress::Closed => {
+                    let device = self
+                        .enrollment
+                        .as_ref()
+                        .and_then(EnrollmentCarrier::candidate_device)
+                        .ok_or(Failure::Protocol)?;
+                    self.committed_device = Some(device);
+                    self.enrollment_terminal = true;
+                }
+                EnrollmentProgress::Connecting | EnrollmentProgress::AwaitingSubmission => {}
+            }
+            Ok(None)
+        })();
+        match result {
+            Ok(action) => action,
+            Err(error) => {
+                self.fail_enrollment(error);
+                None
+            }
+        }
+    }
+
+    pub(super) fn frozen_signed(&mut self, frozen: SignedFrozenCandidate) -> Result<(), Failure> {
+        let code = self
+            .enrollment
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .send_frozen(frozen)
+            .map_err(|_| Failure::Enrollment)?;
+        self.renderer
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .send_comparison(&code)
+    }
+
+    pub(super) fn original_nonce(
+        &self,
+    ) -> Result<service_protocol::PairingNonce, super::PeerRuntimeError> {
+        self.preparation
+            .as_ref()
+            .ok_or(super::PeerRuntimeError::Protocol)?
+            .prepared()
+            .map(|original| original.nonce)
+            .map_err(|_| super::PeerRuntimeError::Protocol)
+    }
+
+    pub(super) fn original_challenge(
+        &self,
+    ) -> Result<service_protocol::PairingChallenge, super::PeerRuntimeError> {
+        self.preparation
+            .as_ref()
+            .ok_or(super::PeerRuntimeError::Protocol)?
+            .prepared()
+            .map(|original| original.challenge)
+            .map_err(|_| super::PeerRuntimeError::Protocol)
+    }
+
+    pub(super) fn original_pc_key(&self) -> Result<TlsPublicKey, super::PeerRuntimeError> {
+        self.preparation
+            .as_ref()
+            .ok_or(super::PeerRuntimeError::Protocol)?
+            .prepared()
+            .map(|original| original.pc_key)
+            .map_err(|_| super::PeerRuntimeError::Protocol)
+    }
+
+    pub(super) fn take_verified(
+        &mut self,
+    ) -> Result<
+        (
+            (
+                android_attestation::VerifiedKeyBundle,
+                android_attestation::TrustedStatusSnapshot,
+            ),
+            super::enrollment::CandidateSummary,
+        ),
+        Failure,
+    > {
+        if !self.commit_requested {
+            return Err(Failure::Protocol);
+        }
+        self.enrollment
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .take_verified()
+            .map_err(|_| Failure::Enrollment)
+    }
+
+    pub(super) fn send_acceptance(
+        &mut self,
+        acceptance: SignedEnrollmentAcceptance,
+    ) -> Result<(), Failure> {
+        if !self.commit_requested {
+            return Err(Failure::Protocol);
+        }
+        self.enrollment
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .send_acceptance(acceptance)
+            .map_err(|_| Failure::Enrollment)
+    }
+
+    pub(super) fn reject_enrollment_start(&mut self, error: Failure) {
+        self.fail_enrollment(error);
+    }
+
+    fn fail_enrollment(&mut self, error: Failure) {
+        self.first_failure.get_or_insert(error);
+        if let Some(carrier) = self.enrollment.as_mut() {
+            carrier.cancel();
+        }
+        self.commit_requested = false;
+        self.enrollment_failed = true;
+        self.enrollment_terminal = true;
+    }
+
+    fn finish_enrollment_terminal(&mut self) -> Result<(), Failure> {
+        if !self.enrollment_terminal || !self.enrollment_reported {
+            return Err(Failure::Protocol);
+        }
+        if !self
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.outcome_sent && renderer.ready_idle())
+        {
+            return Err(Failure::Protocol);
+        }
+        if let Some(preparation) = self.preparation.as_mut() {
+            preparation.invalidate();
+        }
+        self.protocol
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .start_close()
+            .map_err(|_| Failure::Protocol)?;
+        self.renderer
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .begin_close()
+    }
+
     fn begin_renderer(&mut self) -> Result<(), Failure> {
         self.renderer_attempted = true; // Burn before RNG, allocation or native creation.
         self.match_pair()?;
@@ -1212,6 +1555,9 @@ impl ServicePairing {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.cancel();
         }
+        if let Some(enrollment) = self.enrollment.as_mut() {
+            enrollment.cancel();
+        }
         if let Some(starter) = self.starter.as_mut() {
             starter.cancel();
         }
@@ -1243,6 +1589,9 @@ impl ServicePairing {
             renderer.drain();
             self.cleanup_failed |= renderer.cleanup_failed;
         }
+        if let Some(enrollment) = self.enrollment.as_mut() {
+            enrollment.drain();
+        }
         if self.remaining_owners() != 0 {
             return;
         }
@@ -1254,6 +1603,13 @@ impl ServicePairing {
         self.pending_id = None;
         self.preparation = None;
         self.renderer = None;
+        self.enrollment = None;
+        self.enrollment_route = None;
+        self.enrollment_failed = false;
+        self.enrollment_terminal = false;
+        self.enrollment_reported = false;
+        self.commit_requested = false;
+        self.committed_device = None;
         self.renderer_attempted = false;
         self.generation = None;
         if self.rearm
@@ -1274,11 +1630,6 @@ impl ServicePairing {
         self.shutdown();
         self.drain_step();
     }
-    #[allow(dead_code)] // W3 orchestration entry.
-    pub(super) fn renderer_mut(&mut self) -> Option<&mut RendererRun> {
-        self.renderer.as_mut()
-    }
-    #[allow(dead_code)] // W3 orchestration entry.
     pub(super) fn renderer(&self) -> Option<&RendererRun> {
         self.renderer.as_ref()
     }
@@ -1299,6 +1650,10 @@ impl ServicePairing {
             .renderer
             .as_ref()
             .map_or(0, RendererRun::remaining_owners)
+            + self
+                .enrollment
+                .as_ref()
+                .map_or(0, EnrollmentCarrier::remaining_owners)
     }
     pub(super) fn cleanup_failed(&self) -> bool {
         self.cleanup_failed

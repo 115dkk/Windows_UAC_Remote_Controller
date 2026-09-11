@@ -25,7 +25,7 @@ fn verify(
         .each_ref()
         .map(|chain| chain.iter().map(Vec::as_slice).collect::<Vec<_>>());
     let candidate = CandidateEvidence::new(&borrowed[0], &borrowed[1], &borrowed[2]).unwrap();
-    verify_with_anchors(
+    verify_key_bundle_with_test_anchors(
         &candidate,
         &fixture.expected,
         &fixture.policy,

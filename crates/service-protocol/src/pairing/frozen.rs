@@ -327,7 +327,8 @@ impl fmt::Debug for MatchedFrozenCandidate {
 
 /// Explicit display access for public six-digit comparison data. Debug remains
 /// redacted and there is no Display/serde implementation or public constructor.
-#[derive(Eq, PartialEq)]
+/// Clone exists so a session can report the code it already sent to its display.
+#[derive(Clone, Eq, PartialEq)]
 pub struct PairingComparisonCode(String);
 
 impl PairingComparisonCode {

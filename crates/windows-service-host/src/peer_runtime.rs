@@ -20,15 +20,17 @@ use approval_core::{
     ApprovalEngine, DecisionError, DeviceKeys, MAX_PENDING_REQUESTS, PrivilegedDeviceRegistry,
     RegistryCheckpoint,
 };
-use approval_protocol::{BootEpoch, DeviceId, PcIdentity, SignedDecision};
+use approval_protocol::{BootEpoch, DecisionPublicKey, DeviceId, PcIdentity, SignedDecision};
 use framed_transport::{
     CancellationToken, ConnectionBudget, OutboundFrameGuard, PeerTransport, ReceivedFrame,
     SocketClock, SocketClockUnavailable, SocketDriver, SocketEvent, SocketLimits,
 };
 use secure_channel::{EndpointRole, PlatformTlsSigner, TlsIdentity, TlsPublicKey};
 use service_protocol::{
-    CLOCK_REQUEST_BYTES, ClockProbeRequest, MAX_CLOCK_PROBE_RTT_NANOS, PcEvent, PcPublicKey,
-    ServiceTick, SignedPcEvent, UnsignedPcEvent, encode_frame,
+    CLOCK_REQUEST_BYTES, ClockProbeRequest, EnrollmentAcceptanceFields, MAX_CLOCK_PROBE_RTT_NANOS,
+    PcEvent, PcPublicKey, ServiceTick, SignedEnrollmentAcceptance, SignedFrozenCandidate,
+    SignedPcEvent, UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate, UnsignedPcEvent,
+    encode_frame,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc as async_mpsc;
@@ -38,12 +40,22 @@ use crate::tls_signer::{
 };
 
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod dialer;
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod enrollment;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod pairing;
 
 const MAX_PEERS: usize = framed_transport::MAX_CONNECTIONS;
 const POLL: Duration = Duration::from_millis(25);
 const EVENT_LIFETIME: Duration = Duration::from_nanos(MAX_CLOCK_PROBE_RTT_NANOS);
 const IDENTITY_DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pc-identity/v1\0";
+#[cfg(all(windows, target_pointer_width = "64"))]
+const MIN_ANDROID_APP_VERSION: u64 = 1_000;
+#[cfg(all(windows, target_pointer_width = "64"))]
+const MIN_ANDROID_OS_VERSION: u32 = 110_000;
+#[cfg(all(windows, target_pointer_width = "64"))]
+const MIN_ANDROID_PATCH: u32 = 202_601;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PeerRuntimeError {
@@ -83,6 +95,8 @@ pub enum SessionProgress {
     ClockDrained,
     DecisionRejected(DecisionError),
     AuthorizedButNotApplied(NotAppliedReason),
+    Enrolled(DeviceId),
+    PairingFailed,
     Expired(usize),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,6 +214,78 @@ impl RegistryOwner<'_> {
             Self::Fixture(owner, _) => Ok(owner.borrow().transport.get(&device).cloned()),
         }
     }
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn relay_endpoint(&mut self) -> Result<Option<std::net::SocketAddr>, PeerRuntimeError> {
+        match self {
+            Self::Native(owner) => owner
+                .read_relay_endpoint()
+                .map_err(|_| PeerRuntimeError::Registry),
+            #[cfg(test)]
+            Self::Fixture(owner, _) => Ok(owner.borrow().relay),
+        }
+    }
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn routes(
+        &mut self,
+    ) -> Result<Vec<(DeviceId, std::net::SocketAddr, relay_service::RouteId)>, PeerRuntimeError>
+    {
+        match self {
+            Self::Native(owner) => owner
+                .device_routes()
+                .map_err(|_| PeerRuntimeError::Registry),
+            #[cfg(test)]
+            Self::Fixture(owner, _) => Ok(owner
+                .borrow()
+                .routes
+                .iter()
+                .map(|(device, (relay, route))| (*device, *relay, *route))
+                .collect()),
+        }
+    }
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn enroll(
+        &mut self,
+        device: DeviceId,
+        proof: android_attestation::VerifiedKeyBundle,
+        policy: &android_attestation::VerificationPolicy,
+        status: &android_attestation::TrustedStatusSnapshot,
+        route: relay_service::RouteId,
+        relay: std::net::SocketAddr,
+    ) -> Result<crate::CommittedRegistryChange, PeerRuntimeError> {
+        match self {
+            Self::Native(owner) => owner
+                .enroll_from_privileged_owner(device, proof, policy, status, route, relay)
+                .map_err(|_| PeerRuntimeError::Registry),
+            #[cfg(test)]
+            Self::Fixture(owner, _) => {
+                let [approval, denial, transport] = proof
+                    .into_current_keys(policy, status)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                let keys =
+                    DeviceKeys::new(decision_from_tls(&approval)?, decision_from_tls(&denial)?)
+                        .map_err(|_| PeerRuntimeError::Registry)?;
+                let mut fixture = owner.borrow_mut();
+                let mut registry = PrivilegedDeviceRegistry::restore_for_privileged_host(
+                    fixture.checkpoint.clone(),
+                )
+                .map_err(|_| PeerRuntimeError::Registry)?;
+                registry
+                    .enroll_from_privileged_host(device, keys)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                let checkpoint = registry.checkpoint_for_privileged_host();
+                let revision = checkpoint
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.device_id() == device)
+                    .map(approval_core::RegistryCheckpointEntry::revision)
+                    .ok_or(PeerRuntimeError::Registry)?;
+                fixture.checkpoint = checkpoint;
+                fixture.transport.insert(device, transport);
+                fixture.routes.insert(device, (relay, route));
+                Ok(crate::CommittedRegistryChange::for_test(device, revision))
+            }
+        }
+    }
     fn close(self) -> Result<(), PeerRuntimeError> {
         match self {
             #[cfg(windows)]
@@ -251,6 +337,41 @@ impl<'key> SessionKey<'key> {
             }
         }
     }
+    fn sign_frozen(
+        &self,
+        message: UnsignedFrozenCandidate,
+    ) -> Result<SignedFrozenCandidate, PeerRuntimeError> {
+        let bytes = message.signing_bytes();
+        let signature = self.sign_protocol(&bytes)?;
+        message
+            .with_der_signature(&signature)
+            .map_err(|_| PeerRuntimeError::Identity)
+    }
+    fn sign_acceptance(
+        &self,
+        message: UnsignedEnrollmentAcceptance,
+    ) -> Result<SignedEnrollmentAcceptance, PeerRuntimeError> {
+        let bytes = message.signing_bytes();
+        let signature = self.sign_protocol(&bytes)?;
+        message
+            .with_der_signature(&signature)
+            .map_err(|_| PeerRuntimeError::Identity)
+    }
+    fn sign_protocol(&self, bytes: &[u8]) -> Result<Vec<u8>, PeerRuntimeError> {
+        match self {
+            #[cfg(windows)]
+            Self::Native(key) => {
+                let digest: [u8; 32] = Sha256::digest(bytes).into();
+                Ok(key
+                    .sign_digest_for_service(&digest)
+                    .map_err(|_| PeerRuntimeError::Identity)?
+                    .as_der_bytes()
+                    .to_vec())
+            }
+            #[cfg(test)]
+            Self::Fixture(key) => Ok(key.sign_protocol(bytes)),
+        }
+    }
     fn sign_clock(&self, message: UnsignedPcEvent) -> Result<SignedPcEvent, PeerRuntimeError> {
         // ONLY the coordinator's fixed Clock event reaches this method. No
         // network-supplied signing bytes/digest command exists in the dispatch.
@@ -287,6 +408,10 @@ impl SocketClock for ServiceClock {
 pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     pairing: pairing::ServicePairing,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    dialer: Option<dialer::DeviceDialer>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    relay: Option<std::net::SocketAddr>,
     registry: Option<RegistryOwner<'key>>,
     engine: ApprovalEngine,
     key: SessionKey<'key>,
@@ -359,6 +484,10 @@ impl<'key> ServiceSession<'key> {
         Ok(Self {
             #[cfg(all(windows, target_pointer_width = "64"))]
             pairing: pairing::ServicePairing::dormant(),
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            dialer: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            relay: None,
             registry: Some(registry),
             engine,
             key,
@@ -399,6 +528,19 @@ impl<'key> ServiceSession<'key> {
             let _ = ready;
             Err(PeerRuntimeError::Io)
         }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(crate) fn configure_relay_after_ready(
+        &mut self,
+        relay: Option<std::net::SocketAddr>,
+    ) -> Result<(), PeerRuntimeError> {
+        if self.closing {
+            return Err(PeerRuntimeError::Closed);
+        }
+        self.relay = relay;
+        self.dialer = relay.map(dialer::DeviceDialer::new).transpose()?;
+        Ok(())
     }
 
     /// Only a sealed native carrier can reach this point. This is not a
@@ -532,6 +674,43 @@ impl<'key> ServiceSession<'key> {
                     || key.public(),
                 );
             }
+            if self
+                .pairing
+                .renderer()
+                .is_some_and(|renderer| renderer.ready_for_invitation())
+                && self.pairing.enrollment_is_absent()
+            {
+                let started = (|| {
+                    let relay = self
+                        .registry
+                        .as_mut()
+                        .ok_or(pairing::Failure::Enrollment)?
+                        .relay_endpoint()
+                        .map_err(|_| pairing::Failure::Enrollment)?
+                        .ok_or(pairing::Failure::RelayUnconfigured)?;
+                    if Some(relay) != self.relay {
+                        return Err(pairing::Failure::Protocol);
+                    }
+                    if crate::ANDROID_SIGNER_SHA256.is_empty() {
+                        return Err(pairing::Failure::SignerPolicyUnavailable);
+                    }
+                    let policy = trusted_android_policy()
+                        .map_err(|_| pairing::Failure::SignerPolicyUnavailable)?;
+                    self.pairing.begin_enrollment(
+                        relay,
+                        policy,
+                        Arc::clone(&self.signer),
+                        self.pc_key.clone(),
+                    )
+                })();
+                if let Err(error) = started {
+                    self.pairing.reject_enrollment_start(error);
+                }
+            }
+            if let Some(progress) = self.process_enrollment(now)? {
+                return Ok(progress);
+            }
+            self.poll_dialer(now)?;
         }
         self.revalidate_peers()?;
         if self.reap_finished() != 0 {
@@ -564,6 +743,105 @@ impl<'key> ServiceSession<'key> {
             SessionProgress::TlsSigning(signing)
         })
     }
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn process_enrollment(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<SessionProgress>, PeerRuntimeError> {
+        let Some(action) = self.pairing.enrollment_action(now) else {
+            return Ok(None);
+        };
+        match action {
+            pairing::CeremonyAction::SignFrozen(unsigned) => {
+                if self.key.public()? != self.pc_key {
+                    return Err(PeerRuntimeError::Identity);
+                }
+                let signed = self.key.sign_frozen(*unsigned)?;
+                if self.key.public()? != self.pc_key {
+                    return Err(PeerRuntimeError::Identity);
+                }
+                self.pairing
+                    .frozen_signed(signed)
+                    .map_err(|_| PeerRuntimeError::Protocol)?;
+                Ok(None)
+            }
+            pairing::CeremonyAction::Commit { relay, route } => {
+                let ((proof, status), summary) = self
+                    .pairing
+                    .take_verified()
+                    .map_err(|_| PeerRuntimeError::Protocol)?;
+                let approval = decision_from_tls(&summary.approval_key)?;
+                let denial = decision_from_tls(&summary.denial_key)?;
+                let keys =
+                    DeviceKeys::new(approval, denial).map_err(|_| PeerRuntimeError::Registry)?;
+                let policy = trusted_android_policy()?;
+                let receipt = self
+                    .registry
+                    .as_mut()
+                    .ok_or(PeerRuntimeError::Closed)?
+                    .enroll(summary.device, proof, &policy, &status, route, relay)?;
+                if receipt.affected_device() != summary.device {
+                    return Err(PeerRuntimeError::Registry);
+                }
+                self.engine
+                    .enroll_device_from_privileged_host(summary.device, keys)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                self.current_registry_checkpoint()?;
+                let pc_transport_key = self.pairing.original_pc_key()?;
+                let unsigned = UnsignedEnrollmentAcceptance::new(EnrollmentAcceptanceFields {
+                    ceremony_nonce: self.pairing.original_nonce()?,
+                    attestation_challenge: self.pairing.original_challenge()?,
+                    pc: self.engine.pc_identity(),
+                    recipient_device: summary.device,
+                    registry_revision: receipt.registry_revision(),
+                    phone_keys: summary.phone_keys,
+                    pc_signing_key: self.pc_key.clone(),
+                    pc_transport_key,
+                })
+                .map_err(|_| PeerRuntimeError::Protocol)?;
+                let acceptance = self.key.sign_acceptance(unsigned)?;
+                self.pairing
+                    .send_acceptance(acceptance)
+                    .map_err(|_| PeerRuntimeError::Protocol)?;
+                Ok(None)
+            }
+            pairing::CeremonyAction::Enrolled(device) => {
+                Ok(Some(SessionProgress::Enrolled(device)))
+            }
+            pairing::CeremonyAction::Failed => Ok(Some(SessionProgress::PairingFailed)),
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn poll_dialer(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
+        let Some(mut dialer) = self.dialer.take() else {
+            return Ok(());
+        };
+        let routes = self
+            .registry
+            .as_mut()
+            .ok_or(PeerRuntimeError::Closed)?
+            .routes()?;
+        let carriers = dialer.poll(&routes, now);
+        self.dialer = Some(dialer);
+        for carrier in carriers {
+            let device = carrier.device;
+            if self
+                .peers
+                .iter()
+                .any(|peer| peer.state.binding.device == device && peer.state.live())
+            {
+                continue;
+            }
+            if self.attach_carrier(carrier).is_err()
+                && let Some(dialer) = self.dialer.as_mut()
+            {
+                dialer.release(device);
+            }
+        }
+        Ok(())
+    }
+
     fn dispatch(
         &mut self,
         index: usize,
@@ -803,6 +1081,7 @@ impl<'key> ServiceSession<'key> {
                 .is_some_and(JoinHandle::is_finished)
             {
                 let mut peer = self.peers.swap_remove(index);
+                let device = peer.state.binding.device;
                 peer.state.retire();
                 if let Some(thread) = peer.thread.take() {
                     // Peer protocol/TLS rejection is a normal retired owner;
@@ -810,6 +1089,10 @@ impl<'key> ServiceSession<'key> {
                     if thread.join().is_err() {
                         self.io_failed = true;
                     }
+                }
+                #[cfg(all(windows, target_pointer_width = "64"))]
+                if let Some(dialer) = self.dialer.as_mut() {
+                    dialer.release(device);
                 }
                 count += 1;
             } else {
@@ -821,7 +1104,12 @@ impl<'key> ServiceSession<'key> {
     pub fn begin_shutdown(&mut self) {
         self.closing = true;
         #[cfg(all(windows, target_pointer_width = "64"))]
-        self.pairing.shutdown();
+        {
+            self.pairing.shutdown();
+            if let Some(dialer) = self.dialer.as_mut() {
+                dialer.cancel();
+            }
+        }
         for peer in &self.peers {
             peer.state.retire();
         }
@@ -837,8 +1125,11 @@ impl<'key> ServiceSession<'key> {
         {
             self.pairing.poll_shutdown();
             self.io_failed |= self.pairing.cleanup_failed();
+            if let Some(dialer) = self.dialer.as_mut() {
+                dialer.drain();
+            }
         }
-        let owners = self.peers.len() + self.pairing_owners();
+        let owners = self.peers.len() + self.pairing_owners() + self.dialer_owners();
         if owners == 0 {
             SessionCleanup::Quiescent {
                 io_failed: self.io_failed,
@@ -848,7 +1139,11 @@ impl<'key> ServiceSession<'key> {
         }
     }
     pub fn finish_shutdown(&mut self) -> Result<(), PeerRuntimeError> {
-        if !self.closing || !self.peers.is_empty() || self.pairing_owners() != 0 {
+        if !self.closing
+            || !self.peers.is_empty()
+            || self.pairing_owners() != 0
+            || self.dialer_owners() != 0
+        {
             return Err(PeerRuntimeError::CleanupPending);
         }
         if let Some(registry) = self.registry.take() {
@@ -866,20 +1161,65 @@ impl<'key> ServiceSession<'key> {
             0
         }
     }
+    fn dialer_owners(&self) -> usize {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.dialer
+                .as_ref()
+                .map_or(0, dialer::DeviceDialer::remaining_owners)
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            0
+        }
+    }
 }
 impl Drop for ServiceSession<'_> {
     fn drop(&mut self) {
         self.begin_shutdown();
         self.reap_finished();
         #[cfg(all(windows, target_pointer_width = "64"))]
-        self.pairing.poll_shutdown();
-        if !self.peers.is_empty() || self.pairing_owners() != 0 {
+        {
+            self.pairing.poll_shutdown();
+            if let Some(dialer) = self.dialer.as_mut() {
+                dialer.drain();
+            }
+        }
+        if !self.peers.is_empty() || self.pairing_owners() != 0 || self.dialer_owners() != 0 {
             // Last-resort invariant failure ONLY. No detached reaper, forgotten
             // handle, blocking join, key release, or false quiescence receipt.
             // Actual runtime retains this session across catch/drain instead.
             std::process::abort();
         }
     }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn trusted_android_policy() -> Result<android_attestation::VerificationPolicy, PeerRuntimeError> {
+    if crate::ANDROID_SIGNER_SHA256.is_empty() {
+        return Err(PeerRuntimeError::Identity);
+    }
+    android_attestation::VerificationPolicy::from_trusted_host(
+        crate::ANDROID_SIGNER_SHA256.to_vec(),
+        MIN_ANDROID_APP_VERSION,
+        android_attestation::PlatformMinimums {
+            os_version: MIN_ANDROID_OS_VERSION,
+            os_patch: MIN_ANDROID_PATCH,
+            vendor_patch: None,
+            boot_patch: None,
+        },
+    )
+    .map_err(|_| PeerRuntimeError::Identity)
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn decision_from_tls(key: &TlsPublicKey) -> Result<DecisionPublicKey, PeerRuntimeError> {
+    DecisionPublicKey::from_sec1_bytes(
+        key.as_spki_der()
+            .get(26..)
+            .ok_or(PeerRuntimeError::Identity)?,
+    )
+    .map_err(|_| PeerRuntimeError::Identity)
 }
 
 struct RetireOnDrop(Arc<PeerState>);

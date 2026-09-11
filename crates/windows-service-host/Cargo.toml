@@ -34,6 +34,7 @@ p256 = { workspace = true, features = ["pkcs8"] }
 qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+android-attestation = { path = "../android-attestation", features = ["test-attestation-anchors"] }
 android-controller = { path = "../android-controller" }
 notification-policy = { path = "../notification-policy" }
 phone-request-core = { path = "../phone-request-core" }

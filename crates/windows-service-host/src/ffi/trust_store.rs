@@ -219,9 +219,7 @@ impl TrustDirectory {
         })
     }
 
-    /// Read by the enrollment orchestration before each invitation; until that
-    /// step lands the reader has no caller.
-    #[allow(dead_code)]
+    /// Read by the enrollment orchestration before each invitation.
     pub(crate) fn read_relay_endpoint(&mut self) -> Result<Option<SocketAddr>, ServiceError> {
         self.operate(|owner| {
             owner.require_known_directory_entries(false)?;
@@ -470,6 +468,10 @@ impl fmt::Debug for ServiceTrustFile {
     }
 }
 impl ServiceTrustFile {
+    pub(crate) fn read_relay_endpoint(&mut self) -> Result<Option<SocketAddr>, ServiceError> {
+        self.directory.read_relay_endpoint()
+    }
+
     fn operate<T>(
         &mut self,
         action: impl FnOnce(&mut Self) -> Result<T, ServiceError>,

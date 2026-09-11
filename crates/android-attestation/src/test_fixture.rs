@@ -2,12 +2,16 @@
 //! Synthetic SOFTWARE certificates for ROOT-run whole-verifier tests only.
 //! Names/TEE claims here are deliberately authored test data, not Android or
 //! Google evidence. The public verifier must reject this private test anchor.
-#![cfg(test)]
+#![cfg(any(test, feature = "test-attestation-anchors"))]
+// Outside `cargo test` the feature build only needs the public synthetic
+// anchors and signer; the mutation helpers used by this crate's own tests stay.
+#![cfg_attr(not(test), allow(dead_code))]
 #![forbid(unsafe_code)]
 
 use std::{
     fmt,
     str::FromStr,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -31,7 +35,6 @@ use x509_cert::{
 
 use crate::{
     ExpectedKeyBundle, PlatformMinimums, VerificationPolicy, certificate, description::KeyRole,
-    roots,
 };
 
 const EC: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
@@ -45,11 +48,11 @@ const MAX_REPLACEMENT_DESCRIPTION_BYTES: usize = 8192;
 
 /// Three leaf-first5-certificate chains sharing test CAs and a test attester.
 /// Private signing material has no getter and never leaves this test object.
-pub(crate) struct SyntheticRkp {
-    pub(crate) chains: [Vec<Vec<u8>>; 3],
-    pub(crate) expected: ExpectedKeyBundle,
-    pub(crate) policy: VerificationPolicy,
-    pub(crate) anchor: roots::Anchor,
+pub struct SyntheticRkp {
+    pub chains: [Vec<Vec<u8>>; 3],
+    pub expected: ExpectedKeyBundle,
+    pub policy: VerificationPolicy,
+    pub anchor: crate::TestAttestationAnchor,
     leaves: [SoftwareTestKey; 3],
     attester: SoftwareTestKey,
     attester_name: Name,
@@ -62,8 +65,14 @@ impl fmt::Debug for SyntheticRkp {
     }
 }
 
+impl Default for SyntheticRkp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyntheticRkp {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let now = SystemTime::now();
         let hour = Duration::from_secs(3600);
         let before = Time::try_from(
@@ -82,6 +91,8 @@ impl SyntheticRkp {
         let ca2 = SoftwareTestKey::p256();
         let ca3 = SoftwareTestKey::p256();
         let attester = SoftwareTestKey::p256();
+        // The third leaf doubles as the synthetic transport signer; its shared
+        // key pair is handed out through transport_signer().
         let leaves = std::array::from_fn(|_| SoftwareTestKey::p256());
         let root_name = name("CN=Synthetic RKP test root,O=Synthetic fixture");
         let ca2_name = name("CN=Droid CA2,O=Google LLC");
@@ -158,8 +169,11 @@ impl SyntheticRkp {
             },
         )
         .expect("synthetic release policy");
-        let anchor = roots::test_anchor(root_der, roots::RootKind::CurrentP384)
-            .expect("synthetic self-signed test root");
+        let anchor = crate::TestAttestationAnchor::from_self_signed_der(
+            root_der,
+            crate::TestAttestationRootKind::CurrentP384,
+        )
+        .expect("synthetic self-signed test root");
         Self {
             chains,
             expected,
@@ -169,6 +183,19 @@ impl SyntheticRkp {
             attester,
             attester_name,
             validity,
+        }
+    }
+
+    pub fn public_keys(&self) -> [TlsPublicKey; 3] {
+        self.leaves.each_ref().map(|key| {
+            TlsPublicKey::from_spki_der(&key.spki()).expect("synthetic canonical P256 public key")
+        })
+    }
+
+    pub fn transport_signer(&self) -> SyntheticTransportSigner {
+        SyntheticTransportSigner {
+            pair: Arc::clone(&self.leaves[2].pair),
+            public: self.public_keys()[2].clone(),
         }
     }
 
@@ -236,10 +263,37 @@ impl SyntheticRkp {
     }
 }
 
+pub struct SyntheticTransportSigner {
+    pair: Arc<EcdsaKeyPair>,
+    public: TlsPublicKey,
+}
+impl secure_channel::PlatformTlsSigner for SyntheticTransportSigner {
+    fn public_key(&self) -> Result<TlsPublicKey, secure_channel::SignerError> {
+        Ok(self.public.clone())
+    }
+
+    fn sign_certificate_verify(
+        &self,
+        input: secure_channel::CertificateVerifyInput<'_>,
+    ) -> Result<secure_channel::CertificateVerifySignature, secure_channel::SignerError> {
+        let signature = self
+            .pair
+            .sign(&SystemRandom::new(), input.as_bytes())
+            .map_err(|_| secure_channel::SignerError::Rejected)?;
+        secure_channel::CertificateVerifySignature::from_der(signature.as_ref())
+            .map_err(|_| secure_channel::SignerError::InvalidSignature)
+    }
+}
+impl fmt::Debug for SyntheticTransportSigner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SyntheticTransportSigner([redacted], software_test_fixture_only)")
+    }
+}
+
 /// Genuine ring-generated ephemeral SOFTWARE signing keys, test-only by module
 /// configuration. No fixed/reused real private material or signing success stub.
 struct SoftwareTestKey {
-    pair: EcdsaKeyPair,
+    pair: Arc<EcdsaKeyPair>,
     curve: ObjectIdentifier,
     signature: ObjectIdentifier,
 }
@@ -271,7 +325,7 @@ impl SoftwareTestKey {
         let pair = EcdsaKeyPair::from_pkcs8(algorithm, document.as_ref(), &rng)
             .expect("synthetic software PKCS8");
         Self {
-            pair,
+            pair: Arc::new(pair),
             curve,
             signature,
         }

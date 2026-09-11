@@ -314,8 +314,11 @@ pub enum VerificationError {
     KeyReuse,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-attestation-anchors"))]
 mod test_fixture;
+
+#[cfg(any(test, feature = "test-attestation-anchors"))]
+pub use test_fixture::{SyntheticRkp, SyntheticTransportSigner};
 
 #[cfg(test)]
 mod tests;

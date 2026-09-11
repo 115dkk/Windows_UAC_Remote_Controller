@@ -206,6 +206,9 @@ fn run(
         }
         Err(error) => return Err(ServiceError::from_identity(error)),
     };
+    let relay = trust_directory
+        .read_relay_endpoint()
+        .map_err(|error| error.at_startup(6))?;
     let registry = match origin {
         IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
         IdentityOrigin::CreatedNow => {
@@ -259,6 +262,9 @@ fn run(
                 return Ok(());
             }
             session.activate_pairing(ready).map_err(session_error)?;
+            session
+                .configure_relay_after_ready(relay)
+                .map_err(session_error)?;
             if cancellation_requested(stop) {
                 return Ok(());
             }
@@ -267,14 +273,24 @@ fn run(
                 if cancellation_requested(stop) {
                     break;
                 }
-                if let SessionProgress::AuthorizedButNotApplied(_) =
-                    session.process_one().map_err(session_error)?
-                {
-                    // Authorization consumption is NOT a Windows action/result.
-                    append(
+                match session.process_one().map_err(session_error)? {
+                    SessionProgress::AuthorizedButNotApplied(_) => {
+                        // Authorization consumption is NOT a Windows action/result.
+                        append(
+                            &mut journal,
+                            ActivityEvent::Failure(FailureKind::PlatformUnavailable),
+                        )?;
+                    }
+                    SessionProgress::PairingFailed => append(
                         &mut journal,
-                        ActivityEvent::Failure(FailureKind::PlatformUnavailable),
-                    )?;
+                        ActivityEvent::Failure(FailureKind::TransportUnavailable),
+                    )?,
+                    SessionProgress::Enrolled(_device) => {
+                        // The fixed journal schema has no enrollment-device event.
+                        // Never substitute a service lifecycle event or record keys,
+                        // comparison codes, or device identifiers in this journal.
+                    }
+                    _ => {}
                 }
                 match stop.recv_timeout(Duration::from_millis(25)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,

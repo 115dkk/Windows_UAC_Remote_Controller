@@ -72,15 +72,3 @@ fn load() -> Result<Vec<Anchor>, Error> {
     }
     Ok(roots)
 }
-
-#[cfg(test)]
-pub(crate) fn test_anchor(encoded: Vec<u8>, kind: RootKind) -> Result<Anchor, Error> {
-    let cert = Certificate::parse(&encoded)?;
-    cert.verify_issued_by(&cert)?;
-    let spki = cert.spki().to_vec();
-    Ok(Anchor {
-        der: encoded,
-        spki,
-        kind,
-    })
-}

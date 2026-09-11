@@ -135,6 +135,15 @@ impl fmt::Debug for TrustedStatusSnapshot {
     }
 }
 impl TrustedStatusSnapshot {
+    #[cfg(any(test, feature = "test-attestation-anchors"))]
+    pub fn from_test_response(body: &[u8]) -> Result<Self, Error> {
+        Self::from_authenticated_google_response(
+            StatusFetchStarted::capture()?,
+            body,
+            Duration::from_secs(600),
+        )
+    }
+
     /// The crate's fixed fetch must have authenticated the Google origin and
     /// computed remaining HTTP freshness (including Age/Cache-Control). Neither
     /// a forwarding process's boolean nor an old body under a new clock suffices.
