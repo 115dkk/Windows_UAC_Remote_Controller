@@ -467,15 +467,14 @@ impl ServicePairing {
             .as_ref()
             .is_some_and(ServiceHandoff::is_closing)
         {
-            if self.channel(side)?.idle() {
-                if let Ok(close) = self
+            if self.channel(side)?.idle()
+                && let Ok(close) = self
                     .protocol
                     .as_ref()
                     .ok_or(Failure::Protocol)?
                     .close_frame(side)
-                {
-                    self.write(side, close, Io::CloseWrite)?;
-                }
+            {
+                self.write(side, close, Io::CloseWrite)?;
             }
             return Ok(());
         }
@@ -492,17 +491,16 @@ impl ServicePairing {
                 .map_err(|_| Failure::Protocol)?;
             self.check_window(Instant::now())?;
         }
-        if self.channel(side)?.idle() {
-            if let Ok(bound) = self
+        if self.channel(side)?.idle()
+            && let Ok(bound) = self
                 .protocol
                 .as_ref()
                 .ok_or(Failure::Protocol)?
                 .bound_frame(side)
-            {
-                self.match_pair()?;
-                self.write(side, bound, Io::BoundWrite)?;
-                self.match_pair()?;
-            }
+        {
+            self.match_pair()?;
+            self.write(side, bound, Io::BoundWrite)?;
+            self.match_pair()?;
         }
         Ok(())
     }
@@ -595,10 +593,10 @@ impl ServicePairing {
                 self.cleanup_failed = true;
             }
         }
-        if let Some(admission) = self.admission.as_mut() {
-            if admission.drain().is_err() {
-                self.cleanup_failed = true;
-            }
+        if let Some(admission) = self.admission.as_mut()
+            && admission.drain().is_err()
+        {
+            self.cleanup_failed = true;
         }
         if self.remaining_owners() != 0 {
             return;

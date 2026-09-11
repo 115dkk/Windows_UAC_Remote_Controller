@@ -139,10 +139,10 @@ impl StarterAdmission {
     }
     pub(crate) fn drain(&mut self) -> Result<bool, Error> {
         self.cancel();
-        if let Some(starter) = self.starter.as_mut() {
-            if !starter.drain()? {
-                return Ok(false);
-            }
+        if let Some(starter) = self.starter.as_mut()
+            && !starter.drain()?
+        {
+            return Ok(false);
         }
         drop(self.starter.take());
         self.window = None;
@@ -183,10 +183,10 @@ impl UnboundPairingListener {
     }
     pub(crate) fn admit_starter(&mut self) -> Result<StarterAdmission, Error> {
         let result = self.admit_checked();
-        if let Err(error) = &result {
-            if let Some(inner) = self.inner.as_mut() {
-                inner.fail(*error);
-            }
+        if let Err(error) = &result
+            && let Some(inner) = self.inner.as_mut()
+        {
+            inner.fail(*error);
         }
         result
     }
@@ -371,13 +371,13 @@ impl ListenerInner {
         let first = *self.first_failure.get_or_insert(error);
         self.phase = ListenPhase::Closed;
         if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
+            && operation.pending.in_flight()
+            && !operation.cancel_requested
         {
-            if operation.pending.in_flight() && !operation.cancel_requested {
-                operation.cancel_requested = true;
-                if let Err(error) = operation.pending.cancel(endpoint.pipe.raw()) {
-                    self.cleanup_failure
-                        .get_or_insert(io_error(Stage::CancelIo, error));
-                }
+            operation.cancel_requested = true;
+            if let Err(error) = operation.pending.cancel(endpoint.pipe.raw()) {
+                self.cleanup_failure
+                    .get_or_insert(io_error(Stage::CancelIo, error));
             }
         }
         first
