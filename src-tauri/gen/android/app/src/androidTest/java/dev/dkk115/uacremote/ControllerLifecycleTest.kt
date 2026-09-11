@@ -634,7 +634,7 @@ class ControllerLifecycleTest {
                 (u.protocol === 'tauri:' && u.hostname === 'localhost');
               if (!local || u.port || u.username || u.password || u.search ||
                   !['', '/', '/index.html'].includes(u.pathname) || document.readyState !== 'complete' ||
-                  document.title !== '휴대폰 승인' || document.documentElement.lang !== 'ko') return false;
+                  document.title !== 'UAC 원격 승인' || document.documentElement.lang !== 'ko') return false;
               const visible = e => {
                 if (!e || !e.isConnected) return false;
                 const s = getComputedStyle(e), r = e.getBoundingClientRect();

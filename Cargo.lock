@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activity-journal"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "approval-protocol",
  "notification-policy",
@@ -56,7 +56,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android-attestation"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "der 0.8.2",
  "httpdate",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "android-bindings"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "activity-journal",
  "android-controller",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "android-controller"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "activity-journal",
  "approval-protocol",
@@ -140,7 +140,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "approval-core"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "approval-protocol",
  "getrandom 0.3.4",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "approval-protocol"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "p256",
  "sha2",
@@ -604,7 +604,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "controller-app"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "controller-runtime",
  "serde",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "controller-runtime"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "activity-journal",
  "libc",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "controller-uniffi-bindgen"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "uniffi",
 ]
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "framed-transport"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "approval-protocol",
  "p256",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "notification-policy"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2821,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "phone-request-core"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "approval-protocol",
  "notification-policy",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "phone-state-store"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "libc",
  "rustix",
@@ -3146,7 +3146,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-service"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "secure-channel"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "p256",
  "rustls",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "service-protocol"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "approval-core",
  "approval-protocol",
@@ -5202,7 +5202,7 @@ dependencies = [
 
 [[package]]
 name = "windows-identity"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "p256",
  "thiserror 2.0.20",
@@ -5265,7 +5265,7 @@ dependencies = [
 
 [[package]]
 name = "windows-observer"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "thiserror 2.0.20",
  "windows 0.62.2",
@@ -5273,7 +5273,7 @@ dependencies = [
 
 [[package]]
 name = "windows-prompt-probe"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "sha2",
  "windows 0.62.2",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "windows-service-host"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "activity-journal",
  "android-attestation",
