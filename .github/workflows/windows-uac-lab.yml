@@ -243,6 +243,52 @@ jobs:
           # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
           Get-Process -Name consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           exit 0
+      - name: Lab experiment (evidence only) - session change on a SYSTEM token duplicate
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          # Runs 34618803758 and 34620877517: the service (LocalSystem, SeTcb enabled) gets E_ACCESSDENIED from
+          # SetTokenInformation(TokenSessionId) on its own duplicated token. Reproduce the exact call sequence as
+          # SYSTEM through a scheduled task with several access-mask variants and record each Win32 error.
+          $script = Join-Path $env:RUNNER_TEMP 'uac-lab-token-session.ps1'
+          $log = Join-Path $env:ProgramData 'uac-lab-token-session.log'
+          @'
+          $log = Join-Path $env:ProgramData 'uac-lab-token-session.log'
+          Add-Type -TypeDefinition @"
+          using System; using System.Runtime.InteropServices;
+          public static class LabTok {
+              [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr tok);
+              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool DuplicateTokenEx(IntPtr tok, uint access, IntPtr attrs, int level, int type, out IntPtr dup);
+              [DllImport("advapi32.dll", SetLastError=true)] public static extern bool SetTokenInformation(IntPtr tok, int cls, ref uint info, uint len);
+              [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+          }
+          "@
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          "identity={0} session={1}" -f $identity.Name, (Get-Process -Id $PID).SessionId | Out-File $log -Append -Encoding utf8
+          foreach ($case in @(
+              @{ open = 0x000A; dup = 0x010B; name = 'open QUERY|DUPLICATE, dup QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_SESSIONID' },
+              @{ open = 0x000A; dup = 0x02000000; name = 'open QUERY|DUPLICATE, dup MAXIMUM_ALLOWED' },
+              @{ open = 0x000A; dup = 0; name = 'open QUERY|DUPLICATE, dup same-as-existing' },
+              @{ open = 0xF01FF; dup = 0x010B; name = 'open ALL_ACCESS, dup explicit' },
+              @{ open = 0xF01FF; dup = 0xF01FF; name = 'open ALL_ACCESS, dup ALL_ACCESS' }
+          )) {
+              $tok = [IntPtr]::Zero; $dup = [IntPtr]::Zero
+              if (-not [LabTok]::OpenProcessToken([LabTok]::GetCurrentProcess(), [uint32]$case.open, [ref]$tok)) { "{0}: open failed {1}" -f $case.name, [Runtime.InteropServices.Marshal]::GetLastWin32Error() | Out-File $log -Append -Encoding utf8; continue }
+              if (-not [LabTok]::DuplicateTokenEx($tok, [uint32]$case.dup, [IntPtr]::Zero, 2, 1, [ref]$dup)) { "{0}: duplicate failed {1}" -f $case.name, [Runtime.InteropServices.Marshal]::GetLastWin32Error() | Out-File $log -Append -Encoding utf8; [void][LabTok]::CloseHandle($tok); continue }
+              [uint32]$session = 2
+              $ok = [LabTok]::SetTokenInformation($dup, 12, [ref]$session, 4)
+              $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              "{0}: set_session ok={1} error={2}" -f $case.name, $ok, $err | Out-File $log -Append -Encoding utf8
+              [void][LabTok]::CloseHandle($dup); [void][LabTok]::CloseHandle($tok)
+          }
+          '@ | Set-Content -Path $script -Encoding ascii
+          if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+          schtasks.exe /Create /F /TN UacLabTokenSession /TR ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $script) /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST | Out-Null
+          schtasks.exe /Run /TN UacLabTokenSession | Out-Null
+          for ($i = 0; $i -lt 40; $i++) { if ((Test-Path -LiteralPath $log) -and (Select-String -Path $log -Pattern 'ALL_ACCESS, dup ALL_ACCESS' -Quiet)) { break }; Start-Sleep -Milliseconds 500 }
+          schtasks.exe /Delete /F /TN UacLabTokenSession | Out-Null
+          if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination "$env:LAB_EVIDENCE/token-session-experiment.txt"; Get-Content -LiteralPath $log } else { Write-Output 'token session experiment left no log' }
       - name: Collect service data, journal and diagnostics (read-only copies)
         if: ${{ always() }}
         shell: pwsh
