@@ -21,10 +21,23 @@ const ACCEPTED_IMPLEMENTATION: (u32, u32) = (1, 1 | 16);
 const ACCEPTED_IMPLEMENTATION: (u32, u32) = (2, !1);
 pub(super) const MAX_DESCRIPTOR_BYTES: usize = 4096;
 pub(super) const SYSTEM_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
-// GENERIC_ALL. Both exact principals need key administration during explicit
-// initialization. The service SID is SERVICE_SID_TYPE_UNRESTRICTED (ADR 0028):
-// a write-restricted token is refused by the key storage providers themselves.
+// GENERIC_ALL is what initialization sets for both exact principals. The
+// service SID is SERVICE_SID_TYPE_UNRESTRICTED (ADR 0028): a write-restricted
+// token is refused by the key storage providers themselves.
 const EXPECTED_ACE_MASK: u32 = 0x1000_0000;
+
+/// Full control for one of the two fixed principals, either the generic right
+/// that initialization set or the provider's mapped form: the Software KSP keeps
+/// the key as a file and reports GENERIC_READ | GENERIC_WRITE | GENERIC_ALL plus
+/// FILE_ALL_ACCESS (0xD01F01FF, lab run 34610113157). Unknown bits, MAXIMUM_ALLOWED
+/// and anything narrower than full control are rejected as a downgrade.
+fn full_control_mask(mask: u32) -> bool {
+    const STANDARD_AND_SPECIFIC_ALL: u32 = 0x001F_01FF;
+    const KNOWN_BITS: u32 = 0xF000_0000 | 0x0100_0000 | 0x001F_FFFF;
+    mask & !KNOWN_BITS == 0
+        && (mask & EXPECTED_ACE_MASK != 0
+            || mask & STANDARD_AND_SPECIFIC_ALL == STANDARD_AND_SPECIFIC_ALL)
+}
 
 /// Ownership state, not authorization. In particular, a failed finalization is
 /// NOT proof that this transaction owns the persistent name and may delete it.
@@ -226,7 +239,7 @@ fn descriptor_matches(bytes: &[u8], service_sid: &[u8]) -> Option<()> {
         let size = usize::from(u16::from_le_bytes([ace_header[2], ace_header[3]]));
         if ace_header[0] != 0
             || ace_header[1] != 0
-            || read_u32(ace_header, 4)? != EXPECTED_ACE_MASK
+            || !full_control_mask(read_u32(ace_header, 4)?)
             || size < 16
             || !size.is_multiple_of(4)
         {
@@ -478,6 +491,35 @@ mod tests {
         let mut huge = good;
         huge.resize(MAX_DESCRIPTOR_BYTES + 1, 0);
         assert!(validate_descriptor(&huge, &service_fixture()).is_err());
+    }
+
+    #[test]
+    fn provider_mapped_full_control_is_accepted_and_downgrades_are_not() {
+        // ACE masks sit at 56 (SYSTEM) and 76 (service SID) in the fixture.
+        let mut mapped = descriptor_fixture();
+        for offset in [56, 76] {
+            mapped[offset..offset + 4].copy_from_slice(&0xD01F_01FF_u32.to_le_bytes());
+        }
+        assert!(validate_descriptor(&mapped, &service_fixture()).is_ok());
+        let mut specific = descriptor_fixture();
+        specific[56..60].copy_from_slice(&0x001F_01FF_u32.to_le_bytes());
+        assert!(validate_descriptor(&specific, &service_fixture()).is_ok());
+        for mask in [
+            0x8000_0000_u32,           // GENERIC_READ only
+            0x0012_0089,               // FILE_GENERIC_READ
+            0x001F_00FF,               // one specific right short of full control
+            0x0200_0000,               // MAXIMUM_ALLOWED
+            0x1200_0000,               // full control with MAXIMUM_ALLOWED
+            0x1000_0000 | 0x0080_0000, // unknown reserved bit
+            0,
+        ] {
+            let mut changed = descriptor_fixture();
+            changed[76..80].copy_from_slice(&mask.to_le_bytes());
+            assert!(
+                validate_descriptor(&changed, &service_fixture()).is_err(),
+                "mask {mask:#010x} must fail"
+            );
+        }
     }
 
     #[test]

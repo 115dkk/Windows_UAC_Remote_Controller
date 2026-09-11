@@ -49,8 +49,12 @@ the developer PC as well (TBS access is also an access check on the caller's tok
 
 ## Consequences
 
-- The disposable lab can now proceed past key creation and observe the real descriptor that the
-  Software KSP returns; the next lab question is the `ProtectedServiceDaclRequired` mismatch.
+- With the unrestricted SID the lab (run 34610113157 at `89c1a74`) created the key and recorded the
+  descriptor the Software KSP returns: owner and group SYSTEM, a protected DACL with exactly the two
+  allow ACEs, but each mask mapped to `0xD01F01FF` (GENERIC_READ | GENERIC_WRITE | GENERIC_ALL |
+  FILE_ALL_ACCESS) because the provider stores the key as a file. The descriptor policy now accepts
+  full control in either the generic or the mapped form for the two fixed principals and still rejects
+  unknown bits, MAXIMUM_ALLOWED and anything narrower.
 - A future low-privilege carrier process (ADR 0018) is still the way to remove network parsing from
   the LocalSystem process; write-restriction was never a substitute for that.
 - The developer PC needs one reinstall from the prerelease before any claim about `0x80090030`.
