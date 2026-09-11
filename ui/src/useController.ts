@@ -8,6 +8,7 @@ export type ClientCommand =
   | { readonly kind: 'service'; readonly action: ServiceAction }
   | { readonly kind: 'pair' }
   | { readonly kind: 'remove'; readonly deviceId: string }
+  | { readonly kind: 'relay'; readonly address: string }
   | { readonly kind: 'clear' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
@@ -54,6 +55,11 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
       : snapshot.service?.allowedActions.includes(command.action) === true;
     case 'pair': return snapshot.canPair;
     case 'remove': return snapshot.dataAvailability.devices === 'available' && snapshot.canUnpair && snapshot.devices.some((device) => device.id === command.deviceId);
+    case 'relay': return snapshot.platform === 'windows' && snapshot.service?.controlHint === 'available'
+      && command.address.trim().length > 0
+      && ((snapshot.service.installed === false && snapshot.service.state === null)
+        || snapshot.service.state === 'stopped'
+        || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
@@ -72,6 +78,7 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
     case 'service': return bridge.controlService(command.action);
     case 'pair': return bridge.beginPairing();
     case 'remove': return bridge.removeDevice(command.deviceId);
+    case 'relay': return bridge.setRelay(command.address);
     case 'clear': return bridge.clearActivity();
     case 'decision': return bridge.decide(command.requestId, command.decision);
     case 'policy': return bridge.savePolicy(command.policy);
@@ -189,7 +196,7 @@ export function useController(bridge: ControllerBridge) {
       }
       const latest = current.current;
       publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
-        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' ? ko.saveFailure : ko.actionFailure, notice: null });
+        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' || command.kind === 'relay' ? ko.saveFailure : ko.actionFailure, notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;

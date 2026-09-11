@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use controller_runtime::{
-    AppPrivateDirectory, AppRuntime, Availability, ControlHint, DecisionIntent, MobileReadiness,
-    NotificationPermission, ObservedServiceState, Platform, PlatformAdapter, PlatformError,
-    ScreenLockState, ServiceAction, ServiceCommandOutcome, ServiceObservation, ServiceState,
-    UnavailablePairingStarter, UnavailablePlatformAdapter,
+    AppPrivateDirectory, AppRuntime, Availability, ControlHint, DecisionIntent, ManagementDevice,
+    ManagementObservation, MobileReadiness, NotificationPermission, ObservedServiceState, Platform,
+    PlatformAdapter, PlatformError, ScreenLockState, ServiceAction, ServiceCommandOutcome,
+    ServiceObservation, ServiceState, UnavailablePairingStarter, UnavailablePlatformAdapter,
 };
 use serde_json::json;
 
@@ -16,8 +16,12 @@ use serde_json::json;
 struct SyntheticOwnerState {
     observation: Mutex<Result<ServiceObservation, PlatformError>>,
     outcome: Mutex<Result<ServiceCommandOutcome, PlatformError>>,
+    management: Mutex<Result<ManagementObservation, PlatformError>>,
     reads: AtomicUsize,
+    management_reads: AtomicUsize,
     controls: AtomicUsize,
+    removals: AtomicUsize,
+    relay_changes: AtomicUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -30,8 +34,12 @@ impl SyntheticOwner {
             // A test must explicitly select an outcome before requesting any
             // mutation. Even the synthetic default is not fabricated success.
             outcome: Mutex::new(Err(PlatformError::ControlFailed)),
+            management: Mutex::new(Err(PlatformError::StatusUnavailable)),
             reads: AtomicUsize::new(0),
+            management_reads: AtomicUsize::new(0),
             controls: AtomicUsize::new(0),
+            removals: AtomicUsize::new(0),
+            relay_changes: AtomicUsize::new(0),
         }))
     }
 
@@ -46,6 +54,10 @@ impl SyntheticOwner {
     fn set_outcome(&self, outcome: Result<ServiceCommandOutcome, PlatformError>) {
         *self.0.outcome.lock().expect("synthetic outcome lock") = outcome;
     }
+
+    fn set_management(&self, observation: Result<ManagementObservation, PlatformError>) {
+        *self.0.management.lock().expect("synthetic management lock") = observation;
+    }
 }
 
 impl PlatformAdapter for SyntheticOwner {
@@ -58,12 +70,31 @@ impl PlatformAdapter for SyntheticOwner {
             .expect("synthetic observation lock")
     }
 
+    fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
+        self.0.management_reads.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .management
+            .lock()
+            .expect("synthetic management lock")
+            .clone()
+    }
+
     fn control_service(
         &self,
         _action: ServiceAction,
     ) -> Result<ServiceCommandOutcome, PlatformError> {
         self.0.controls.fetch_add(1, Ordering::SeqCst);
         *self.0.outcome.lock().expect("synthetic outcome lock")
+    }
+
+    fn remove_device(&self, _device_id: &str) -> Result<(), PlatformError> {
+        self.0.removals.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_relay(&self, _address: &str) -> Result<(), PlatformError> {
+        self.0.relay_changes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -78,6 +109,22 @@ fn installed(state: ServiceState) -> ServiceObservation {
     ServiceObservation {
         state: ObservedServiceState::Installed(state),
         control: Ok(ControlHint::Available),
+    }
+}
+
+fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> ManagementObservation {
+    ManagementObservation {
+        relay_configured,
+        devices,
+    }
+}
+
+fn management_device(id: &str, revision: u64, connected: bool) -> ManagementDevice {
+    ManagementDevice {
+        id: id.to_owned(),
+        revision,
+        route_present: true,
+        connected,
     }
 }
 
@@ -211,6 +258,7 @@ fn helper_validation_failure_preserves_lifecycle_but_disables_control() {
         state: ObservedServiceState::Installed(ServiceState::Running),
         control: Err(PlatformError::HelperUnavailable),
     }));
+    owner.set_management(Ok(management(Vec::new(), false)));
     let mut runtime = windows_runtime(&directory, owner.clone());
     let snapshot = runtime.snapshot();
     assert_eq!(
@@ -254,6 +302,7 @@ fn completed_command_uses_the_owners_actual_refreshed_observation() {
     owner.set_outcome(Ok(ServiceCommandOutcome::Completed {
         observation: installed(ServiceState::Running),
     }));
+    owner.set_management(Ok(management(Vec::new(), false)));
     let mut runtime = windows_runtime(&directory, owner.clone());
     let snapshot = runtime
         .control_service(ServiceAction::Start)
@@ -386,6 +435,160 @@ fn allowed_actions_are_recomputed_and_unavailable_actions_never_launch() {
 }
 
 #[test]
+fn running_management_snapshot_presents_two_valid_devices_and_preserves_revision() {
+    let directory = tempfile::tempdir().expect("isolated fixture");
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    owner.set_management(Ok(management(
+        vec![
+            management_device("01010101010101010101010101010101", 7, true),
+            management_device("abababababababababababababababab", 19, false),
+        ],
+        true,
+    )));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    let snapshot = runtime.snapshot();
+    assert_eq!(owner.0.management_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot.data_availability.devices, Availability::Available);
+    assert!(snapshot.relay_configured);
+    assert!(snapshot.can_unpair);
+    assert_eq!(snapshot.devices.len(), 2);
+    assert_eq!(snapshot.devices[0].name, "01010101번 휴대폰");
+    assert_eq!(snapshot.devices[0].revision, 7);
+    assert!(snapshot.devices[0].route_present);
+    assert!(snapshot.devices[0].connected);
+    assert_eq!(snapshot.devices[1].name, "abababab번 휴대폰");
+    assert_eq!(snapshot.devices[1].revision, 19);
+    let wire = serde_json::to_value(&snapshot).expect("management snapshot JSON");
+    assert_eq!(wire["devices"][0]["revision"], 7);
+    assert_eq!(wire["devices"][0]["routePresent"], true);
+    assert_eq!(wire["relayConfigured"], true);
+}
+
+#[test]
+fn failed_or_malformed_running_management_query_clears_previous_authority() {
+    let directory = tempfile::tempdir().expect("isolated fixture");
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    owner.set_management(Ok(management(
+        vec![management_device(
+            "01010101010101010101010101010101",
+            1,
+            false,
+        )],
+        false,
+    )));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    assert!(runtime.snapshot().can_unpair);
+    owner.set_management(Err(PlatformError::StatusUnavailable));
+    let failed = runtime.snapshot();
+    assert_eq!(failed.data_availability.devices, Availability::Unavailable);
+    assert!(failed.devices.is_empty());
+    assert!(!failed.can_unpair);
+    assert!(!failed.relay_configured);
+    // The device list alone is unavailable; no service-wide issue blocks pairing.
+    assert!(failed.issue.is_none());
+    owner.set_management(Ok(management(
+        vec![management_device(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            1,
+            false,
+        )],
+        false,
+    )));
+    let malformed = runtime.snapshot();
+    assert_eq!(
+        malformed.data_availability.devices,
+        Availability::Unavailable
+    );
+    assert!(malformed.devices.is_empty());
+    assert!(!malformed.can_unpair);
+}
+
+#[test]
+fn removal_requires_an_exact_latest_device_and_requeries_after_completion() {
+    let directory = tempfile::tempdir().expect("isolated fixture");
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    owner.set_management(Ok(management(
+        vec![management_device(
+            "01010101010101010101010101010101",
+            4,
+            false,
+        )],
+        false,
+    )));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    assert_eq!(
+        runtime
+            .remove_device("02020202020202020202020202020202")
+            .expect_err("absent device is not removable")
+            .code,
+        "device_removal_unavailable"
+    );
+    assert_eq!(owner.0.removals.load(Ordering::SeqCst), 0);
+    let reads_before = owner.0.management_reads.load(Ordering::SeqCst);
+    runtime
+        .remove_device("01010101010101010101010101010101")
+        .expect("exact current device");
+    assert_eq!(owner.0.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        owner.0.management_reads.load(Ordering::SeqCst),
+        reads_before + 2
+    );
+    assert_eq!(owner.0.reads.load(Ordering::SeqCst), 3);
+    for invalid in [
+        "00000000000000000000000000000000",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0101",
+    ] {
+        assert_eq!(
+            runtime
+                .remove_device(invalid)
+                .expect_err("noncanonical device id")
+                .code,
+            "invalid_device_id"
+        );
+    }
+}
+
+#[test]
+fn relay_requires_a_numeric_canonical_socket_and_requeries_only_while_running() {
+    let stopped_directory = tempfile::tempdir().expect("isolated fixture");
+    let stopped_owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
+    let mut stopped = windows_runtime(&stopped_directory, stopped_owner.clone());
+    assert!(
+        stopped
+            .set_relay("192.0.2.10:443")
+            .unwrap()
+            .relay_configured
+    );
+    assert_eq!(stopped_owner.0.relay_changes.load(Ordering::SeqCst), 1);
+    assert_eq!(stopped_owner.0.management_reads.load(Ordering::SeqCst), 0);
+    for invalid in [
+        "relay.example:443",
+        "0.0.0.0:443",
+        "127.0.0.1:0",
+        " 127.0.0.1:443",
+    ] {
+        assert_eq!(
+            stopped.set_relay(invalid).expect_err("invalid relay").code,
+            "invalid_relay_address"
+        );
+    }
+
+    let running_directory = tempfile::tempdir().expect("isolated fixture");
+    let running_owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    running_owner.set_management(Ok(management(Vec::new(), true)));
+    let mut running = windows_runtime(&running_directory, running_owner.clone());
+    assert!(
+        running
+            .set_relay("[2001:db8::10]:443")
+            .unwrap()
+            .relay_configured
+    );
+    assert_eq!(running_owner.0.relay_changes.load(Ordering::SeqCst), 1);
+    assert_eq!(running_owner.0.management_reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn android_lock_configured_missing_and_unavailable_remain_distinct() {
     let directory = tempfile::tempdir().expect("isolated fixture");
     let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
@@ -454,9 +657,9 @@ fn unavailable_owners_return_explicit_errors_and_do_not_create_data() {
     assert_eq!(
         runtime
             .remove_device("synthetic-device")
-            .expect_err("unpair not wired")
+            .expect_err("invalid device id")
             .code,
-        "unpair_unavailable"
+        "invalid_device_id"
     );
     for decision in [DecisionIntent::Approve, DecisionIntent::Deny] {
         assert_eq!(
@@ -531,6 +734,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             },
             "phoneService": null, "mobile": null,
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
+            "relayConfigured": false,
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,
             "dataAvailability": {"devices": "unavailable", "requests": "unavailable", "activity": "unavailable"},

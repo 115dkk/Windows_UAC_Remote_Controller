@@ -271,6 +271,7 @@ fn map_service_error(error: ServiceError) -> PairingFailure {
         | ServiceError::ProbeBusy
         | ServiceError::ProbeSlotsFull
         | ServiceError::ProbeUnavailable
+        | ServiceError::ManagementRefused
         | ServiceError::PairingClientNative { .. }
         | ServiceError::RendererNative { .. } => PairingFailure::Unavailable,
     }

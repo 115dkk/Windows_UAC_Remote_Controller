@@ -678,6 +678,102 @@ fn exercise(
     }
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn management_query_reads_the_current_software_registry_snapshot() {
+    exercise(|session, _, registry, _| {
+        registry.borrow_mut().routes.insert(
+            device(1),
+            (
+                "192.0.2.10:443".parse().unwrap(),
+                relay_service::RouteId::new([9; 32]).unwrap(),
+            ),
+        );
+
+        let response = session
+            .handle_management(
+                crate::ffi::ManagementClientClass::GuiMedium,
+                crate::management_protocol::ManagementRequest::Query,
+            )
+            .unwrap()
+            .expect("query replies synchronously");
+        let crate::management_protocol::ManagementResponse::Snapshot {
+            relay,
+            identity_provider,
+            android_signer_digests,
+            devices,
+        } = response
+        else {
+            panic!("query must return a snapshot");
+        };
+
+        assert_eq!(relay, None);
+        assert_eq!(
+            identity_provider,
+            crate::contract::IDENTITY_PROVIDER_PROFILE
+        );
+        assert_eq!(
+            android_signer_digests.as_slice(),
+            crate::ANDROID_SIGNER_SHA256
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].device, device(1));
+        assert_eq!(devices[0].revision, 1);
+        assert!(devices[0].route_present);
+        assert!(!devices[0].connected);
+        assert_eq!(devices[0].enrolled_unix_secs, None);
+        assert_eq!(devices[1].device, device(2));
+        assert_eq!(devices[1].revision, 2);
+        assert!(!devices[1].route_present);
+        assert!(!devices[1].connected);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn management_remove_updates_registry_and_engine_on_the_session_thread() {
+    exercise(|session, _, registry, _| {
+        registry.borrow_mut().routes.insert(
+            device(1),
+            (
+                "192.0.2.10:443".parse().unwrap(),
+                relay_service::RouteId::new([9; 32]).unwrap(),
+            ),
+        );
+
+        let response = session
+            .handle_management(
+                crate::ffi::ManagementClientClass::CliElevated,
+                crate::management_protocol::ManagementRequest::RemoveDevice { device: device(1) },
+            )
+            .unwrap();
+        assert_eq!(
+            response,
+            Some(crate::management_protocol::ManagementResponse::Done)
+        );
+
+        let fixture = registry.borrow();
+        assert!(
+            fixture
+                .checkpoint
+                .entries()
+                .iter()
+                .all(|entry| entry.device_id() != device(1))
+        );
+        assert!(!fixture.transport.contains_key(&device(1)));
+        assert!(!fixture.routes.contains_key(&device(1)));
+        drop(fixture);
+        assert!(
+            session
+                .engine
+                .registry_checkpoint_for_privileged_host()
+                .entries()
+                .iter()
+                .all(|entry| entry.device_id() != device(1))
+        );
+    });
+}
+
 #[test]
 fn real_android_clock_probe_roundtrips_through_worker_key_and_same_engine_epoch() {
     exercise(|session, key, _, clients| {

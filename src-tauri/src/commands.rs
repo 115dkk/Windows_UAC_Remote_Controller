@@ -201,6 +201,29 @@ pub(crate) async fn remove_device(
 }
 
 #[tauri::command]
+pub(crate) async fn set_relay(
+    address: String,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<AppSnapshot, AppIssue> {
+    if address.is_empty() || address.len() > 80 {
+        return Err(AppIssue {
+            code: "invalid_relay_address",
+            message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력해 주세요.",
+            next_action: Some("예: 192.0.2.10:443 또는 [2001:db8::10]:443"),
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        with_runtime(&state, move |runtime| runtime.set_relay(&address)).await
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = state;
+        Err(controller_runtime::PlatformError::Unsupported.into())
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn decide_request(
     app: tauri::AppHandle,
     origin: crate::mobile::CommandOrigin,

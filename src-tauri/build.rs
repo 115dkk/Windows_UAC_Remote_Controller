@@ -11,6 +11,9 @@ fn main() {
         "clear_activity",
         "open_lock_settings",
         "open_notification_settings",
+        "open_pairing_scanner",
+        "request_details",
+        "set_relay",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("Tauri application build configuration must be valid");

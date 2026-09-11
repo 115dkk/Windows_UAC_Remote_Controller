@@ -15,6 +15,7 @@ export const controllerBridge: ControllerBridge = {
   controlService: (action) => native<AppSnapshot>('control_service', { action }),
   beginPairing: () => native<AppSnapshot>('begin_pairing'),
   removeDevice: (deviceId) => native<AppSnapshot>('remove_device', { deviceId }),
+  setRelay: (address) => native<AppSnapshot>('set_relay', { address }),
   decide: (requestId, decision) => native<AppSnapshot>('decide_request', { requestId, decision }),
   requestDetails: (requestId) => native<RequestDetailsView>('request_details', { requestId }),
   watchRequests: async (notify) => {

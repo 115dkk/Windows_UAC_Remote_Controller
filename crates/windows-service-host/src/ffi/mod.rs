@@ -34,7 +34,8 @@ pub(crate) use pairing_peer::renderer::{
 };
 #[cfg(target_pointer_width = "64")]
 pub(crate) use pairing_peer::{
-    AttemptWindow, ListenProgress, RendererRegistration, StarterAdmission, UnboundPairingListener,
+    AttemptWindow, ListenProgress, ManagementClientClass, ManagementListener, ManagementPipe,
+    RendererRegistration, StarterAdmission, UnboundPairingListener,
 };
 #[cfg(target_pointer_width = "64")]
 pub use pairing_peer::{

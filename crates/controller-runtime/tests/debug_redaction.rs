@@ -11,6 +11,8 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
     let device = PairedDeviceView {
         id: secret.into(),
         name: secret.into(),
+        revision: 1,
+        route_present: false,
         connected: false,
         last_seen_label: Some(secret.into()),
     };
@@ -48,6 +50,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         phone_service: None,
         mobile: None,
         policy: Some(NotificationPolicy::default()),
+        relay_configured: false,
         devices: vec![device],
         requests: vec![request],
         request_catalog: None,

@@ -66,14 +66,19 @@ use crate::{ServiceError, native};
 mod io;
 pub(super) mod renderer;
 mod uac_policy;
-pub(crate) use io::{AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener};
+pub(crate) use io::{
+    AttemptWindow, ListenProgress, ManagementListener, ManagementPipe, StarterAdmission,
+    UnboundPairingListener,
+};
 pub use io::{PairingPipe, PairingPipeProgress};
 pub(crate) use renderer::RendererRegistration;
 
 pub(super) const STARTER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingStarter.v1";
 pub(super) const HELPER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingHelper.v1";
 pub(super) const RENDERER_PIPE: &str = r"\\.\pipe\UacRemoteController.PairingRenderer.v1";
+pub(super) const MANAGEMENT_PIPE: &str = r"\\.\pipe\UacRemoteController.Management.v1";
 const PIPE_BUFFER_BYTES: u32 = 4096;
+const MANAGEMENT_PIPE_BUFFER_BYTES: u32 = crate::management_protocol::MAX_MANAGEMENT_FRAME as u32;
 // Concrete data/EA/attribute read+write, READ_CONTROL and SYNCHRONIZE. Crucially
 // not FILE_APPEND_DATA == FILE_CREATE_PIPE_INSTANCE (0x4). Future clients must
 // request this concrete subset, NOT GENERIC_WRITE/GENERIC_ALL (which include 4).
@@ -88,6 +93,7 @@ const ADMINISTRATORS: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0
 const MEDIUM_IL: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 16, 0, 32, 0, 0];
 const HIGH_IL: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 16, 0, 48, 0, 0];
 static RESERVED: AtomicBool = AtomicBool::new(false);
+static MANAGEMENT_RESERVED: AtomicBool = AtomicBool::new(false);
 static BOUNDARY_HEALTH: BoundaryHealth = BoundaryHealth::new();
 
 /// Shared across the fixed pair: losing one undrained owner invalidates its
@@ -114,6 +120,13 @@ impl BoundaryHealth {
 pub enum PairingPeerRole {
     Starter,
     Helper,
+}
+
+/// Derived only from the connected process image and primary token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManagementClientClass {
+    GuiMedium,
+    CliElevated,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,19 +238,31 @@ impl Drop for Handle {
         }
     }
 }
-struct Reservation;
+struct Reservation(bool);
 impl Reservation {
     fn acquire() -> Result<Self, PairingPeerError> {
         cleanup_state()?;
         RESERVED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| PairingPeerError::Busy)?;
-        Ok(Self)
+        Ok(Self(false))
+    }
+
+    fn acquire_management() -> Result<Self, PairingPeerError> {
+        cleanup_state()?;
+        MANAGEMENT_RESERVED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PairingPeerError::Busy)?;
+        Ok(Self(true))
     }
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
-        RESERVED.store(false, Ordering::Release);
+        if self.0 {
+            MANAGEMENT_RESERVED.store(false, Ordering::Release);
+        } else {
+            RESERVED.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -248,8 +273,15 @@ struct ServiceContext {
 }
 impl ServiceContext {
     fn observe() -> Result<Rc<Self>, PairingPeerError> {
+        Self::observe_with(Reservation::acquire()?)
+    }
+
+    fn observe_management() -> Result<Rc<Self>, PairingPeerError> {
+        Self::observe_with(Reservation::acquire_management()?)
+    }
+
+    fn observe_with(reservation: Reservation) -> Result<Rc<Self>, PairingPeerError> {
         service_positive(|| Ok(()))?;
-        let reservation = Reservation::acquire()?;
         windows_identity::verify_service_context()
             .map_err(|e| PairingPeerError::Service(ServiceError::from_identity(e)))?;
         let installation = validate_pairing_installation().map_err(PairingPeerError::Service)?;
@@ -508,6 +540,197 @@ macro_rules! redacted_debug {
     })+ };
 }
 redacted_debug!(PairingServerEndpoints, PairingServerEndpoint, PairingPeer);
+
+/// Independent management endpoint because the pairing role is hardwired to one
+/// image and one token policy. This endpoint admits exactly either fixed class.
+pub(crate) struct ManagementServerEndpoint {
+    pipe: Handle,
+    context: Rc<ServiceContext>,
+}
+
+impl fmt::Debug for ManagementServerEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManagementServerEndpoint(redacted)")
+    }
+}
+
+impl ManagementServerEndpoint {
+    pub(crate) fn create_for_running_service() -> Result<Self, PairingPeerError> {
+        let context = ServiceContext::observe_management()?;
+        let sid = OwnServiceSid::lookup()
+            .map_err(PairingPeerError::Service)?
+            .bytes();
+        context.recheck()?;
+        let name = Wide::new(MANAGEMENT_PIPE).map_err(PairingPeerError::Service)?;
+        let descriptor = SecurityDescriptor::from_sddl(&management_pipe_sddl(&sid)?)
+            .map_err(PairingPeerError::Service)?;
+        let security = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.ptr().0,
+            bInheritHandle: false.into(),
+        };
+        let (open, mode) = pipe_modes();
+        service_positive(|| Ok(()))?;
+        // SAFETY: one fixed local first-instance name, protected descriptor,
+        // bounded buffers, remote clients and inherited handles rejected.
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                name.ptr(),
+                open,
+                mode,
+                1,
+                MANAGEMENT_PIPE_BUFFER_BYTES,
+                MANAGEMENT_PIPE_BUFFER_BYTES,
+                0,
+                Some(ptr::from_ref(&security)),
+            )
+        };
+        let pipe = Handle::new(pipe, PairingPeerStage::CreateEndpoint)?;
+        context.recheck()?;
+        Ok(Self { pipe, context })
+    }
+
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.pipe.raw()
+    }
+
+    pub(crate) fn authenticate_connected(self) -> Result<ManagementPeer, PairingPeerError> {
+        self.context.recheck()?;
+        let (pid, session) = pipe_identity(self.pipe.raw())?;
+        // SAFETY: OS-observed PID only; query/synchronize cannot mutate the client.
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        }
+        .map_err(|error| native_error(PairingPeerStage::QueryProcess, error))?;
+        let process = Handle::new(process, PairingPeerStage::QueryProcess)?;
+        let created = process_identity(process.raw(), pid)?;
+        let token = TokenFacts::observe(process.raw())?;
+        let image = process_image(process.raw())?;
+        let class = management_class(&self.context.installation, &image, &token, session)?;
+        let interactive = SessionEpoch::observe(session)?;
+        let mut peer = ManagementPeer {
+            process,
+            endpoint: self,
+            pid,
+            created,
+            token,
+            interactive,
+            class,
+            live: true,
+        };
+        peer.recheck()?;
+        Ok(peer)
+    }
+}
+
+pub(crate) struct ManagementPeer {
+    process: Handle,
+    endpoint: ManagementServerEndpoint,
+    pid: u32,
+    created: u64,
+    token: TokenFacts,
+    interactive: SessionEpoch,
+    class: ManagementClientClass,
+    live: bool,
+}
+
+impl fmt::Debug for ManagementPeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManagementPeer(redacted)")
+    }
+}
+
+impl ManagementPeer {
+    pub(crate) fn class(&mut self) -> Result<ManagementClientClass, PairingPeerError> {
+        self.recheck()?;
+        Ok(self.class)
+    }
+
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.endpoint.pipe.raw()
+    }
+
+    pub(crate) fn recheck(&mut self) -> Result<(), PairingPeerError> {
+        if !self.live {
+            return Err(PairingPeerError::Closed);
+        }
+        let result = (|| {
+            self.endpoint.context.recheck()?;
+            let expected = (self.pid, self.interactive.id);
+            if pipe_identity(self.endpoint.pipe.raw())? != expected
+                || process_identity(self.process.raw(), self.pid)? != self.created
+            {
+                return Err(PairingPeerError::Rejected);
+            }
+            let token = TokenFacts::observe(self.process.raw())?;
+            let image = process_image(self.process.raw())?;
+            if token != self.token
+                || management_class(
+                    &self.endpoint.context.installation,
+                    &image,
+                    &token,
+                    self.interactive.id,
+                )? != self.class
+                || SessionEpoch::observe(self.interactive.id)? != self.interactive
+            {
+                return Err(PairingPeerError::Rejected);
+            }
+            self.endpoint.context.recheck()
+        })();
+        if result.is_err() {
+            self.live = false;
+        }
+        result
+    }
+}
+
+fn process_image(process: HANDLE) -> Result<PathBuf, PairingPeerError> {
+    let mut buffer = [0u16; 1024];
+    let mut length = buffer.len() as u32;
+    // SAFETY: retained query-only process and bounded DOS-path output.
+    unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    }
+    .map_err(|error| native_error(PairingPeerStage::QueryProcess, error))?;
+    let units = buffer
+        .get(..length as usize)
+        .filter(|value| !value.is_empty() && !value.contains(&0))
+        .ok_or(PairingPeerError::Malformed)?;
+    Ok(PathBuf::from(
+        String::from_utf16(units).map_err(|_| PairingPeerError::Malformed)?,
+    ))
+}
+
+fn management_class(
+    installation: &ValidatedPairingInstallation,
+    image: &std::path::Path,
+    token: &TokenFacts,
+    session: u32,
+) -> Result<ManagementClientClass, PairingPeerError> {
+    if token.require(PairingPeerRole::Starter, session).is_ok()
+        && installation.check_controller_image(image).is_ok()
+    {
+        return Ok(ManagementClientClass::GuiMedium);
+    }
+    token.require(PairingPeerRole::Helper, session)?;
+    installation
+        .check_service_image(image)
+        .map_err(PairingPeerError::Service)?;
+    Ok(ManagementClientClass::CliElevated)
+}
+
+fn management_pipe_sddl(service_sid: &[u8]) -> Result<String, PairingPeerError> {
+    pipe_sddl(PairingPeerRole::Starter, service_sid)
+}
 
 fn pipe_modes() -> (FILE_FLAGS_AND_ATTRIBUTES, NAMED_PIPE_MODE) {
     (

@@ -17,6 +17,7 @@ mod build_policy {
 }
 mod contract;
 mod diagnostic;
+pub mod management_protocol;
 /// Disposable lab builds only: the SCM exit code drops HRESULTs, so the lab
 /// keeps the failure text next to the activity journal for the evidence upload.
 #[cfg(all(windows, feature = "lab-software-identity"))]
@@ -175,6 +176,95 @@ pub fn query_status() -> Result<ServiceSnapshot, ServiceError> {
 
 /// Elevated CLI verb only: stores the numeric relay endpoint in the protected
 /// trust directory. It enrolls nothing and opens no connection by itself.
+pub fn management_query() -> Result<management_protocol::ManagementResponse, ServiceError> {
+    management_exchange(management_protocol::ManagementRequest::Query)
+}
+
+pub(crate) fn management_mutation(
+    request: management_protocol::ManagementRequest,
+) -> Result<(), ServiceError> {
+    match management_exchange(request)? {
+        management_protocol::ManagementResponse::Done => Ok(()),
+        management_protocol::ManagementResponse::Refused(_) => Err(ServiceError::ManagementRefused),
+        management_protocol::ManagementResponse::Snapshot { .. } => {
+            Err(ServiceError::UnexpectedState)
+        }
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn management_exchange(
+    request: management_protocol::ManagementRequest,
+) -> Result<management_protocol::ManagementResponse, ServiceError> {
+    use std::time::{Duration, Instant};
+
+    const POLL_DELAY: Duration = Duration::from_millis(10);
+    let wire = management_protocol::encode_request(&request)
+        .map_err(|_| ServiceError::InvalidArguments)?;
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(30);
+    let mut client = PairingClient::connect_management(start, deadline)
+        .map_err(|_| ServiceError::ManagementRefused)?;
+    let exchange = (|| {
+        client
+            .begin_write(&wire)
+            .map_err(|_| ServiceError::ManagementRefused)?;
+        loop {
+            match client.poll().map_err(|_| ServiceError::ManagementRefused)? {
+                PairingClientProgress::Pending => std::thread::sleep(POLL_DELAY),
+                PairingClientProgress::Written => break,
+                _ => return Err(ServiceError::ManagementRefused),
+            }
+        }
+        client
+            .begin_read()
+            .map_err(|_| ServiceError::ManagementRefused)?;
+        loop {
+            match client.poll().map_err(|_| ServiceError::ManagementRefused)? {
+                PairingClientProgress::Pending => std::thread::sleep(POLL_DELAY),
+                PairingClientProgress::Read(bytes) => {
+                    return management_protocol::decode_response(&bytes)
+                        .map_err(|_| ServiceError::ManagementRefused);
+                }
+                _ => return Err(ServiceError::ManagementRefused),
+            }
+        }
+    })();
+
+    client.cancel();
+    let cleanup = loop {
+        match client.drain() {
+            Ok(true) => break Ok(()),
+            Ok(false) => std::thread::sleep(POLL_DELAY),
+            Err(_) => break Err(ServiceError::ManagementRefused),
+        }
+    };
+    match (exchange, cleanup) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(error),
+    }
+}
+
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+fn management_exchange(
+    _request: management_protocol::ManagementRequest,
+) -> Result<management_protocol::ManagementResponse, ServiceError> {
+    Err(ServiceError::UnsupportedPlatform)
+}
+
+pub fn remove_device(device: approval_protocol::DeviceId) -> Result<(), ServiceError> {
+    #[cfg(windows)]
+    {
+        native::remove_device(device)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device;
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
 pub fn configure_relay(endpoint: std::net::SocketAddr) -> Result<(), ServiceError> {
     #[cfg(windows)]
     {

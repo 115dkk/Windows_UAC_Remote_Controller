@@ -13,7 +13,7 @@ export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): Ap
     phoneService: platform === 'android' ? { state: 'local_settings_ready', bootEnabled: true, canStart: false, canStop: true, policyOwnerReady: true } : null,
     mobile: platform === 'android' ? { screenLock: 'configured', notifications: 'allowed', canOpenLockSettings: false, canOpenNotificationSettings: false, canOpenPairingScanner: false } : null,
     policy: { schedule: { mode: 'always' }, alert: 'sound' },
-    devices: [], requests: [], activity: [],
+    devices: [], relayConfigured: false, requests: [], activity: [],
     requestCatalog: platform === 'android' ? { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 1 } : null,
     requestReview: null,
     dataAvailability: { devices: 'available', requests: 'available', activity: 'available' },
@@ -40,7 +40,7 @@ export function qaCase(name: string): QaCase {
   switch (name) {
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-unavailable': return { page: 'status', snapshot: { ...windows, dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
-    case 'desktop-devices': return { page: 'devices', snapshot: { ...windows, devices: [{ id: 'synthetic-device', name: '화면 예시 휴대폰', connected: false, lastSeenLabel: '마지막 연결: 화면 예시' }], canUnpair: true } };
+    case 'desktop-devices': return { page: 'devices', snapshot: { ...windows, devices: [{ id: 'synthetic-device', name: '화면 예시 휴대폰', revision: 1, connected: false, routePresent: false, lastSeenLabel: '마지막 연결: 화면 예시' }], canUnpair: true } };
     case 'desktop-history': return { page: 'activity', snapshot: { ...windows, activity: [{ id: 'synthetic-event-1', timestampMillis: Date.UTC(2026, 8, 8, 12, 30), kind: 'service_started' }, { id: 'synthetic-event-2', timestampMillis: Date.UTC(2026, 8, 8, 12, 20), kind: 'cancelled' }], canClearActivity: true } };
     case 'phone-pending': return { page: 'requests', snapshot: { ...phone, requests: [pendingRequest] } };
     case 'phone-terminal': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: 'PowerShell', executablePath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', details: `pwsh.exe -NoProfile -Command "Write-Output '화면 예시'"` })] } };
@@ -117,6 +117,7 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     },
     beginPairing: () => reply({ ...value, issue: { code: 'synthetic_only', message: '이 화면 예시에서는 실제 기기를 연결하지 않아요.', nextAction: null } }),
     removeDevice: (id) => reply({ ...value, devices: value.devices.filter((device) => device.id !== id) }),
+    setRelay: () => reply({ ...value, relayConfigured: true, issue: null }),
     decide: (id) => reply({ ...value, requests: value.requests.map((request) => request.id === id ? { ...request, state: 'sending', canApprove: false, canDeny: false } : request) }),
     requestDetails: (id) => {
       // Synthetic-only extra fixture text. Production snapshots contain no body.

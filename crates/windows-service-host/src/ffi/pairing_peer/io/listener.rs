@@ -4,11 +4,15 @@
 //! original inner owner only on success; failure leaves cancellation/drain owned.
 
 use super::super::super::overlapped_pipe::PendingOperation;
-use super::super::{PairingPeerRole, ServiceContext};
+use super::super::{
+    ManagementClientClass, ManagementPeer, ManagementServerEndpoint, PairingPeerRole,
+    ServiceContext,
+};
 use super::{
     BOUNDARY_HEALTH, Completed, Connection, Error, Handle, Inner, Kind, LIMITS, MAX_LIFETIME,
-    Operation, OperationKind, OriginalBudget, PairingPipe, PairingServerEndpoint, Phase, Stage,
-    cleanup_state, expected_cancel_completion, io_error, native_error, service_positive,
+    Operation, OperationKind, OriginalBudget, PairingPipe, PairingPipeProgress,
+    PairingServerEndpoint, Phase, Stage, cleanup_state, expected_cancel_completion, io_error,
+    native_error, service_positive,
 };
 use std::{fmt, mem, rc::Rc, time::Instant};
 use windows::{Win32::System::Threading::CreateEventW, core::PCWSTR};
@@ -475,6 +479,306 @@ impl ListenerInner {
         })?;
         self.drained = true;
         Ok(true)
+    }
+}
+
+/// One management listener and connected message pipe. Its peer class remains
+/// opaque and is rechecked before every I/O transition.
+pub(crate) struct ManagementListener {
+    endpoint: Option<ManagementServerEndpoint>,
+    operation: Option<PendingOperation<Handle>>,
+    cancel_requested: bool,
+    connected: bool,
+}
+
+impl fmt::Debug for ManagementListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManagementListener(redacted)")
+    }
+}
+
+impl ManagementListener {
+    pub(crate) fn create() -> Result<Self, Error> {
+        let endpoint = ManagementServerEndpoint::create_for_running_service()?;
+        Ok(Self {
+            endpoint: Some(endpoint),
+            operation: None,
+            cancel_requested: false,
+            connected: false,
+        })
+    }
+
+    pub(crate) fn begin_connect(&mut self) -> Result<(), Error> {
+        if self.connected || self.operation.is_some() {
+            return Err(Error::InvalidPhase);
+        }
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|error| native_error(Stage::CreateEvent, error))?;
+        let event = Handle::new(event, Stage::CreateEvent)?;
+        let operation = PendingOperation::prepare(Kind::Connect, LIMITS, event)
+            .map_err(|error| io_error(Stage::Connect, error))?;
+        self.operation = Some(operation);
+        let result = (|| {
+            let endpoint = self.endpoint.as_ref().ok_or(Error::Closed)?;
+            endpoint.context.recheck()?;
+            let operation = self.operation.as_mut().ok_or(Error::InvalidPhase)?;
+            service_positive(|| {
+                operation
+                    .issue(endpoint.raw())
+                    .map_err(|error| io_error(Stage::Connect, error))
+            })
+        })();
+        if let Err(error) = result {
+            self.cancel();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn poll_connect(&mut self) -> Result<Option<ManagementPipe>, Error> {
+        if self.connected {
+            return Err(Error::InvalidPhase);
+        }
+        let endpoint = self.endpoint.as_ref().ok_or(Error::Closed)?;
+        endpoint.context.recheck()?;
+        let Some(operation) = self.operation.as_mut() else {
+            return Err(Error::InvalidPhase);
+        };
+        match operation
+            .poll(endpoint.raw())
+            .map_err(|error| io_error(Stage::Connect, error))?
+        {
+            None => Ok(None),
+            Some(Completed::Count(0)) if !operation.in_flight() => {
+                drop(self.operation.take());
+                let endpoint = self.endpoint.as_ref().ok_or(Error::Closed)?;
+                endpoint.context.recheck()?;
+                let window = AttemptWindow::at_admission(Instant::now())?;
+                let endpoint = self.endpoint.take().ok_or(Error::Closed)?;
+                let peer = endpoint.authenticate_connected()?;
+                self.connected = true;
+                Ok(Some(ManagementPipe {
+                    peer: Some(peer),
+                    operation: None,
+                    cancel_requested: false,
+                    window: Some(window),
+                }))
+            }
+            Some(_) => Err(Error::InvalidMessage),
+        }
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
+            && operation.in_flight()
+            && !self.cancel_requested
+        {
+            self.cancel_requested = true;
+            let _ = operation.cancel(endpoint.raw());
+        }
+    }
+
+    pub(crate) fn drain(&mut self) -> Result<bool, Error> {
+        self.cancel();
+        if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
+        {
+            match operation.poll(endpoint.raw()) {
+                Ok(None) => return Ok(false),
+                Ok(Some(_)) if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
+                Ok(Some(_)) => {}
+                Err(error)
+                    if expected_cancel_completion(
+                        error,
+                        self.cancel_requested,
+                        operation.in_flight(),
+                    ) => {}
+                Err(_) => return Err(Error::CleanupUnconfirmed),
+            }
+        }
+        drop(self.operation.take());
+        drop(self.endpoint.take());
+        cleanup_state()?;
+        Ok(true)
+    }
+}
+
+impl Drop for ManagementListener {
+    fn drop(&mut self) {
+        self.cancel();
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(PendingOperation::in_flight)
+        {
+            BOUNDARY_HEALTH.quarantine();
+            let retained = ManagementListener {
+                endpoint: self.endpoint.take(),
+                operation: self.operation.take(),
+                cancel_requested: self.cancel_requested,
+                connected: self.connected,
+            };
+            mem::forget(retained);
+        }
+    }
+}
+
+pub(crate) struct ManagementPipe {
+    peer: Option<ManagementPeer>,
+    operation: Option<(PendingOperation<Handle>, OperationKind)>,
+    cancel_requested: bool,
+    window: Option<AttemptWindow>,
+}
+
+impl fmt::Debug for ManagementPipe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManagementPipe(redacted)")
+    }
+}
+
+impl ManagementPipe {
+    fn check_window(&self) -> Result<(), Error> {
+        self.window.as_ref().ok_or(Error::Closed)?.check()
+    }
+
+    pub(crate) fn class(&mut self) -> Result<ManagementClientClass, Error> {
+        self.check_window()?;
+        self.peer.as_mut().ok_or(Error::Closed)?.class()
+    }
+
+    pub(crate) fn begin_read(&mut self) -> Result<(), Error> {
+        self.begin(Kind::Read(
+            crate::management_protocol::MAX_MANAGEMENT_FRAME + 1,
+        ))
+    }
+
+    pub(crate) fn begin_write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len() > crate::management_protocol::MAX_MANAGEMENT_FRAME {
+            return Err(Error::InvalidMessage);
+        }
+        self.begin(Kind::Write(bytes))
+    }
+
+    fn begin(&mut self, kind: Kind<'_>) -> Result<(), Error> {
+        self.check_window()?;
+        if self.operation.is_some() {
+            return Err(Error::Busy);
+        }
+        let operation_kind = match kind {
+            Kind::Read(_) => OperationKind::Read,
+            Kind::Write(bytes) if !bytes.is_empty() => OperationKind::Write(bytes.len()),
+            _ => return Err(Error::InvalidMessage),
+        };
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|error| native_error(operation_kind.stage(), error))?;
+        let event = Handle::new(event, operation_kind.stage())?;
+        let limits = super::super::super::overlapped_pipe::BufferLimits {
+            max_read: crate::management_protocol::MAX_MANAGEMENT_FRAME + 1,
+            max_write: crate::management_protocol::MAX_MANAGEMENT_FRAME,
+        };
+        let operation = PendingOperation::prepare(kind, limits, event)
+            .map_err(|error| io_error(operation_kind.stage(), error))?;
+        self.operation = Some((operation, operation_kind));
+        let result = (|| {
+            let peer = self.peer.as_mut().ok_or(Error::Closed)?;
+            peer.recheck()?;
+            let operation = &mut self.operation.as_mut().ok_or(Error::InvalidPhase)?.0;
+            service_positive(|| {
+                operation
+                    .issue(peer.raw())
+                    .map_err(|error| io_error(operation_kind.stage(), error))
+            })
+        })();
+        if let Err(error) = result {
+            self.cancel();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<PairingPipeProgress, Error> {
+        self.check_window()?;
+        let peer = self.peer.as_mut().ok_or(Error::Closed)?;
+        peer.recheck()?;
+        let Some((operation, kind)) = self.operation.as_mut() else {
+            return Ok(PairingPipeProgress::Idle);
+        };
+        let completed = match operation
+            .poll(peer.raw())
+            .map_err(|error| io_error(kind.stage(), error))?
+        {
+            None => return Ok(PairingPipeProgress::Pending),
+            Some(value) if !operation.in_flight() => value,
+            Some(_) => return Err(Error::Malformed),
+        };
+        let kind = *kind;
+        drop(self.operation.take());
+        peer.recheck()?;
+        match (kind, completed) {
+            (OperationKind::Read, Completed::Bytes(bytes))
+                if !bytes.is_empty()
+                    && bytes.len() <= crate::management_protocol::MAX_MANAGEMENT_FRAME =>
+            {
+                Ok(PairingPipeProgress::Read(bytes))
+            }
+            (OperationKind::Write(expected), Completed::Count(actual)) if expected == actual => {
+                Ok(PairingPipeProgress::Written)
+            }
+            (_, Completed::Eof) => Err(Error::EndOfStream),
+            _ => Err(Error::InvalidMessage),
+        }
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        if let (Some(peer), Some((operation, _))) = (self.peer.as_ref(), self.operation.as_mut())
+            && operation.in_flight()
+            && !self.cancel_requested
+        {
+            self.cancel_requested = true;
+            let _ = operation.cancel(peer.raw());
+        }
+    }
+
+    pub(crate) fn drain(&mut self) -> Result<bool, Error> {
+        self.cancel();
+        if let (Some(peer), Some((operation, _))) = (self.peer.as_ref(), self.operation.as_mut()) {
+            match operation.poll(peer.raw()) {
+                Ok(None) => return Ok(false),
+                Ok(Some(_)) if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
+                Ok(Some(_)) => {}
+                Err(error)
+                    if expected_cancel_completion(
+                        error,
+                        self.cancel_requested,
+                        operation.in_flight(),
+                    ) => {}
+                Err(_) => return Err(Error::CleanupUnconfirmed),
+            }
+        }
+        drop(self.operation.take());
+        drop(self.peer.take());
+        self.window = None;
+        cleanup_state()?;
+        Ok(true)
+    }
+}
+
+impl Drop for ManagementPipe {
+    fn drop(&mut self) {
+        self.cancel();
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(|(operation, _)| operation.in_flight())
+        {
+            BOUNDARY_HEALTH.quarantine();
+            let retained = ManagementPipe {
+                peer: self.peer.take(),
+                operation: self.operation.take(),
+                cancel_requested: self.cancel_requested,
+                window: self.window.take(),
+            };
+            mem::forget(retained);
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// CLI input has no freeform payload. Unknown arguments are never retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Command {
     Status,
     Service,
@@ -20,6 +20,7 @@ pub enum Command {
     Uninstall,
     ProbeOnce,
     Relay(SocketAddr),
+    RemoveDevice(approval_protocol::DeviceId),
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
     Help,
@@ -108,7 +109,7 @@ impl RendererInvocation {
 
 /// Presentation submits only one of these user intents. It does not supply a
 /// boolean administrator claim, helper path or arbitrary command argument.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceControlIntent {
     Install,
@@ -116,17 +117,76 @@ pub enum ServiceControlIntent {
     Stop,
     Restart,
     Uninstall,
+    RemoveDevice(#[serde(with = "device_id_hex")] approval_protocol::DeviceId),
+    SetRelay(SocketAddr),
+}
+
+/// The presentation carries a device id as the same 64 lowercase hex characters
+/// the elevated CLI accepts; the id type itself has no serialization.
+mod device_id_hex {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub(super) fn serialize<S: Serializer>(
+        device: &approval_protocol::DeviceId,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::device_hex(*device))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<approval_protocol::DeviceId, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        super::parse_device_hex(&text)
+            .map_err(|_| D::Error::custom("device id must be 64 lowercase hex characters"))
+    }
+}
+
+impl fmt::Debug for Command {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Status => "Command::Status",
+            Self::Service => "Command::Service",
+            Self::Install => "Command::Install",
+            Self::Start => "Command::Start",
+            Self::Stop => "Command::Stop",
+            Self::Restart => "Command::Restart",
+            Self::Uninstall => "Command::Uninstall",
+            Self::ProbeOnce => "Command::ProbeOnce",
+            Self::Relay(_) => "Command::Relay(redacted)",
+            Self::RemoveDevice(_) => "Command::RemoveDevice(redacted)",
+            Self::Pair(_) => "Command::Pair(redacted)",
+            Self::PairRenderer(_) => "Command::PairRenderer(redacted)",
+            Self::Help => "Command::Help",
+        })
+    }
+}
+
+impl fmt::Debug for ServiceControlIntent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Install => "ServiceControlIntent::Install",
+            Self::Start => "ServiceControlIntent::Start",
+            Self::Stop => "ServiceControlIntent::Stop",
+            Self::Restart => "ServiceControlIntent::Restart",
+            Self::Uninstall => "ServiceControlIntent::Uninstall",
+            Self::RemoveDevice(_) => "ServiceControlIntent::RemoveDevice(redacted)",
+            Self::SetRelay(_) => "ServiceControlIntent::SetRelay(redacted)",
+        })
+    }
 }
 
 impl ServiceControlIntent {
     #[cfg(any(windows, test))]
-    pub(crate) const fn argument(self) -> &'static str {
+    pub(crate) fn argument(self) -> String {
         match self {
-            Self::Install => "install",
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-            Self::Uninstall => "uninstall",
+            Self::Install => "install".into(),
+            Self::Start => "start".into(),
+            Self::Stop => "stop".into(),
+            Self::Restart => "restart".into(),
+            Self::Uninstall => "uninstall".into(),
+            Self::RemoveDevice(device) => format!("remove {}", device_hex(device)),
+            Self::SetRelay(address) => format!("relay {address}"),
         }
     }
 }
@@ -164,6 +224,30 @@ pub(crate) fn validate_relay_endpoint(endpoint: SocketAddr) -> Result<(), Servic
     Ok(())
 }
 
+pub fn device_hex(device: approval_protocol::DeviceId) -> String {
+    let mut value = String::with_capacity(32);
+    for byte in device.as_bytes() {
+        value.push_str(&format!("{byte:02x}"));
+    }
+    value
+}
+
+pub fn parse_device_hex(value: &str) -> Result<approval_protocol::DeviceId, ServiceError> {
+    if value.len() != 32 {
+        return Err(ServiceError::InvalidArguments);
+    }
+    let mut bytes = [0; 16];
+    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let digit = |digit| match digit {
+            b'0'..=b'9' => Ok(digit - b'0'),
+            b'a'..=b'f' => Ok(digit - b'a' + 10),
+            _ => Err(ServiceError::InvalidArguments),
+        };
+        *output = digit(pair[0])? * 16 + digit(pair[1])?;
+    }
+    approval_protocol::DeviceId::from_bytes(bytes).map_err(|_| ServiceError::InvalidArguments)
+}
+
 impl Command {
     /// Input excludes argv[0]. No arguments means read-only status.
     pub fn parse<I, S>(arguments: I) -> Result<Self, ServiceError>
@@ -177,6 +261,19 @@ impl Command {
         };
         let second = arguments.next();
         let third = arguments.next();
+        if first.as_ref().to_str() == Some("remove") {
+            if third.is_some() || arguments.next().is_some() {
+                return Err(ServiceError::InvalidArguments);
+            }
+            let device = parse_device_hex(
+                second
+                    .ok_or(ServiceError::InvalidArguments)?
+                    .as_ref()
+                    .to_str()
+                    .ok_or(ServiceError::InvalidArguments)?,
+            )?;
+            return Ok(Self::RemoveDevice(device));
+        }
         if first.as_ref().to_str() == Some("relay") {
             if third.is_some() || arguments.next().is_some() {
                 return Err(ServiceError::InvalidArguments);
@@ -440,6 +537,8 @@ pub enum ServiceError {
     ProbeUnavailable,
     #[error("the pairing helper handoff is unavailable or incomplete")]
     PairingHandoffUnavailable,
+    #[error("실행 중인 휴대폰 승인 서비스에서만 휴대폰을 제거할 수 있습니다.")]
+    ManagementRefused,
     #[error("pairing client Windows call failed at fixed stage {stage} (HRESULT {hresult:#010x})")]
     PairingClientNative { stage: u8, hresult: i32 },
     #[error(
@@ -623,6 +722,56 @@ pub(crate) fn continuing_pending_start(existing: Option<Instant>, now: Instant) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_cli_payloads_are_exact_canonical_and_redacted() {
+        let text = "112233445566778899aabbccddeeff00";
+        let device = parse_device_hex(text).expect("canonical device identifier");
+        assert_eq!(device_hex(device), text);
+        let command = Command::parse(["remove", text]).expect("fixed remove command");
+        assert_eq!(command, Command::RemoveDevice(device));
+        assert!(!format!("{command:?}").contains(text));
+        let intent = ServiceControlIntent::RemoveDevice(device);
+        assert_eq!(intent.argument(), format!("remove {text}"));
+        assert!(!format!("{intent:?}").contains(text));
+
+        let address: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let command =
+            Command::parse(["relay", "203.0.113.10:443"]).expect("fixed numeric relay command");
+        assert_eq!(command, Command::Relay(address));
+        assert!(!format!("{command:?}").contains("203.0.113.10"));
+        let intent = ServiceControlIntent::SetRelay(address);
+        assert_eq!(intent.argument(), "relay 203.0.113.10:443");
+        assert!(!format!("{intent:?}").contains("203.0.113.10"));
+
+        for invalid in [
+            "00000000000000000000000000000000",
+            "112233445566778899AABBCCDDEEFF00",
+            "112233445566778899aabbccddeeff0",
+            "112233445566778899aabbccddeeff000",
+            "112233445566778899aabbccddeeff0g",
+        ] {
+            assert_eq!(
+                parse_device_hex(invalid),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+        for arguments in [
+            vec!["remove"],
+            vec!["remove", text, "extra"],
+            vec!["relay"],
+            vec!["relay", "example.com:443"],
+            vec!["relay", "0.0.0.0:443"],
+            vec!["relay", "203.0.113.10:0"],
+            vec!["relay", "203.0.113.10:443", "extra"],
+        ] {
+            assert_eq!(
+                Command::parse(arguments),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+    }
+
     #[test]
     fn renderer_cli_is_exact_three_tokens_canonical_and_nonauthority() {
         let pending = "11".repeat(32);
@@ -913,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_is_the_only_two_argument_command_and_public_id_is_canonical_redacted_data() {
+    fn pair_remove_and_relay_are_the_only_two_argument_commands_and_ids_stay_redacted() {
         let id = PendingElevationId::from_bytes([0xab; 32]).unwrap();
         let text = id.argument();
         assert_eq!(text, "ab".repeat(32));
@@ -924,7 +1073,24 @@ mod tests {
         assert_eq!(PendingElevationId::parse(OsStr::new(&text)), Ok(id));
         assert_eq!(
             format!("{:?}", Command::Pair(id)),
-            "Pair(PendingElevationId(redacted))"
+            "Command::Pair(redacted)"
+        );
+        let device = parse_device_hex(&"cd".repeat(16)).unwrap();
+        assert_eq!(
+            Command::parse(["remove", "cd".repeat(16).as_str()]),
+            Ok(Command::RemoveDevice(device))
+        );
+        assert_eq!(
+            format!("{:?}", Command::RemoveDevice(device)),
+            "Command::RemoveDevice(redacted)"
+        );
+        assert_eq!(
+            Command::parse(["relay", "203.0.113.10:443"]),
+            Ok(Command::Relay("203.0.113.10:443".parse().unwrap()))
+        );
+        assert_eq!(
+            format!("{:?}", Command::Relay("203.0.113.10:443".parse().unwrap())),
+            "Command::Relay(redacted)"
         );
         for verb in [
             "status",

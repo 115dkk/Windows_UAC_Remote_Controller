@@ -322,7 +322,7 @@ impl Endpoint {
             .map_err(|error| io_error(Stage::Read, error))?;
         inner.operation = Some(Operation {
             pending,
-            kind: OperationKind::Read,
+            kind: OperationKind::from_kind(Kind::Read(READ_CAPACITY), false)?,
             cancel_requested: false,
         });
         inner.budget.observe(Instant::now())?;

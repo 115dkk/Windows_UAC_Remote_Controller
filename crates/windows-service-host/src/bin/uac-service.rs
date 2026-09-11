@@ -13,6 +13,8 @@ fn run() -> Result<(), ServiceError> {
         writeln!(
             io::stdout().lock(),
             "uac-service [status|service|install|start|stop|restart|uninstall|probe-once|help]\n\
+             uac-service remove <32자리 소문자 휴대폰 식별자>\n\
+             uac-service relay <숫자 IP:포트>\n\
              uac-service pair <64자리 소문자 공개 식별자>\n\
              uac-service pair-renderer <64자리 공개 식별자> <64자리 표시 식별자>\n\
              기본 동작은 상태 확인입니다. 설치·시작·중지·재시작·제거는 관리자 권한이 필요합니다.\n\
@@ -48,6 +50,10 @@ fn run() -> Result<(), ServiceError> {
         Command::Uninstall => windows_service_host::uninstall(),
         Command::Relay(endpoint) => {
             windows_service_host::configure_relay(endpoint)?;
+            windows_service_host::query_status()
+        }
+        Command::RemoveDevice(device) => {
+            windows_service_host::remove_device(device)?;
             windows_service_host::query_status()
         }
         Command::Service

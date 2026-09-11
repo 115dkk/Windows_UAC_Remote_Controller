@@ -55,6 +55,8 @@ mod dialer;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod enrollment;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod management;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod pairing;
 pub(crate) mod prompt;
 
@@ -215,6 +217,22 @@ struct PeerSlot {
     responses_in_flight: VecDeque<(u64, Instant, ResponseKind)>,
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+struct PendingRelayReplacement {
+    address: std::net::SocketAddr,
+    old_dialer: Option<dialer::DeviceDialer>,
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+impl fmt::Debug for PendingRelayReplacement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingRelayReplacement")
+            .field("old_dialer_owned", &self.old_dialer.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 enum RegistryOwner<'key> {
     #[cfg(windows)]
     Native(Box<crate::ServiceRegistry<'key>>),
@@ -273,6 +291,36 @@ impl RegistryOwner<'_> {
                 .collect()),
         }
     }
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn revoke(
+        &mut self,
+        device: DeviceId,
+    ) -> Result<crate::CommittedRegistryChange, PeerRuntimeError> {
+        match self {
+            Self::Native(owner) => owner
+                .revoke_from_privileged_owner(device)
+                .map_err(|_| PeerRuntimeError::Registry),
+            #[cfg(test)]
+            Self::Fixture(owner, _) => {
+                let mut fixture = owner.borrow_mut();
+                let mut registry = PrivilegedDeviceRegistry::restore_for_privileged_host(
+                    fixture.checkpoint.clone(),
+                )
+                .map_err(|_| PeerRuntimeError::Registry)?;
+                registry
+                    .revoke_from_privileged_host(device)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                fixture.checkpoint = registry.checkpoint_for_privileged_host();
+                fixture.transport.remove(&device);
+                fixture.routes.remove(&device);
+                Ok(crate::CommittedRegistryChange::for_test(
+                    device,
+                    fixture.checkpoint.next_revision() - 1,
+                ))
+            }
+        }
+    }
+
     #[cfg(all(windows, target_pointer_width = "64"))]
     fn enroll(
         &mut self,
@@ -440,9 +488,13 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     pairing: pairing::ServicePairing,
     #[cfg(all(windows, target_pointer_width = "64"))]
+    management: management::ServiceManagement,
+    #[cfg(all(windows, target_pointer_width = "64"))]
     dialer: Option<dialer::DeviceDialer>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay: Option<std::net::SocketAddr>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pending_relay: Option<PendingRelayReplacement>,
     registry: Option<RegistryOwner<'key>>,
     engine: ApprovalEngine,
     key: SessionKey<'key>,
@@ -517,9 +569,13 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             pairing: pairing::ServicePairing::dormant(),
             #[cfg(all(windows, target_pointer_width = "64"))]
+            management: management::ServiceManagement::dormant(),
+            #[cfg(all(windows, target_pointer_width = "64"))]
             dialer: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            pending_relay: None,
             registry: Some(registry),
             engine,
             key,
@@ -554,7 +610,8 @@ impl<'key> ServiceSession<'key> {
         }
         #[cfg(target_pointer_width = "64")]
         {
-            self.pairing.activate(ready, self.engine.boot_epoch())
+            self.pairing.activate(ready, self.engine.boot_epoch())?;
+            self.management.activate().map_err(|_| PeerRuntimeError::Io)
         }
         #[cfg(not(target_pointer_width = "64"))]
         {
@@ -1078,6 +1135,17 @@ impl<'key> ServiceSession<'key> {
     ) -> Result<SessionProgress, PeerRuntimeError> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
+            if let management::ManagementProgress::Request { class, request } =
+                self.management.poll().map_err(|_| PeerRuntimeError::Io)?
+                && let Some(response) = self.handle_management(class, request)?
+            {
+                self.management
+                    .reply(response)
+                    .map_err(|_| PeerRuntimeError::Io)?;
+            }
+            if self.pending_relay.is_some() {
+                self.poll_pending_relay()?;
+            }
             let now = self.now()?;
             self.pairing.poll(self.engine.boot_epoch(), now);
             if self.pairing.wants_preparation_context() {
@@ -1262,6 +1330,118 @@ impl<'key> ServiceSession<'key> {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn poll_pending_relay(&mut self) -> Result<(), PeerRuntimeError> {
+        let Some(mut pending) = self.pending_relay.take() else {
+            return Ok(());
+        };
+        if let Some(old_dialer) = pending.old_dialer.as_mut()
+            && !old_dialer.drain()
+        {
+            self.pending_relay = Some(pending);
+            return Ok(());
+        }
+        pending.old_dialer = None;
+        let replacement = match dialer::DeviceDialer::new(pending.address) {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                self.pending_relay = Some(pending);
+                return Err(error);
+            }
+        };
+        self.dialer = Some(replacement);
+        self.relay = Some(pending.address);
+        self.management
+            .reply(crate::management_protocol::ManagementResponse::Done)
+            .map_err(|_| PeerRuntimeError::Io)
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn handle_management(
+        &mut self,
+        class: crate::ffi::ManagementClientClass,
+        request: crate::management_protocol::ManagementRequest,
+    ) -> Result<Option<crate::management_protocol::ManagementResponse>, PeerRuntimeError> {
+        use crate::management_protocol::{DeviceRow, ManagementRequest, ManagementResponse};
+        if !matches!(request, ManagementRequest::Query)
+            && class != crate::ffi::ManagementClientClass::CliElevated
+        {
+            return Ok(Some(ManagementResponse::Refused(
+                "관리자 확인을 거쳐 다시 시도해 주세요.".into(),
+            )));
+        }
+        match request {
+            ManagementRequest::Query => {
+                let checkpoint = self.current_registry_checkpoint()?;
+                let routes = self
+                    .registry
+                    .as_mut()
+                    .ok_or(PeerRuntimeError::Closed)?
+                    .routes()?;
+                let devices = checkpoint
+                    .entries()
+                    .iter()
+                    .map(|entry| DeviceRow {
+                        device: entry.device_id(),
+                        revision: entry.revision(),
+                        route_present: routes
+                            .iter()
+                            .any(|(device, _, _)| *device == entry.device_id()),
+                        connected: self.peers.iter().any(|peer| {
+                            peer.state.binding.device == entry.device_id() && peer.state.live()
+                        }),
+                        enrolled_unix_secs: None,
+                    })
+                    .collect();
+                Ok(Some(ManagementResponse::Snapshot {
+                    relay: self.relay,
+                    identity_provider: crate::contract::IDENTITY_PROVIDER_PROFILE.into(),
+                    android_signer_digests: crate::ANDROID_SIGNER_SHA256.to_vec(),
+                    devices,
+                }))
+            }
+            ManagementRequest::RemoveDevice { device } => {
+                let receipt = self
+                    .registry
+                    .as_mut()
+                    .ok_or(PeerRuntimeError::Closed)?
+                    .revoke(device)?;
+                if receipt.affected_device() != device {
+                    return Err(PeerRuntimeError::Registry);
+                }
+                self.engine
+                    .revoke_device_from_privileged_host(device)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                self.current_registry_checkpoint()?;
+                for peer in &self.peers {
+                    if peer.state.binding.device == device {
+                        peer.state.retire();
+                    }
+                }
+                if let Some(dialer) = self.dialer.as_mut() {
+                    dialer.release(device);
+                }
+                Ok(Some(ManagementResponse::Done))
+            }
+            ManagementRequest::SetRelay { address } => {
+                if self.pending_relay.is_some() {
+                    return Err(PeerRuntimeError::Protocol);
+                }
+                crate::native::configure_relay_for_running_service(address)
+                    .map_err(|_| PeerRuntimeError::Registry)?;
+                let mut old_dialer = self.dialer.take();
+                if let Some(dialer) = old_dialer.as_mut() {
+                    dialer.cancel();
+                }
+                self.pending_relay = Some(PendingRelayReplacement {
+                    address,
+                    old_dialer,
+                });
+                Ok(None)
+            }
+        }
     }
 
     fn dispatch(
@@ -1667,7 +1847,15 @@ impl<'key> ServiceSession<'key> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             self.pairing.shutdown();
+            self.management.shutdown();
             if let Some(dialer) = self.dialer.as_mut() {
+                dialer.cancel();
+            }
+            if let Some(dialer) = self
+                .pending_relay
+                .as_mut()
+                .and_then(|pending| pending.old_dialer.as_mut())
+            {
                 dialer.cancel();
             }
         }
@@ -1686,11 +1874,31 @@ impl<'key> ServiceSession<'key> {
         {
             self.pairing.poll_shutdown();
             self.io_failed |= self.pairing.cleanup_failed();
+            self.management.drain();
+            self.io_failed |= self.management.failed();
             if let Some(dialer) = self.dialer.as_mut() {
                 dialer.drain();
             }
+            if let Some(dialer) = self
+                .pending_relay
+                .as_mut()
+                .and_then(|pending| pending.old_dialer.as_mut())
+            {
+                dialer.drain();
+            }
+            if self.pending_relay.as_ref().is_some_and(|pending| {
+                pending
+                    .old_dialer
+                    .as_ref()
+                    .is_none_or(|dialer| dialer.remaining_owners() == 0)
+            }) {
+                self.pending_relay = None;
+            }
         }
-        let owners = self.peers.len() + self.pairing_owners() + self.dialer_owners();
+        let owners = self.peers.len()
+            + self.pairing_owners()
+            + self.management_owners()
+            + self.dialer_owners();
         if owners == 0 {
             SessionCleanup::Quiescent {
                 io_failed: self.io_failed,
@@ -1703,6 +1911,7 @@ impl<'key> ServiceSession<'key> {
         if !self.closing
             || !self.peers.is_empty()
             || self.pairing_owners() != 0
+            || self.management_owners() != 0
             || self.dialer_owners() != 0
         {
             return Err(PeerRuntimeError::CleanupPending);
@@ -1722,12 +1931,27 @@ impl<'key> ServiceSession<'key> {
             0
         }
     }
+    fn management_owners(&self) -> usize {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.management.remaining_owners()
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            0
+        }
+    }
     fn dialer_owners(&self) -> usize {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             self.dialer
                 .as_ref()
                 .map_or(0, dialer::DeviceDialer::remaining_owners)
+                + self
+                    .pending_relay
+                    .as_ref()
+                    .and_then(|pending| pending.old_dialer.as_ref())
+                    .map_or(0, dialer::DeviceDialer::remaining_owners)
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
@@ -1742,11 +1966,31 @@ impl Drop for ServiceSession<'_> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             self.pairing.poll_shutdown();
+            self.management.drain();
             if let Some(dialer) = self.dialer.as_mut() {
                 dialer.drain();
             }
+            if let Some(dialer) = self
+                .pending_relay
+                .as_mut()
+                .and_then(|pending| pending.old_dialer.as_mut())
+            {
+                dialer.drain();
+            }
+            if self.pending_relay.as_ref().is_some_and(|pending| {
+                pending
+                    .old_dialer
+                    .as_ref()
+                    .is_none_or(|dialer| dialer.remaining_owners() == 0)
+            }) {
+                self.pending_relay = None;
+            }
         }
-        if !self.peers.is_empty() || self.pairing_owners() != 0 || self.dialer_owners() != 0 {
+        if !self.peers.is_empty()
+            || self.pairing_owners() != 0
+            || self.management_owners() != 0
+            || self.dialer_owners() != 0
+        {
             // Last-resort invariant failure ONLY. No detached reaper, forgotten
             // handle, blocking join, key release, or false quiescence receipt.
             // Actual runtime retains this session across catch/drain instead.

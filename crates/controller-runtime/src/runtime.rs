@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 use std::{
+    collections::BTreeSet,
     fmt,
+    net::{SocketAddr, SocketAddrV6},
     time::{Duration, Instant},
 };
 
@@ -10,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActivityView, AppIssue, AppPrivateDirectory, AppSnapshot, ControlHint, DataAvailability,
-    MobileReadiness, PairingView, Platform, ScreenLockState, ServiceAction, ServiceState,
-    ServiceView, storage::PreferenceStore,
+    ManagementDevice, ManagementObservation, MobileReadiness, PairingView, Platform,
+    ScreenLockState, ServiceAction, ServiceState, ServiceView, storage::PreferenceStore,
 };
 
 pub const MAX_COMPUTER_NAME_BYTES: usize = 256;
@@ -86,10 +88,19 @@ impl From<PlatformError> for AppIssue {
 /// serialize access to one `AppRuntime`; never block its WebView/UI thread.
 pub trait PlatformAdapter: Send {
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError>;
+    fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
     fn control_service(
         &self,
         action: ServiceAction,
     ) -> Result<ServiceCommandOutcome, PlatformError>;
+    fn remove_device(&self, _device_id: &str) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
+    fn set_relay(&self, _address: &str) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
 }
 
 /// Published state and cancellation seam for one asynchronous pairing attempt.
@@ -238,6 +249,8 @@ pub struct AppRuntime {
     computer_name: String,
     adapter: Box<dyn PlatformAdapter>,
     last_service: Option<ServiceView>,
+    last_management: Option<ManagementObservation>,
+    confirmed_relay_configured: bool,
     service_issue: Option<AppIssue>,
     mobile: MobileReadiness,
     control_progress: ControlProgress,
@@ -299,6 +312,8 @@ impl AppRuntime {
             computer_name: display_computer_name(platform, computer_name),
             adapter,
             last_service: None,
+            last_management: None,
+            confirmed_relay_configured: false,
             service_issue: None,
             mobile: MobileReadiness::UNAVAILABLE,
             control_progress: ControlProgress::Idle,
@@ -313,9 +328,14 @@ impl AppRuntime {
     pub fn snapshot(&mut self) -> AppSnapshot {
         if self.platform == Platform::Windows {
             match self.adapter.observe_service() {
-                Ok(observation) => self.accept_service_observation(observation),
+                Ok(observation) => self.accept_service_and_management(observation),
                 Err(error) => {
                     let stale = self.last_service.is_some();
+                    let management_was_current = self.last_management.is_some();
+                    self.last_management = None;
+                    if management_was_current {
+                        self.confirmed_relay_configured = false;
+                    }
                     if let Some(service) = &mut self.last_service {
                         service.allowed_actions.clear();
                         service.remote_requests_ready = false;
@@ -384,7 +404,7 @@ impl AppRuntime {
             // pre-command snapshot, without a speculative mutation or refresh.
             ServiceCommandOutcome::UserCancelled => Ok(before),
             ServiceCommandOutcome::Completed { observation } => {
-                self.accept_service_observation(observation);
+                self.accept_service_and_management(observation);
                 Ok(self.present())
             }
             ServiceCommandOutcome::StillRunning => {
@@ -449,7 +469,7 @@ impl AppRuntime {
             .adapter
             .observe_service()
             .map_err(|_| service_not_ready())?;
-        self.accept_service_observation(observation);
+        self.accept_service_and_management(observation);
         if observation.state != ObservedServiceState::Installed(ServiceState::Running)
             || observation.control != Ok(ControlHint::Available)
             || !self.pairing_starter.available()
@@ -460,8 +480,82 @@ impl AppRuntime {
         Ok(self.present())
     }
 
-    pub fn remove_device(&mut self, _device_id: &str) -> Result<AppSnapshot, AppIssue> {
-        Err(crate::UnwiredCapability::Unpairing.issue())
+    pub fn remove_device(&mut self, device_id: &str) -> Result<AppSnapshot, AppIssue> {
+        if self.platform != Platform::Windows {
+            return Err(crate::UnwiredCapability::Unpairing.issue());
+        }
+        let device_id = parse_device_id(device_id).ok_or_else(invalid_device_issue)?;
+        let before = self.snapshot();
+        if let Some(issue) = before.issue {
+            return Err(issue);
+        }
+        let device_exists = self.last_management.as_ref().is_some_and(|management| {
+            management
+                .devices
+                .iter()
+                .any(|device| device.id == device_id)
+        });
+        if !before.can_unpair || !device_exists {
+            return Err(AppIssue {
+                code: "device_removal_unavailable",
+                message: "현재 휴대폰 목록에서는 이 휴대폰을 제거할 수 없습니다.",
+                next_action: Some("목록을 새로 확인한 뒤 다시 시도해 주세요."),
+            });
+        }
+        self.adapter
+            .remove_device(&device_id)
+            .map_err(|_| management_mutation_issue())?;
+        self.refresh_after_running_management_mutation()
+    }
+
+    pub fn set_relay(&mut self, address: &str) -> Result<AppSnapshot, AppIssue> {
+        if self.platform != Platform::Windows {
+            return Err(PlatformError::Unsupported.into());
+        }
+        let address = parse_relay_address(address).ok_or_else(invalid_relay_issue)?;
+        let before = self.snapshot();
+        if let Some(issue) = before.issue {
+            return Err(issue);
+        }
+        let service = before
+            .service
+            .as_ref()
+            .ok_or_else(|| AppIssue::from(PlatformError::StatusUnavailable))?;
+        if service.control_hint != ControlHint::Available
+            || !matches!(
+                (service.installed, service.state),
+                (false, None) | (true, Some(ServiceState::Stopped | ServiceState::Running))
+            )
+        {
+            return Err(AppIssue {
+                code: "relay_change_unavailable",
+                message: "휴대폰 승인의 현재 상태에서는 중계 서버 주소를 저장할 수 없습니다.",
+                next_action: Some("상태를 새로 확인한 뒤 다시 시도해 주세요."),
+            });
+        }
+        self.adapter
+            .set_relay(&address.to_string())
+            .map_err(|_| management_mutation_issue())?;
+        if service.state == Some(ServiceState::Running) {
+            self.refresh_after_running_management_mutation()
+        } else {
+            self.confirmed_relay_configured = true;
+            Ok(before_with_relay(before))
+        }
+    }
+
+    fn refresh_after_running_management_mutation(&mut self) -> Result<AppSnapshot, AppIssue> {
+        let observation = self
+            .adapter
+            .observe_service()
+            .map_err(|_| management_query_issue())?;
+        self.accept_service_and_management(observation);
+        let snapshot = self.present();
+        if let Some(issue) = snapshot.issue {
+            Err(issue)
+        } else {
+            Ok(snapshot)
+        }
     }
 
     pub fn decide(
@@ -478,6 +572,28 @@ impl AppRuntime {
 
     pub fn clear_activity(&mut self) -> Result<AppSnapshot, AppIssue> {
         Err(activity_unavailable())
+    }
+
+    fn accept_service_and_management(&mut self, observation: ServiceObservation) {
+        self.accept_service_observation(observation);
+        if observation.state != ObservedServiceState::Installed(ServiceState::Running) {
+            self.last_management = None;
+            return;
+        }
+        match self
+            .adapter
+            .observe_management()
+            .and_then(validate_management)
+        {
+            Ok(management) => {
+                self.last_management = Some(management);
+            }
+            Err(_) => {
+                // The device list is unavailable; pairing and service control keep
+                // their own paths, so this is not a service-wide issue.
+                self.last_management = None;
+            }
+        }
     }
 
     fn accept_service_observation(&mut self, observation: ServiceObservation) {
@@ -498,8 +614,6 @@ impl AppRuntime {
                 Vec::new()
             },
             control_hint,
-            // A real request/identity/transport owner is not connected. No SCM
-            // lifecycle or native capability-development flag proves readiness.
             remote_requests_ready: false,
         });
     }
@@ -559,6 +673,25 @@ impl AppRuntime {
                     next_action: Some("앱을 다시 열어 휴대폰 상태를 확인해 주세요."),
                 })
         });
+        let management_running = self.last_service.as_ref().is_some_and(|service| {
+            service.state == Some(ServiceState::Running) && self.last_management.is_some()
+        });
+        let devices = self
+            .last_management
+            .as_ref()
+            .filter(|_| management_running)
+            .map(|management| {
+                management
+                    .devices
+                    .iter()
+                    .map(management_device_view)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut data_availability = DataAvailability::UNAVAILABLE;
+        if management_running {
+            data_availability.devices = crate::Availability::Available;
+        }
         AppSnapshot {
             schema_version: 4,
             platform: self.platform,
@@ -567,12 +700,23 @@ impl AppRuntime {
             phone_service: None,
             mobile: (self.platform == Platform::Android).then_some(self.mobile),
             policy: Some(self.policy.clone()),
-            devices: Vec::new(),
+            relay_configured: if self
+                .last_service
+                .as_ref()
+                .is_some_and(|service| service.state == Some(ServiceState::Running))
+            {
+                self.last_management
+                    .as_ref()
+                    .is_some_and(|management| management.relay_configured)
+            } else {
+                self.confirmed_relay_configured
+            },
+            devices,
             requests: Vec::new(),
             request_catalog: None,
             request_review: None,
             activity: Vec::new(),
-            data_availability: DataAvailability::UNAVAILABLE,
+            data_availability,
             pairing,
             can_pair: self.platform == Platform::Windows
                 && self.last_service.as_ref().is_some_and(|service| {
@@ -585,10 +729,114 @@ impl AppRuntime {
                     .as_ref()
                     .is_none_or(|attempt| attempt.state().terminal_at.is_some())
                 && self.pairing_starter.available(),
-            can_unpair: false,
+            can_unpair: management_running
+                && self.service_issue.is_none()
+                && self
+                    .last_service
+                    .as_ref()
+                    .is_some_and(|service| service.control_hint == ControlHint::Available)
+                && !self
+                    .last_management
+                    .as_ref()
+                    .is_none_or(|management| management.devices.is_empty()),
             can_clear_activity: false,
             issue,
         }
+    }
+}
+
+fn validate_management(
+    observation: ManagementObservation,
+) -> Result<ManagementObservation, PlatformError> {
+    let mut ids = BTreeSet::new();
+    for device in &observation.devices {
+        if device.revision == 0
+            || parse_device_id(&device.id).is_none()
+            || !ids.insert(device.id.as_str())
+        {
+            return Err(PlatformError::StatusUnavailable);
+        }
+    }
+    Ok(observation)
+}
+
+fn parse_device_id(value: &str) -> Option<String> {
+    if value.len() != 32
+        || value
+            .bytes()
+            .any(|byte| !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        || value.bytes().all(|byte| byte == b'0')
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn parse_relay_address(value: &str) -> Option<SocketAddr> {
+    if value.is_empty() || value.len() > 80 {
+        return None;
+    }
+    let address = value.parse::<SocketAddr>().ok()?;
+    if address.port() == 0 || address.ip().is_unspecified() {
+        return None;
+    }
+    if let SocketAddr::V6(address) = address
+        && invalid_ipv6_relay(address)
+    {
+        return None;
+    }
+    Some(address)
+}
+
+fn invalid_ipv6_relay(address: SocketAddrV6) -> bool {
+    address.flowinfo() != 0 || address.scope_id() != 0 || address.ip().to_ipv4_mapped().is_some()
+}
+
+fn management_device_view(device: &ManagementDevice) -> crate::PairedDeviceView {
+    crate::PairedDeviceView {
+        id: device.id.clone(),
+        name: format!("{}번 휴대폰", &device.id[..8]),
+        revision: device.revision,
+        route_present: device.route_present,
+        connected: device.connected,
+        last_seen_label: None,
+    }
+}
+
+fn before_with_relay(mut snapshot: AppSnapshot) -> AppSnapshot {
+    snapshot.relay_configured = true;
+    snapshot
+}
+
+fn invalid_device_issue() -> AppIssue {
+    AppIssue {
+        code: "invalid_device_id",
+        message: "휴대폰 정보를 읽지 못했습니다.",
+        next_action: Some("목록을 새로 확인한 뒤 다시 시도해 주세요."),
+    }
+}
+
+fn invalid_relay_issue() -> AppIssue {
+    AppIssue {
+        code: "invalid_relay_address",
+        message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력해 주세요.",
+        next_action: Some("예: 192.0.2.10:443 또는 [2001:db8::10]:443"),
+    }
+}
+
+fn management_query_issue() -> AppIssue {
+    AppIssue {
+        code: "service_management_unavailable",
+        message: "연결된 휴대폰 정보를 확인하지 못했습니다.",
+        next_action: Some("휴대폰 승인 상태를 확인한 뒤 새로고침해 주세요."),
+    }
+}
+
+fn management_mutation_issue() -> AppIssue {
+    AppIssue {
+        code: "service_management_failed",
+        message: "요청한 설정을 변경하지 못했습니다.",
+        next_action: Some("현재 상태를 새로 확인한 뒤 다시 시도해 주세요."),
     }
 }
 

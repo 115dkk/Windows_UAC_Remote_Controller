@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Safe delegation to the reviewed Windows-only service owner. No local FFI.
 
+use std::net::SocketAddr;
+
 use windows_service_host::{
     ControlOutcome, InstallationState, ServiceControlIntent, ServiceError, ServiceOperation,
-    ServiceSnapshot,
+    ServiceSnapshot, management_protocol::ManagementResponse,
 };
 
 use crate::{
-    ControlHint, ObservedServiceState, PlatformAdapter, PlatformError, ServiceAction,
-    ServiceCommandOutcome, ServiceObservation, ServiceState,
+    ControlHint, ManagementDevice, ManagementObservation, ObservedServiceState, PlatformAdapter,
+    PlatformError, ServiceAction, ServiceCommandOutcome, ServiceObservation, ServiceState,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -18,6 +20,26 @@ impl PlatformAdapter for WindowsPlatformAdapter {
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError> {
         let status = windows_service_host::query_status().map_err(status_error)?;
         observation(status)
+    }
+
+    fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
+        let ManagementResponse::Snapshot { relay, devices, .. } =
+            windows_service_host::management_query().map_err(management_error)?
+        else {
+            return Err(PlatformError::StatusUnavailable);
+        };
+        Ok(ManagementObservation {
+            relay_configured: relay.is_some(),
+            devices: devices
+                .into_iter()
+                .map(|row| ManagementDevice {
+                    id: device_hex(row.device.as_bytes()),
+                    revision: row.revision,
+                    route_present: row.route_present,
+                    connected: row.connected,
+                })
+                .collect(),
+        })
     }
 
     fn control_service(
@@ -59,6 +81,63 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             },
         })
     }
+
+    fn remove_device(&self, device_id: &str) -> Result<(), PlatformError> {
+        completed_mutation(remove_device_intent(device_id)?)
+    }
+
+    fn set_relay(&self, address: &str) -> Result<(), PlatformError> {
+        let address = address
+            .parse::<SocketAddr>()
+            .map_err(|_| PlatformError::ControlFailed)?;
+        completed_mutation(ServiceControlIntent::SetRelay(address))
+    }
+}
+
+fn remove_device_intent(device_id: &str) -> Result<ServiceControlIntent, PlatformError> {
+    if device_id.len() != 32 {
+        return Err(PlatformError::ControlFailed);
+    }
+    let digit = |value: u8| match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(PlatformError::ControlFailed),
+    };
+    let mut bytes = [0; 16];
+    for (output, pair) in bytes.iter_mut().zip(device_id.as_bytes().chunks_exact(2)) {
+        *output = digit(pair[0])? * 16 + digit(pair[1])?;
+    }
+    let mut wire = Vec::with_capacity(22);
+    wire.extend_from_slice(b"UCMG");
+    wire.extend_from_slice(&[1, 2]);
+    wire.extend_from_slice(&bytes);
+    let windows_service_host::management_protocol::ManagementRequest::RemoveDevice { device } =
+        windows_service_host::management_protocol::decode_request(&wire)
+            .map_err(|_| PlatformError::ControlFailed)?
+    else {
+        return Err(PlatformError::ControlFailed);
+    };
+    Ok(ServiceControlIntent::RemoveDevice(device))
+}
+
+fn completed_mutation(intent: ServiceControlIntent) -> Result<(), PlatformError> {
+    match windows_service_host::request_elevated_control_from_ui(intent).map_err(control_error)? {
+        ControlOutcome::Completed { .. } => Ok(()),
+        ControlOutcome::UserCancelled
+        | ControlOutcome::StillRunning
+        | ControlOutcome::CompletionStatusUnknown
+        | ControlOutcome::HelperFailed { .. } => Err(PlatformError::ControlFailed),
+    }
+}
+
+fn device_hex(bytes: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(32);
+    for byte in bytes {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    value
 }
 
 fn observation(status: ServiceSnapshot) -> Result<ServiceObservation, PlatformError> {
@@ -90,6 +169,13 @@ fn observation(status: ServiceSnapshot) -> Result<ServiceObservation, PlatformEr
         })
         .map_err(|_| PlatformError::HelperUnavailable);
     Ok(ServiceObservation { state, control })
+}
+
+fn management_error(error: ServiceError) -> PlatformError {
+    match error {
+        ServiceError::UnsupportedPlatform => PlatformError::Unsupported,
+        _ => PlatformError::StatusUnavailable,
+    }
 }
 
 fn status_error(error: ServiceError) -> PlatformError {

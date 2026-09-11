@@ -159,11 +159,27 @@ impl MobileReadiness {
     };
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagementDevice {
+    pub id: String,
+    pub revision: u64,
+    pub route_present: bool,
+    pub connected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagementObservation {
+    pub relay_configured: bool,
+    pub devices: Vec<ManagementDevice>,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedDeviceView {
     pub id: String,
     pub name: String,
+    pub revision: u64,
+    pub route_present: bool,
     pub connected: bool,
     pub last_seen_label: Option<String>,
 }
@@ -275,6 +291,7 @@ pub struct AppSnapshot {
     pub mobile: Option<MobileReadiness>,
     /// None means no current policy observation; never substitute defaults.
     pub policy: Option<NotificationPolicy>,
+    pub relay_configured: bool,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
     /// None is no current native observation, not an empty provisioned map.
@@ -301,6 +318,7 @@ impl AppSnapshot {
             phone_service: Some(service),
             mobile: Some(readiness),
             policy: None,
+            relay_configured: false,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,
@@ -341,6 +359,7 @@ impl AppSnapshot {
             phone_service: None,
             mobile: Some(readiness),
             policy: Some(policy),
+            relay_configured: false,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,

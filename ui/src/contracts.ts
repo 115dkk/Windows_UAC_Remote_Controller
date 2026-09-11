@@ -39,7 +39,9 @@ export interface MobileReadiness {
 export interface PairedDeviceView {
   readonly id: string;
   readonly name: string;
+  readonly revision: number;
   readonly connected: boolean;
+  readonly routePresent: boolean;
   readonly lastSeenLabel: string | null;
 }
 export interface RequestView {
@@ -87,6 +89,7 @@ export interface AppSnapshot {
   readonly mobile: MobileReadiness | null;
   readonly policy: NotificationPolicy | null;
   readonly devices: readonly PairedDeviceView[];
+  readonly relayConfigured: boolean;
   readonly requests: readonly RequestView[];
   readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;
@@ -107,6 +110,7 @@ export interface ControllerBridge {
   controlService(action: ServiceAction): Promise<AppSnapshot>;
   beginPairing(): Promise<AppSnapshot>;
   removeDevice(deviceId: string): Promise<AppSnapshot>;
+  setRelay(address: string): Promise<AppSnapshot>;
   decide(requestId: string, decision: 'approve' | 'deny'): Promise<AppSnapshot>;
   requestDetails(requestId: string): Promise<RequestDetailsView>;
   watchRequests?(notify: () => void): Promise<() => Promise<void>>;

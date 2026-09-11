@@ -237,8 +237,39 @@ pub(crate) fn query_status() -> Result<ServiceSnapshot, ServiceError> {
 pub(crate) fn configure_relay(endpoint: std::net::SocketAddr) -> Result<(), ServiceError> {
     ffi::require_elevated()?;
     let _installation = ffi::validate_installation(true)?;
+    let status = query_status()?;
+    if status.state == Some(ServiceState::Running) {
+        return crate::management_mutation(
+            crate::management_protocol::ManagementRequest::SetRelay { address: endpoint },
+        );
+    }
+    if status.state != Some(ServiceState::Stopped)
+        && status.installation != crate::InstallationState::NotInstalled
+    {
+        return Err(ServiceError::UnexpectedState);
+    }
     let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
     directory.write_relay_endpoint(endpoint)
+}
+
+pub(crate) fn configure_relay_for_running_service(
+    endpoint: std::net::SocketAddr,
+) -> Result<(), ServiceError> {
+    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_relay_endpoint(endpoint)
+}
+
+pub(crate) fn remove_device(device: approval_protocol::DeviceId) -> Result<(), ServiceError> {
+    ffi::require_elevated()?;
+    let _installation = ffi::validate_installation(true)?;
+    let status = query_status()?;
+    if status.state != Some(ServiceState::Running) {
+        return Err(ServiceError::ManagementRefused);
+    }
+    crate::management_mutation(
+        crate::management_protocol::ManagementRequest::RemoveDevice { device },
+    )
 }
 
 pub(crate) fn request_probe_once() -> Result<crate::ProbeRequestAccepted, ServiceError> {

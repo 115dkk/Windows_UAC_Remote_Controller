@@ -86,12 +86,19 @@ enum ClientEndpoint {
     Starter,
     Helper,
     Renderer,
+    Management(PairingPeerRole),
 }
 impl ClientEndpoint {
     fn role(self) -> PairingPeerRole {
         match self {
-            Self::Starter => PairingPeerRole::Starter,
+            Self::Starter | Self::Management(PairingPeerRole::Starter) => PairingPeerRole::Starter,
             _ => PairingPeerRole::Helper,
+        }
+    }
+    fn descriptor_role(self) -> PairingPeerRole {
+        match self {
+            Self::Management(_) => PairingPeerRole::Starter,
+            _ => self.role(),
         }
     }
     fn name(self) -> &'static str {
@@ -99,6 +106,7 @@ impl ClientEndpoint {
             Self::Starter => pairing_peer::STARTER_PIPE,
             Self::Helper => pairing_peer::HELPER_PIPE,
             Self::Renderer => pairing_peer::RENDERER_PIPE,
+            Self::Management(_) => pairing_peer::MANAGEMENT_PIPE,
         }
     }
 }
@@ -251,6 +259,14 @@ struct OwnIdentity {
     epoch: SessionEpoch,
 }
 impl OwnIdentity {
+    fn observed_management_role() -> Result<PairingPeerRole, Error> {
+        let starter = Self::observe(PairingPeerRole::Starter);
+        if starter.is_ok() {
+            return Ok(PairingPeerRole::Starter);
+        }
+        Self::observe(PairingPeerRole::Helper).map(|_| PairingPeerRole::Helper)
+    }
+
     fn observe(role: PairingPeerRole) -> Result<Self, Error> {
         reject_thread_impersonation().map_err(Error::Service)?;
         // SAFETY: documented current-process/thread observations. The process
@@ -323,6 +339,8 @@ struct Connection {
     installation: ValidatedPairingInstallation,
     own: OwnIdentity,
     role: PairingPeerRole,
+    descriptor_role: PairingPeerRole,
+    management: bool,
     pid: u32,
     created: u64,
     service_sid: Vec<u8>,
@@ -341,7 +359,7 @@ impl Connection {
             self.pid,
         )
         .map_err(Error::Service)?;
-        verify_pipe_security(self.pipe.0, self.role, &self.service_sid)?;
+        verify_pipe_security(self.pipe.0, self.descriptor_role, &self.service_sid)?;
         if pipe_identity(self.pipe.0)? != (self.pid, 0)
             || process_identity(self.server.0, self.pid)
                 .map_err(|error| peer_error_at(Stage::QueryServer, error))?
@@ -388,6 +406,10 @@ impl PairingClient {
     pub fn connect_helper(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
         Self::connect(ClientEndpoint::Helper, started_at, deadline)
     }
+    pub fn connect_management(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
+        let role = OwnIdentity::observed_management_role()?;
+        Self::connect(ClientEndpoint::Management(role), started_at, deadline)
+    }
     fn connect(
         endpoint: ClientEndpoint,
         started_at: Instant,
@@ -423,7 +445,7 @@ impl PairingClient {
         }
         .map_err(|e| native_error(Stage::Connect, e))?;
         let pipe = Handle::new(pipe)?;
-        verify_pipe_security(pipe.0, role, &service_sid)?;
+        verify_pipe_security(pipe.0, endpoint.descriptor_role(), &service_sid)?;
         let (pid, session) = pipe_identity(pipe.0)?;
         if pid != expected_pid || session != 0 {
             return Err(Error::Rejected);
@@ -448,6 +470,8 @@ impl PairingClient {
             installation,
             own,
             role,
+            descriptor_role: endpoint.descriptor_role(),
+            management: matches!(endpoint, ClientEndpoint::Management(_)),
             pid,
             created,
             service_sid,
@@ -471,7 +495,17 @@ impl PairingClient {
         Ok(Self { inner: Some(inner) })
     }
     pub fn begin_read(&mut self) -> Result<(), Error> {
-        self.inner_mut().begin(Kind::Read(READ_CAPACITY))
+        let capacity = if self
+            .inner_ref()
+            .connection
+            .as_ref()
+            .is_some_and(|value| value.management)
+        {
+            crate::management_protocol::MAX_MANAGEMENT_FRAME + 1
+        } else {
+            READ_CAPACITY
+        };
+        self.inner_mut().begin(Kind::Read(capacity))
     }
     pub fn begin_write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.inner_mut().begin(Kind::Write(bytes))
@@ -569,14 +603,19 @@ impl OriginalBudget {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationKind {
-    Read,
+    Read(usize),
     Write(usize),
 }
 impl OperationKind {
-    fn from_kind(kind: Kind<'_>) -> Result<Self, Error> {
+    fn from_kind(kind: Kind<'_>, management: bool) -> Result<Self, Error> {
+        let max = if management {
+            crate::management_protocol::MAX_MANAGEMENT_FRAME
+        } else {
+            MAX_MESSAGE
+        };
         match kind {
-            Kind::Read(READ_CAPACITY) => Ok(Self::Read),
-            Kind::Write(bytes) if !bytes.is_empty() && bytes.len() <= MAX_MESSAGE => {
+            Kind::Read(capacity) if capacity == max + 1 => Ok(Self::Read(max)),
+            Kind::Write(bytes) if !bytes.is_empty() && bytes.len() <= max => {
                 Ok(Self::Write(bytes.len()))
             }
             _ => Err(Error::InvalidMessage),
@@ -584,7 +623,7 @@ impl OperationKind {
     }
     fn stage(self) -> Stage {
         match self {
-            Self::Read => Stage::Read,
+            Self::Read(_) => Stage::Read,
             Self::Write(_) => Stage::Write,
         }
     }
@@ -660,12 +699,25 @@ impl Inner {
         if self.operation.is_some() {
             return Err(self.fail(Error::Busy));
         }
-        let operation_kind = OperationKind::from_kind(kind).map_err(|error| self.fail(error))?;
+        let management = self
+            .connection
+            .as_ref()
+            .is_some_and(|value| value.management);
+        let operation_kind =
+            OperationKind::from_kind(kind, management).map_err(|error| self.fail(error))?;
         // SAFETY: unnamed noninherited manual-reset event, initially unsignaled.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
             .map_err(|e| self.fail(native_error(Stage::CreateEvent, e)))?;
         let event = Handle::new(event).map_err(|error| self.fail(error))?;
-        let pending = PendingOperation::prepare(kind, LIMITS, event)
+        let limits = if management {
+            BufferLimits {
+                max_read: crate::management_protocol::MAX_MANAGEMENT_FRAME + 1,
+                max_write: crate::management_protocol::MAX_MANAGEMENT_FRAME,
+            }
+        } else {
+            LIMITS
+        };
+        let pending = PendingOperation::prepare(kind, limits, event)
             .map_err(|error| self.fail(io_error(operation_kind.stage(), error)))?;
         self.operation = Some(Operation {
             pending,
@@ -763,8 +815,8 @@ fn classify_completion(
     value: Completed,
 ) -> Result<PairingClientProgress, Error> {
     match (kind, value) {
-        (OperationKind::Read, Completed::Bytes(bytes))
-            if !bytes.is_empty() && bytes.len() <= MAX_MESSAGE =>
+        (OperationKind::Read(maximum), Completed::Bytes(bytes))
+            if !bytes.is_empty() && bytes.len() <= maximum =>
         {
             Ok(PairingClientProgress::Read(bytes))
         }
@@ -1217,24 +1269,24 @@ mod tests {
     #[test]
     fn message_and_completion_shapes_never_accept_truncation_or_eof() {
         assert_eq!(
-            OperationKind::from_kind(Kind::Connect),
+            OperationKind::from_kind(Kind::Connect, false),
             Err(Error::InvalidMessage)
         );
         assert_eq!(
-            OperationKind::from_kind(Kind::Write(&[])),
+            OperationKind::from_kind(Kind::Write(&[]), false),
             Err(Error::InvalidMessage)
         );
         assert_eq!(
-            OperationKind::from_kind(Kind::Write(&vec![0; MAX_MESSAGE + 1])),
+            OperationKind::from_kind(Kind::Write(&vec![0; MAX_MESSAGE + 1]), false),
             Err(Error::InvalidMessage)
         );
         assert_eq!(
-            OperationKind::from_kind(Kind::Read(MAX_MESSAGE)),
+            OperationKind::from_kind(Kind::Read(MAX_MESSAGE), false),
             Err(Error::InvalidMessage)
         );
         assert_eq!(
-            OperationKind::from_kind(Kind::Read(READ_CAPACITY)),
-            Ok(OperationKind::Read)
+            OperationKind::from_kind(Kind::Read(READ_CAPACITY), false),
+            Ok(OperationKind::Read(MAX_MESSAGE))
         );
         for value in [
             Completed::Bytes(vec![]),
@@ -1242,8 +1294,25 @@ mod tests {
             Completed::Count(0),
             Completed::Eof,
         ] {
-            assert!(classify_completion(OperationKind::Read, value).is_err());
+            assert!(classify_completion(OperationKind::Read(MAX_MESSAGE), value).is_err());
         }
+        assert!(matches!(
+            classify_completion(
+                OperationKind::Read(crate::management_protocol::MAX_MANAGEMENT_FRAME),
+                Completed::Bytes(vec![0; MAX_MESSAGE + 1]),
+            ),
+            Ok(PairingClientProgress::Read(bytes)) if bytes.len() == MAX_MESSAGE + 1
+        ));
+        assert!(
+            classify_completion(
+                OperationKind::Read(crate::management_protocol::MAX_MANAGEMENT_FRAME),
+                Completed::Bytes(vec![
+                    0;
+                    crate::management_protocol::MAX_MANAGEMENT_FRAME + 1
+                ]),
+            )
+            .is_err()
+        );
         assert!(classify_completion(OperationKind::Write(4), Completed::Count(3)).is_err());
         assert!(matches!(
             classify_completion(OperationKind::Write(4), Completed::Count(4)),

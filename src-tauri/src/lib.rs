@@ -94,6 +94,7 @@ pub fn run() {
             commands::begin_pairing,
             commands::open_pairing_scanner,
             commands::remove_device,
+            commands::set_relay,
             commands::decide_request,
             commands::request_details,
             commands::clear_activity,

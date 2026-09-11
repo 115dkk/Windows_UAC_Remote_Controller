@@ -33,7 +33,8 @@ const LIMITS: BufferLimits = BufferLimits {
 
 mod listener;
 pub(crate) use listener::{
-    AttemptWindow, ListenProgress, StarterAdmission, UnboundPairingListener,
+    AttemptWindow, ListenProgress, ManagementListener, ManagementPipe, StarterAdmission,
+    UnboundPairingListener,
 };
 
 impl EventHandle for Handle {
