@@ -188,8 +188,10 @@ jobs:
           Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA, ConsentPromptBehaviorAdmin, PromptOnSecureDesktop | Format-List | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/uac-policy.txt"
           # A LIMITED scheduled task in the interactive session gives a filtered (medium) token; its elevation request
           # produces the actual consent.exe prompt. The elevated child would only sleep; it is never approved here.
-          # A script file avoids nested quoting through schtasks (the inline form exited with 1 in run 34613990614)
-          # and records the request's own outcome as evidence.
+          # The runner's interactive administrator has no filtered token (run 34615972812 logged elevated=True even
+          # under a LIMITED scheduled task), so a real prompt needs a basic-user token: runas /trustlevel creates one
+          # in this same interactive session, and the script's own ShellExecute runas then reaches AppInfo and consent.exe.
+          # The script records its identity, elevation state and outcome as evidence.
           $requestScript = Join-Path $env:RUNNER_TEMP 'uac-lab-elevation-request.ps1'
           $requestLog = Join-Path $env:LAB_EVIDENCE 'elevation-request.log'
           @(
@@ -197,18 +199,17 @@ jobs:
             ('$log = ''{0}''' -f $requestLog),
             '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()',
             '$principal = New-Object Security.Principal.WindowsPrincipal($identity)',
-            '"user={0} elevated={1} session={2}" -f $identity.Name, $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator), (Get-Process -Id $PID).SessionId | Out-File -FilePath $log -Append',
+            '"user={0} elevated={1} session={2}" -f $identity.Name, $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator), (Get-Process -Id $PID).SessionId | Out-File -FilePath $log -Append -Encoding utf8',
             'try {',
             '  $child = Start-Process -FilePath cmd.exe -ArgumentList ''/c'', ''timeout'', ''/t'', ''100'', ''/nobreak'' -Verb RunAs -PassThru',
-            '  "started elevated child pid={0}" -f $child.Id | Out-File -FilePath $log -Append',
+            '  "started elevated child pid={0}" -f $child.Id | Out-File -FilePath $log -Append -Encoding utf8',
             '} catch {',
-            '  "request failed: {0}" -f $_.Exception.Message | Out-File -FilePath $log -Append',
+            '  "request failed: {0}" -f $_.Exception.Message | Out-File -FilePath $log -Append -Encoding utf8',
             '  exit 3',
             '}'
           ) | Set-Content -Path $requestScript -Encoding ascii
           $trigger = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $requestScript
-          schtasks.exe /Create /F /TN UacLabElevationRequest /TR $trigger /SC ONCE /ST 00:00 /RL LIMITED /IT | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/schtasks-create.txt"
-          schtasks.exe /Run /TN UacLabElevationRequest | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/schtasks-run.txt"
+          runas.exe /trustlevel:0x20000 $trigger 2>&1 | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/runas-basic-user.txt"
           $consent = $null
           $timeline = @()
           for ($i = 0; $i -lt 80; $i++) {
@@ -218,8 +219,6 @@ jobs:
             Start-Sleep -Milliseconds 500
           }
           $timeline | Set-Content -Path "$env:LAB_EVIDENCE/consent-timeline.txt"
-          schtasks.exe /Query /TN UacLabElevationRequest /V /FO LIST | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/schtasks-query.txt"
-          Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 60 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'UacLabElevationRequest' } | Format-List TimeCreated, Id, Message | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/taskscheduler-events.txt"
           if (Test-Path -LiteralPath $requestLog) { Get-Content -LiteralPath $requestLog } else { Write-Output 'elevation request script left no log' }
           if ($consent) { Write-Output ("consent.exe present: pid {0} session {1}" -f $consent.Id, $consent.SessionId) } else { Write-Output 'consent.exe did not appear within 40 s.' }
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-before-probe.txt"
@@ -231,7 +230,6 @@ jobs:
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-after-probe.txt"
           # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
           Get-Process -Name consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          schtasks.exe /Delete /F /TN UacLabElevationRequest | Out-Null
           exit 0
       - name: Collect service data, journal and diagnostics (read-only copies)
         if: ${{ always() }}

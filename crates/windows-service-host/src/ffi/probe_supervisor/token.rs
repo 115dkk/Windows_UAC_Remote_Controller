@@ -229,6 +229,18 @@ impl TokenBuffer {
                 .map_err(|_| unsupported_at(line!()))?,
         ))
     }
+    /// TokenHasRestrictions is documented as a DWORD, but the runner's service
+    /// token answered with a longer buffer (lab run 34615972812, token.rs:229).
+    /// Read the leading DWORD and ignore trailing bytes for that class only.
+    fn leading_u32(&self) -> Result<u32, Error> {
+        Ok(u32::from_ne_bytes(
+            self.bytes()
+                .get(..4)
+                .ok_or_else(|| unsupported_at(line!()))?
+                .try_into()
+                .map_err(|_| unsupported_at(line!()))?,
+        ))
+    }
 }
 
 fn groups(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<(Vec<u8>, u32)>, Error> {
@@ -333,7 +345,7 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
         groups: regular,
         restricted,
         privileges: values,
-        has_restrictions: TokenBuffer::read(token, TokenHasRestrictions)?.scalar()?,
+        has_restrictions: TokenBuffer::read(token, TokenHasRestrictions)?.leading_u32()?,
     })
 }
 fn luid(value: LUID) -> u64 {
