@@ -307,7 +307,7 @@ unsafe fn descriptor_parts(pointer: PSECURITY_DESCRIPTOR) -> Result<(Vec<u8>, Ve
     let mut control = SECURITY_DESCRIPTOR_CONTROL::default();
     let mut revision = 0;
     // SAFETY: initialized fixed outputs and live native descriptor.
-    unsafe { GetSecurityDescriptorControl(pointer, &mut control, &mut revision) }
+    unsafe { GetSecurityDescriptorControl(pointer, &mut control.0, &mut revision) }
         .map_err(|error| native(4, error))?;
     let required = SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_DACL_PROTECTED;
     if revision != 1 || control.0 & required.0 != required.0 {
