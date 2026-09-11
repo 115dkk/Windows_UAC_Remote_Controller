@@ -147,15 +147,31 @@ class ControllerApplication : Application() {
     }
 
     internal fun canOpenPairingScanner(activity: MainActivity): Boolean {
-        if (!isCurrentForegroundControllerHost(activity) || pairingScanner != null || activity.pairingPermissionPending() ||
-            !serviceWanted || serviceToken == null || explicitStopRequested || !controllerBootActivationEnabled()) return false
-        val actor = policyActor ?: return false
-        if (actor.lifecyclePhase() != PolicyOwnerPhase.READY || actor.hasPendingPairingScan()) return false
+        val reason = pairingScannerGateReason(activity)
+        // Bounded fixed-token CI diagnostics: the first closed gate, logged only when it changes.
+        if (reason != lastScannerGateReason) { lastScannerGateReason = reason; Log.i("UacScan", "gate=${reason == null} reason=${reason ?: "open"}") }
+        return reason == null
+    }
+    private var lastScannerGateReason: String? = "unset"
+    private fun pairingScannerGateReason(activity: MainActivity): String? {
+        if (!isCurrentForegroundControllerHost(activity)) return "host"
+        if (pairingScanner != null) return "scanner_open"
+        if (activity.pairingPermissionPending()) return "permission_pending"
+        if (!serviceWanted) return "service_not_wanted"
+        if (serviceToken == null) return "service_token"
+        if (explicitStopRequested) return "explicit_stop"
+        if (!controllerBootActivationEnabled()) return "boot_activation"
+        val actor = policyActor ?: return "actor"
+        if (actor.lifecyclePhase() != PolicyOwnerPhase.READY) return "phase_${actor.lifecyclePhase().name}"
+        if (actor.hasPendingPairingScan()) return "pending_scan"
         return try {
-            getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure == true &&
-                ControllerForegroundService.observeUnlock(this) == UserUnlockObservation.UNLOCKED &&
-                packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY)
-        } catch (_: Exception) { false }
+            when {
+                getSystemService(android.app.KeyguardManager::class.java)?.isDeviceSecure != true -> "not_secure"
+                ControllerForegroundService.observeUnlock(this) != UserUnlockObservation.UNLOCKED -> "not_unlocked"
+                !packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY) -> "no_camera"
+                else -> null
+            }
+        } catch (_: Exception) { "system_query" }
     }
 
     /** Zero-payload native opening. The original physical binding is retained only as liveness. */

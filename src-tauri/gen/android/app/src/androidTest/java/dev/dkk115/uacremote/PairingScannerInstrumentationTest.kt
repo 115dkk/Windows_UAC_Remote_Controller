@@ -60,7 +60,11 @@ class PairingScannerInstrumentationTest {
             scenario.onActivity { activity = it }
             val host = requireNotNull(activity)
             val app = host.application as ControllerApplication
-            await { onMain { app.canOpenPairingScanner(host) } }
+            try { await { onMain { app.canOpenPairingScanner(host) } } }
+            catch (error: AssertionError) {
+                // Fixed diagnostic lines only (owner phase, service, activation); never payloads.
+                throw AssertionError("Scanner gate stayed closed: ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
+            }
             val originalActor = onMain { actor(app) }
             await { eval(host, BUTTON_READY) == "true" }
             assertEquals("\"clicked\"", eval(host, CLICK_BUTTON))
