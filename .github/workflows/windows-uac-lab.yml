@@ -66,7 +66,8 @@ jobs:
           if ($text -notmatch 'lab-software-ksp-do-not-ship') { throw 'The lab build does not carry the lab identity marker; refusing to install a production-profile service in the lab.' }
           Write-Output 'Lab identity marker present.'
       - name: Install the protected product directory and both executables
-        shell: pwsh
+        # Windows PowerShell 5.1 (.NET Framework) has the security-descriptor-at-creation overloads.
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
