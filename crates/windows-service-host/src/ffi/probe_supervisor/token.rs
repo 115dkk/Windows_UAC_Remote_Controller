@@ -101,20 +101,64 @@ impl CurrentToken {
         }
         // SAFETY: only the new owned token's session scalar is changed. Caller
         // SeTcb was observed ALREADY enabled; no privilege activation is used.
-        unsafe {
+        let set = unsafe {
             SetTokenInformation(
                 duplicate.raw(),
                 TokenSessionId,
                 (&session as *const u32).cast(),
                 4,
             )
-        }
-        .map_err(|error| native(Stage::SetSession, error))?;
+        };
+        // Lab evidence only (run 34618803758 answered E_ACCESSDENIED here although
+        // SeTcb was observed enabled): record the facts and try one explicit enable.
+        #[cfg(feature = "lab-software-identity")]
+        let set = match set {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::lab::record_note(&format!(
+                    "set_session {session} failed: {error:?}; tcb attributes {:?}; token session {:?}",
+                    self.privilege_attributes(SE_TCB_NAME),
+                    TokenBuffer::read(self.handle.raw(), TokenSessionId).map(|value| value.flag())
+                ));
+                match lab_enable_tcb() {
+                    Ok(()) => {
+                        let retry = unsafe {
+                            SetTokenInformation(
+                                duplicate.raw(),
+                                TokenSessionId,
+                                (&session as *const u32).cast(),
+                                4,
+                            )
+                        };
+                        crate::lab::record_note(&format!(
+                            "set_session retry after enabling SeTcb: {retry:?}"
+                        ));
+                        retry
+                    }
+                    Err(enable) => {
+                        crate::lab::record_note(&format!("enabling SeTcb failed: {enable:?}"));
+                        Err(error)
+                    }
+                }
+            }
+        };
+        set.map_err(|error| native(Stage::SetSession, error))?;
         if facts(duplicate.raw(), session, service_sid)? != self.facts {
             return Err(Error::RestrictedTokenMismatch);
         }
         self.recheck(service_sid)?;
         Ok(duplicate)
+    }
+    #[cfg(feature = "lab-software-identity")]
+    fn privilege_attributes(&self, name: windows::core::PCWSTR) -> Option<u32> {
+        let mut id = LUID::default();
+        // SAFETY: fixed local privilege name; lookup does not enable anything.
+        unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut id) }.ok()?;
+        self.facts
+            .privileges
+            .iter()
+            .find(|(value, _)| *value == luid(id))
+            .map(|(_, flags)| *flags)
     }
     pub(super) fn recheck(&self, service_sid: &[u8]) -> Result<(), Error> {
         let current = Self::observe(service_sid)?;
@@ -140,6 +184,41 @@ impl CurrentToken {
         }
         Ok(())
     }
+}
+
+/// Lab only: enable SeTcbPrivilege on the current process token once so the
+/// disposable runner can show whether the session change needs an explicit
+/// enable. Release builds never adjust privileges.
+#[cfg(feature = "lab-software-identity")]
+fn lab_enable_tcb() -> windows::core::Result<()> {
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
+    };
+    let mut token = HANDLE::default();
+    // SAFETY: own process pseudo-handle; adjust/query access only; initialized out.
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    }?;
+    let token = Handle::new(token, Stage::TokenQuery)
+        .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_HANDLE))?;
+    let mut id = LUID::default();
+    // SAFETY: fixed local privilege name; initialized scalar out.
+    unsafe { LookupPrivilegeValueW(PCWSTR::null(), SE_TCB_NAME, &mut id) }?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: id,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: owned token with adjust access; one initialized privilege row; no
+    // previous-state buffer requested.
+    unsafe { AdjustTokenPrivileges(token.raw(), false, Some(&privileges), 0, None, None) }?;
+    Ok(())
 }
 
 fn reject_impersonation() -> Result<(), Error> {
