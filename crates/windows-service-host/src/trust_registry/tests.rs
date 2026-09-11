@@ -172,7 +172,16 @@ fn maximum_composite_is_bounded_and_roundtrips_canonically() {
     // 14-byte header plus 32 entries of 232 bytes (version 2 with routes).
     assert_eq!(bytes.len(), 7438);
     assert_eq!(bytes.len(), MAX_DOCUMENT_BYTES);
-    assert_eq!(Document::decode(pc(), &bytes).unwrap().encode(), bytes);
+    let decoded = Document::decode(pc(), &bytes).unwrap();
+    assert_eq!(decoded.encode(), bytes);
+    // Every enrolled device keeps its steady-state relay and route through the codec.
+    let routes = decoded.device_routes();
+    assert_eq!(routes.len(), 32);
+    assert!(
+        routes
+            .iter()
+            .all(|(_, relay_address, route_id)| *relay_address == relay(1) && *route_id == route(1))
+    );
     assert!(
         state
             .changed(RegistryChange::Enroll {
