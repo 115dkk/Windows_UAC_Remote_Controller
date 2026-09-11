@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "scope": "Exact upstream original notice assets; package applicability and distribution completeness are separate",
+  "sources": [
+    {
+      "id": "uniffi-5c7b73906358/LICENSE",
+      "sourcePath": "third-party/notices/rust/uniffi-5c7b73906358/LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/mozilla/uniffi-rs/5c7b73906358e1a7acdc1bdc7bf5cd86fb27e44c/LICENSE",
+      "bytes": 16725,
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    },
+    {
+      "id": "ndk-49bbbba16c58/LICENSE-MIT",
+      "sourcePath": "third-party/notices/rust/ndk-49bbbba16c58/LICENSE-MIT",
+      "upstreamUrl": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-MIT",
+      "bytes": 1036,
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+    },
+    {
+      "id": "ndk-49bbbba16c58/LICENSE-APACHE",
+      "sourcePath": "third-party/notices/rust/ndk-49bbbba16c58/LICENSE-APACHE",
+      "upstreamUrl": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-APACHE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "id": "unic-5878605364af/LICENSE-MIT",
+      "sourcePath": "third-party/notices/rust/unic-5878605364af/LICENSE-MIT",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+      "bytes": 1023,
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "id": "unic-5878605364af/LICENSE-APACHE",
+      "sourcePath": "third-party/notices/rust/unic-5878605364af/LICENSE-APACHE",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+      "bytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "id": "unic-5878605364af/COPYRIGHT.md",
+      "sourcePath": "third-party/notices/rust/unic-5878605364af/COPYRIGHT.md",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
+      "bytes": 608,
+      "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b"
+    },
+    {
+      "id": "unic-5878605364af/AUTHORS",
+      "sourcePath": "third-party/notices/rust/unic-5878605364af/AUTHORS",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
+      "bytes": 664,
+      "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09"
+    },
+    {
+      "id": "unic-8a6ce83063d9/LICENSE-MIT",
+      "sourcePath": "third-party/notices/rust/unic-8a6ce83063d9/LICENSE-MIT",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+      "bytes": 1023,
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "id": "unic-8a6ce83063d9/LICENSE-APACHE",
+      "sourcePath": "third-party/notices/rust/unic-8a6ce83063d9/LICENSE-APACHE",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+      "bytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "id": "unic-8a6ce83063d9/COPYRIGHT.md",
+      "sourcePath": "third-party/notices/rust/unic-8a6ce83063d9/COPYRIGHT.md",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md",
+      "bytes": 608,
+      "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b"
+    },
+    {
+      "id": "unic-8a6ce83063d9/AUTHORS",
+      "sourcePath": "third-party/notices/rust/unic-8a6ce83063d9/AUTHORS",
+      "upstreamUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS",
+      "bytes": 664,
+      "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09"
+    }
+  ]
+}

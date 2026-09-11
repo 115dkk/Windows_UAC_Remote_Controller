@@ -11,18 +11,20 @@ import { fileURLToPath } from 'node:url';
 import { TextDecoder } from 'node:util';
 import { licenseInventoryFromMetadata, readLockedCargoMetadata } from './license-inventory.mjs';
 import { ALLOC_STDLIB_SHARED_NOTICE, isReviewedSharedNoticeConsumer, isReviewedSharedNoticeProvider, matchesReviewedSharedNoticeBytes } from './license-material-supplements.mjs';
+import { isApprovedUpstreamIndex, matchesUpstreamMaterial, MAX_UPSTREAM_CONSUMERS, MAX_UPSTREAM_GROUP_FILES, upstreamNoticeGroup, upstreamPinForSourcePath, UPSTREAM_SOURCE_INDEX, UPSTREAM_SOURCE_PINS } from './license-upstream-policy.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 export const MATERIALS_OUTPUT = 'target/license-materials/rust';
 export const MATERIAL_LIMITS = Object.freeze({ packages: 2048, perPackage: 32, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, rootEntries: 1024, pathBytes: 4096, manifestBytes: 16 * 1024 * 1024 });
-const MARKER = '.rust-license-materials-v2';
-const MARKER_BYTES = Buffer.from('Rust license-materials collection v2; incomplete until manifest.json is committed.\n');
+const MARKER = '.rust-license-materials-v3';
+const MARKER_BYTES = Buffer.from('Rust license-materials collection v3; incomplete until manifest.json is committed.\n');
 const ROOT_NOTICES = ['LICENSE', 'LICENSE-NOTICE.md'];
 const PATCH_NOTICE = 'vendor/ANDROID_LIFECYCLE_PATCHES.md';
+const MAX_FIXED_ROOT_MATERIALS = ROOT_NOTICES.length + 1 + UPSTREAM_SOURCE_PINS.length;
 const LIMITATIONS = Object.freeze(['license-compatibility-not-evaluated', 'legal-completeness-not-certified', 'corresponding-source-not-produced', 'npm-maven-not-collected', 'fonts-remain-owned-by-tools/ui-fonts.mjs', 'stable-input-observations-not-upstream-archive-verification', 'quiescent-trusted-checkout-source-cache-output-required', 'anchor-stat-checks-not-adversarial-ancestor-swap-or-aba-containment']);
 const LEGAL_NAME = /^(?:LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT|UNLICENSE)(?:[-_.][A-Za-z0-9._-]+)?$/iu;
 const PRIVATE_SEGMENT = /^(?:\.git|\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.config|\.codex|\.superloopy|\.env(?:\..*)?|credentials?|secrets?|config(?:\..*)?|id_rsa|id_ed25519)$/iu;
-const ERRORS = new Set(['arguments', 'metadata_observation', 'metadata_shape', 'metadata_license', 'provenance', 'path', 'source_missing', 'source_type', 'source_changed', 'source_text', 'source_bounds', 'name_collision', 'material_missing', 'output_exists', 'output_io', 'manifest']);
+const ERRORS = new Set(['arguments', 'metadata_observation', 'metadata_shape', 'metadata_license', 'provenance', 'path', 'source_missing', 'source_type', 'source_changed', 'source_text', 'source_bounds', 'name_collision', 'material_missing', 'upstream_notice', 'output_exists', 'output_io', 'manifest']);
 const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -182,7 +184,7 @@ export function legalCandidates(names) {
   return selected;
 }
 export function inspectGeneratedMaterialNames(io, directory, expected) {
-  if (!Array.isArray(expected) || expected.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + 3 || expected.some((name, index) => name !== `m${String(index).padStart(6, '0')}.txt`)) incomplete('manifest');
+  if (!Array.isArray(expected) || expected.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + MAX_FIXED_ROOT_MATERIALS || expected.some((name, index) => name !== `m${String(index).padStart(6, '0')}.txt`)) incomplete('manifest');
   // The generated flat directory is not a package-root scan. Read only its
   // exact declared count plus one extra entry for bounded intrusion detection.
   const names = directoryNames(io, directory, expected.length + 1).sort(compare);
@@ -232,17 +234,19 @@ function packageRecords(metadata, repository) {
 }
 
 export function validateMaterialManifest(manifest) {
-  if (!keys(manifest, ['schemaVersion', 'status', 'scope', 'lockfile', 'inventory', 'packages', 'materials', 'sharedNotices', 'limitations']) || manifest.schemaVersion !== 2 || manifest.status !== 'collected' || manifest.scope !== 'rust-declared-and-shallow-legal-materials' || !Array.isArray(manifest.inventory) || !Array.isArray(manifest.packages) || !Array.isArray(manifest.materials) || !Array.isArray(manifest.sharedNotices) || manifest.sharedNotices.length > 1 || manifest.inventory.length === 0 || manifest.inventory.length > MATERIAL_LIMITS.packages || manifest.packages.length !== manifest.inventory.length || manifest.materials.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + 3) incomplete('manifest');
+  if (!keys(manifest, ['schemaVersion', 'status', 'scope', 'lockfile', 'inventory', 'packages', 'materials', 'sharedNotices', 'upstreamIndex', 'upstreamNotices', 'limitations']) || manifest.schemaVersion !== 3 || manifest.status !== 'collected' || manifest.scope !== 'rust-declared-and-shallow-legal-materials' || !Array.isArray(manifest.inventory) || !Array.isArray(manifest.packages) || !Array.isArray(manifest.materials) || !Array.isArray(manifest.sharedNotices) || manifest.sharedNotices.length > 1 || !Array.isArray(manifest.upstreamNotices) || manifest.upstreamNotices.length > MAX_UPSTREAM_CONSUMERS || manifest.inventory.length === 0 || manifest.inventory.length > MATERIAL_LIMITS.packages || manifest.packages.length !== manifest.inventory.length || manifest.materials.length > MATERIAL_LIMITS.packages * MATERIAL_LIMITS.perPackage + MAX_FIXED_ROOT_MATERIALS) incomplete('manifest');
   const byteRecord = (value, maximum) => Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= maximum && /^[a-f0-9]{64}$/u.test(value.sha256);
   if (!keys(manifest.lockfile, ['sourcePath', 'bytes', 'sha256']) || manifest.lockfile.sourcePath !== 'Cargo.lock' || !byteRecord(manifest.lockfile, MATERIAL_LIMITS.fileBytes)) incomplete('manifest');
+  if (manifest.upstreamNotices.length ? !keys(manifest.upstreamIndex, ['sourcePath', 'bytes', 'sha256']) || manifest.upstreamIndex.sourcePath !== UPSTREAM_SOURCE_INDEX || !byteRecord(manifest.upstreamIndex, MATERIAL_LIMITS.fileBytes) : manifest.upstreamIndex !== null) incomplete('manifest');
   const origins = new Set(), materialById = new Map();
   let total = 0;
   manifest.materials.forEach((item, index) => {
     const id = `m${String(index).padStart(6, '0')}`;
-    if (!keys(item, ['id', 'origin', 'sourcePath', 'outputPath', 'kind', 'bytes', 'sha256']) || item.id !== id || item.outputPath !== `materials/${id}.txt` || !['text', 'spdx-metadata', 'attribution'].includes(item.kind) || !byteRecord(item, MATERIAL_LIMITS.fileBytes) || !/^(?:repository|package:[0-9]{6})$/u.test(item.origin)) incomplete('manifest');
+    if (!keys(item, ['id', 'origin', 'sourcePath', 'outputPath', 'kind', 'bytes', 'sha256']) || item.id !== id || item.outputPath !== `materials/${id}.txt` || !['text', 'spdx-metadata', 'attribution'].includes(item.kind) || !byteRecord(item, MATERIAL_LIMITS.fileBytes) || !/^(?:repository|upstream-repository|package:[0-9]{6})$/u.test(item.origin)) incomplete('manifest');
     safeRelativePath(item.sourcePath); safeRelativePath(item.outputPath);
     if (item.origin === 'repository' && ![...ROOT_NOTICES, PATCH_NOTICE].includes(item.sourcePath)) incomplete('manifest');
-    if (item.origin !== 'repository' && Number(item.origin.slice(8)) >= manifest.packages.length) incomplete('manifest');
+    if (item.origin === 'upstream-repository' && !matchesUpstreamMaterial(item, upstreamPinForSourcePath(item.sourcePath))) incomplete('manifest');
+    if (item.origin.startsWith('package:') && Number(item.origin.slice(8)) >= manifest.packages.length) incomplete('manifest');
     const key = `${item.origin}/${item.sourcePath}`.toLowerCase();
     if (origins.has(key)) incomplete('name_collision');
     origins.add(key); materialById.set(item.id, item); total += item.bytes;
@@ -260,16 +264,35 @@ export function validateMaterialManifest(manifest) {
     if (!isReviewedSharedNoticeConsumer(manifest.inventory[share.consumerInventoryIndex], consumer?.provenance?.kind) || !isReviewedSharedNoticeProvider(manifest.inventory[share.providerInventoryIndex], provider?.provenance?.kind) || !matchesReviewedSharedNoticeBytes(material) || material.origin !== `package:${String(share.providerInventoryIndex).padStart(6, '0')}` || !Array.isArray(consumer.materials) || !consumer.materials.includes(share.materialId) || !Array.isArray(provider.materials) || !provider.materials.includes(share.materialId)) incomplete('manifest');
     reviewedShares.set(share.consumerInventoryIndex, share.materialId);
   }
+  const upstreamByConsumer = new Map(), referencedUpstream = new Set();
+  for (const relation of manifest.upstreamNotices) {
+    if (!keys(relation, ['consumerInventoryIndex', 'groupId', 'sources']) || !Number.isSafeInteger(relation.consumerInventoryIndex) || relation.consumerInventoryIndex < 0 || relation.consumerInventoryIndex >= manifest.inventory.length || upstreamByConsumer.has(relation.consumerInventoryIndex)) incomplete('manifest');
+    const consumer = manifest.packages[relation.consumerInventoryIndex];
+    const approved = upstreamNoticeGroup(manifest.inventory[relation.consumerInventoryIndex], consumer?.provenance?.kind);
+    if (!approved || relation.groupId !== approved.id || !Array.isArray(relation.sources) || relation.sources.length !== approved.sources.length || !Array.isArray(consumer.materials)) incomplete('manifest');
+    const refs = new Set();
+    relation.sources.forEach((source, index) => {
+      const pin = approved.sources[index], material = materialById.get(source?.materialId);
+      if (!keys(source, ['sourceId', 'materialId', 'upstreamSourcePath', 'upstreamUrl', 'bytes', 'sha256']) || source.sourceId !== pin.id || source.upstreamSourcePath !== pin.upstreamSourcePath || source.upstreamUrl !== pin.upstreamUrl || source.bytes !== pin.bytes || source.sha256 !== pin.sha256 || !matchesUpstreamMaterial(material, pin) || !consumer.materials.includes(source.materialId) || refs.has(source.materialId)) incomplete('manifest');
+      refs.add(source.materialId); referencedUpstream.add(source.materialId);
+    });
+    upstreamByConsumer.set(relation.consumerInventoryIndex, refs);
+  }
+  if (manifest.materials.some((item) => item.origin === 'upstream-repository' && !referencedUpstream.has(item.id))) incomplete('manifest');
   manifest.packages.forEach((pkg, index) => {
-    if (!keys(pkg, ['inventoryIndex', 'provenance', 'materials']) || pkg.inventoryIndex !== index || !keys(pkg.provenance, ['kind', 'root']) || !['workspace', 'vendored', 'path', 'registry', 'git'].includes(pkg.provenance.kind) || !Array.isArray(pkg.materials) || pkg.materials.length === 0 || pkg.materials.length > MATERIAL_LIMITS.perPackage + 3 || new Set(pkg.materials).size !== pkg.materials.length) incomplete('manifest');
+    if (!keys(pkg, ['inventoryIndex', 'provenance', 'materials']) || pkg.inventoryIndex !== index || !keys(pkg.provenance, ['kind', 'root']) || !['workspace', 'vendored', 'path', 'registry', 'git'].includes(pkg.provenance.kind) || !Array.isArray(pkg.materials) || pkg.materials.length === 0 || pkg.materials.length > MATERIAL_LIMITS.perPackage + Math.max(3, MAX_UPSTREAM_GROUP_FILES) || new Set(pkg.materials).size !== pkg.materials.length) incomplete('manifest');
     safeRelativePath(pkg.provenance.root);
     const ownOrigin = `package:${String(index).padStart(6, '0')}`;
     const selected = pkg.materials.map((id) => materialById.get(id));
     const reviewedMaterial = reviewedShares.get(index);
-    if (selected.some((item) => !item || item.origin !== 'repository' && item.origin !== ownOrigin && item.id !== reviewedMaterial)) incomplete('manifest');
+    const upstreamMaterials = upstreamByConsumer.get(index) ?? new Set();
+    if (selected.some((item) => !item || item.origin !== 'repository' && item.origin !== ownOrigin && item.id !== reviewedMaterial && !upstreamMaterials.has(item.id))) incomplete('manifest');
+    if (selected.filter((item) => item.origin === ownOrigin).length > MATERIAL_LIMITS.perPackage) incomplete('source_bounds');
     const row = manifest.inventory[index];
     if (row.workspace !== (pkg.provenance.kind === 'workspace')) incomplete('manifest');
-    if (!row.workspace && !selected.some((item) => item.origin === ownOrigin && item.kind === 'text' || item.id === reviewedMaterial)) incomplete('material_missing');
+    const requiredUpstream = upstreamNoticeGroup(row, pkg.provenance.kind);
+    if (requiredUpstream && upstreamMaterials.size !== requiredUpstream.sources.length) incomplete('material_missing');
+    if (!row.workspace && !selected.some((item) => item.origin === ownOrigin && item.kind === 'text' || item.id === reviewedMaterial || upstreamMaterials.has(item.id))) incomplete('material_missing');
     if ((row.workspace || pkg.provenance.kind === 'vendored' && row.license?.includes('GPL-2.0-or-later')) && ROOT_NOTICES.some((name) => !selected.some((item) => item.origin === 'repository' && item.sourcePath === name))) incomplete('material_missing');
     if (pkg.provenance.kind === 'vendored' && !selected.some((item) => item.origin === 'repository' && item.sourcePath === PATCH_NOTICE)) incomplete('material_missing');
   });
@@ -377,8 +400,8 @@ export function collectLicenseMaterials({ repository = repositoryRoot, metadataR
     if (selected.length > MATERIAL_LIMITS.perPackage) incomplete('source_bounds', entry.pkg.name);
     selected.sort(compare);
     if (!entry.workspace && !selected.some((name) => !name.toLowerCase().endsWith('.spdx'))) {
-      if (!isReviewedSharedNoticeConsumer(inventory[index], entry.provenance.kind)) incomplete('material_missing', entry.pkg.name);
-      missingText.push(index);
+      if (isReviewedSharedNoticeConsumer(inventory[index], entry.provenance.kind)) missingText.push(index);
+      else if (!upstreamNoticeGroup(inventory[index], entry.provenance.kind)) incomplete('material_missing', entry.pkg.name);
     }
     const refs = selected.map((name) => add(entry.root, name, `package:${String(index).padStart(6, '0')}`, name.toLowerCase().endsWith('.spdx') ? 'spdx-metadata' : 'text'));
     if (entry.workspace || entry.provenance.kind === 'vendored' && entry.pkg.license?.includes('GPL-2.0-or-later')) refs.push(...rootRefs);
@@ -396,10 +419,37 @@ export function collectLicenseMaterials({ repository = repositoryRoot, metadataR
     packages[consumerInventoryIndex].materials.sort(compare);
     return { id: ALLOC_STDLIB_SHARED_NOTICE.id, consumerInventoryIndex, providerInventoryIndex, materialId: material.id, upstreamNoticeUrl: ALLOC_STDLIB_SHARED_NOTICE.upstreamNoticeUrl, bytes: material.bytes, sha256: material.sha256 };
   });
-  const manifest = validateMaterialManifest({ schemaVersion: 2, status: 'collected', scope: 'rust-declared-and-shallow-legal-materials', lockfile: { sourcePath: 'Cargo.lock', bytes: lock.bytes.length, sha256: digest(lock.bytes) }, inventory, packages, materials, sharedNotices, limitations: [...LIMITATIONS] });
+  let upstreamIndexInput = null;
+  const imported = new Map(), upstreamNotices = [];
+  inventory.forEach((row, consumerInventoryIndex) => {
+    const approved = upstreamNoticeGroup(row, packages[consumerInventoryIndex].provenance.kind);
+    if (!approved) return;
+    if (!upstreamIndexInput) {
+      upstreamIndexInput = readStable(io, join(root, ...UPSTREAM_SOURCE_INDEX.split('/')));
+      let index;
+      try { index = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(upstreamIndexInput.bytes)); } catch { incomplete('upstream_notice'); }
+      if (!isApprovedUpstreamIndex(index)) incomplete('upstream_notice');
+    }
+    const sources = approved.sources.map((pin) => {
+      let materialId = imported.get(pin.id);
+      if (!materialId) {
+        materialId = add(root, pin.sourcePath, 'upstream-repository', pin.kind);
+        const material = materials.find((item) => item.id === materialId);
+        if (!matchesUpstreamMaterial(material, pin)) incomplete('upstream_notice', row.name);
+        imported.set(pin.id, materialId);
+      }
+      packages[consumerInventoryIndex].materials.push(materialId);
+      return { sourceId: pin.id, materialId, upstreamSourcePath: pin.upstreamSourcePath, upstreamUrl: pin.upstreamUrl, bytes: pin.bytes, sha256: pin.sha256 };
+    });
+    packages[consumerInventoryIndex].materials.sort(compare);
+    upstreamNotices.push({ consumerInventoryIndex, groupId: approved.id, sources });
+  });
+  const upstreamIndex = upstreamIndexInput ? { sourcePath: UPSTREAM_SOURCE_INDEX, bytes: upstreamIndexInput.bytes.length, sha256: digest(upstreamIndexInput.bytes) } : null;
+  const manifest = validateMaterialManifest({ schemaVersion: 3, status: 'collected', scope: 'rust-declared-and-shallow-legal-materials', lockfile: { sourcePath: 'Cargo.lock', bytes: lock.bytes.length, sha256: digest(lock.bytes) }, inventory, packages, materials, sharedNotices, upstreamIndex, upstreamNotices, limitations: [...LIMITATIONS] });
   const manifestBytes = encodeMaterialManifest(manifest);
   const checkSources = () => {
     recheck(io, lock);
+    if (upstreamIndexInput) recheck(io, upstreamIndexInput);
     for (const scan of scans) {
       checkAnchors(io, scan.anchors);
       if (stamp(lstat(io, scan.manifest)) !== scan.manifestStamp || JSON.stringify(legalCandidates(directoryNames(io, scan.root))) !== JSON.stringify(scan.names)) incomplete('source_changed');

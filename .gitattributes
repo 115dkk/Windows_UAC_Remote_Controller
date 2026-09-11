@@ -2,3 +2,6 @@
 *.png binary
 *.ico binary
 *.woff2 binary
+# Preserve imported upstream notice bytes, including their original line endings.
+third-party/notices/rust/** -text
+third-party/notices/rust/sources.json text eol=lf
