@@ -6,6 +6,7 @@
   "permissions": [
     "allow-app-snapshot", "allow-save-notification-policy", "allow-control-service",
     "allow-begin-pairing", "allow-remove-device", "allow-decide-request",
-    "allow-clear-activity", "allow-open-lock-settings", "allow-open-notification-settings"
+    "allow-clear-activity", "allow-open-lock-settings", "allow-open-notification-settings",
+    "allow-open-pairing-scanner", "allow-request-details"
   ]
 }
