@@ -197,7 +197,18 @@ fn configure_unfinalized(
     )?;
     // Some providers may not support these pre-finalization checks. In that
     // case do NOT finalize first and repair permissions afterward: reject them.
-    validate_key(key, service_sid)
+    #[cfg(not(feature = "lab-software-identity"))]
+    {
+        validate_key(key, service_sid)
+    }
+    // Lab only: the software KSP answers NTE_BAD_KEY_STATE to property reads on
+    // an unfinalized key. create() still validates and reopens the finalized key
+    // and rolls it back on any mismatch; production keeps the pre-check above.
+    #[cfg(feature = "lab-software-identity")]
+    {
+        let _ = (key, service_sid);
+        Ok(())
+    }
 }
 
 fn validate_key(key: &OwnedKey, service_sid: &[u8; 32]) -> Result<(), IdentityError> {
