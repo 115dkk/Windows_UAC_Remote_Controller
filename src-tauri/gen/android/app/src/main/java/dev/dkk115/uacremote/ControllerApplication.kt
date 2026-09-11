@@ -152,6 +152,9 @@ class ControllerApplication : Application() {
         if (reason != lastScannerGateReason) { lastScannerGateReason = reason; Log.i("UacScan", "gate=${reason == null} reason=${reason ?: "open"}") }
         return reason == null
     }
+    /** Fixed-token outcome of the last native open attempt, for CI diagnostics only. */
+    @Volatile internal var lastPairingScannerLaunch: String? = null
+        private set
     private var lastScannerGateReason: String? = "unset"
     private fun pairingScannerGateReason(activity: MainActivity): String? {
         if (!isCurrentForegroundControllerHost(activity)) return "host"
@@ -180,6 +183,7 @@ class ControllerApplication : Application() {
         check(Looper.myLooper() == Looper.getMainLooper())
         // Bounded fixed-token diagnostics for CI: outcome and branch only, never payloads.
         val report = { result: PairingScannerLaunch, reason: String ->
+            lastPairingScannerLaunch = "${result.name}:$reason"
             Log.i("UacScan", "stage=open result=${result.name} reason=$reason"); callback(result)
         }
         if (!isCurrentForegroundControllerHost(activity) || !originCurrent()) { report(PairingScannerLaunch.UNAVAILABLE, "host_or_origin"); return }

@@ -74,7 +74,13 @@ class PairingScannerInstrumentationTest {
                 throw AssertionError("Scanner button never became ready: client=$client nativeGate=$gate ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
             }
             assertEquals("\"clicked\"", eval(host, CLICK_BUTTON))
-            await { onMain { scannerWindow() != null } }
+            try { await { onMain { scannerWindow() != null } } }
+            catch (error: AssertionError) {
+                // Fixed tokens only: whether the native open ran and how it ended, plus the owner lines.
+                val launch = onMain { app.lastPairingScannerLaunch }
+                val gate = onMain { app.canOpenPairingScanner(host) }
+                throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
+            }
             assertTrue(onMain { secureScannerWindow() })
             await { onMain { scannerMessage() == host.getString(R.string.pairing_scanner_scanning) } }
             assertFalse(onMain { app.canOpenPairingScanner(host) })
