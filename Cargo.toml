@@ -55,7 +55,10 @@ unimplemented = "deny"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+# Debug info goes; the symbol table stays. UniFFI's binding generator reads the
+# Android library's exported metadata symbols, and `strip = true` removed them
+# (release run 34642055338: "No UniFFI metadata found").
+strip = "debuginfo"
 overflow-checks = true
 
 [profile.dev]
