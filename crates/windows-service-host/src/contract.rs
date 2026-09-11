@@ -159,10 +159,10 @@ impl Command {
         };
         let second = arguments.next();
         let third = arguments.next();
-        if arguments.next().is_some() {
-            return Err(ServiceError::InvalidArguments);
-        }
         if first.as_ref().to_str() == Some("pair-renderer") {
+            if arguments.next().is_some() {
+                return Err(ServiceError::InvalidArguments);
+            }
             let pending =
                 PendingElevationId::parse(second.ok_or(ServiceError::InvalidArguments)?.as_ref())?;
             let display =
@@ -958,6 +958,24 @@ mod tests {
             Err(ServiceError::InvalidArguments)
         );
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn renderer_cli_rejects_the_first_excess_argument_without_reading_its_tail() {
+        let mut count = 0;
+        let raw = [
+            "pair-renderer".to_owned(),
+            "ab".repeat(32),
+            "cd".repeat(32),
+            "extra".to_owned(),
+            "never-read".to_owned(),
+        ];
+        let iterator = raw.iter().inspect(|_| count += 1);
+        assert_eq!(
+            Command::parse(iterator),
+            Err(ServiceError::InvalidArguments)
+        );
+        assert_eq!(count, 4);
     }
 
     #[test]
