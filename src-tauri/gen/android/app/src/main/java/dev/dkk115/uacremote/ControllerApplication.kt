@@ -45,7 +45,8 @@ import dev.dkk115.uacremote.pairing.PairingScannerLaunch
 
 /** One Application owner; Direct Boot construction does not touch CE/Rust/keys. */
 class ControllerApplication : Application() {
-    @Volatile private var policyActor: ApplicationPolicyActor? = null
+    @Volatile internal var policyActor: ApplicationPolicyActor? = null
+        private set
     private var pairingScanner: PairingScannerDialog? = null // main only, retained through cleanup
     private val main = Handler(Looper.getMainLooper())
     private val readLock = Any()
@@ -180,7 +181,13 @@ class ControllerApplication : Application() {
                 // One zero-payload snapshot invalidation after ACTUAL release,
                 // never to a replacement Activity/WebView or while resources remain.
                 if (isCurrentForegroundControllerHost(activity) && originCurrent()) requestSnapshotChanged()
-            } }) } catch (error: Exception) { report(PairingScannerLaunch.UNAVAILABLE, "construct:${error.javaClass.simpleName}"); return }
+            } },
+            { finished ->
+                // Terminal enrollment refreshes the original binding while the
+                // native result window remains open; it does not release its slot.
+                if (pairingScanner === finished && policyActor === actor &&
+                    isCurrentForegroundControllerHost(activity) && originCurrent()) requestSnapshotChanged()
+            }) } catch (error: Exception) { report(PairingScannerLaunch.UNAVAILABLE, "construct:${error.javaClass.simpleName}"); return }
         pairingScanner = flow
         try {
             val opened = flow.show()

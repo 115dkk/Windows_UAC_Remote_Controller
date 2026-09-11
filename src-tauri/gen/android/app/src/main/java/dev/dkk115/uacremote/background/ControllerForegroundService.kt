@@ -13,6 +13,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
@@ -34,6 +35,18 @@ class ControllerForegroundService : Service() {
     private var unlockReceiverRegistered = false
     private var unlockRegistrationAttempted = false
     private var activationWaitStartId: Int? = null
+    private val main = Handler(Looper.getMainLooper())
+    private val connectivityToken = Any()
+    private var connectivityTickPosted = false
+    private val connectivityTick = object : Runnable {
+        override fun run() {
+            connectivityTickPosted = false
+            val owner = application as? ControllerApplication
+            if (!connectionMaintenanceReady(owner)) { stopConnectivityTick(); return }
+            owner?.policyActor?.maintainConnections()
+            scheduleConnectivityTick()
+        }
+    }
     private val unlockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!destroyed && intent.action == Intent.ACTION_USER_UNLOCKED) refreshAfterUnlock()
@@ -80,6 +93,7 @@ class ControllerForegroundService : Service() {
             sticky = intent == null, attached = attached, promoted = promoted))
         val owner = application as? ControllerApplication
         if (!promoted || owner == null || !attached) {
+            stopConnectivityTick()
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
@@ -115,6 +129,7 @@ class ControllerForegroundService : Service() {
                 component = component, activation = owner.controllerBootActivationState()))
             owner.controllerServiceStartRejected(activatedGeneration, ownerToken)
             retiring = true
+            stopConnectivityTick()
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
@@ -128,6 +143,7 @@ class ControllerForegroundService : Service() {
             return rejectStart(owner, generation, startId)
         }
         activatedGeneration = generation
+        scheduleConnectivityTick()
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.GENERATION_ACCEPTED,
             component = component, sticky = sticky, generationPresent = true, admitted = true,
             activation = owner.controllerBootActivationState()))
@@ -143,6 +159,7 @@ class ControllerForegroundService : Service() {
             generationPresent = generation != null, admitted = false, keptCurrent = current))
         if (current) return START_STICKY
         retiring = true
+        stopConnectivityTick()
         owner.controllerServiceStartRejected(generation, ownerToken)
         stopSelfResult(startId)
         return START_NOT_STICKY
@@ -184,7 +201,25 @@ class ControllerForegroundService : Service() {
         catch (_: Exception) { /* retain the registration obligation until destroy */ }
     }
 
+    private fun connectionMaintenanceReady(owner: ControllerApplication?): Boolean =
+        promoted && attached && !retiring && !destroyed && owner != null &&
+            owner.isCurrentControllerServiceGeneration(ownerToken, activatedGeneration) &&
+            owner.policyActor?.lifecyclePhase() == PolicyOwnerPhase.READY
+
+    private fun scheduleConnectivityTick() {
+        if (!connectionMaintenanceReady(application as? ControllerApplication)) { stopConnectivityTick(); return }
+        if (!connectivityTickPosted) {
+            connectivityTickPosted = main.postDelayed(connectivityTick, connectivityToken, CONNECTION_TICK_MILLIS)
+        }
+    }
+
+    private fun stopConnectivityTick() {
+        main.removeCallbacksAndMessages(connectivityToken)
+        connectivityTickPosted = false
+    }
+
     private fun showState(state: ControllerServiceState) {
+        if (state == ControllerServiceState.LOCAL_SETTINGS_READY) scheduleConnectivityTick() else stopConnectivityTick()
         if (!promoted || destroyed) return
         try {
             val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
@@ -193,6 +228,8 @@ class ControllerForegroundService : Service() {
             BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.NOTIFICATION_FAILED,
                 failure = BootDiagnostics.failureCategory(failure)))
             // No invisible replacement/background worker is started on failure.
+            retiring = true
+            stopConnectivityTick()
             (application as? ControllerApplication)?.controllerServiceStartRejected(activatedGeneration, ownerToken)
             stopSelf()
         }
@@ -235,6 +272,7 @@ class ControllerForegroundService : Service() {
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.SERVICE_DESTROY,
             generationPresent = activatedGeneration != null, attached = attached, promoted = promoted))
         destroyed = true
+        stopConnectivityTick()
         activationWaitStartId = null
         unregisterUnlockReceiver()
         if (attached) (application as? ControllerApplication)?.detachControllerService(ownerToken, activatedGeneration)
@@ -245,6 +283,7 @@ class ControllerForegroundService : Service() {
     }
 
     companion object {
+        private const val CONNECTION_TICK_MILLIS = 15_000L
         private const val ACTION_START = "dev.dkk115.uacremote.service.START"
         private const val ACTION_EXPLICIT_START = "dev.dkk115.uacremote.service.EXPLICIT_START"
         private const val EXTRA_GENERATION = "dev.dkk115.uacremote.service.NATIVE_GENERATION"

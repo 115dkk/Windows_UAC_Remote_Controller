@@ -25,6 +25,8 @@ import androidx.core.view.WindowCompat
 import dev.dkk115.uacremote.MainActivity
 import dev.dkk115.uacremote.R
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
+import dev.dkk115.uacremote.nativecore.NativeCeremonyStatus
+import dev.dkk115.uacremote.nativecore.NativeCeremonyFailure
 
 /** One native window/input lifetime, bound to the ORIGINAL Activity and actor. */
 internal class PairingScannerDialog(
@@ -33,6 +35,7 @@ internal class PairingScannerDialog(
     private val actor: ApplicationPolicyActor,
     private val currentHost: () -> Boolean,
     private val finished: (PairingScannerDialog) -> Unit,
+    private val ceremonyFinished: (PairingScannerDialog) -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val started = SystemClock.elapsedRealtime()
@@ -56,7 +59,7 @@ internal class PairingScannerDialog(
         override fun dismiss() { this@PairingScannerDialog.close() }
         fun dismissOriginalWindow() { super.dismiss() }
     }
-    private val content = PairingScannerView(dialog.context, ::close, ::permissionAction)
+    private val content = PairingScannerView(dialog.context, ::close, ::permissionAction, ::confirmCeremony, ::close)
     private var state = PairingScannerState.PREPARING
     private var closed = false
     private var coreReady = false
@@ -108,15 +111,17 @@ internal class PairingScannerDialog(
         return true
     }
 
-    private fun live(): Boolean = !closed && PairingScanRules.current(started, SystemClock.elapsedRealtime()) && currentHost() && try {
+    private fun live(): Boolean = !closed &&
+        (PairingCeremonyRules.terminal(state) || PairingScanRules.current(started, SystemClock.elapsedRealtime())) && currentHost() && try {
         activity.getSystemService(UserManager::class.java)?.isUserUnlocked == true &&
             activity.getSystemService(KeyguardManager::class.java)?.isDeviceSecure == true
     } catch (_: Exception) { false }
 
-    private fun render(value: PairingScannerState) {
+    private fun render(value: PairingScannerState, comparisonCode: String? = null, failureDetail: Int? = null) {
         if (closed) return
         state = value
-        content.render(value, value != PairingScannerState.PERMISSION_SETTINGS || permissionSettingsIntent() != null)
+        content.render(value, value != PairingScannerState.PERMISSION_SETTINGS || permissionSettingsIntent() != null,
+            comparisonCode = comparisonCode, failureDetail = failureDetail)
     }
 
     private fun permissionOrCamera() {
@@ -199,7 +204,15 @@ internal class PairingScannerDialog(
                 actor.acceptPairingInvitation(ticket, result.value) { value ->
                     if (!live()) { close(); return@acceptPairingInvitation }
                     when (value) {
-                        PairingScanRead.READ -> if (!ticket.isCancelled()) render(PairingScannerState.READ) else terminal(PairingScannerState.UNAVAILABLE)
+                        PairingScanRead.READ -> {
+                            if (ticket.isCancelled()) terminal(PairingScannerState.UNAVAILABLE)
+                            else {
+                                render(PairingScannerState.CONNECTING)
+                                if (!actor.beginPairingCeremony(ticket, ::onCeremony)) {
+                                    terminal(PairingScannerState.FAILED, PairingCeremonyRules.failureDetail(NativeCeremonyFailure.UNAVAILABLE))
+                                }
+                            }
+                        }
                         PairingScanRead.INVALID -> terminal(PairingScannerState.INVALID)
                         PairingScanRead.UNAVAILABLE -> terminal(PairingScannerState.UNAVAILABLE)
                     }
@@ -208,15 +221,39 @@ internal class PairingScannerDialog(
         }
     }
 
-    private fun terminal(value: PairingScannerState) {
+    private fun onCeremony(status: NativeCeremonyStatus) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (closed || state !in setOf(PairingScannerState.CONNECTING, PairingScannerState.COMPARE, PairingScannerState.WAITING_PC)) return
+        if (!live()) { close(); return }
+        val next = PairingCeremonyRules.state(status.phase)
+        if (PairingCeremonyRules.terminal(next)) {
+            terminal(next, if (next == PairingScannerState.FAILED) PairingCeremonyRules.failureDetail(status.failure) else null)
+        } else if (!ticket.isCancelled()) {
+            render(next, comparisonCode = if (next == PairingScannerState.COMPARE) status.comparisonCode else null)
+        }
+    }
+
+    private fun confirmCeremony() {
+        if (!live()) { close(); return }
+        if (state != PairingScannerState.COMPARE || ticket.isCancelled()) return
+        actor.confirmPairingCeremony(ticket)
+        render(PairingScannerState.WAITING_PC)
+    }
+
+    private fun terminal(value: PairingScannerState, failureDetail: Int? = null) {
+        if (closed || PairingCeremonyRules.terminal(state)) return
         camera?.close()
         actor.cancelPairingScan(ticket)
         coreReady = false
-        render(value)
+        render(value, failureDetail = failureDetail)
+        if (PairingCeremonyRules.terminal(value)) {
+            main.removeCallbacks(expiry)
+            ceremonyFinished(this)
+        }
     }
 
     private fun expire() {
-        if (closed) return
+        if (closed || PairingCeremonyRules.terminal(state)) return
         val now = SystemClock.elapsedRealtime()
         if (currentHost()) terminal(if (PairingScanRules.expired(started, now)) PairingScannerState.EXPIRED else PairingScannerState.UNAVAILABLE)
         else close()

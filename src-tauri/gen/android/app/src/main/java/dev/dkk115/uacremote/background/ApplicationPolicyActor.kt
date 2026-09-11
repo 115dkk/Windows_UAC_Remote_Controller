@@ -13,6 +13,11 @@ import dev.dkk115.uacremote.nativecore.uniffiEnsureInitialized
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
 import dev.dkk115.uacremote.nativecore.NativePairingScan
 import dev.dkk115.uacremote.nativecore.NativePairingScanResult
+import dev.dkk115.uacremote.nativecore.NativePairingCeremony
+import dev.dkk115.uacremote.nativecore.NativeCeremonyStatus
+import dev.dkk115.uacremote.nativecore.NativeCeremonyPhase
+import dev.dkk115.uacremote.nativecore.NativeCeremonyFailure
+import dev.dkk115.uacremote.pairing.PairingCeremonyRules
 import dev.dkk115.uacremote.pairing.PairingScanTicket
 import dev.dkk115.uacremote.pairing.PairingScanStart
 import dev.dkk115.uacremote.pairing.PairingScanRead
@@ -46,9 +51,16 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private var controller: MobileController? = null
     private class PairingJob(val ticket: PairingScanTicket, val released: () -> Unit) {
         val scan = AtomicReference<NativePairingScan?>(null)
+        val ceremony = AtomicReference<NativePairingCeremony?>(null)
         val pending = AtomicBoolean(true)
         val accepted = AtomicBoolean(false)
-        val cleanup = DenialCloseCursor(1)
+        val ceremonyStarted = AtomicBoolean(false)
+        val pollScheduled = AtomicBoolean(false)
+        // Worker only. Cleanup observations share the original nonrenewable budget.
+        var polls = 0
+        var settled = false
+        var callback: ((NativeCeremonyStatus) -> Unit)? = null
+        val cleanup = DenialCloseCursor(2)
     }
     private val pairingJob = AtomicReference<PairingJob?>(null)
     // Retain even if the Rust constructor fails after partially reopening keys.
@@ -193,10 +205,142 @@ internal class ApplicationPolicyActor(private val application: Application) {
         }
     }
 
+    /** Starts once after READ; polling yields the sole worker between observations. */
+    internal fun beginPairingCeremony(ticket: PairingScanTicket, callback: (NativeCeremonyStatus) -> Unit): Boolean {
+        val job = pairingJob.get()
+        if (job == null || job.ticket !== ticket || ticket.isCancelled() || !job.accepted.get() ||
+            lifecycle.phase() != PolicyOwnerPhase.READY || !job.ceremonyStarted.compareAndSet(false, true)) return false
+        if (!job.pending.compareAndSet(false, true)) return false
+        if (lifecycle.admit() != null) { job.pending.set(false); return false }
+        try {
+            worker.execute {
+                try {
+                    if (pairingJob.get() !== job || !job.accepted.get() || ticket.isCancelled() ||
+                        lifecycle.phase() != PolicyOwnerPhase.READY) throw BridgeException.Closed()
+                    val scan = job.scan.get() ?: throw BridgeException.Closed()
+                    val owner = controller ?: throw BridgeException.Closed()
+                    job.callback = callback
+                    job.ceremony.set(owner.beginPairingCeremony(scan))
+                    if (ticket.isCancelled()) job.ceremony.get()?.cancel()
+                    scheduleCeremonyPoll(job)
+                } catch (failure: Throwable) {
+                    rethrowFatal(failure)
+                    pairingReply { callback(unavailableCeremonyStatus()) }
+                    cancelPairingScan(ticket)
+                } finally {
+                    job.pending.set(false); lifecycle.release()
+                    resumeQueuedWork(); cleanupIfStopped()
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            job.pending.set(false); lifecycle.release(); cancelPairingScan(ticket)
+            return false
+        }
+        return true
+    }
+
+    internal fun confirmPairingCeremony(ticket: PairingScanTicket) {
+        val job = pairingJob.get()?.takeIf { it.ticket === ticket } ?: return
+        if (ticket.isCancelled() || lifecycle.phase() != PolicyOwnerPhase.READY) return
+        try {
+            worker.execute {
+                try {
+                    if (!ticket.isCancelled() && lifecycle.phase() == PolicyOwnerPhase.READY) job.ceremony.get()?.confirm()
+                } catch (_: Exception) { /* The next native status, not this call, determines the UI. */ }
+                finally { resumeQueuedWork(); cleanupIfStopped() }
+            }
+        } catch (_: RejectedExecutionException) { /* No confirmation occurred; polling still owns the result. */ }
+    }
+
+    /** Worker only. One timer or queued poll per job; never sleep/block the owner. */
+    private fun scheduleCeremonyPoll(job: PairingJob) {
+        if (pairingJob.get() !== job || job.settled || job.pollScheduled.get()) return
+        if (job.polls >= PairingCeremonyRules.MAX_POLLS) {
+            val callback = job.callback
+            job.callback = null
+            if (!job.ticket.isCancelled() && callback != null) pairingReply { callback(unavailableCeremonyStatus()) }
+            cancelPairingScan(job.ticket)
+            return
+        }
+        job.polls += 1
+        job.pollScheduled.set(true)
+        val posted = main.postDelayed(Runnable {
+            try {
+                worker.execute {
+                    job.pollScheduled.set(false)
+                    pollPairingCeremony(job)
+                }
+            } catch (_: RejectedExecutionException) {
+                job.pollScheduled.set(false)
+                cancelPairingScan(job.ticket)
+            }
+        }, job, PairingCeremonyRules.POLL_INTERVAL_MILLIS)
+        if (!posted) {
+            job.pollScheduled.set(false)
+            val callback = job.callback
+            job.callback = null
+            if (callback != null) pairingReply { callback(unavailableCeremonyStatus()) }
+            cancelPairingScan(job.ticket)
+        }
+    }
+
+    private fun pollPairingCeremony(job: PairingJob) {
+        try {
+            if (pairingJob.get() !== job) return
+            val ceremony = job.ceremony.get() ?: return
+            // Observe settlement BEFORE status, so the final status cannot be
+            // missed if native work finishes between these two getters.
+            job.settled = ceremony.isSettled()
+            if (!job.ticket.isCancelled()) {
+                val status = ceremony.status()
+                val callback = job.callback
+                if (callback != null) pairingReply { if (!job.ticket.isCancelled()) callback(status) }
+            }
+            if (job.settled) job.callback = null else scheduleCeremonyPoll(job)
+        } catch (failure: Throwable) {
+            rethrowFatal(failure)
+            val callback = job.callback
+            job.callback = null
+            if (!job.ticket.isCancelled() && callback != null) pairingReply { callback(unavailableCeremonyStatus()) }
+            cancelPairingScan(job.ticket)
+        } finally {
+            resumeQueuedWork(); cleanupIfStopped()
+        }
+    }
+
+    private fun unavailableCeremonyStatus() = NativeCeremonyStatus(
+        phase = NativeCeremonyPhase.FAILED, comparisonCode = null,
+        failure = NativeCeremonyFailure.UNAVAILABLE, deadlineNanos = 0uL,
+    )
+
+    private val connectivityPending = AtomicBoolean(false)
+    @Volatile private var connectivityFailures = 0L
+    internal fun connectivityFailureCount(): Long = connectivityFailures
+
+    /** Fixed, coalesced maintenance; no connection error escapes to the service. */
+    internal fun maintainConnections() {
+        if (lifecycle.phase() != PolicyOwnerPhase.READY || !connectivityPending.compareAndSet(false, true)) return
+        try {
+            worker.execute {
+                try {
+                    if (lifecycle.phase() == PolicyOwnerPhase.READY) controller?.maintainConnections()
+                } catch (_: BridgeException) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } catch (_: Exception) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } finally {
+                    connectivityPending.set(false)
+                    resumeQueuedWork(); cleanupIfStopped()
+                }
+            }
+        } catch (_: RejectedExecutionException) { connectivityPending.set(false) }
+    }
+
     /** Only cancel is allowed concurrently with the worker; Rust implements it atomically. */
     internal fun cancelPairingScan(ticket: PairingScanTicket) {
         ticket.cancel()
         val job = pairingJob.get()?.takeIf { it.ticket === ticket } ?: return
+        try { job.ceremony.get()?.cancel() } catch (_: Exception) { /* retain until actual settlement */ }
         try { job.scan.get()?.cancel() } catch (_: Exception) { /* terminal, cleanup remains retained */ }
         requestWorkerCleanup()
     }
@@ -205,17 +349,38 @@ internal class ApplicationPolicyActor(private val application: Application) {
         main.post { try { action() } catch (_: Exception) { /* never transfer a detached reply */ } }
     }
 
-    /** Worker only. Failed generated close remains owned until existing explicit cleanup retry. */
+    /** Worker only. Unsettled ceremony resources block reentry just like an exact
+     * failed generated close. Cancellation is not settlement. Cleanup-only polls
+     * use the remaining original budget; exhaustion retains both handles until
+     * later native progress or explicit cleanup, never a new owner or deadline. */
     private fun cleanupPairingScan(explicitRetry: Boolean) {
         val job = pairingJob.get() ?: return
-        if (!job.ticket.isCancelled() || job.pending.get()) return
+        if (job.pending.get() || (!job.ticket.isCancelled() && !job.settled)) return
+        val ceremony = job.ceremony.get()
+        if (ceremony != null) {
+            if (job.ticket.isCancelled()) job.callback = null
+            val settled = try { ceremony.isSettled() } catch (_: Exception) { false }
+            if (!settled) {
+                if (job.polls < PairingCeremonyRules.MAX_POLLS) scheduleCeremonyPoll(job)
+                return
+            }
+            job.settled = true
+            job.ceremony.set(null)
+            main.removeCallbacksAndMessages(job)
+            job.pollScheduled.set(false)
+            try { job.cleanup.closeOrRetain(ceremony) } catch (_: Exception) { }
+        }
         val scan = job.scan.getAndSet(null)
         if (scan != null) {
             try { scan.cancel() } catch (_: Exception) { }
             try { job.cleanup.closeOrRetain(scan) } catch (_: Exception) { }
         }
         if (explicitRetry) job.cleanup.retryOnce()
-        if (job.cleanup.complete() && pairingJob.compareAndSet(job, null)) pairingReply(job.released)
+        if (job.cleanup.complete() && pairingJob.compareAndSet(job, null)) {
+            job.callback = null
+            main.removeCallbacksAndMessages(job)
+            pairingReply(job.released)
+        }
     }
 
     private fun enqueueRequest(action: () -> Unit): Boolean = try {

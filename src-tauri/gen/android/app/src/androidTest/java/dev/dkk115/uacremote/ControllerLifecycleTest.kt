@@ -435,7 +435,7 @@ class ControllerLifecycleTest {
                         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
                         val snapshot = JSONObject(decoder.decode(ByteBuffer.wrap(bytes.toByteArray())).toString())
                         val phone = snapshot.getJSONObject("phoneService")
-                        snapshot.getInt("schemaVersion") == 3 && snapshot.getString("platform") == "android" &&
+                        snapshot.getInt("schemaVersion") == 4 && snapshot.getString("platform") == "android" &&
                             phone.getString("state") == "local_settings_ready" && phone.getBoolean("policyOwnerReady") && phone.getBoolean("bootEnabled")
                     } catch (_: Exception) { false }
                 }
