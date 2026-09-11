@@ -66,9 +66,11 @@ pub(super) fn run(
     let session = security::process_identity(own, own_pid, None, cleanup).map_err(|_| ())?;
     verify_window_station().map_err(|_| ())?;
     let image = system_consent_path().map_err(|_| ())?;
+    lab_note!("watch helper started: session={session} own_pid={own_pid}");
     let mut tracked: Option<Tracked> = None;
     let mut sequence = 0u32;
     let mut last_output = Instant::now();
+    let mut last_desktop = String::new();
 
     while began.elapsed() < MAX_LIFETIME {
         recheck_peer()?;
@@ -105,6 +107,10 @@ pub(super) fn run(
         let desktop = open_input_desktop(cleanup)?;
         let desktop_name =
             object_name(HANDLE(desktop.raw().0), NativeOperation::DesktopName).map_err(|_| ())?;
+        if desktop_name != last_desktop {
+            lab_note!("input desktop: {desktop_name}");
+            last_desktop = desktop_name.clone();
+        }
         if began.elapsed() >= MAX_LIFETIME {
             drop(desktop);
             break;
@@ -132,6 +138,7 @@ pub(super) fn run(
                 drop(desktop);
                 break;
             }
+            lab_note!("winlogon census: {}", census_kind(&census));
             match census {
                 Census::None => {
                     if let Some(current) = tracked.take() {
@@ -254,15 +261,27 @@ fn worker_census(
     verify_input_desktop(desktop).map_err(|_| ())?;
     let began = Instant::now();
     let windows = enumerate_without_budget(desktop).map_err(|_| ())?;
+    lab_note!("winlogon windows: {}", windows.len());
     let mut candidates = Vec::new();
     for hwnd in &windows {
-        if let Some(candidate) = candidate_for(*hwnd, session, image, cleanup).map_err(|_| ())? {
+        let candidate = match candidate_for(*hwnd, session, image, cleanup) {
+            Ok(candidate) => candidate,
+            Err(_error) => {
+                lab_note!(
+                    "window {:#x}: candidate query failed: {_error:?}",
+                    hwnd.0 as usize
+                );
+                return Err(());
+            }
+        };
+        if let Some(candidate) = candidate {
             candidates.push(candidate);
             if candidates.len() > 1 {
                 return Ok(Census::Ambiguous);
             }
         }
     }
+    lab_note!("winlogon candidates: {}", candidates.len());
     let Some(candidate) = candidates.pop() else {
         return Ok(Census::None);
     };
@@ -286,7 +305,7 @@ fn worker_census(
         qualified_candidates: 1,
         ..ProbeCounts::default()
     };
-    let report = uia::inspect_without_budget(
+    let report = match uia::inspect_without_budget(
         candidate.hwnd,
         candidate.pid,
         began,
@@ -297,13 +316,31 @@ fn worker_census(
             verify_input_desktop(desktop)?;
             Ok(())
         },
-    )
-    .map_err(|_| ())?;
+    ) {
+        Ok(report) => report,
+        Err(_error) => {
+            lab_note!("winlogon candidate inspect failed: {_error:?}");
+            return Err(());
+        }
+    };
     candidate.recheck(session, image, cleanup).map_err(|_| ())?;
     Ok(Census::One {
         identity,
         report: Some(report),
     })
+}
+
+#[cfg(feature = "lab-diagnostics")]
+fn census_kind(census: &Census) -> &'static str {
+    match census {
+        Census::None => "none",
+        Census::VerificationFailed => "verification_failed",
+        Census::One { report: None, .. } => "one_same",
+        Census::One {
+            report: Some(_), ..
+        } => "one_new",
+        Census::Ambiguous => "ambiguous",
+    }
 }
 
 fn target_identity(candidate: &Candidate, sequence: u32) -> Result<TargetIdentity> {

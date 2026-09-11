@@ -31,6 +31,43 @@ use windows::{
     },
     core::{BOOL, Error as WinError, PWSTR},
 };
+/// Lab-only fixed-token notes (counts, OS names, enum names; never prompt text).
+/// Expands to nothing without the `lab-diagnostics` feature.
+macro_rules! lab_note {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "lab-diagnostics")]
+        $crate::ffi::lab_diagnostics::note(&format!($($arg)*));
+    }};
+}
+
+#[cfg(feature = "lab-diagnostics")]
+mod lab_diagnostics {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const MAX_NOTES: u32 = 6_000;
+    static NOTES: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn note(text: &str) {
+        if NOTES.fetch_add(1, Ordering::Relaxed) >= MAX_NOTES {
+            return;
+        }
+        let Some(root) = std::env::var_os("ProgramData") else {
+            return;
+        };
+        let path = std::path::Path::new(&root)
+            .join("휴대폰 승인")
+            .join("lab-helper.txt");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(file, "{text}");
+        }
+    }
+}
+
 pub(super) mod pipe_client;
 mod resources;
 mod security;
@@ -379,6 +416,7 @@ pub(super) fn candidate_for(
     .map_err(|error| native_error(NativeOperation::OpenProcess, error))?;
     let process = OwnedHandle::acquired(raw, NativeOperation::CloseProcess, cleanup)?;
     if !image_matches(process.raw(), expected_image)? {
+        lab_note!("window {:#x}: pid={pid} image mismatch", hwnd.0 as usize);
         return Ok(None);
     }
     security::native64(process.raw())?;
