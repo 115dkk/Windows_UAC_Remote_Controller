@@ -242,8 +242,8 @@ jobs:
           Write-Output "probe-once exit=$LASTEXITCODE"
           Start-Sleep -Seconds 12
           & $exe status | Tee-Object -FilePath "$env:LAB_EVIDENCE/status-after-probe.json"
-          $helperNotes = Join-Path $env:ProgramData '휴대폰 승인\lab-helper.txt'
-          if (Test-Path -LiteralPath $helperNotes) { Write-Output '--- helper notes (last 80 lines) ---'; Get-Content -LiteralPath $helperNotes | Select-Object -Last 80 } else { Write-Output 'no helper notes' }
+          $helperNotes = Join-Path $env:windir 'Temp\uac-lab-helper.txt'
+          if (Test-Path -LiteralPath $helperNotes) { Copy-Item -LiteralPath $helperNotes -Destination "$env:LAB_EVIDENCE/lab-helper.txt"; Write-Output '--- helper notes (last 80 lines) ---'; Get-Content -LiteralPath $helperNotes | Select-Object -Last 80 } else { Write-Output 'no helper notes' }
           # The running service owns the prompt watcher (probe-once answers Busy while it does). The
           # watcher journals fixed kinds only: watcher_started, watcher_alive (first heartbeat), then an
           # observed request when it saw the consent window. Only that observed record passes.

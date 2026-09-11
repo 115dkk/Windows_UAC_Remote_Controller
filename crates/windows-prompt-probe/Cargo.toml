@@ -10,7 +10,7 @@ description = "Per-session SYSTEM consent-UI watcher with exact-target action"
 
 [features]
 # Lab runners only: append fixed-token census facts (window counts, OS desktop names
-# and enum names, never prompt text) to %ProgramData%\휴대폰 승인\lab-helper.txt.
+# and enum names, never prompt text) to <Windows>\Temp\uac-lab-helper.txt.
 # Release builds never enable it.
 lab-diagnostics = []
 

@@ -51,12 +51,9 @@ mod lab_diagnostics {
         if NOTES.fetch_add(1, Ordering::Relaxed) >= MAX_NOTES {
             return;
         }
-        let Some(root) = std::env::var_os("ProgramData") else {
+        let Some(path) = notes_path() else {
             return;
         };
-        let path = std::path::Path::new(&root)
-            .join("휴대폰 승인")
-            .join("lab-helper.txt");
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -65,6 +62,18 @@ mod lab_diagnostics {
             use std::io::Write as _;
             let _ = writeln!(file, "{text}");
         }
+    }
+
+    /// The helper runs with a minimal environment (no `ProgramData`), so the
+    /// location comes from the OS system directory: `<Windows>\Temp`, which
+    /// SYSTEM can always write.
+    fn notes_path() -> Option<std::path::PathBuf> {
+        let consent = super::system_consent_path().ok()?;
+        let consent = String::from_utf16(&consent).ok()?;
+        let windows = std::path::Path::new(consent.trim_end_matches('\0'))
+            .parent()?
+            .parent()?;
+        Some(windows.join("Temp").join("uac-lab-helper.txt"))
     }
 }
 
