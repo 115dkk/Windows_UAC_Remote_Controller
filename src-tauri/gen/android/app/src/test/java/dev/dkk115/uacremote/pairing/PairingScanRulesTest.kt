@@ -9,6 +9,48 @@ import java.nio.ByteBuffer
 
 /** Synthetic local contracts only; no camera, original invitation, native owner or enrollment proof. */
 class PairingScanRulesTest {
+    @Test fun scannerStatesKeepTheExactGalleryOrder() {
+        assertEquals(listOf(
+            "PREPARING", "PERMISSION_PENDING", "PERMISSION_DENIED", "PERMISSION_SETTINGS",
+            "CAMERA_UNAVAILABLE", "UNAVAILABLE", "SCANNING", "READING", "READ", "CONNECTING",
+            "COMPARE", "WAITING_PC", "ENROLLED", "FAILED", "INVALID", "EXPIRED", "CLOSED",
+        ), PairingScannerState.values().map { it.name })
+    }
+
+    @Test fun comparisonRequiresExactlySixAsciiDigitsWithoutRepair() {
+        assertEquals(PairingScannerState.UNAVAILABLE, PairingScannerCopy.resolvedState(PairingScannerState.COMPARE))
+        for (code in listOf(null, "", "12345", "1234567", "123 456", "12345a", "１２３４５６", "١٢٣٤٥٦", " 123456", "123456\n")) {
+            assertEquals(PairingScannerState.UNAVAILABLE, PairingScannerCopy.resolvedState(PairingScannerState.COMPARE, code))
+        }
+        for (code in listOf("123456", "000000", "012345", "987654")) {
+            assertEquals(PairingScannerState.COMPARE, PairingScannerCopy.resolvedState(PairingScannerState.COMPARE, code))
+        }
+        for (state in PairingScannerState.values().filter { it != PairingScannerState.COMPARE }) {
+            assertEquals(state, PairingScannerCopy.resolvedState(state))
+            assertEquals(state, PairingScannerCopy.resolvedState(state, "invalid"))
+        }
+    }
+
+    @Test fun comparisonCopyGroupsDigitsAndSpeaksEachKoreanDigitIncludingZero() {
+        assertEquals("123 456", PairingScannerCopy.groupedCode("123456"))
+        assertEquals("일, 이, 삼, 사, 오, 육", PairingScannerCopy.codeDescription("123456"))
+        assertEquals("007 890", PairingScannerCopy.groupedCode("007890"))
+        assertEquals("영, 영, 칠, 팔, 구, 영", PairingScannerCopy.codeDescription("007890"))
+    }
+
+    @Test fun comparisonCopyRejectsMalformedDigitsBeforeFormatting() {
+        for (code in listOf("", "12345", "1234567", "123 456", "12345a", "１２３４５６", "١٢٣٤٥٦", " 123456", "123456\n")) {
+            try {
+                PairingScannerCopy.groupedCode(code)
+                fail("Malformed comparison code must not be grouped")
+            } catch (_: IllegalArgumentException) { }
+            try {
+                PairingScannerCopy.codeDescription(code)
+                fail("Malformed comparison code must not be announced")
+            } catch (_: IllegalArgumentException) { }
+        }
+    }
+
     @Test fun originalLocalDeadlineNeverRenewsAndRegressionIsNotExpiry() {
         assertTrue(PairingScanRules.current(100, 300_099))
         assertFalse(PairingScanRules.current(100, 300_100))

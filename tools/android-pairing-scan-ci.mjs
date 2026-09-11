@@ -31,8 +31,11 @@ export const SCANNER_CASES = Object.freeze({
     checks: ['ownedNativeViewOnly', 'noQrOrCameraFixture', 'normalAndLargeText', 'lightAndDark', 'allFixtureFilesWritten'],
   },
 });
+// Exact `PairingScannerState` order (PairingScanRules.kt): the enrollment ceremony states sit between
+// `read` and `invalid`. The gallery multiplies these by light/dark and normal/large text: 17 x 4 = 68 PNGs.
 export const SCANNER_STATES = Object.freeze(['preparing', 'permission_pending', 'permission_denied', 'permission_settings',
-  'camera_unavailable', 'unavailable', 'scanning', 'reading', 'read', 'invalid', 'expired', 'closed']);
+  'camera_unavailable', 'unavailable', 'scanning', 'reading', 'read', 'connecting', 'compare', 'waiting_pc', 'enrolled',
+  'failed', 'invalid', 'expired', 'closed']);
 export const SCANNER_IMAGES = Object.freeze(SCANNER_STATES.flatMap(state =>
   ['light', 'dark'].flatMap(theme => ['normal', 'large'].map(scale => `${state}-${theme}-${scale}.png`))));
 

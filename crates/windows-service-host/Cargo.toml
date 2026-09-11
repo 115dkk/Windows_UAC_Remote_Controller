@@ -8,6 +8,11 @@ repository.workspace = true
 publish.workspace = true
 description = "Fixed-identity Windows SCM lifecycle host with protected-installation validation"
 
+[features]
+# Forwarded lab-only identity provider (ADR 0027). Release packaging rejects a
+# service binary that carries the lab profile marker; never enable it to ship.
+lab-software-identity = ["windows-identity/lab-software-identity"]
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
@@ -24,6 +29,7 @@ framed-transport = { path = "../framed-transport" }
 tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros"] }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 android-controller = { path = "../android-controller" }
@@ -31,6 +37,7 @@ notification-policy = { path = "../notification-policy" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }
 tempfile = "3.23.0"
+rqrr = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }
@@ -53,6 +60,7 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_System_Registry",
     "Win32_System_Services",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

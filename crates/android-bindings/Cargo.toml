@@ -20,6 +20,7 @@ framed-transport = { path = "../framed-transport" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }
 notification-policy = { path = "../notification-policy" }
+relay-service = { path = "../relay-service" }
 controller-runtime = { path = "../controller-runtime" }
 secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }

@@ -11,6 +11,23 @@
     <string name="pairing_scanner_reading">QR 내용을 확인하고 있어요.</string>
     <string name="pairing_scanner_read">PC 연결 QR을 읽었어요.</string>
     <string name="pairing_scanner_read_detail">아직 PC와 연결되지는 않았어요.</string>
+    <string name="pairing_scanner_connecting">PC와 연결하고 있어요.</string>
+    <string name="pairing_scanner_connecting_detail">잠시만 기다려 주세요.</string>
+    <string name="pairing_scanner_compare">PC 화면에 표시된 여섯 자리 숫자와 같은지 확인해 주세요.</string>
+    <string name="pairing_scanner_confirm">숫자가 같아요</string>
+    <string name="pairing_scanner_reject">다릅니다, 취소</string>
+    <string name="pairing_scanner_waiting_pc">PC에서 확인을 기다리고 있어요.</string>
+    <string name="pairing_scanner_waiting_pc_detail">PC 화면에서 [숫자가 같아요]를 눌러 주세요.</string>
+    <string name="pairing_scanner_enrolled">PC와 연결했어요.</string>
+    <string name="pairing_scanner_enrolled_detail">이제 이 PC의 권한 요청을 휴대폰에서 확인할 수 있어요.</string>
+    <string name="pairing_scanner_failed">PC와 연결하지 못했어요.</string>
+    <string name="pairing_scanner_failed_cancelled">연결을 취소했어요.</string>
+    <string name="pairing_scanner_failed_expired">확인 시간이 지났어요. PC에서 다시 시도해 주세요.</string>
+    <string name="pairing_scanner_failed_network">PC나 중계 서버에 연결할 수 없었어요. 네트워크를 확인한 뒤 다시 시도해 주세요.</string>
+    <string name="pairing_scanner_failed_rejected">PC가 이 연결을 받아들이지 않았어요. PC 화면의 안내를 확인해 주세요.</string>
+    <string name="pairing_scanner_failed_mismatch">PC와 휴대폰의 정보가 서로 달라 연결을 중단했어요. 다시 시도해 주세요.</string>
+    <string name="pairing_scanner_failed_storage">휴대폰에 연결 정보를 저장하지 못했어요.</string>
+    <string name="pairing_scanner_failed_unavailable">지금은 연결을 진행할 수 없어요.</string>
     <string name="pairing_scanner_invalid">이 QR은 읽을 수 없어요. PC의 연결 화면에 있는 QR인지 확인한 뒤 이 화면을 다시 열어 주세요.</string>
     <string name="pairing_scanner_expired">QR을 읽을 수 있는 시간이 지났어요. 이 화면을 닫고 다시 열어 주세요.</string>
     <string name="pairing_scanner_closed">QR 읽기를 종료했어요.</string>
@@ -28,6 +45,9 @@
     <item type="id" name="pairing_scanner_root" />
     <item type="id" name="pairing_scanner_message" />
     <item type="id" name="pairing_scanner_close" />
+    <item type="id" name="pairing_scanner_confirm" />
+    <item type="id" name="pairing_scanner_reject" />
+    <item type="id" name="pairing_scanner_code" />
     <style name="Theme.PairingScanner" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowNoTitle">true</item>

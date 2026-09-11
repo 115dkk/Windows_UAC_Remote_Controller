@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -18,7 +19,13 @@ import com.google.android.material.button.MaterialButton
 import dev.dkk115.uacremote.R
 
 /** App-owned controls only. Fixture rendering needs no QR/camera or FLAG_SECURE exception. */
-internal class PairingScannerView(context: Context, close: () -> Unit, permission: () -> Unit) : ScrollView(context) {
+internal class PairingScannerView(
+    context: Context,
+    onClose: () -> Unit,
+    onPermission: () -> Unit,
+    onConfirm: () -> Unit = {},
+    onReject: () -> Unit = {},
+) : ScrollView(context) {
     private val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val heading = TextView(context).apply {
         setText(R.string.pairing_scanner_title); textSize = 24f
@@ -42,8 +49,17 @@ internal class PairingScannerView(context: Context, close: () -> Unit, permissio
         clipToOutline = true
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
     }
-    private val permissionButton = button(R.string.pairing_scanner_allow_camera, true, permission)
-    private val closeButton = button(R.string.pairing_scanner_close, false, close).apply { id = R.id.pairing_scanner_close }
+    private val code = TextView(context).apply {
+        id = R.id.pairing_scanner_code
+        textSize = 32f; letterSpacing = 0.12f; fontFeatureSettings = "tnum"
+        setTextColor(context.getColor(R.color.pairing_scanner_text))
+        gravity = Gravity.CENTER
+        textDirection = View.TEXT_DIRECTION_LTR
+    }
+    private val confirmButton = button(R.string.pairing_scanner_confirm, true, onConfirm).apply { id = R.id.pairing_scanner_confirm }
+    private val rejectButton = button(R.string.pairing_scanner_reject, false, onReject).apply { id = R.id.pairing_scanner_reject }
+    private val permissionButton = button(R.string.pairing_scanner_allow_camera, true, onPermission)
+    private val closeButton = button(R.string.pairing_scanner_close, false, onClose).apply { id = R.id.pairing_scanner_close }
 
     init {
         id = R.id.pairing_scanner_root
@@ -55,6 +71,9 @@ internal class PairingScannerView(context: Context, close: () -> Unit, permissio
         addContent(message, 20)
         column.addView(previewContainer, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(260)).apply { topMargin = dp(20) })
         addContent(detail, 16)
+        addContent(code, 24)
+        addContent(confirmButton, 24)
+        addContent(rejectButton, 12)
         addContent(permissionButton, 24)
         addContent(closeButton, 12)
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -88,8 +107,14 @@ internal class PairingScannerView(context: Context, close: () -> Unit, permissio
     fun removePreview() { previewContainer.removeAllViews() }
     fun focusHeading() { heading.requestFocus() }
 
-    fun render(state: PairingScannerState, permissionSettingsAvailable: Boolean = false) {
-        message.setText(when (state) {
+    fun render(
+        state: PairingScannerState,
+        permissionSettingsAvailable: Boolean = false,
+        comparisonCode: String? = null,
+        failureDetail: Int? = null,
+    ) {
+        val displayedState = PairingScannerCopy.resolvedState(state, comparisonCode)
+        message.setText(when (displayedState) {
             PairingScannerState.PREPARING -> R.string.pairing_scanner_preparing
             PairingScannerState.PERMISSION_PENDING -> R.string.pairing_scanner_permission_pending
             PairingScannerState.PERMISSION_DENIED -> R.string.pairing_scanner_permission_denied
@@ -99,16 +124,35 @@ internal class PairingScannerView(context: Context, close: () -> Unit, permissio
             PairingScannerState.SCANNING -> R.string.pairing_scanner_scanning
             PairingScannerState.READING -> R.string.pairing_scanner_reading
             PairingScannerState.READ -> R.string.pairing_scanner_read
+            PairingScannerState.CONNECTING -> R.string.pairing_scanner_connecting
+            PairingScannerState.COMPARE -> R.string.pairing_scanner_compare
+            PairingScannerState.WAITING_PC -> R.string.pairing_scanner_waiting_pc
+            PairingScannerState.ENROLLED -> R.string.pairing_scanner_enrolled
+            PairingScannerState.FAILED -> R.string.pairing_scanner_failed
             PairingScannerState.INVALID -> R.string.pairing_scanner_invalid
             PairingScannerState.EXPIRED -> R.string.pairing_scanner_expired
             PairingScannerState.CLOSED -> R.string.pairing_scanner_closed
         })
-        previewContainer.visibility = if (state in setOf(PairingScannerState.PREPARING, PairingScannerState.SCANNING)) VISIBLE else GONE
-        detail.setText(R.string.pairing_scanner_read_detail)
-        detail.visibility = if (state == PairingScannerState.READ) VISIBLE else GONE
-        permissionButton.visibility = if (state == PairingScannerState.PERMISSION_DENIED ||
-            (state == PairingScannerState.PERMISSION_SETTINGS && permissionSettingsAvailable)) VISIBLE else GONE
-        permissionButton.setText(if (state == PairingScannerState.PERMISSION_SETTINGS) R.string.pairing_scanner_open_permissions else R.string.pairing_scanner_allow_camera)
+        previewContainer.visibility = if (displayedState in setOf(PairingScannerState.PREPARING, PairingScannerState.SCANNING)) VISIBLE else GONE
+        val detailText = when (displayedState) {
+            PairingScannerState.READ -> R.string.pairing_scanner_read_detail
+            PairingScannerState.CONNECTING -> R.string.pairing_scanner_connecting_detail
+            PairingScannerState.WAITING_PC -> R.string.pairing_scanner_waiting_pc_detail
+            PairingScannerState.ENROLLED -> R.string.pairing_scanner_enrolled_detail
+            PairingScannerState.FAILED -> failureDetail ?: R.string.pairing_scanner_failed_unavailable
+            else -> null
+        }
+        detail.text = detailText?.let { context.getString(it) }.orEmpty()
+        detail.visibility = if (detailText != null) VISIBLE else GONE
+        val comparing = displayedState == PairingScannerState.COMPARE
+        code.text = if (comparing) PairingScannerCopy.groupedCode(requireNotNull(comparisonCode)) else ""
+        code.contentDescription = if (comparing) PairingScannerCopy.codeDescription(requireNotNull(comparisonCode)) else null
+        code.visibility = if (comparing) VISIBLE else GONE
+        confirmButton.visibility = if (comparing) VISIBLE else GONE
+        rejectButton.visibility = if (comparing) VISIBLE else GONE
+        permissionButton.visibility = if (displayedState == PairingScannerState.PERMISSION_DENIED ||
+            (displayedState == PairingScannerState.PERMISSION_SETTINGS && permissionSettingsAvailable)) VISIBLE else GONE
+        permissionButton.setText(if (displayedState == PairingScannerState.PERMISSION_SETTINGS) R.string.pairing_scanner_open_permissions else R.string.pairing_scanner_allow_camera)
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

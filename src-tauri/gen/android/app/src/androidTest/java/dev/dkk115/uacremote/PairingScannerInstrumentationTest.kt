@@ -105,7 +105,10 @@ class PairingScannerInstrumentationTest {
                 }
                 val configured = instrumentation.targetContext.createConfigurationContext(config)
                 val view = PairingScannerView(ContextThemeWrapper(configured, R.style.Theme_PairingScanner), {}, {})
-                view.render(state, permissionSettingsAvailable = true)
+                // COMPARE needs a code to draw its controls. This is an explicitly synthetic gallery
+                // fixture, never a value the production View could supply on its own.
+                view.render(state, permissionSettingsAvailable = true,
+                    comparisonCode = if (state == PairingScannerState.COMPARE) "123456" else null)
                 view.measure(View.MeasureSpec.makeMeasureSpec(390, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(844, View.MeasureSpec.EXACTLY))
                 view.layout(0, 0, 390, 844)
@@ -124,7 +127,8 @@ class PairingScannerInstrumentationTest {
             assertTrue(output.length() in 1..2_000_000L)
             count++
         }
-        assertEquals(48, count)
+        assertEquals(PairingScannerState.values().size * 4, count)
+        assertEquals(68, count)
         receipt(input, "native-view-render", listOf("ownedNativeViewOnly", "noQrOrCameraFixture", "normalAndLargeText",
             "lightAndDark", "allFixtureFilesWritten"))
     }

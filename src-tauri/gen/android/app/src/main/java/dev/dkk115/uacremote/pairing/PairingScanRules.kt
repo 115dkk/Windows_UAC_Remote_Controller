@@ -7,7 +7,27 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal enum class PairingScannerLaunch(val wireValue: String) { OPENED("opened"), BUSY("busy"), UNAVAILABLE("unavailable") }
 internal enum class PairingScanStart { READY, BUSY, UNAVAILABLE }
 internal enum class PairingScanRead { READ, INVALID, UNAVAILABLE }
-internal enum class PairingScannerState { PREPARING, PERMISSION_PENDING, PERMISSION_DENIED, PERMISSION_SETTINGS, CAMERA_UNAVAILABLE, UNAVAILABLE, SCANNING, READING, READ, INVALID, EXPIRED, CLOSED }
+internal enum class PairingScannerState { PREPARING, PERMISSION_PENDING, PERMISSION_DENIED, PERMISSION_SETTINGS, CAMERA_UNAVAILABLE, UNAVAILABLE, SCANNING, READING, READ, CONNECTING, COMPARE, WAITING_PC, ENROLLED, FAILED, INVALID, EXPIRED, CLOSED }
+
+/** Presentation only. A displayed code or state never accepts a connection. */
+internal object PairingScannerCopy {
+    private val spokenDigits = listOf("영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구")
+    private fun validCode(code: String?): Boolean =
+        code != null && code.length == 6 && code.all { it in '0'..'9' }
+
+    fun resolvedState(state: PairingScannerState, comparisonCode: String? = null): PairingScannerState =
+        if (state == PairingScannerState.COMPARE && !validCode(comparisonCode)) PairingScannerState.UNAVAILABLE else state
+
+    fun groupedCode(code: String): String {
+        require(validCode(code))
+        return code.substring(0, 3) + " " + code.substring(3)
+    }
+
+    fun codeDescription(code: String): String {
+        require(validCode(code))
+        return code.map { spokenDigits[it - '0'] }.joinToString(", ")
+    }
+}
 
 /** Process-local selection only. It owns no keys, peer, original fields or permission. */
 internal class PairingScanTicket {

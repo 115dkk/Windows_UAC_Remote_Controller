@@ -49,9 +49,10 @@ test('each native check is a real boolean; an unknown or duplicate-shadow check 
   assert.throws(() => parseScannerReceipt(text.replace('"version":1', '"\\u0076ersion":1'), expected('native-dialog')));
 });
 
-test('fixture paths are only the fixed48 native no-QR view states under one fresh nonce', () => {
-  assert.equal(SCANNER_STATES.length, 12); assert.equal(SCANNER_IMAGES.length, 48);
-  assert.equal(new Set(SCANNER_IMAGES).size, 48);
+test('fixture paths are only the fixed 68 native no-QR view states under one fresh nonce', () => {
+  assert.equal(SCANNER_STATES.length, 17); assert.equal(SCANNER_IMAGES.length, 68);
+  assert.equal(new Set(SCANNER_IMAGES).size, 68);
+  assert.deepEqual(SCANNER_STATES.slice(9, 14), ['connecting', 'compare', 'waiting_pc', 'enrolled', 'failed']);
   for (const name of SCANNER_IMAGES) assert.equal(scannerImagePath('a'.repeat(32), name), `cache/pairing-scanner-fixtures/${'a'.repeat(32)}/${name}`);
   for (const name of ['../secret.png', '/tmp/secret.png', 'read-light-normal.png/../keys', 'unknown.png', 'READ-light-normal.png']) {
     assert.throws(() => scannerImagePath('a'.repeat(32), name));
