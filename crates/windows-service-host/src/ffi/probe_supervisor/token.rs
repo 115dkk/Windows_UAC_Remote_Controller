@@ -29,6 +29,16 @@ use windows::{
     core::{HRESULT, PCWSTR},
 };
 
+/// Every UnsupportedToken site funnels through here so a lab build can record
+/// which token fact the runner's service token failed (never a token value).
+fn unsupported_at(line: u32) -> Error {
+    #[cfg(feature = "lab-software-identity")]
+    crate::lab::record_note(&format!("unsupported token fact at token.rs:{line}"));
+    #[cfg(not(feature = "lab-software-identity"))]
+    let _ = line;
+    Error::UnsupportedToken
+}
+
 const SYSTEM: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const SYSTEM_IL: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 16, 0, 64, 0, 0];
 const MAX_TOKEN: usize = 65536;
@@ -157,7 +167,7 @@ fn native64(process: HANDLE) -> Result<(), Error> {
             IMAGE_FILE_MACHINE_AMD64 | IMAGE_FILE_MACHINE_ARM64
         )
     {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     Ok(())
 }
@@ -186,7 +196,7 @@ impl TokenBuffer {
         }
         .map_err(|error| native(Stage::TokenQuery, error))?;
         if length == 0 || length as usize > MAX_TOKEN {
-            return Err(Error::UnsupportedToken);
+            return Err(unsupported_at(line!()));
         }
         value.length = length as usize;
         Ok(value)
@@ -199,21 +209,24 @@ impl TokenBuffer {
     fn sid(&self, pointer: *mut std::ffi::c_void) -> Result<Vec<u8>, Error> {
         let offset = (pointer as usize)
             .checked_sub(self.words.as_ptr() as usize)
-            .ok_or(Error::UnsupportedToken)?;
-        let bytes = self.bytes().get(offset..).ok_or(Error::UnsupportedToken)?;
+            .ok_or_else(|| unsupported_at(line!()))?;
+        let bytes = self
+            .bytes()
+            .get(offset..)
+            .ok_or_else(|| unsupported_at(line!()))?;
         if bytes.len() < 8 || bytes[0] != 1 || bytes[1] > 15 {
-            return Err(Error::UnsupportedToken);
+            return Err(unsupported_at(line!()));
         }
         Ok(bytes
             .get(..8 + usize::from(bytes[1]) * 4)
-            .ok_or(Error::UnsupportedToken)?
+            .ok_or_else(|| unsupported_at(line!()))?
             .to_vec())
     }
     fn scalar(&self) -> Result<u32, Error> {
         Ok(u32::from_ne_bytes(
             self.bytes()
                 .try_into()
-                .map_err(|_| Error::UnsupportedToken)?,
+                .map_err(|_| unsupported_at(line!()))?,
         ))
     }
 }
@@ -224,18 +237,18 @@ fn groups(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<(Vec<u8>,
     let count = u32::from_ne_bytes(
         bytes
             .get(..4)
-            .ok_or(Error::UnsupportedToken)?
+            .ok_or_else(|| unsupported_at(line!()))?
             .try_into()
-            .map_err(|_| Error::UnsupportedToken)?,
+            .map_err(|_| unsupported_at(line!()))?,
     ) as usize;
     if count > MAX_GROUPS {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     let start = mem::offset_of!(TOKEN_GROUPS, Groups);
     let size = mem::size_of::<SID_AND_ATTRIBUTES>();
     let rows = bytes
         .get(start..start + count * size)
-        .ok_or(Error::UnsupportedToken)?;
+        .ok_or_else(|| unsupported_at(line!()))?;
     let mut output = Vec::with_capacity(count);
     for row in rows.chunks_exact(size) {
         // SAFETY: exact C-layout row inside initialized bounded buffer; contained
@@ -249,11 +262,11 @@ fn groups(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<(Vec<u8>,
 
 fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error> {
     if TokenBuffer::read(token, TokenType)?.scalar()? != TokenPrimary.0 as u32 {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     let user = TokenBuffer::read(token, TokenUser)?;
     if user.length < mem::size_of::<TOKEN_USER>() {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     // SAFETY: fixed TokenUser C-layout output; SID reads are independently bounded.
     let user_value =
@@ -263,7 +276,7 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
     }
     let integrity = TokenBuffer::read(token, TokenIntegrityLevel)?;
     if integrity.length < mem::size_of::<TOKEN_MANDATORY_LABEL>() {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     // SAFETY: fixed integrity-label C-layout output with checked contained SID.
     let label = unsafe {
@@ -272,7 +285,7 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
     if integrity.sid(label.Label.Sid.0)? != SYSTEM_IL
         || TokenBuffer::read(token, TokenSessionId)?.scalar()? != session
     {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     let regular = groups(token, TokenGroups)?;
     let restricted = groups(token, TokenRestrictedSids)?;
@@ -290,12 +303,12 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
         privileges
             .bytes()
             .get(..4)
-            .ok_or(Error::UnsupportedToken)?
+            .ok_or_else(|| unsupported_at(line!()))?
             .try_into()
-            .map_err(|_| Error::UnsupportedToken)?,
+            .map_err(|_| unsupported_at(line!()))?,
     ) as usize;
     if count > 128 {
-        return Err(Error::UnsupportedToken);
+        return Err(unsupported_at(line!()));
     }
     let size = mem::size_of::<windows::Win32::Security::LUID_AND_ATTRIBUTES>();
     let start = mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
@@ -303,7 +316,7 @@ fn facts(token: HANDLE, session: u32, service_sid: &[u8]) -> Result<Facts, Error
     for row in privileges
         .bytes()
         .get(start..start + count * size)
-        .ok_or(Error::UnsupportedToken)?
+        .ok_or_else(|| unsupported_at(line!()))?
         .chunks_exact(size)
     {
         // SAFETY: exact initialized LUID_AND_ATTRIBUTES row; scalar fields only.

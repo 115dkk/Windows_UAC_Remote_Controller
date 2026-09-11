@@ -21,6 +21,24 @@ mod diagnostic;
 /// keeps the failure text next to the activity journal for the evidence upload.
 #[cfg(all(windows, feature = "lab-software-identity"))]
 mod lab {
+    /// Appends one fixed-token note (no payloads) to the lab failure file.
+    pub(crate) fn record_note(note: &str) {
+        let Some(root) = std::env::var_os("ProgramData") else {
+            return;
+        };
+        let path = std::path::Path::new(&root)
+            .join(crate::INSTALLATION_FOLDER)
+            .join("lab-failure.txt");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
+            use std::io::Write as _;
+            let _ = writeln!(file, "{note}");
+        }
+    }
+
     pub(crate) fn record_failure(failure: &crate::ServiceError) {
         let Some(root) = std::env::var_os("ProgramData") else {
             return;
