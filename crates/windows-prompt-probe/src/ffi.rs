@@ -27,7 +27,10 @@ use windows::{
                 QueryFullProcessImageNameW, WaitForSingleObject,
             },
         },
-        UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindowVisible, WSF_VISIBLE},
+        UI::WindowsAndMessaging::{
+            GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+            IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WSF_VISIBLE,
+        },
     },
     core::{BOOL, Error as WinError, PWSTR},
 };
@@ -437,10 +440,21 @@ pub(super) fn candidate_for(
         lab_note!("window {:#x}: pid={pid} hidden, skipped", hwnd.0 as usize);
         return Ok(None);
     }
+    // A shown consent.exe process still has more than one visible top-level window
+    // (lab run 34648389804). The consent dialog is an unowned ordinary window;
+    // owned popups, tool windows and no-activate windows are never the dialog.
+    // SAFETY: read-only window relationship and style queries on the same handle.
+    let owned = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid());
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let auxiliary = exstyle & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0;
     lab_note!(
-        "window {:#x}: pid={pid} visible consent candidate",
-        hwnd.0 as usize
+        "window {:#x}: pid={pid} visible class={} owned={owned} exstyle={exstyle:#x}",
+        hwnd.0 as usize,
+        class_name_for_notes(hwnd)
     );
+    if owned || auxiliary {
+        return Ok(None);
+    }
     security::native64(process.raw())?;
     security::process_identity(process.raw(), pid, Some(session), cleanup)?;
     alive(process.raw())?;
@@ -454,6 +468,19 @@ pub(super) fn candidate_for(
     };
     candidate.recheck(session, expected_image, cleanup)?;
     Ok(Some(candidate))
+}
+
+/// OS window class name for lab notes only (never prompt text).
+#[cfg(feature = "lab-diagnostics")]
+fn class_name_for_notes(hwnd: HWND) -> String {
+    let mut units = [0u16; 128];
+    // SAFETY: read-only class name query into an initialized bounded buffer.
+    let count = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut units) };
+    usize::try_from(count)
+        .ok()
+        .filter(|count| *count > 0 && *count < units.len())
+        .and_then(|count| String::from_utf16(&units[..count]).ok())
+        .unwrap_or_else(|| "?".to_owned())
 }
 
 struct Enumeration {

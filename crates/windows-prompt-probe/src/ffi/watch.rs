@@ -319,8 +319,12 @@ fn worker_census(
     ) {
         Ok(report) => report,
         Err(_error) => {
+            // A window under construction answers UI Automation with incomplete
+            // properties (lab run 34648389804: PatternAvailability while consent.exe
+            // was starting). That is this cycle's verdict, not a helper failure;
+            // the next cycle looks again and nothing is reported meanwhile.
             lab_note!("winlogon candidate inspect failed: {_error:?}");
-            return Err(());
+            return Ok(Census::VerificationFailed);
         }
     };
     candidate.recheck(session, image, cleanup).map_err(|_| ())?;
