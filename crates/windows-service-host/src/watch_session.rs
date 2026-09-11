@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Pure bounded state for the supervised prompt watcher.
 #![forbid(unsafe_code)]
+// Only the 64-bit Windows watch owner drives this machine; other targets compile
+// it for the shared WatchSession type without ever constructing it.
+#![cfg_attr(not(all(windows, target_pointer_width = "64")), allow(dead_code))]
 
 use crate::{ProbeSupervisorError, WatchEvent};
 use std::{

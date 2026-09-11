@@ -489,7 +489,7 @@ fn codec_rejects_noncanonical_or_invalid_relay_fields() {
     for (offset, value, expected) in [
         (0, 2, PeerAssociationError::InvalidRelayEncoding),
         (1, 5, PeerAssociationError::InvalidRelayEncoding),
-        (2, 0, PeerAssociationError::InvalidRelayEncoding),
+        (2, 1, PeerAssociationError::InvalidRelayEncoding),
         (4, 1, PeerAssociationError::InvalidRelayEncoding),
         (20, 1, PeerAssociationError::InvalidRelayEncoding),
     ] {

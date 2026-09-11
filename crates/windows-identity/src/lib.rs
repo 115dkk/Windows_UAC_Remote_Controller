@@ -44,6 +44,7 @@ pub mod lab {
 
     static LAST_DESCRIPTOR: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+    #[cfg(windows)]
     pub(crate) fn record_descriptor(bytes: &[u8]) {
         if let Ok(mut slot) = LAST_DESCRIPTOR.lock() {
             *slot = Some(bytes.to_vec());

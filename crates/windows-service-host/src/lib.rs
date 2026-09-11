@@ -99,6 +99,7 @@ pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
 pub const ANDROID_SIGNER_SHA256: &[[u8; 32]] = build_policy::ANDROID_SIGNER_SHA256;
 
+#[cfg(any(windows, test))]
 pub(crate) fn android_signer_digest_strings() -> Vec<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     ANDROID_SIGNER_SHA256

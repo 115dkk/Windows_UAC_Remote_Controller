@@ -497,6 +497,7 @@ pub(crate) fn quoted_watch_command_line(image: &[u16]) -> Result<Vec<u16>, Probe
     Ok(command)
 }
 
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
 pub(crate) fn quoted_image_command_line(image: &[u16]) -> Result<Vec<u16>, ProbeSupervisorError> {
     // A fixed protected filename only, never arbitrary arguments. The Windows
     // API uses an unquoted application name as command line when it is null;
