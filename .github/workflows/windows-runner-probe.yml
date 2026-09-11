@@ -33,6 +33,12 @@ jobs:
           foreach ($name in 'EnableLUA','ConsentPromptBehaviorAdmin','ConsentPromptBehaviorUser','PromptOnSecureDesktop','EnableUIADesktopToggle','FilterAdministratorToken','EnableInstallerDetection') {
             Write-Output ("{0}={1}" -f $name, $policy.$name)
           }
+          Write-Output "--- window station / desktops of this session ---"
+          Add-Type -Namespace Probe -Name Desk -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint id); [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId(); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr h, int index, System.Text.StringBuilder info, uint len, out uint needed);'
+          $sb = New-Object System.Text.StringBuilder 256; $needed = 0
+          [void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $sb, 512, [ref]$needed)
+          Write-Output "ThreadDesktop=$($sb.ToString())"
+          exit 0
       - name: Report TPM and platform crypto provider facts
         shell: pwsh
         run: |
@@ -43,9 +49,19 @@ jobs:
           certutil -csplist 2>&1 | ForEach-Object { $_ }
           Write-Output "--- Win32_Tpm ---"
           try { Get-CimInstance -Namespace root/cimv2/Security/MicrosoftTpm -ClassName Win32_Tpm | Format-List | Out-String -Width 200 } catch { Write-Output "Win32_Tpm unavailable: $($_.Exception.Message)" }
+          Write-Output "--- PCP provider open from this admin context (read-only, no key) ---"
+          Add-Type -Namespace Probe -Name Ncrypt -MemberDefinition '[DllImport("ncrypt.dll", CharSet=CharSet.Unicode)] public static extern int NCryptOpenStorageProvider(out IntPtr h, string name, uint flags); [DllImport("ncrypt.dll")] public static extern int NCryptFreeObject(IntPtr h);'
+          foreach ($provider in 'Microsoft Platform Crypto Provider','Microsoft Software Key Storage Provider') {
+            $h = [IntPtr]::Zero
+            $status = [Probe.Ncrypt]::NCryptOpenStorageProvider([ref]$h, $provider, 0)
+            Write-Output ("{0}: 0x{1:X8}" -f $provider, $status)
+            if ($status -eq 0) { [void][Probe.Ncrypt]::NCryptFreeObject($h) }
+          }
+          exit 0
       - name: Report VM and OS identity
         shell: pwsh
         run: |
           Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, TotalPhysicalMemory | Format-List | Out-String
           Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber | Format-List | Out-String
           Get-Service -Name TBS, TrustedInstaller -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String
+          exit 0
