@@ -322,7 +322,7 @@ fn cancel_and_release(
 #[test]
 fn genuine_request_fence_and_one_shot_bytes_produce_only_prepared_unsent_denial() {
     with_fixture(1, |controller, platform, requests| {
-        assert_eq!(bridge_version(), 9);
+        assert_eq!(bridge_version(), 10);
         let scope = controller.reserve_denial(requests[0].clone()).unwrap();
         assert!(scope.same_scope(controller.reserve_denial(requests[0].clone()).unwrap()));
         assert_eq!(

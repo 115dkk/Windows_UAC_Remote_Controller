@@ -492,7 +492,10 @@ class ControllerLifecycleTest {
 
     /** Read only the actual current window. No loadUrl, new WebView, mock bridge,
      * DOM modification or navigation. evaluateJavascript and its callback run on
-     * main; only the instrumentation thread waits, with one outstanding query. */
+     * main; only the instrumentation thread waits, with one outstanding query.
+     * One query may legitimately take several seconds while a cold Chromium
+     * renderer initializes after reboot, so the single query is bounded only by
+     * the original 30 s document deadline, never by a shorter per-query cap. */
     private fun awaitWebView(scenario: ActivityScenario<MainActivity>, label: String) {
         val until = SystemClock.elapsedRealtime() + 30_000L
         var last: WebReadiness
@@ -526,7 +529,7 @@ class ControllerLifecycleTest {
                 } catch (_: RuntimeException) { done.countDown() }
             }
             val remaining = until - SystemClock.elapsedRealtime()
-            if (remaining <= 0 || !done.await(remaining.coerceAtMost(2_000L), TimeUnit.MILLISECONDS)) {
+            if (remaining <= 0 || !done.await(remaining, TimeUnit.MILLISECONDS)) {
                 active.set(false)
                 throw AssertionError("WebView deadline: $label; callback unavailable")
             }
