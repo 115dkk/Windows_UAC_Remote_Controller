@@ -450,6 +450,32 @@ struct Fixture {
     reference: PeerAssociationRef,
     _temp: tempfile::TempDir,
 }
+/// Reads the durable history under this thread's own admission. The reactor
+/// detaches the inbox (the shared state is `None`) for as long as it holds
+/// admission, so a bare lock-and-unwrap races with maintenance that the
+/// preceding policy save or peer event has just woken (run 34624753189).
+fn admitted_history_len(fixture: &Fixture) -> usize {
+    let end = Instant::now() + LIMIT;
+    loop {
+        match fixture.controller.enter() {
+            Ok(_admission) => {
+                return fixture
+                    .controller
+                    .state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .expect("an admitted owner has its inbox attached")
+                    .history()
+                    .unwrap()
+                    .len();
+            }
+            Err(BridgeError::Busy) if Instant::now() < end => std::thread::yield_now(),
+            Err(error) => panic!("no admission for the history read: {error:?}"),
+        }
+    }
+}
+
 fn fixture() -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let (notice, notices) = sync_mpsc::sync_channel(128);
@@ -660,18 +686,7 @@ fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one
             .unwrap(),
         )
         .unwrap();
-    assert!(
-        fixture
-            .controller
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .history()
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(admitted_history_len(&fixture), 0);
     peer.send(PcEvent::Resolved {
         binding,
         issued_at: ServiceTick::from_nanos_since_epoch(0),
@@ -688,19 +703,7 @@ fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one
         }
     }
     assert!(view.is_revoked());
-    assert_eq!(
-        fixture
-            .controller
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .history()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(admitted_history_len(&fixture), 1);
     assert!(
         fixture
             .controller
@@ -807,18 +810,7 @@ fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_bod
     fixture.controller.save_notification_policy(policy).unwrap();
     assert!(view.is_revoked());
     assert!(view.details(fixture.platform.observed()).is_err());
-    assert!(
-        fixture
-            .controller
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .history()
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(admitted_history_len(&fixture), 0);
     fixture.cleanup();
     drop(peer);
 }
