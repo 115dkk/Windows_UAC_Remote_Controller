@@ -80,7 +80,18 @@ class PairingScannerInstrumentationTest {
                 val launch = onMain { app.lastPairingScannerLaunch }
                 val gate = onMain { app.canOpenPairingScanner(host) }
                 val notice = eval(host, VISIBLE_NOTICE)
-                throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate notice=$notice ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
+                // Diagnostic only, after the product path already failed: call the same command directly
+                // from the client and report how the IPC answered (fixed shape: ok/err plus its code).
+                val started = eval(host, DIRECT_INVOKE)
+                var direct = "pending"
+                val until = SystemClock.elapsedRealtime() + 10_000L
+                while (SystemClock.elapsedRealtime() < until) {
+                    direct = eval(host, DIRECT_RESULT)
+                    if (direct != "\"pending\"") break
+                    SystemClock.sleep(200)
+                }
+                val launchAfter = onMain { app.lastPairingScannerLaunch }
+                throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate notice=$notice directStarted=$started directResult=$direct launchAfterDirect=$launchAfter ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
             }
             assertTrue(onMain { secureScannerWindow() })
             await { onMain { scannerMessage() == host.getString(R.string.pairing_scanner_scanning) } }
@@ -259,6 +270,8 @@ class PairingScannerInstrumentationTest {
         private const val BUTTON_READY = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return !!b&&!b.disabled;})()"
         private const val BUTTON_STATE = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');return JSON.stringify({present:!!b,disabled:b?b.disabled:null,buttons:document.querySelectorAll('button').length,title:document.title});})()"
         private const val VISIBLE_NOTICE = "(()=>{const n=document.querySelector('[role=\"alert\"] p, .notice-box p');return JSON.stringify(n?n.textContent:null);})()"
+        private const val DIRECT_INVOKE = "(()=>{window.__uacScanProbe='pending';const t=window.__TAURI_INTERNALS__;if(!t||!t.invoke){window.__uacScanProbe='no-internals';return 'no-internals';}t.invoke('open_pairing_scanner').then(v=>{window.__uacScanProbe='ok:'+JSON.stringify(v);}).catch(e=>{window.__uacScanProbe='err:'+JSON.stringify({code:e&&e.code,message:e&&e.message,raw:String(e)}).slice(0,300);});return 'started';})()"
+        private const val DIRECT_RESULT = "(()=>JSON.stringify(window.__uacScanProbe||'pending'))()"
         private const val CLICK_BUTTON = "(()=>{const b=document.querySelector('button[data-pairing-scanner=\"open\"]');if(!b||b.disabled)return 'missing';b.click();return 'clicked';})()"
     }
 }
