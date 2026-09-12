@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/windows-installer-options.yml'
       - 'tools/windows-installer-options-gallery.ps1'
+      - 'tools/InstallerOptionsNative.cs'
   workflow_dispatch:
     inputs:
       source_run:
