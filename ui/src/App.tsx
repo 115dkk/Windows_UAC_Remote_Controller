@@ -92,8 +92,9 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   }
   const refreshButton = <div className="header-actions"><button className="button quiet refresh-button" type="button" disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" />{refreshing ? ko.refreshing : ko.refresh}</button><button className="button quiet app-settings-button" type="button" aria-label={tr('앱 설정')} title={tr('앱 설정')} aria-haspopup="dialog" disabled={busy !== null || confirmation !== null} onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button></div>;
 
-  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ?? ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main></div>;
-  if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main></div>;
+  const settingsDialog = settingsOpen && <LanguageSettings onClose={() => setSettingsOpen(false)} />;
+  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ? tr(error) : ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main>{settingsDialog}</div>;
+  if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main>{settingsDialog}</div>;
 
   const items = navigationFor(snapshot);
   const title = !phone && page === 'status' ? ko.homeTitle
@@ -127,5 +128,5 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
     </div>
   </main>;
 
-  return <div className={`app-shell ${phone ? 'phone-shell' : 'desktop-shell'}`}><a className="skip-link" href="#main-content">{ko.skip}</a>{phone ? <>{main}{navigation}</> : <>{navigation}{main}</>}{confirmation && <ConfirmDialog confirmation={confirmation} onClose={() => setConfirmation(null)} />}{settingsOpen && <LanguageSettings onClose={() => setSettingsOpen(false)} />}</div>;
+  return <div className={`app-shell ${phone ? 'phone-shell' : 'desktop-shell'}`}><a className="skip-link" href="#main-content">{ko.skip}</a>{phone ? <>{main}{navigation}</> : <>{navigation}{main}</>}{confirmation && <ConfirmDialog confirmation={confirmation} onClose={() => setConfirmation(null)} />}{settingsDialog}</div>;
 }

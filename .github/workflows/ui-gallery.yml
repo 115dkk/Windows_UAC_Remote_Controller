@@ -3,6 +3,7 @@ name: UI gallery
 on:
   pull_request:
     paths:
+      - 'locales/**'
       - 'ui/**'
       - 'tools/ui-gallery/**'
       - 'tools/ui-quality.mjs'
@@ -18,6 +19,7 @@ on:
   push:
     branches: [main, 'codex/ci-ui-gallery', 'codex/native-runtime']
     paths:
+      - 'locales/**'
       - 'ui/**'
       - 'tools/ui-gallery/**'
       - 'tools/ui-quality.mjs'

@@ -29,7 +29,11 @@ export function resolveLocale(languages: readonly string[]): Locale {
       if (core.includes('hans')) return 'zh-Hans';
       return core.includes('hant') || core.some(part => ['tw','hk','mo'].includes(part)) ? 'zh-Hant' : 'zh-Hans';
     }
-    if (language === 'pt') return /(?:^|-)pt(?:-|$)/u.test(tag.slice(3)) ? 'pt-PT' : 'pt-BR';
+    if (language === 'pt') {
+      const parts = tag.split('-').slice(1);
+      const extension = parts.findIndex(part => part.length === 1);
+      return (extension < 0 ? parts : parts.slice(0, extension)).includes('pt') ? 'pt-PT' : 'pt-BR';
+    }
     if (language && locales.includes(language as Locale)) return language as Locale;
   }
   return 'en';
@@ -87,7 +91,10 @@ export async function initializeLanguage(): Promise<void> {
   const family = state.locale === 'ko' ? 'IBM Plex Sans KR' : state.locale === 'ja' ? 'Noto Sans JP'
     : state.locale === 'zh-Hans' ? 'Noto Sans SC' : state.locale === 'zh-Hant' ? 'Noto Sans TC'
       : state.locale === 'ar' ? 'Noto Sans Arabic' : 'Noto Sans';
-  try { await document.fonts.load(`400 16px "${family}"`); } catch { /* Bundled-font failure leaves explicit system fallback. CI verifies shipped glyphs. */ }
+  try {
+    await Promise.race([document.fonts.load(`400 16px "${family}"`), new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); })]);
+  } catch { /* Bundled-font failure leaves explicit system fallback. CI verifies shipped glyphs. */ }
+  finally { clearTimeout(timer); }
   window.addEventListener('languagechange', () => { void refreshLanguage(); });
   window.addEventListener('focus', () => { void refreshLanguage(); });
 }

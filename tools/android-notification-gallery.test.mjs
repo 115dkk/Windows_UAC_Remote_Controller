@@ -69,7 +69,7 @@ test('setup uses one fixedpoint barrier before first fixture launch with unchang
   assert.ok(activity.includes('check(notification.timeoutAfter == 60_000L)'));
 });
 
-const productResources = readFileSync(new URL('../src-tauri/gen/android/app/src/main/res/values/strings.xml', import.meta.url), 'utf8');
+const productResources = readFileSync(new URL('../src-tauri/gen/android/app/src/main/res/values-ko/strings.xml', import.meta.url), 'utf8');
 const expectedStatus = statusResourceExpectations(productResources);
 const ui = (title, body, actions = '') => `<hierarchy><node package="com.android.systemui"><node text="${title}"/><node text="${body}"/>${actions}</node></hierarchy>`;
 
