@@ -16,3 +16,8 @@ writeFileSync('target/android-lifecycle-ci/language-tests.txt',output);
 assert.match(output,/OK \(2 tests\)/u);
 assert.doesNotMatch(output,/FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed/u);
 process.stdout.write('Actual Android locale resources, RTL and BidiFormatter display-only tests passed. No physical authentication claim.\n');
+const backOutput = adb(['shell','am','instrument','-w','-r','-e','class','dev.dkk115.uacremote.LanguageBackInstrumentationTest','dev.dkk115.uacremote.test/androidx.test.runner.AndroidJUnitRunner']);
+writeFileSync('target/android-lifecycle-ci/language-back-tests.txt',backOutput);
+assert.match(backOutput,/OK \(1 test\)/u);
+assert.doesNotMatch(backOutput,/FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed/u);
+process.stdout.write('Actual Android Back cancelled unsaved language drafts, restored focus, kept the Activity and preserved normal Back without a dialog.\n');

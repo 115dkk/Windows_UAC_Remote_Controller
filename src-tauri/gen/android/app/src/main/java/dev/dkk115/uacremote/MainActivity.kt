@@ -11,6 +11,7 @@ import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.pairing.PairingScannerDialog
 
 class MainActivity : TauriActivity() {
+  private var webDialogBack: WebDialogBackHandler? = null
   private var presentationLanguage: String? = null
   private var pairingPermissionOwner: PairingScannerDialog? = null
   private val pairingPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -28,9 +29,13 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     DeviceStatePlugin.actualWebViewCreated(this, webView)
+    webDialogBack?.retire()
+    webDialogBack = WebDialogBackHandler(this, webView)
   }
 
   override fun onDestroy() {
+    webDialogBack?.retire()
+    webDialogBack = null
     (application as? ControllerApplication)?.pairingScannerHostStopped(this)
     DeviceStatePlugin.actualActivityDestroyed(this)
     super.onDestroy()
@@ -56,8 +61,19 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onStop() {
+    webDialogBack?.invalidate()
     (application as? ControllerApplication)?.pairingScannerHostStopped(this)
     super.onStop()
+  }
+
+  override fun onPause() {
+    webDialogBack?.invalidate()
+    super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    if (!hasFocus) webDialogBack?.invalidate()
+    super.onWindowFocusChanged(hasFocus)
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {
