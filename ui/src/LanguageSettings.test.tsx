@@ -32,7 +32,7 @@ it('consumes cancel while a save is pending and permits retry after failure', as
   expect(event.defaultPrevented).toBe(true);
   expect(close).not.toHaveBeenCalled();
   expect(save).toHaveBeenCalledTimes(1);
-  await act(async () => { reject(new Error('synthetic save failure')); });
+  await act(async () => { reject(new Error('synthetic save failure')); await Promise.resolve(); });
   expect(screen.getByRole('alert')).toBeInTheDocument();
   fireEvent(screen.getByRole('dialog'), new Event('cancel', { cancelable: true }));
   expect(close).toHaveBeenCalledTimes(1);
