@@ -262,7 +262,10 @@ export function useController(bridge: ControllerBridge) {
         if (scannerReturn.current.pending) scannerReturn.current.wake = true;
         void refresh();
       }
-      else if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
+      else {
+        if (scannerReturn.current.pending && !scannerReturn.current.opened) dismissScannerReturnFocus();
+        if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
+      }
     };
     let disposed = false;
     let unsubscribe: (() => Promise<void>) | undefined;
@@ -282,7 +285,7 @@ export function useController(bridge: ControllerBridge) {
       window.removeEventListener('focus', onForeground);
       document.removeEventListener('visibilitychange', onForeground);
     };
-  }, [bridge, publish, refresh]);
+  }, [bridge, dismissScannerReturnFocus, publish, refresh]);
 
   return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, dismissScannerReturnFocus };
 }

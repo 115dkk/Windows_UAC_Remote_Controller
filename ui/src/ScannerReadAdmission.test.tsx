@@ -115,4 +115,21 @@ describe('scanner intent waits for the actual background read', () => {
       expect(screen.queryByText(incoming.requests[0]!.programName)).not.toBeInTheDocument();
     } finally { visibility.mockRestore(); }
   });
+
+  it('leaving and returning before the read completes still cancels the old intent', async () => {
+    const test = setup();
+    render(<App bridge={test.bridge} />);
+    const entry = await screen.findByRole('button', { name: ko.openPairingScanner });
+    fireEvent(window, new Event('focus'));
+    fireEvent.click(entry);
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      fireEvent(document, new Event('visibilitychange'));
+      visibility.mockReturnValue('visible');
+      fireEvent(document, new Event('visibilitychange'));
+      await act(async () => { test.pending.resolve(test.snapshot); await test.pending.promise; });
+      await waitFor(() => expect(entry).toBeEnabled());
+      expect(test.openPairingScanner).not.toHaveBeenCalled();
+    } finally { visibility.mockRestore(); }
+  });
 });
