@@ -951,32 +951,34 @@ fn font_face(locale: Locale) -> &'static str {
 }
 
 fn font_bytes(locale: Locale) -> [&'static [u8]; 2] {
-    // Literal include paths and explicit slice types keep each font visible to
-    // rust-analyzer without nested macro/concat/env expansion and coercion.
+    // Exact array lengths come from assets/fonts/native/manifest.json and are
+    // checked by rustc against include_bytes!. The pinned analyzer models that
+    // builtin with an inferred array length (upstream issue/PR22520); an unsized
+    // slice leaves that length unconstrained even with an explicit slice type.
     // These are the same fixed compile-time inputs; no runtime path is accepted.
-    static LATIN_REGULAR: &[u8] =
+    static LATIN_REGULAR: &[u8; 646148] =
         include_bytes!("../../../../../assets/fonts/native/UACSans-Regular.ttf");
-    static LATIN_BOLD: &[u8] =
+    static LATIN_BOLD: &[u8; 648272] =
         include_bytes!("../../../../../assets/fonts/native/UACSans-Bold.ttf");
-    static KOREAN_REGULAR: &[u8] =
+    static KOREAN_REGULAR: &[u8; 2533808] =
         include_bytes!("../../../../../assets/fonts/native/UACSansKR-Regular.ttf");
-    static KOREAN_BOLD: &[u8] =
+    static KOREAN_BOLD: &[u8; 2478456] =
         include_bytes!("../../../../../assets/fonts/native/UACSansKR-Bold.ttf");
-    static JAPANESE_REGULAR: &[u8] =
+    static JAPANESE_REGULAR: &[u8; 5766888] =
         include_bytes!("../../../../../assets/fonts/native/UACSansJP-Regular.ttf");
-    static JAPANESE_BOLD: &[u8] =
+    static JAPANESE_BOLD: &[u8; 5761684] =
         include_bytes!("../../../../../assets/fonts/native/UACSansJP-Bold.ttf");
-    static SIMPLIFIED_REGULAR: &[u8] =
+    static SIMPLIFIED_REGULAR: &[u8; 10595936] =
         include_bytes!("../../../../../assets/fonts/native/UACSansSC-Regular.ttf");
-    static SIMPLIFIED_BOLD: &[u8] =
+    static SIMPLIFIED_BOLD: &[u8; 10585460] =
         include_bytes!("../../../../../assets/fonts/native/UACSansSC-Bold.ttf");
-    static TRADITIONAL_REGULAR: &[u8] =
+    static TRADITIONAL_REGULAR: &[u8; 7149184] =
         include_bytes!("../../../../../assets/fonts/native/UACSansTC-Regular.ttf");
-    static TRADITIONAL_BOLD: &[u8] =
+    static TRADITIONAL_BOLD: &[u8; 7143712] =
         include_bytes!("../../../../../assets/fonts/native/UACSansTC-Bold.ttf");
-    static ARABIC_REGULAR: &[u8] =
+    static ARABIC_REGULAR: &[u8; 194328] =
         include_bytes!("../../../../../assets/fonts/native/UACSansArabic-Regular.ttf");
-    static ARABIC_BOLD: &[u8] =
+    static ARABIC_BOLD: &[u8; 194512] =
         include_bytes!("../../../../../assets/fonts/native/UACSansArabic-Bold.ttf");
     match locale {
         Locale::Ko => [KOREAN_REGULAR, KOREAN_BOLD],
