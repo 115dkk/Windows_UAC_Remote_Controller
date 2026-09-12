@@ -39,7 +39,9 @@ class LanguageBackInstrumentationTest {
             val originalPreference = onMain { AppLanguage.preference(host) }
             val originalLocale = onMain { AppLanguage.effective(host) }
             repeat(2) {
-                assertEquals("true", eval(host, "(()=>{document.querySelector('.app-settings-button').click();return true})()"))
+                // Javascript click() does not focus like a user interaction.
+                // Set the real toolbar's focus before testing focus restoration.
+                assertEquals("true", eval(host, OPEN_SETTINGS))
                 await { eval(host, OPEN) == "true" }
                 val initialChoice = eval(host, CHOICE)
                 // Select a different draft through the actual rendered radio.
@@ -55,7 +57,7 @@ class LanguageBackInstrumentationTest {
                 assertEquals(originalLocale, onMain { AppLanguage.effective(host) })
                 assertEquals("true", eval(host, "document.activeElement===document.querySelector('.app-settings-button')"))
                 // Reopening confirms the draft was discarded, not merely hidden.
-                eval(host, "document.querySelector('.app-settings-button').click()")
+                assertEquals("true", eval(host, OPEN_SETTINGS))
                 await { eval(host, OPEN) == "true" }
                 assertEquals(initialChoice, eval(host, CHOICE))
                 instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
@@ -125,6 +127,7 @@ class LanguageBackInstrumentationTest {
     }
 
     companion object {
+        private const val OPEN_SETTINGS = "(()=>{const b=document.querySelector('.app-settings-button');b.focus();b.click();return true})()"
         private const val OPEN = "!!document.querySelector('dialog.language-settings[open]')"
         private const val CHOICE = "[...document.querySelectorAll('.language-settings input[type=radio]')].findIndex(r=>r.checked)"
     }
