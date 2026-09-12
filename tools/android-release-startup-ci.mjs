@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
+import { SYNTHETIC_CI_PIN, guardedHierarchyInput, performFirstUnlockUi } from './android-first-unlock.mjs';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true');
 assert.equal(process.env.CI, 'true');
@@ -57,16 +59,31 @@ async function unlockDisposableEmulator() {
   adb(['shell', 'input', 'keyevent', 'KEYCODE_SLEEP']);
   await setTimeout(300);
   adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
-  await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=true/.test(value), 'test keyguard visible');
-  adb(['shell', 'input', 'swipe', '540', '1800', '540', '600', '400']);
-  const pin = await until(ui, view => Boolean(view.document.querySelector('[resource-id="com.android.systemui:id/pinEntry"]')), 'test PIN entry');
-  const entry = pin.document.querySelector('[resource-id="com.android.systemui:id/pinEntry"]');
-  assert.equal(entry.getAttribute('package'), 'com.android.systemui');
-  assert.equal(entry.getAttribute('password'), 'true');
-  assert.equal(entry.getAttribute('text'), '');
-  assert.equal(entry.getAttribute('enabled'), 'true');
-  adb(['shell', 'input', 'text', '2468']);
-  adb(['shell', 'input', 'keyevent', 'KEYCODE_ENTER']);
+  await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=true/.test(value)
+    && value.includes('screenState=SCREEN_STATE_ON') && value.includes('interactiveState=INTERACTIVE_STATE_AWAKE'), 'test keyguard awake');
+  // Reuse the existing bounded SystemUI ceremony: fresh observed control
+  // bounds, one PIN attempt, no guessed swipe/keyboard focus or stale input.
+  const bootId = adb(['shell', 'cat', '/proc/sys/kernel/random/boot_id']).trim();
+  const deadline = performance.now() + 120000;
+  const actions = [], discarded = [];
+  const checkCurrent = () => {
+    assert.ok(performance.now() < deadline, 'test unlock deadline');
+    assert.equal(adb(['shell', 'cat', '/proc/sys/kernel/random/boot_id']).trim(), bootId);
+  };
+  await performFirstUnlockUi({ nonce: randomBytes(16).toString('hex'), bootId, checkCurrent,
+    monotonicNow: () => performance.now(),
+    capture: async path => {
+      checkCurrent();
+      const capturedAt = performance.now();
+      const completion = adb(['shell', 'uiautomator', 'dump', path]);
+      assert.equal(completion.trim(), `UI hierchary dumped to: ${path}`);
+      const xml = adb(['shell', 'cat', path]);
+      return { path, xml, capturedAt, bootId, xmlSha256: createHash('sha256').update(xml).digest('hex') };
+    },
+    dispatch: (argv, capturedAt) => guardedHierarchyInput(capturedAt, performance.now(), () => adb(['shell', 'input', ...argv])),
+    onAction: action => actions.push(action), onDiscard: view => discarded.push(view),
+  });
+  writeFileSync('evidence/test-unlock-actions.json', JSON.stringify({ actions, discarded }, null, 2));
   const unlocked = await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=false/.test(value), 'test keyguard dismissed');
   assert.match(unlocked, /\bsecure=true/);
   writeFileSync('evidence/unlocked-window-policy.txt', unlocked);
@@ -106,7 +123,7 @@ try {
   adb(['shell', 'settings', 'put', 'system', 'screen_off_timeout', '1800000']);
   adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
   // Public synthetic emulator lock, not a user credential or authentication test.
-  adb(['shell', 'locksettings', 'set-pin', '2468']);
+  adb(['shell', 'locksettings', 'set-pin', SYNTHETIC_CI_PIN]);
   await unlockDisposableEmulator();
   adb(['install', resolve(process.env.RUNNER_TEMP, 'startup.apk')]);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.CAMERA']);

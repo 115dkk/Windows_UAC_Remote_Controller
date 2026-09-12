@@ -53,6 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
+          npm ci --prefix ../control
           rustup show active-toolchain
           rustup target add x86_64-linux-android
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' --channel=0 </dev/null
