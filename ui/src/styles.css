@@ -156,6 +156,12 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .page-header .refresh-label { display: none; }
 .page-header .header-actions .refresh-button, .page-header .header-actions .app-settings-button { inline-size: var(--header-target); block-size: var(--header-target); min-block-size: var(--header-target); padding: 0; flex: 0 0 auto; }
 @container page-heading (min-width: 20em) {
+  .page-header .refresh-label:is(:lang(ko), :lang(ja), :lang(zh)) { display: inline; }
+  .page-header .header-actions .refresh-button:is(:lang(ko), :lang(ja), :lang(zh)) { inline-size: auto; block-size: auto; padding-inline: var(--space-2); }
+}
+/* Longer translated action labels need more room; their compact mode is stable
+   across every page, rather than changing with the current heading. */
+@container page-heading (min-width: 28em) {
   .page-header .refresh-label { display: inline; }
   .page-header .header-actions .refresh-button { inline-size: auto; block-size: auto; padding-inline: var(--space-2); }
 }

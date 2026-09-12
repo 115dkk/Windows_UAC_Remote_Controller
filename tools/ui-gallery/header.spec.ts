@@ -49,6 +49,9 @@ for (const selected of headerCases) {
     }
     const refresh = page.locator('.page-header .refresh-button');
     await expect(refresh).toHaveAccessibleName(galleryText(locale, '다시 확인'));
+    if (locale === 'ko' && selected.viewport.width === 390 && !selected.rootTextSizePercent) {
+      await expect(refresh.locator('.refresh-label')).toBeVisible();
+    }
     if (selected.rootTextSizePercent === 200 || selected.viewport.width === 320) {
       await expect(refresh.locator('.refresh-label')).toBeHidden();
       expect((await refresh.boundingBox())!.width).toBeGreaterThanOrEqual(48);
