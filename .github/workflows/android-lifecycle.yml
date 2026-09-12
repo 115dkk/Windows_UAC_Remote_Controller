@@ -137,7 +137,8 @@ jobs:
           avd-name: uac-lifecycle-ci-36-x86_64
           emulator-port: 5554
           disable-animations: true
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated
+          # The Pixel profile advertises both lenses; CameraX validates both.
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated -camera-front emulated
           # Preserve every original lifecycle/first-unlock check and its limits.
           # The separately bounded scanner step uses that same unlocked fixture.
           script: node tools/android-lifecycle-ci.mjs && node tools/android-pairing-scan-ci.mjs && node tools/android-language-ci.mjs

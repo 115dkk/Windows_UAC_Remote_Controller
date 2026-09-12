@@ -257,7 +257,12 @@ class PairingScannerInstrumentationTest {
                 finally { done.countDown() }
             }
         }
-        if (!done.await(2, TimeUnit.SECONDS)) { active.set(false); throw AssertionError("Native scan Javascript callback unavailable") }
+        // The click opens a real themed native window on the same UI thread.
+        // CI observed show=true after 1.96s, just beyond the old callback budget
+        // once WebView dispatch is included. Wait for that ORIGINAL callback;
+        // never replay the click or substitute a native observation for its ack.
+        val callbackSeconds = if (script == CLICK_BUTTON) 10L else 2L
+        if (!done.await(callbackSeconds, TimeUnit.SECONDS)) { active.set(false); throw AssertionError("Native scan Javascript callback unavailable") }
         active.set(false)
         return value.get() ?: throw AssertionError("Original native scan view changed")
     }

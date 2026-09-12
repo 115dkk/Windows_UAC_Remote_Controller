@@ -14,6 +14,19 @@ const receipt = name => ({ version: 1, ...expected(name), completed: true,
   checks: Object.fromEntries(SCANNER_CASES[name].checks.map(key => [key, true])) });
 const output = value => `INSTRUMENTATION_STATUS: UAC_PAIRING_SCAN_RECEIPT_V1=${JSON.stringify(value)}\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n`;
 
+test('native click waits for its original callback and CI supplies advertised emulated cameras', () => {
+  const source = readFileSync(new URL('../src-tauri/gen/android/app/src/androidTest/java/dev/dkk115/uacremote/PairingScannerInstrumentationTest.kt', import.meta.url), 'utf8');
+  assert.ok(source.includes('if (script == CLICK_BUTTON) 10L else 2L'));
+  assert.ok(source.includes('done.await(callbackSeconds, TimeUnit.SECONDS)'));
+  assert.ok(source.includes('webView(host) === original'));
+  assert.ok(source.includes('assertTrue(onMain { secureScannerWindow() })'));
+  for (const workflow of ['android-lifecycle.yml', 'android-release-startup.yml']) {
+    const yaml = readFileSync(new URL(`../.github/workflows/${workflow}`, import.meta.url), 'utf8');
+    assert.ok(yaml.includes('-camera-back emulated -camera-front emulated'));
+    assert.ok(!yaml.includes('-camera-front webcam'));
+  }
+});
+
 test('each real-scanner case requires exactly one completed test and its own complete bound receipt', () => {
   for (const name of Object.keys(SCANNER_CASES)) assert.deepEqual(parseScannerReceipt(output(receipt(name)), expected(name)), receipt(name));
   const text = output(receipt('native-dialog'));

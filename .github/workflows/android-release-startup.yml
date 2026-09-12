@@ -98,7 +98,7 @@ jobs:
           avd-name: uac-release-startup-ci
           emulator-port: 5554
           disable-animations: true
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated -camera-front emulated
           script: node control/tools/android-release-startup-ci.mjs
       - name: Retain evidence, never the ephemeral signing key or test APK
         if: ${{ always() }}
