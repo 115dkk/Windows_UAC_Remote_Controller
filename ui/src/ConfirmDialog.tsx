@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useEffect, useId, useRef } from 'react';
-import { ko } from './messages.ko';
+import { ko } from './messages';
+import { displayText } from './displayText';
 
 export interface Confirmation {
   readonly title: string;
@@ -29,7 +30,7 @@ export function ConfirmDialog({ confirmation, onClose }: { confirmation: Confirm
     <dialog ref={dialog} className="confirm-dialog" aria-labelledby={titleId} aria-describedby={descriptionId}
       onCancel={(event) => { event.preventDefault(); onClose(); }}>
       <h2 id={titleId}>{confirmation.title}</h2>
-      {confirmation.subject && <p className="dialog-subject"><bdi>{confirmation.subject}</bdi></p>}
+      {confirmation.subject && <p className="dialog-subject"><bdi dir="ltr">{displayText(confirmation.subject)}</bdi></p>}
       <p id={descriptionId}>{confirmation.body}</p>
       <div className="dialog-actions">
         <button type="button" className="button secondary" onClick={onClose}>{ko.cancel}</button>

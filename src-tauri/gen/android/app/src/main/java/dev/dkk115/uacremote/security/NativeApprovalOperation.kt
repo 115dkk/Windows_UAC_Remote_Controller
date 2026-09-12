@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.security
 
+import dev.dkk115.uacremote.AppLanguage
+import dev.dkk115.uacremote.R
+
 import android.app.Activity
 import android.content.Context
 import android.hardware.biometrics.BiometricPrompt
@@ -104,8 +107,8 @@ internal class NativeApprovalOperation internal constructor(
                 return ApprovalOperationOutcome.Failure(ApprovalOperationError.NATIVE_UNAVAILABLE)
             }
             val prompt = BiometricPrompt.Builder(host)
-                .setTitle("컴퓨터 요청 승인")
-                .setDescription("이 요청을 승인하려면 휴대폰 인증을 완료하세요.")
+                .setTitle(AppLanguage.text(host, R.string.approval_auth_title))
+                .setDescription(AppLanguage.text(host, R.string.approval_auth_description))
                 .setAllowedAuthenticators(ALLOWED_AUTHENTICATORS)
                 .setConfirmationRequired(true)
                 // DEVICE_CREDENTIAL supplies its own system button. Never set a

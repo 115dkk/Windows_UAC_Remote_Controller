@@ -9,8 +9,10 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.text.BidiFormatter
+import android.text.TextDirectionHeuristics
 import androidx.core.app.NotificationCompat
 import dev.dkk115.uacremote.R
+import dev.dkk115.uacremote.AppLanguage
 
 /** Plain bounded display DTO for the real renderer and isolated synthetic CI.
  * Production constructs it ONLY after the original opaque Rust handle check. */
@@ -28,7 +30,8 @@ internal object RequestNotificationPolicy {
 /** Framework templates own geometry/semantics. No key/auth, full commands,
  * full-screen intent, custom RemoteViews, native owner or source fixtures. */
 internal class RequestNotificationRenderer(context: Context) {
-    private val context = context.applicationContext
+    private val source = context.applicationContext
+    private val context: Context get() = AppLanguage.context(source)
     private fun manager(): NotificationManager = context.getSystemService(NotificationManager::class.java)
         ?: throw IllegalStateException("Notification service unavailable")
 
@@ -36,13 +39,20 @@ internal class RequestNotificationRenderer(context: Context) {
         val manager = manager()
         for (mode in RequestNotificationMode.values()) {
             val id = channel(mode)
-            if (manager.getNotificationChannel(id) != null) continue // User settings own existing channels.
             val name = when (mode) {
                 RequestNotificationMode.SOUND -> R.string.request_channel_sound
                 RequestNotificationMode.VIBRATION_ONLY -> R.string.request_channel_vibration
                 RequestNotificationMode.SILENT -> R.string.request_channel_silent
             }
             val importance = if (mode == RequestNotificationMode.SILENT) NotificationManager.IMPORTANCE_LOW else NotificationManager.IMPORTANCE_HIGH
+            val existing = manager.getNotificationChannel(id)
+            if (existing != null) {
+                // Rename only: preserve the user's importance/sound/vibration.
+                existing.name = context.getString(name)
+                existing.description = context.getString(R.string.request_channel_description)
+                manager.createNotificationChannel(existing)
+                continue
+            }
             val created = NotificationChannel(id, context.getString(name), importance)
             created.description = context.getString(R.string.request_channel_description)
             created.enableVibration(mode == RequestNotificationMode.VIBRATION_ONLY)
@@ -61,29 +71,37 @@ internal class RequestNotificationRenderer(context: Context) {
     fun build(content: RequestNotificationContent, mode: RequestNotificationMode, quiet: Boolean, remainingMillis: Long,
               actions: RequestNotificationActions): Notification {
         require(remainingMillis in 1..300_000L)
-        val bidi = BidiFormatter.getInstance()
-        val summary = context.getString(R.string.request_notification_summary, bidi.unicodeWrap(content.program), bidi.unicodeWrap(content.path))
+        val context = this.context // One locale snapshot for this notification.
+        val bidi = BidiFormatter.getInstance(context.resources.configuration.locales[0])
+        val program = bidi.unicodeWrap(UntrustedDisplayText.escape(content.program), TextDirectionHeuristics.FIRSTSTRONG_LTR)
+        val path = bidi.unicodeWrap(UntrustedDisplayText.escape(content.path), TextDirectionHeuristics.LTR)
+        val summary = context.getString(R.string.request_notification_summary, program, path)
+        val fits = UntrustedDisplayText.fitsNotification(summary)
+        val shown = if (fits) summary else context.getString(R.string.request_notification_public_body)
         val publicVersion = NotificationCompat.Builder(context, channel(mode))
             .setSmallIcon(R.drawable.ic_request_notice)
             .setContentTitle(context.getString(R.string.request_notification_title))
             .setContentText(context.getString(R.string.request_notification_public_body))
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setSilent(true).build()
-        return NotificationCompat.Builder(context, channel(mode))
+        val builder = NotificationCompat.Builder(context, channel(mode))
             .setSmallIcon(R.drawable.ic_request_notice)
             .setColor(context.getColor(R.color.request_notification_accent))
             .setContentTitle(context.getString(R.string.request_notification_title))
             .setSubText(context.getString(R.string.request_computer_context))
-            .setContentText(bidi.unicodeWrap(content.program))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(summary))
+            .setContentText(if (fits) program else shown)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(shown))
             .setContentIntent(actions.open)
-            .addAction(R.drawable.ic_request_approve, context.getString(R.string.request_action_approve), actions.approve)
-            .addAction(R.drawable.ic_request_deny, context.getString(R.string.request_action_deny), actions.deny)
-            .addAction(R.drawable.ic_request_details, context.getString(R.string.request_action_details), actions.details)
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(publicVersion)
             .setOnlyAlertOnce(true).setSilent(RequestNotificationPolicy.silent(quiet, mode))
             .setTimeoutAfter(remainingMillis).setAutoCancel(false).setLocalOnly(true).setShowWhen(false)
+        // Do not invite approval from a platform-truncated security identifier.
+        // The app details screen owns the full escaped display of long fields.
+        if (fits) builder.addAction(R.drawable.ic_request_approve, context.getString(R.string.request_action_approve), actions.approve)
+        return builder
+            .addAction(R.drawable.ic_request_deny, context.getString(R.string.request_action_deny), actions.deny)
+            .addAction(R.drawable.ic_request_details, context.getString(R.string.request_action_details), actions.details)
             .build()
     }
 

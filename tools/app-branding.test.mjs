@@ -14,7 +14,8 @@ test('PC, Android and client share the explicit UAC app name and source logo', (
   assert.equal(config.app.windows[0].title, config.productName);
   assert.equal(config.identifier, 'dev.dkk115.uacremote');
   assert.match(text('ui/src/messages.ko.ts'), /appName: 'UAC 원격 승인'/u);
-  assert.match(text(`${res}/values/strings.xml`), /name="app_name">"UAC 원격 승인"/u);
+  assert.match(text(`${res}/values/strings.xml`), /name="app_name">"?UAC Remote Approval/u);
+  assert.match(text(`${res}/values-ko/strings.xml`), /name="app_name">"?UAC 원격 승인/u);
   assert.match(text('ui/index.html'), /<title>UAC 원격 승인<\/title>/u);
   assert.deepEqual(bytes('ui/public/app-logo.svg'), bytes('src-tauri/icons/source.svg'));
   assert.match(text('src-tauri/icons/source.svg'), /m40 51 12 12 22-23/u, 'approval check is present in the original vector');

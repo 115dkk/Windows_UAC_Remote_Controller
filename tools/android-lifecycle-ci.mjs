@@ -367,6 +367,8 @@ export async function main(args = process.argv.slice(2)) {
       requireThat(/\bSuccess\s*$/.test(await mutate(['install', '-t', selected[packageName].path])), 'APK install was not confirmed.');
     }
     await mutate(['shell', 'pm', 'grant', PACKAGE, 'android.permission.POST_NOTIFICATIONS']);
+    // Preserve the existing Korean native-shell assertions explicitly in CI.
+    await mutate(['shell', 'cmd', 'locale', 'set-app-locales', PACKAGE, '--user', '0', '--locales', 'ko-KR']);
     async function barrier() {
       requireBroadcastBarrier(await read(['shell', 'am', 'wait-for-broadcast-barrier', '--flush-broadcast-loopers', '--flush-application-threads'], 60_000));
     }

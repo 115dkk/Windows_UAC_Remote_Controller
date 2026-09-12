@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterEach } from 'vitest';
+import { afterEach, beforeEach } from 'vitest';
+import { setPreviewLanguage } from './i18n';
+
+// Existing Korean consumer-copy fixtures are explicit. Production defaults use OS locale.
+beforeEach(() => { setPreviewLanguage('ko'); document.documentElement.lang='ko'; document.documentElement.dir='ltr'; });
 
 afterEach(cleanup);
 

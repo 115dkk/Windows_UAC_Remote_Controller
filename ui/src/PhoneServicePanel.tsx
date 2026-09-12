@@ -2,7 +2,7 @@
 import { useId } from 'react';
 import type { PhoneServiceView } from './contracts';
 import { Icon } from './icons';
-import { ko, phoneServiceStateText } from './messages.ko';
+import { ko, phoneServiceStateText } from './messages';
 
 /** Native state only. Request acceptance never becomes a local running result. */
 export function PhoneServicePanel({ service, disabled, onAction }: {

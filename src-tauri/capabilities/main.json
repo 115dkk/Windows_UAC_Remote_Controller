@@ -4,6 +4,7 @@
   "description": "Local presentation may call only the controller's narrow typed commands.",
   "windows": ["main"],
   "permissions": [
+    "allow-get-language", "allow-set-language",
     "allow-app-snapshot", "allow-save-notification-policy", "allow-control-service",
     "allow-begin-pairing", "allow-remove-device", "allow-decide-request",
     "allow-clear-activity", "allow-open-lock-settings", "allow-open-notification-settings",

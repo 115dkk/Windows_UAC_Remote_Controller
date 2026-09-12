@@ -223,6 +223,15 @@ class ControllerApplication : Application() {
     internal fun pairingScannerHostStopped(activity: MainActivity) { pairingScanner?.takeIf { it.activity === activity }?.close() }
     internal fun pairingScannerRotationChanged(activity: MainActivity) { pairingScanner?.takeIf { it.activity === activity }?.rotationChanged() }
 
+    /** Refresh presentation through existing owners; never construct a key/actor
+     * or renew a request/authentication lifetime for a language preference. */
+    internal fun presentationLanguageChanged() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        pairingScanner?.close()
+        serviceListener?.invoke(state)
+        policyActor?.maintainRequests()
+    }
+
     /** Native listener gets an empty wake only; sticky review is read separately. */
     internal fun observeRequestChanges(activity: Activity, listener: (() -> Unit)?) {
         check(Looper.myLooper() == Looper.getMainLooper())

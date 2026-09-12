@@ -3,7 +3,7 @@ import { useId } from 'react';
 import type { Ref } from 'react';
 import type { AppSnapshot } from './contracts';
 import { Icon } from './icons';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { hasNoPairedPc } from './phoneConnection';
 
 export function PairingEntry({ snapshot, disabled, onOpenScanner, scannerButtonRef }: {

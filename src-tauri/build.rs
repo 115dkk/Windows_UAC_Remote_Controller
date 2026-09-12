@@ -3,6 +3,8 @@
 fn main() {
     let manifest = tauri_build::AppManifest::new().commands(&[
         "app_snapshot",
+        "get_language",
+        "set_language",
         "save_notification_policy",
         "control_service",
         "begin_pairing",

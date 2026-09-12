@@ -9,6 +9,31 @@ pub(crate) struct CommandOrigin {
     native: tauri::ipc::AndroidInvokeOrigin,
 }
 
+#[cfg(target_os = "android")]
+pub(crate) fn language_settings(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+    preference: Option<String>,
+) -> Result<presentation_i18n::LanguageSettings, AppIssue> {
+    use tauri::Manager;
+    let (command, payload) = match preference {
+        Some(language) => ("setLanguage", serde_json::json!({"language":language})),
+        None => ("getLanguage", serde_json::json!({})),
+    };
+    let settings: presentation_i18n::LanguageSettings = app
+        .state::<DeviceState>()
+        .0
+        .run_mobile_plugin_from_origin(&origin.native, command, payload)
+        .map_err(|_| mobile_issue())?;
+    if !presentation_i18n::valid_preference(&settings.preference)
+        || settings.system_locales.len() > 32
+        || settings.system_locales.iter().any(|tag| tag.len() > 85)
+    {
+        return Err(mobile_issue());
+    }
+    Ok(settings)
+}
+
 impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for CommandOrigin {
     fn from_command(
         command: tauri::ipc::CommandItem<'de, R>,

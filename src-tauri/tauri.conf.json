@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "UAC 원격 승인",
-  "version": "0.1.0-alpha.14",
+  "version": "0.1.0-alpha.15",
   "identifier": "dev.dkk115.uacremote",
   "build": {
     "beforeDevCommand": "node tools/build-ui.mjs dev",
@@ -37,7 +37,7 @@
       "allowDowngrades": false,
       "nsis": {
         "installMode": "perMachine",
-        "languages": ["Korean", "English"],
+        "languages": ["English", "Korean", "French", "German", "Japanese", "SimpChinese", "TradChinese", "Spanish", "PortugueseBR", "Portuguese", "Arabic"],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",

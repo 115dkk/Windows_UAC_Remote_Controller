@@ -47,6 +47,10 @@ export function qaCase(name: string): QaCase {
     case 'desktop-devices': return { page: 'devices', snapshot: { ...windows, devices: [{ id: 'synthetic-device', name: '화면 예시 휴대폰', revision: 1, connected: false, routePresent: false, lastSeenLabel: '마지막 연결: 화면 예시' }], canUnpair: true } };
     case 'desktop-history': return { page: 'activity', snapshot: { ...windows, activity: [{ id: 'synthetic-event-1', timestampMillis: Date.UTC(2026, 8, 8, 12, 30), kind: 'service_started' }, { id: 'synthetic-event-2', timestampMillis: Date.UTC(2026, 8, 8, 12, 20), kind: 'cancelled' }], canClearActivity: true } };
     case 'phone-pending': return { page: 'requests', snapshot: { ...phone, requests: [pendingRequest] } };
+    case 'phone-bidi': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest,
+      programName: 'report\u202Egpj.exe', executablePath: 'C:\\ملفات\\report\u202Egpj.exe',
+      details: '"C:\\ملفات\\report\u202Egpj.exe" --note=\u2066日本語\u2069 --shape=برنامج\u200d\u200c عربي',
+    })] } };
     case 'phone-terminal': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: 'PowerShell', executablePath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', details: `pwsh.exe -NoProfile -Command "Write-Output '화면 예시'"` })] } };
     case 'phone-long-request': return { page: 'requests', snapshot: { ...phone, requests: [withSyntheticDetails({ ...pendingRequest, programName: '화면 예시 · 길이가 긴 프로그램 이름 설치 관리자.exe', executablePath: `C:\\${'한글 경로와 English mixed-direction אבג '.repeat(8)}\\${'unbroken'.repeat(22)}.exe`, details: `${'<img src=x onerror="exampleOnly()">\n'.repeat(4)}${'아주 긴 프로그램 요청의 예시 내용입니다. '.repeat(35)}` })] } };
     case 'phone-empty': return { page: 'requests', snapshot: phone };

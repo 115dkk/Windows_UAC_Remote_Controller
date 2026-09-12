@@ -1,12 +1,6 @@
 name: Native installer options (existing CI artifact)
 
 on:
-  push:
-    branches: ['codex/native-runtime']
-    paths:
-      - '.github/workflows/windows-installer-options.yml'
-      - 'tools/windows-installer-options-gallery.ps1'
-      - 'tools/InstallerOptionsNative.cs'
   workflow_dispatch:
     inputs:
       source_run:
@@ -28,10 +22,10 @@ jobs:
     timeout-minutes: 10
     env:
       CI: 'true'
-      # Push-triggered harness checks reuse this immutable, payload-inspected
-      # alpha14 build. The normal Windows package job tests its own new artifact.
-      SOURCE_RUN: ${{ inputs.source_run || '34691429350' }}
-      SOURCE_SHA: ${{ inputs.source_sha || 'bb57ba909a599a7b99a7d96e61974984fd769283' }}
+      # Explicit producer selection avoids stale/expired alpha fixtures. The
+      # normal Windows package job always exercises its own current installer.
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

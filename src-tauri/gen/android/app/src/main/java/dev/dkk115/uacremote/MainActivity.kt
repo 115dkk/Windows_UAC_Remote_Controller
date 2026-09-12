@@ -11,6 +11,7 @@ import dev.dkk115.uacremote.background.ControllerForegroundService
 import dev.dkk115.uacremote.pairing.PairingScannerDialog
 
 class MainActivity : TauriActivity() {
+  private var presentationLanguage: String? = null
   private var pairingPermissionOwner: PairingScannerDialog? = null
   private val pairingPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
     val original = pairingPermissionOwner
@@ -38,11 +39,13 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    try { AppLanguage.migrateLegacyPreference(this) } catch (_: Exception) { /* Keep the current Android choice if migration is unavailable. */ }
     (application as? ControllerApplication)?.receiveRequestIntent(this, intent, savedInstanceState != null)
   }
 
   override fun onStart() {
     super.onStart()
+    refreshPresentationLanguage()
     // Opening/rotating the Activity must not undo an explicit service stop.
     ControllerForegroundService.startIfEnabled(this)
   }
@@ -59,6 +62,16 @@ class MainActivity : TauriActivity() {
 
   override fun onConfigurationChanged(newConfig: Configuration) {
     super.onConfigurationChanged(newConfig)
+    refreshPresentationLanguage()
     (application as? ControllerApplication)?.pairingScannerRotationChanged(this)
+  }
+
+  private fun refreshPresentationLanguage() {
+    val current = try { AppLanguage.effective(this) } catch (_: Exception) { return }
+    val previous = presentationLanguage
+    presentationLanguage = current
+    if (previous != null && previous != current) {
+      (application as? ControllerApplication)?.presentationLanguageChanged()
+    }
   }
 }

@@ -129,6 +129,9 @@ try {
   adb(['shell', 'locksettings', 'set-pin', SYNTHETIC_CI_PIN]);
   await unlockDisposableEmulator();
   adb(['install', resolve(process.env.RUNNER_TEMP, 'startup.apk')]);
+  // Existing minified-startup controls deliberately exercise Korean. Product
+  // startup remains system-default; this is an explicit disposable-AVD setting.
+  adb(['shell', 'cmd', 'locale', 'set-app-locales', pkg, '--user', '0', '--locales', 'ko-KR']);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.CAMERA']);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.POST_NOTIFICATIONS']);
   adb(['shell', 'am', 'start', '-W', '-n', `${pkg}/.MainActivity`]);

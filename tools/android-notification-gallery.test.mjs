@@ -135,13 +135,13 @@ test('native status receipt checks channel properties, flags, mapping and absenc
 test('APK source receipt requires every exact renderer, lightweight type and resource hash without omissions or duplicates', () => {
   const expected = sharedRendererInputs.map((path, index) => ({ path, sha256: index.toString(16).padStart(64, '0') }));
   const value = { schema: 1, scope: 'exact-shared-renderer-inputs', files: expected };
-  assert.equal(sharedRendererInputs.length, 12);
+  assert.equal(sharedRendererInputs.length, 26);
   assert.equal(matchesRendererSourceReceipt(value, expected), true);
   const changedHash = structuredClone(value); changedHash.files[1].sha256 = 'f'.repeat(64);
   const duplicate = structuredClone(value); duplicate.files[1] = duplicate.files[0];
   for (const invalid of [null, { ...value, schema: 2 }, { ...value, scope: 'production service' },
     { ...value, files: expected.slice(1) }, { ...value, files: [...expected, expected[0]] },
-    { ...value, files: new Array(12) }, changedHash, duplicate,
+    { ...value, files: new Array(26) }, changedHash, duplicate,
   ]) assert.equal(matchesRendererSourceReceipt(invalid, expected), false);
 });
 

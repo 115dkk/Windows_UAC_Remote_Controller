@@ -11,6 +11,7 @@ members = [
     "crates/windows-service-host",
     "crates/windows-identity",
     "crates/controller-runtime",
+    "crates/presentation-i18n",
     "crates/service-protocol",
     "crates/secure-channel",
     "crates/phone-request-core",
@@ -25,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.14"
+version = "0.1.0-alpha.15"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-2.0-or-later"

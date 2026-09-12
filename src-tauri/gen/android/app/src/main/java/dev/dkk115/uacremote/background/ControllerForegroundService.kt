@@ -222,6 +222,7 @@ class ControllerForegroundService : Service() {
         if (state == ControllerServiceState.LOCAL_SETTINGS_READY) scheduleConnectivityTick() else stopConnectivityTick()
         if (!promoted || destroyed) return
         try {
+            ControllerStatusNotificationRenderer(this).ensureChannel()
             val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
             manager.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(state))
         } catch (failure: Exception) {

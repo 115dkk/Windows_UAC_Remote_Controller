@@ -17,6 +17,11 @@ const hooks = instructions(read('src-tauri/windows/packaging-hooks.nsh'));
 const firewall = read('crates/windows-service-host/src/ffi/firewall.rs');
 const base = JSON.parse(read('src-tauri/tauri.conf.json'));
 const overlay = JSON.parse(read('src-tauri/windows/package-config.json'));
+const installerLanguages = ['English', 'Korean', 'French', 'German', 'Japanese', 'SimpChinese', 'TradChinese', 'Spanish', 'PortugueseBR', 'Portuguese', 'Arabic'];
+const installerLocaleIds = new Map([['en', '1033'], ['ko', '1042'], ['fr', '1036'], ['de', '1031'],
+  ['ja', '1041'], ['zh-Hans', '2052'], ['zh-Hant', '1028'], ['es', '1034'], ['pt-BR', '1046'], ['pt-PT', '2070'], ['ar', '1025']]);
+const installerGallery = read('tools/windows-installer-options-gallery.ps1');
+const installerNative = read('tools/InstallerOptionsNative.cs');
 
 function position(lines, token, after = -1) {
   const at = lines.findIndex((line, index) => index > after && line === token);
@@ -53,7 +58,7 @@ test('source contract fixes per-machine x64 package and protected product names'
   assert.equal(base.bundle.windows.allowDowngrades, false);
   assert.equal(base.bundle.windows.nsis.template, 'windows/installer.nsi');
   assert.equal(base.bundle.windows.nsis.installerHooks, 'windows/packaging-hooks.nsh');
-  assert.deepEqual(base.bundle.windows.nsis.languages, ['Korean', 'English']);
+  assert.deepEqual(base.bundle.windows.nsis.languages, installerLanguages);
   for (const guard of ['!if "${INSTALLMODE}" != "perMachine"', '!if "${ARCH}" != "x64"',
     '!if "${MAINBINARYNAME}" != "controller-app"', '!if "${PRODUCTNAME}" != "UAC 원격 승인"']) rejectingGuard(template, guard);
   position(template, '!define INSTALLATIONID "휴대폰 승인"');
@@ -64,6 +69,51 @@ test('source contract fixes per-machine x64 package and protected product names'
     'StrCpy $UacDirectory "$PROGRAMFILES64\\휴대폰 승인"', '${If} $INSTDIR != "placeholder\\휴대폰 승인"',
     '${AndIf} $INSTDIR != $UacDirectory', 'Call ${PREFIX}UacFail', 'StrCpy $INSTDIR $UacDirectory']);
   assert.ok(!template.some((line) => /MUI_PAGE_DIRECTORY|ReadRegStr.*\$INSTDIR/u.test(line)));
+});
+
+test('installer defaults silently to the OS and maps only eleven explicit cosmetic locale tags', () => {
+  assert.equal(base.bundle.windows.nsis.displayLanguageSelector, false);
+  assert.ok(!template.some(line => line.includes('MUI_LANGDLL_DISPLAY')));
+  const init = block(template, 'Function .onInit', 'FunctionEnd');
+  ordered(init, ['${GetParameters} $0', 'ClearErrors', '${GetOptions} $0 "/LANG=" $1', '${IfNot} ${Errors}']);
+  const assignments = init.filter(line => line.startsWith('StrCpy $LANGUAGE '));
+  assert.deepEqual(assignments, [...installerLocaleIds.values()].map(id => 'StrCpy $LANGUAGE ' + id));
+  for (const [locale, id] of installerLocaleIds) {
+    const condition = (locale === 'en' ? '${If}' : '${ElseIf}') + ' $1 == "' + locale + '"';
+    assert.equal(init[position(init, condition) + 1], 'StrCpy $LANGUAGE ' + id);
+  }
+  const last = position(init, 'StrCpy $LANGUAGE 1025');
+  assert.deepEqual(init.slice(last + 1, last + 4), ['${EndIf}', '${EndIf}', 'ClearErrors']);
+  const localeBlock = init.slice(position(init, '${GetParameters} $0'), last + 4).join('\n');
+  assert.doesNotMatch(localeBlock, /\b(?:Exec|ExecWait|ExecShell|File|WriteRegStr|System::Call|MessageBox)\b/u);
+});
+
+test('native installer gallery covers every locale and both defaults without reaching installation', () => {
+  const locales = [...installerLocaleIds.keys()];
+  assert.ok(installerGallery.includes("foreach ($locale in @(" + locales.map(locale => "'" + locale + "'").join(',') + '))'));
+  assert.ok(installerGallery.includes("foreach ($mode in @('fresh','upgrade'))"));
+  assert.ok(installerGallery.includes("if ($locale -ne 'en') { $arguments += \"/LANG=$locale\" }"));
+  assert.ok(installerGallery.includes("CurrentUICulture.TwoLetterISOLanguageName -ne 'en'"));
+  assert.ok(installerGallery.includes("if ($mode -eq 'upgrade') { $arguments += '/UPDATE' }"));
+  assert.ok(installerGallery.includes('installer-$locale-$mode.png'));
+  assert.ok(installerGallery.includes('$checks.Count -ne 3'));
+  assert.ok(installerGallery.includes('foreach ($choice in 0..2)'));
+  assert.ok(installerGallery.includes('$choiceControls.Count -ne 1'));
+  assert.ok(installerGallery.includes('[InstallerOptionsNative]::Checked('));
+  assert.ok(installerGallery.indexOf('if ($desktop.Count -eq 1) { $found = $true; break }') < installerGallery.indexOf('[InstallerOptionsNative]::Next('));
+  assert.ok(installerGallery.includes('$ownedIds.Contains($_.Current.ProcessId)'));
+  assert.ok(installerGallery.includes("$env:RUNNER_ENVIRONMENT -ne 'github-hosted'"));
+  assert.doesNotMatch(installerGallery, /InvokePattern|TogglePattern|SendKeys|Set-WinUserLanguageList|Set-WinUILanguageOverride/u);
+  for (const locale of locales) assert.equal(installerNative.split('case "' + locale + '":').length - 1, 2);
+  for (const token of ['actualPid != expectedPid', '!IsWindowEnabled(hwnd)', '!IsWindowVisible(hwnd)',
+    'GetDlgCtrlID(hwnd) != 1', 'GetWindowStyle(hwnd, -16) & 0xF', '(style != 2 && style != 3)',
+    'ShortcutIndex(text, locale) != expectedChoice', 'Message(hwnd, 0x00F0)', 'if (value > 1)']) {
+    assert.ok(installerNative.includes(token), `Missing native gallery boundary: ${token}`);
+  }
+  const navigation = installerNative.slice(installerNative.indexOf('private static string[] NavigationLabels'), installerNative.indexOf('private static string[] ShortcutLabels'));
+  assert.doesNotMatch(navigation, /"(?:Install|Finish|설치|Installer|Installieren|インストール|安装|安裝|Instalar|تنصيب)/u);
+  assert.equal(installerNative.split('Message(hwnd, 0x00F5)').length - 1, 1);
+  assert.doesNotMatch(installerNative, /SendInput|keybd_event|mouse_event|Process\.Start/u);
 });
 
 test('source contract rejects missing duplicate or extra helper payloads at NSIS preprocessing', () => {
@@ -335,12 +385,13 @@ test('source contract retains checked ancestor pins and differentiates installat
   ordered(native('UacFail'), ['Call ${PREFIX}UacRelease', 'SetErrorLevel 3', 'MessageBox MB_OK|MB_ICONSTOP "$UacFailure" /SD IDOK', 'Abort "$UacFailure"']);
 });
 
-test('source contract defines every custom outcome once in Korean and English without raw native error labels', () => {
+test('source contract defines every custom outcome once in all eleven locales without raw native error labels', () => {
   const definitions = new Map();
   for (const line of [...template, ...hooks].filter((value) => value.startsWith('LangString Uac'))) {
-    const match = /^LangString (Uac[A-Za-z0-9]+) (1033|1042) "(.+)"$/u.exec(line);
+    const match = /^LangString (Uac[A-Za-z0-9]+) ([0-9]+) "(.+)"$/u.exec(line);
     assert.ok(match, `Unsupported custom language declaration: ${line}`);
     const [, name, language, text] = match;
+    assert.ok([...installerLocaleIds.values()].includes(language), `Unsupported language identity: ${language}`);
     const key = name + ':' + language;
     assert.ok(!definitions.has(key), `Duplicate custom translation: ${key}`);
     assert.doesNotMatch(text, /\b(?:TPM|CNG|NCrypt|HRESULT|UnsafePermissions|WindowsCall|JournalUnavailable|RegistryUnavailable|KeyNotFound|ServiceError)\b/u);
@@ -349,7 +400,7 @@ test('source contract defines every custom outcome once in Korean and English wi
   const references = new Set([...([...template, ...hooks].join('\n')).matchAll(/\$\((Uac[A-Za-z0-9]+)\)/gu)].map((match) => match[1]));
   assert.ok(references.size >= 9, 'Expected the actual custom outcome surface');
   for (const key of definitions.keys()) references.add(key.split(':')[0]);
-  for (const name of references) for (const language of ['1033', '1042']) assert.ok(definitions.has(name + ':' + language), `Missing ${language}: ${name}`);
+  for (const name of references) for (const language of installerLocaleIds.values()) assert.ok(definitions.has(name + ':' + language), `Missing ${language}: ${name}`);
   for (const name of ['UacUnsafe', 'UacInstallFailed', 'UacStartFailed', 'UacRemoveFailed', 'UacFileFailed', 'UacCopyFailed', 'UacDataRetained']) {
     const korean = definitions.get(name + ':1042');
     const english = definitions.get(name + ':1033')?.toLowerCase();

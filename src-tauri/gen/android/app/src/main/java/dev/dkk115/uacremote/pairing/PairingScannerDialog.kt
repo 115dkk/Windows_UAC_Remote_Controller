@@ -23,6 +23,7 @@ import android.view.WindowManager
 import androidx.camera.view.PreviewView
 import androidx.core.view.WindowCompat
 import dev.dkk115.uacremote.MainActivity
+import dev.dkk115.uacremote.AppLanguage
 import dev.dkk115.uacremote.R
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
 import dev.dkk115.uacremote.nativecore.NativeCeremonyStatus
@@ -52,7 +53,7 @@ internal class PairingScannerDialog(
             if (view === originalDecor) main.post { finishIfReleased() }
         }
     }
-    private val dialog = object : Dialog(activity, R.style.Theme_PairingScanner) {
+    private val dialog = object : Dialog(AppLanguage.context(activity), R.style.Theme_PairingScanner) {
         // Back/cancel and SDK dismiss requests converge on the same one-attempt
         // owner. A callback must never trigger a second underlying dismiss.
         override fun cancel() { this@PairingScannerDialog.close() }

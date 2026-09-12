@@ -30,6 +30,7 @@ import dev.dkk115.uacremote.background.NativeRequestActionResult
 import dev.dkk115.uacremote.background.NativeRequestReadReply
 import dev.dkk115.uacremote.background.NativeRequestRules
 import org.json.JSONObject
+import org.json.JSONArray
 import org.json.JSONTokener
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,7 +85,37 @@ internal class DeviceStateActivityCommands(
     }
 
     fun controllerRequests(invoke: Invoke) = readRequests(invoke, false)
+
+    fun getLanguage(invoke: Invoke) {
+        if (requestArguments(invoke.getRawArgs(), emptySet()) == null || !isForeground()) {
+            invoke.reject("invalid_device_state_arguments", "invalid_device_state_arguments"); return
+        }
+        try { invoke.resolve(languageSnapshot()) }
+        catch (_: Exception) { invoke.reject("language_unavailable", "language_unavailable") }
+    }
+
+    fun setLanguage(invoke: Invoke) {
+        val language = requestArguments(invoke.getRawArgs(), setOf("language"))?.get("language")
+        if (language == null || !AppLanguage.valid(language) || !isForeground()) {
+            invoke.reject("invalid_device_state_arguments", "invalid_device_state_arguments"); return
+        }
+        try {
+            // Changing copy cancels a visible pairing ceremony, never confirms it.
+            // Existing authentication retains its original OS prompt and lifetime.
+            (activity.application as? ControllerApplication)?.pairingScannerHostStopped(activity)
+            AppLanguage.set(activity, language)
+            (activity.application as? ControllerApplication)?.presentationLanguageChanged()
+            invoke.resolve(languageSnapshot())
+        } catch (_: Exception) { invoke.reject("language_unavailable", "language_unavailable") }
+    }
     fun controllerRequestDetails(invoke: Invoke) = readRequests(invoke, true)
+
+    /** The origin-bound transport owns serialization; locale/resources have no
+     * Tauri dependency and can be exercised unchanged by native renderer CI. */
+    private fun languageSnapshot(): JSObject = JSObject().apply {
+        put("preference", AppLanguage.preference(activity))
+        put("systemLocales", JSONArray(AppLanguage.systemLocales(activity)))
+    }
 
     private fun readRequests(invoke: Invoke, details: Boolean) {
         val fields = requestArguments(invoke.getRawArgs(), if (details) setOf("locator") else emptySet())
@@ -423,7 +454,7 @@ internal class DeviceStateActivityCommands(
                 SecureLockObservation.MISSING -> Unit
             }
             if (settingsLaunchPending) {
-                invoke.reject("보안 설정 화면을 이미 열고 있어요.", "lock_settings_pending")
+                invoke.reject(AppLanguage.text(activity, R.string.lock_settings_pending), "lock_settings_pending")
                 return@runOnUiThread
             }
             val intent = try {
@@ -576,21 +607,21 @@ internal class DeviceStateActivityCommands(
         if (arguments.length <= MAX_EMPTY_ARGUMENT_LENGTH &&
             arguments.trim().let { it == "null" || it == "{}" }
         ) return true
-        invoke.reject("이 요청을 처리할 수 없어요. 앱에서 다시 시도해 주세요.", "invalid_device_state_arguments")
+        invoke.reject(AppLanguage.text(activity, R.string.invalid_device_state_arguments), "invalid_device_state_arguments")
         return false
     }
 
     private fun rejectReadiness(invoke: Invoke) {
         // Never pass an Exception to Invoke.reject: Tauri logs exception text.
-        invoke.reject("휴대폰 잠금 상태를 확인하지 못했어요.", "mobile_state_unavailable")
+        invoke.reject(AppLanguage.text(activity, R.string.mobile_state_unavailable), "mobile_state_unavailable")
     }
 
     private fun rejectSettings(invoke: Invoke) {
-        invoke.reject("보안 설정 화면을 열지 못했어요. 휴대폰 설정에서 확인해 주세요.", "lock_settings_unavailable")
+        invoke.reject(AppLanguage.text(activity, R.string.lock_settings_unavailable), "lock_settings_unavailable")
     }
 
     private fun rejectNotificationSettings(invoke: Invoke) {
-        invoke.reject("알림 설정 화면을 열지 못했어요. 휴대폰 설정에서 이 앱의 알림을 확인해 주세요.", "notification_settings_unavailable")
+        invoke.reject(AppLanguage.text(activity, R.string.notification_settings_unavailable), "notification_settings_unavailable")
     }
 
     private companion object {

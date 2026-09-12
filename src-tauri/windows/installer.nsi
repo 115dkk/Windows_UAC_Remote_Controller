@@ -163,7 +163,9 @@ Var UacDesktopCheckbox
 Var UacStartMenuCheckbox
 Var UacTaskbarCheckbox
 
-Name "${PRODUCTNAME}"
+; Display-only name also feeds NSIS's localized setup/uninstall captions.
+; PRODUCTNAME/INSTALLATIONID remain fixed for matching and registry identities.
+Name "$(UacProductName)"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
 
@@ -312,6 +314,18 @@ Page custom UacShortcutPage UacShortcutPageLeave
   !include "{{this}}"
 {{/each}}
 
+LangString UacProductName 1033 "UAC Remote Approval"
+LangString UacProductName 1042 "UAC 원격 승인"
+LangString UacProductName 1036 "Approbation UAC à distance"
+LangString UacProductName 1031 "UAC-Freigabe aus der Ferne"
+LangString UacProductName 1041 "UAC リモート承認"
+LangString UacProductName 2052 "UAC 远程批准"
+LangString UacProductName 1028 "UAC 遠端核准"
+LangString UacProductName 1034 "Aprobación remota de UAC"
+LangString UacProductName 1046 "Aprovação remota do UAC"
+LangString UacProductName 2070 "Aprovação remota do UAC"
+LangString UacProductName 1025 "الموافقة على UAC عن بُعد"
+
 LangString UacShortcutsTitle 1042 "바로가기 선택"
 LangString UacShortcutsTitle 1033 "Choose shortcuts"
 LangString UacShortcutsSubtitle 1042 "앱을 어디에서 열지 선택하세요."
@@ -328,6 +342,79 @@ LangString UacShortcutTaskbar 1042 "작업표시줄에 추가 (앱에서 Windows
 LangString UacShortcutTaskbar 1033 "Add to taskbar — confirm with Windows in the app"
 LangString UacShortcutHint 1042 "작업표시줄 추가에는 시작 메뉴 바로가기도 필요해 함께 선택됩니다. 설치 후 앱을 열면 고정 방법을 안내합니다. Windows 버전에 따라 직접 고정해야 할 수 있어요."
 LangString UacShortcutHint 1033 "Taskbar pinning also needs a Start menu shortcut, so both are selected together. Open the app after setup for pinning instructions. Some Windows versions require manual pinning."
+
+LangString UacShortcutsTitle 1036 "Choisir les raccourcis"
+LangString UacShortcutsTitle 1031 "Verknüpfungen auswählen"
+LangString UacShortcutsTitle 1041 "ショートカットの選択"
+LangString UacShortcutsTitle 2052 "选择快捷方式"
+LangString UacShortcutsTitle 1028 "選擇捷徑"
+LangString UacShortcutsTitle 1034 "Elegir accesos directos"
+LangString UacShortcutsTitle 1046 "Escolher atalhos"
+LangString UacShortcutsTitle 2070 "Escolher atalhos"
+LangString UacShortcutsTitle 1025 "اختيار الاختصارات"
+LangString UacShortcutsSubtitle 1036 "Choisissez où ouvrir l’application."
+LangString UacShortcutsSubtitle 1031 "Wählen Sie, wo Sie die App öffnen möchten."
+LangString UacShortcutsSubtitle 1041 "アプリを開く場所を選んでください。"
+LangString UacShortcutsSubtitle 2052 "选择从哪里打开应用。"
+LangString UacShortcutsSubtitle 1028 "選擇從哪裡開啟應用程式。"
+LangString UacShortcutsSubtitle 1034 "Elija desde dónde abrir la aplicación."
+LangString UacShortcutsSubtitle 1046 "Escolha de onde abrir o app."
+LangString UacShortcutsSubtitle 2070 "Escolha de onde abrir a aplicação."
+LangString UacShortcutsSubtitle 1025 "اختر من أين تريد فتح التطبيق."
+LangString UacShortcutsFresh 1036 "Nouvelle installation. Choisissez les raccourcis souhaités."
+LangString UacShortcutsFresh 1031 "Neuinstallation. Wählen Sie die gewünschten Verknüpfungen."
+LangString UacShortcutsFresh 1041 "新規インストールです。必要なショートカットを選んでください。"
+LangString UacShortcutsFresh 2052 "这是全新安装。请选择所需的快捷方式。"
+LangString UacShortcutsFresh 1028 "這是全新安裝。請選擇所需的捷徑。"
+LangString UacShortcutsFresh 1034 "Instalación nueva. Elija los accesos directos que desee."
+LangString UacShortcutsFresh 1046 "Nova instalação. Escolha os atalhos desejados."
+LangString UacShortcutsFresh 2070 "Nova instalação. Escolha os atalhos pretendidos."
+LangString UacShortcutsFresh 1025 "تثبيت جديد. اختر الاختصارات التي تريدها."
+LangString UacShortcutsUpgrade 1036 "Mise à niveau ou réparation. Les raccourcis existants non sélectionnés restent inchangés."
+LangString UacShortcutsUpgrade 1031 "Upgrade oder Reparatur. Nicht ausgewählte vorhandene Verknüpfungen bleiben unverändert."
+LangString UacShortcutsUpgrade 1041 "更新または修復インストールです。選択しない既存のショートカットはそのまま残ります。"
+LangString UacShortcutsUpgrade 2052 "升级或修复安装。未选中的现有快捷方式将保持不变。"
+LangString UacShortcutsUpgrade 1028 "升級或修復安裝。未選取的現有捷徑將保持不變。"
+LangString UacShortcutsUpgrade 1034 "Actualización o reparación. Los accesos directos existentes no seleccionados se conservan."
+LangString UacShortcutsUpgrade 1046 "Atualização ou reparo. Os atalhos existentes não selecionados permanecem inalterados."
+LangString UacShortcutsUpgrade 2070 "Atualização ou reparação. Os atalhos existentes não selecionados permanecem inalterados."
+LangString UacShortcutsUpgrade 1025 "ترقية أو إصلاح. تبقى الاختصارات الحالية غير المحددة دون تغيير."
+LangString UacShortcutDesktop 1036 "Ajouter au bureau"
+LangString UacShortcutDesktop 1031 "Zum Desktop hinzufügen"
+LangString UacShortcutDesktop 1041 "デスクトップに追加"
+LangString UacShortcutDesktop 2052 "添加到桌面"
+LangString UacShortcutDesktop 1028 "新增至桌面"
+LangString UacShortcutDesktop 1034 "Añadir al escritorio"
+LangString UacShortcutDesktop 1046 "Adicionar à área de trabalho"
+LangString UacShortcutDesktop 2070 "Adicionar ao ambiente de trabalho"
+LangString UacShortcutDesktop 1025 "إضافة إلى سطح المكتب"
+LangString UacShortcutStartMenu 1036 "Ajouter à la liste d’applications du menu Démarrer"
+LangString UacShortcutStartMenu 1031 "Zur App-Liste im Startmenü hinzufügen"
+LangString UacShortcutStartMenu 1041 "スタートメニューのアプリ一覧に追加"
+LangString UacShortcutStartMenu 2052 "添加到开始菜单的应用列表"
+LangString UacShortcutStartMenu 1028 "新增至開始功能表的應用程式清單"
+LangString UacShortcutStartMenu 1034 "Añadir a la lista de aplicaciones de Inicio"
+LangString UacShortcutStartMenu 1046 "Adicionar à lista de apps do menu Iniciar"
+LangString UacShortcutStartMenu 2070 "Adicionar à lista de aplicações do menu Iniciar"
+LangString UacShortcutStartMenu 1025 "إضافة إلى قائمة التطبيقات في قائمة ابدأ"
+LangString UacShortcutTaskbar 1036 "Ajouter à la barre des tâches — confirmer dans l’application"
+LangString UacShortcutTaskbar 1031 "Zur Taskleiste hinzufügen — in der App mit Windows bestätigen"
+LangString UacShortcutTaskbar 1041 "タスクバーに追加（アプリ内で Windows に確認）"
+LangString UacShortcutTaskbar 2052 "添加到任务栏（在应用中由 Windows 确认）"
+LangString UacShortcutTaskbar 1028 "新增至工作列（在應用程式中由 Windows 確認）"
+LangString UacShortcutTaskbar 1034 "Añadir a la barra de tareas — confirmar con Windows en la aplicación"
+LangString UacShortcutTaskbar 1046 "Adicionar à barra de tarefas — confirmar com o Windows no app"
+LangString UacShortcutTaskbar 2070 "Adicionar à barra de tarefas — confirmar com o Windows na aplicação"
+LangString UacShortcutTaskbar 1025 "إضافة إلى شريط المهام — التأكيد مع Windows داخل التطبيق"
+LangString UacShortcutHint 1036 "L’épinglage à la barre des tâches nécessite aussi un raccourci Démarrer : les deux sont sélectionnés ensemble. Ouvrez l’application après l’installation pour les instructions. Selon Windows, l’épinglage peut être manuel."
+LangString UacShortcutHint 1031 "Für die Taskleiste wird auch eine Startmenü-Verknüpfung benötigt; beide werden gemeinsam ausgewählt. Öffnen Sie die App nach der Installation für Hinweise. Je nach Windows-Version ist manuelles Anheften nötig."
+LangString UacShortcutHint 1041 "タスクバーへのピン留めにはスタートメニューのショートカットも必要なため、両方を選択します。インストール後にアプリを開くと手順を確認できます。Windows のバージョンによっては手動でのピン留めが必要です。"
+LangString UacShortcutHint 2052 "固定到任务栏还需要开始菜单快捷方式，因此会同时选中两项。安装后请打开应用查看固定说明。某些 Windows 版本需要手动固定。"
+LangString UacShortcutHint 1028 "釘選至工作列還需要開始功能表捷徑，因此會同時選取兩項。安裝後請開啟應用程式查看釘選說明。部分 Windows 版本需要手動釘選。"
+LangString UacShortcutHint 1034 "La barra de tareas también necesita un acceso en Inicio; ambos se seleccionan juntos. Abra la aplicación tras instalar para ver las instrucciones. Algunas versiones de Windows requieren anclar manualmente."
+LangString UacShortcutHint 1046 "Fixar na barra de tarefas também exige um atalho no menu Iniciar; ambos são selecionados juntos. Abra o app após a instalação para ver as instruções. Algumas versões do Windows exigem fixação manual."
+LangString UacShortcutHint 2070 "Fixar na barra de tarefas também exige um atalho no menu Iniciar; ambos são selecionados em conjunto. Abra a aplicação após a instalação para ver as instruções. Algumas versões do Windows exigem fixação manual."
+LangString UacShortcutHint 1025 "يتطلب التثبيت في شريط المهام اختصارًا في قائمة ابدأ أيضًا، لذا يُحددان معًا. افتح التطبيق بعد التثبيت للاطلاع على التعليمات. قد يلزم التثبيت يدويًا في بعض إصدارات Windows."
 
 Function UacInitializeShortcutChoices
   ; Evaluate once before registration/payload writes. A partial installation is
@@ -467,9 +554,38 @@ Function .onInit
     StrCpy $UpdateMode 1
   ${EndIf}
 
-  !if "${DISPLAYLANGUAGESELECTOR}" == "true"
-    !insertmacro MUI_LANGDLL_DISPLAY
-  !endif
+  ; Cosmetic override only: absent/unknown tags retain NSIS's OS-selected
+  ; language. Never show a startup language picker or accept a language file.
+  ; Use parameters (not the executable path) and assign compiled LANGIDs only.
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/LANG=" $1
+  ${IfNot} ${Errors}
+    ${If} $1 == "en"
+      StrCpy $LANGUAGE 1033
+    ${ElseIf} $1 == "ko"
+      StrCpy $LANGUAGE 1042
+    ${ElseIf} $1 == "fr"
+      StrCpy $LANGUAGE 1036
+    ${ElseIf} $1 == "de"
+      StrCpy $LANGUAGE 1031
+    ${ElseIf} $1 == "ja"
+      StrCpy $LANGUAGE 1041
+    ${ElseIf} $1 == "zh-Hans"
+      StrCpy $LANGUAGE 2052
+    ${ElseIf} $1 == "zh-Hant"
+      StrCpy $LANGUAGE 1028
+    ${ElseIf} $1 == "es"
+      StrCpy $LANGUAGE 1034
+    ${ElseIf} $1 == "pt-BR"
+      StrCpy $LANGUAGE 1046
+    ${ElseIf} $1 == "pt-PT"
+      StrCpy $LANGUAGE 2070
+    ${ElseIf} $1 == "ar"
+      StrCpy $LANGUAGE 1025
+    ${EndIf}
+  ${EndIf}
+  ClearErrors
 
   !insertmacro SetContext
 

@@ -3,8 +3,18 @@ import { useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AppSnapshot, PairedDeviceView } from './contracts';
 import { Icon } from './icons';
-import { activityText, ko } from './messages.ko';
+import { activityText, ko } from './messages';
 import { EmptyState } from './StatusPanels';
+import { currentLocale, formatText, tr } from './i18n';
+import { displayText } from './displayText';
+
+function deviceLabel(device: PairedDeviceView, pc: boolean): string {
+  // Windows management currently has no user-authored friendly-name field;
+  // localize only its exact generated ID label, never Android PC/user names.
+  if (pc && currentLocale() !== 'ko' && /^[a-f0-9]{32}$/u.test(device.id)
+    && device.name === `${device.id.slice(0,8)}번 휴대폰`) return formatText('휴대폰 {id}', {id:device.id.slice(0,8)});
+  return device.name;
+}
 
 export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemove, onSetRelay }: {
   snapshot: AppSnapshot; disabled: boolean; onPair: () => void; onRemove: (device: PairedDeviceView) => void;
@@ -55,18 +65,18 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
   const unavailable = snapshot.dataAvailability.devices !== 'available';
   const unavailableState = <EmptyState icon="link" title={ko.devicesUnavailable} description={ko.devicesUnavailableBody} />;
   const relayForm = snapshot.platform === 'windows' && <>
-    <section className="surface pairing-entry auxiliary-card" aria-label="PC 내장 중계">
-      <h2>PC 내장 중계</h2>
-      <p className="supporting-text">중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.</p>
-      <p className="supporting-text">휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.</p>
-      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void enableEmbeddedRelay(); }}>이 PC의 내장 중계 사용</button>
+    <section className="surface pairing-entry auxiliary-card" aria-label={tr('PC 내장 중계')}>
+      <h2>{tr('PC 내장 중계')}</h2>
+      <p className="supporting-text">{tr('중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.')}</p>
+      <p className="supporting-text">{tr('휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.')}</p>
+      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void enableEmbeddedRelay(); }}>{tr('이 PC의 내장 중계 사용')}</button>
       {error && <p className="field-error" role="alert">{error}</p>}
     </section>
-    <section className="relay-advanced" aria-label="외부 중계 서버"><h2>고급 설정: 외부 중계 서버</h2>
+    <section className="relay-advanced" aria-label={tr('외부 중계 서버')}><h2>{tr('고급 설정: 외부 중계 서버')}</h2>
     <form className="policy-form" onSubmit={submit} aria-label={ko.relayAddress}>
     <fieldset className="surface form-section" disabled={relayDisabled || submitting}>
       <legend><label htmlFor={`${id}-relay`}>{ko.relayAddress}</label></legend>
-      <input id={`${id}-relay`} type="text" value={address} autoComplete="off" spellCheck={false}
+      <input id={`${id}-relay`} dir="ltr" type="text" value={address} autoComplete="off" spellCheck={false}
         aria-describedby={`${id}-relay-hint ${id}-relay-status`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
       <p id={`${id}-relay-hint`} className="supporting-text">{ko.relayAddressHint}</p>
       <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
@@ -81,24 +91,23 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
   const qrEntry = pc && <section className="surface pairing-entry" aria-label={ko.pairPhone}>
     <p className="supporting-text" id={`${id}-qr-purpose`}>{ko.pairingQrPurpose}</p>
     <button type="button" className="button primary" disabled={qrDisabled} aria-describedby={`${id}-qr-purpose`} onClick={onPair}><Icon name="qr" />{ko.pairPhone}</button>
-    {pairing && <p className="supporting-text" role="status">{pairing.message}</p>}
+    {pairing && <p className="supporting-text" role="status">{tr(pairing.message)}</p>}
     {!pairingActive && recovery && <p className="supporting-text">{recovery}</p>}
     {!pairingActive && !snapshot.canPair && onOpenStatus && <button type="button" className="button secondary" onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
   </section>;
   if (unavailable) return <>{qrEntry}{unavailableState}{relayForm}</>;
   return <>
     {qrEntry}
-    {unavailable ? unavailableState : snapshot.devices.length ? <ul className="surface device-list">{snapshot.devices.map((device) => <li key={device.id}><span className="device-icon"><Icon name={phone ? 'pc' : 'phone'} /></span><div className="device-copy"><h2><bdi>{device.name}</bdi></h2><p className={`state-line ${device.connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{device.connected ? ko.connected : ko.disconnected}</p>{device.lastSeenLabel && <p className="supporting-text"><bdi>{device.lastSeenLabel}</bdi></p>}</div>{snapshot.canUnpair && <button type="button" className="button danger-quiet" disabled={disabled} onClick={() => onRemove(device)} aria-label={`${device.name} ${ko.removeDevice}`}>{ko.removeDevice}</button>}</li>)}</ul>
+    {unavailable ? unavailableState : snapshot.devices.length ? <ul className="surface device-list">{snapshot.devices.map((device) => <li key={device.id}><span className="device-icon"><Icon name={phone ? 'pc' : 'phone'} /></span><div className="device-copy"><h2><bdi dir="ltr">{displayText(deviceLabel(device, pc))}</bdi></h2><p className={`state-line ${device.connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{device.connected ? ko.connected : ko.disconnected}</p>{device.lastSeenLabel && <p className="supporting-text"><bdi dir="ltr">{displayText(device.lastSeenLabel)}</bdi></p>}</div>{snapshot.canUnpair && <button type="button" className="button danger-quiet" disabled={disabled} onClick={() => onRemove(device)} aria-label={`${displayText(deviceLabel(device, pc))} ${ko.removeDevice}`}>{ko.removeDevice}</button>}</li>)}</ul>
       : <EmptyState icon={phone ? 'pc' : 'phone'} title={phone ? ko.noComputers : ko.noPhones} description={ko.noDevicesBody} />}
     {!pc && (snapshot.canPair || pairingActive ? <div className="collection-actions"><button type="button" className="button primary" disabled={disabled || pairingActive} onClick={onPair}><Icon name="plus" />{ko.pairComputer}</button></div> : !pairing && <p className="supporting-text">{ko.pairingUnavailable}</p>)}
-    {!pc && pairing && <p className="supporting-text" role="status">{pairing.message}</p>}
+    {!pc && pairing && <p className="supporting-text" role="status">{tr(pairing.message)}</p>}
     {relayForm}
   </>;
 }
 
-const dateFormatter = new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
 function ActivityTime({ timestamp }: { timestamp: number }) {
+  const dateFormatter = new Intl.DateTimeFormat(currentLocale(), { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime())) return <span className="supporting-text">{ko.unknownActivityTime}</span>;
   return <time dateTime={date.toISOString()}>{dateFormatter.format(date)}</time>;

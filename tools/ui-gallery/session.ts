@@ -1,10 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { test as base, expect } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import type { Browser, Page, TestInfo } from '@playwright/test';
 import type { GalleryCase } from './cases';
 
 const bannerText = '화면 예시 · 실제 연결 아님';
 const maxMessages = 50;
+export const galleryLocales = ['ko', 'en', 'fr', 'de', 'ja', 'zh-Hans', 'zh-Hant', 'es', 'pt-BR', 'pt-PT', 'ar'] as const;
+export type GalleryLocale = typeof galleryLocales[number];
+const catalogs = new Map<GalleryLocale, Record<string, string>>(galleryLocales.map(locale => [
+  locale, JSON.parse(readFileSync(new URL(`../../locales/${locale}.json`, import.meta.url), 'utf8')) as Record<string, string>,
+]));
+export function galleryText(locale: GalleryLocale, source: string): string {
+  const value = catalogs.get(locale)?.[source];
+  if (!value) throw new Error(`Missing gallery translation: ${locale} / ${source}`);
+  return value;
+}
 
 export class GallerySession {
   private readonly consoleMessages: { type: string; text: string }[] = [];
@@ -15,6 +26,7 @@ export class GallerySession {
   private consoleTruncated = false;
   private selected: GalleryCase | null = null;
   private measurements: unknown[] = [];
+  private locale: GalleryLocale = 'ko';
 
   constructor(private readonly page: Page, private readonly browser: Browser, private readonly info: TestInfo) {
     page.on('console', (message) => {
@@ -31,8 +43,9 @@ export class GallerySession {
     });
   }
 
-  async open(selected: GalleryCase): Promise<void> {
+  async open(selected: GalleryCase, locale: GalleryLocale = 'ko'): Promise<void> {
     this.selected = selected;
+    this.locale = locale;
     await this.page.setViewportSize(selected.viewport);
     await this.page.emulateMedia({ colorScheme: selected.colorScheme, forcedColors: selected.forcedColors, reducedMotion: 'reduce' });
     await this.page.routeWebSocket('**/*', async (socket) => {
@@ -48,7 +61,7 @@ export class GallerySession {
         await route.abort('blockedbyclient');
       }
     });
-    const response = await this.page.goto(`/qa.html?case=${encodeURIComponent(selected.fixture)}`, { waitUntil: 'load' });
+    const response = await this.page.goto(`/qa.html?case=${encodeURIComponent(selected.fixture)}&locale=${encodeURIComponent(locale)}`, { waitUntil: 'load' });
     expect(response?.status()).toBe(200);
     if (selected.rootTextSizePercent === 200) {
       // Explicit QA-only text-size stress. No production switch, browser zoom,
@@ -60,10 +73,10 @@ export class GallerySession {
         : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
         : selected.fixture.startsWith('desktop-') ? 'PC 승인을 휴대폰에서'
           : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' || selected.fixture.startsWith('phone-service-') ? '알림 시간' : '요청';
-    await expect(this.page.getByRole('heading', { name: heading, exact: true, level: 1 })).toBeVisible();
-    await expect(this.page.getByRole('button', { name: '다시 확인', exact: true })).toBeEnabled();
+    await expect(this.page.getByRole('heading', { name: galleryText(locale, heading), exact: true, level: 1 })).toBeVisible();
+    await expect(this.page.getByRole('button', { name: galleryText(locale, '다시 확인'), exact: true })).toBeEnabled();
     await this.page.evaluate(async () => { await document.fonts.ready; });
-    await expect(this.page.getByText(bannerText, { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(this.page.getByText(galleryText(locale, bannerText), { exact: true })).toBeInViewport({ ratio: 1 });
     await expect(this.page.locator('input[type="password"]')).toHaveCount(0);
   }
 
@@ -71,8 +84,8 @@ export class GallerySession {
     if (!this.selected) throw new Error('Gallery capture has no declared fixture.');
     if (!/^[a-z0-9-]+$/u.test(stage)) throw new Error('Invalid gallery stage name.');
     await this.page.evaluate(async () => { await document.fonts.ready; });
-    await expect(this.page.getByText(bannerText, { exact: true })).toBeVisible();
-    await expect(this.page.getByText(bannerText, { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(this.page.getByText(galleryText(this.locale, bannerText), { exact: true })).toBeVisible();
+    await expect(this.page.getByText(galleryText(this.locale, bannerText), { exact: true })).toBeInViewport({ ratio: 1 });
     const layout = await this.page.evaluate(() => {
       const selectors = ['html', 'body', '#root', '.app-shell', '.main-scroll', 'dialog[open]'];
       const owners = selectors.flatMap((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector)).map((element) => ({
@@ -101,11 +114,12 @@ export class GallerySession {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       fontsStatus: document.fonts.status, declaredFontFamily: getComputedStyle(document.body).fontFamily,
       rootFontSize: getComputedStyle(document.documentElement).fontSize,
+      documentLanguage: document.documentElement.lang, documentDirection: document.documentElement.dir,
       devicePixelRatio: window.devicePixelRatio,
     })).catch(() => null);
     const data = {
       scope: 'CLIENT / SYNTHETIC', visualReview: 'not-performed-by-harness',
-      fixture: this.selected, browserName: 'chromium', browserVersion: this.browser.version(),
+      fixture: this.selected, locale: this.locale, browserName: 'chromium', browserVersion: this.browser.version(),
       textSizeStress: this.selected?.rootTextSizePercent === 200
         ? { rootPercent: 200, scope: 'CLIENT QA ONLY; not browser zoom or native OS scaling' } : null,
       context, captures: this.captures, layoutMeasurements: this.measurements,

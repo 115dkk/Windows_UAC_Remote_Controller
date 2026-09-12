@@ -1,0 +1,98 @@
+[
+  {
+    "path": "assets/fonts/native/UACSans-Regular.ttf",
+    "source": "ui/public/fonts/noto/NotoSans.ttf",
+    "family": "UAC Sans",
+    "weight": 400,
+    "sha256": "2802ed69311b53c909d0e1eeb1ee2efe6f8bad4cf458881b4405b7afc6bfaced",
+    "bytes": 646148
+  },
+  {
+    "path": "assets/fonts/native/UACSans-Bold.ttf",
+    "source": "ui/public/fonts/noto/NotoSans.ttf",
+    "family": "UAC Sans",
+    "weight": 700,
+    "sha256": "f5f8f969389741d3aa6e88dc9284dd2e6e867104e322143301cf4054df1f2124",
+    "bytes": 648272
+  },
+  {
+    "path": "assets/fonts/native/UACSansArabic-Regular.ttf",
+    "source": "ui/public/fonts/noto/NotoSansArabic.ttf",
+    "family": "UAC Sans Arabic",
+    "weight": 400,
+    "sha256": "49a6393092c40a0e17650fe8618fd45e8e496b450e1b3fa19995f414b1e7fb1b",
+    "bytes": 194328
+  },
+  {
+    "path": "assets/fonts/native/UACSansArabic-Bold.ttf",
+    "source": "ui/public/fonts/noto/NotoSansArabic.ttf",
+    "family": "UAC Sans Arabic",
+    "weight": 700,
+    "sha256": "392764071538c1518895d28eb5fb495573e6d3db9ca875fbead8ec663f3dd2d1",
+    "bytes": 194512
+  },
+  {
+    "path": "assets/fonts/native/UACSansJP-Regular.ttf",
+    "source": "ui/public/fonts/noto/NotoSansJP.ttf",
+    "family": "UAC Sans JP",
+    "weight": 400,
+    "sha256": "8d75482be164af70550740bcf6a87e9d66feb58c1e6b737a721ff747efdafc3a",
+    "bytes": 5766888
+  },
+  {
+    "path": "assets/fonts/native/UACSansJP-Bold.ttf",
+    "source": "ui/public/fonts/noto/NotoSansJP.ttf",
+    "family": "UAC Sans JP",
+    "weight": 700,
+    "sha256": "7a1f0dfd4c526eb7456e65d822c43ae447b4ddfb3fa5a0af1c246ffb3b1ba687",
+    "bytes": 5761684
+  },
+  {
+    "path": "assets/fonts/native/UACSansSC-Regular.ttf",
+    "source": "ui/public/fonts/noto/NotoSansSC.ttf",
+    "family": "UAC Sans SC",
+    "weight": 400,
+    "sha256": "dd5b2992ae12bb0f3ea32fca17975510b738c403200e1a0083050fc393d78620",
+    "bytes": 10595936
+  },
+  {
+    "path": "assets/fonts/native/UACSansSC-Bold.ttf",
+    "source": "ui/public/fonts/noto/NotoSansSC.ttf",
+    "family": "UAC Sans SC",
+    "weight": 700,
+    "sha256": "f55db9c46bca5804b2c3523c40c31e3988594edee218f79afa101d9eb83e0839",
+    "bytes": 10585460
+  },
+  {
+    "path": "assets/fonts/native/UACSansTC-Regular.ttf",
+    "source": "ui/public/fonts/noto/NotoSansTC.ttf",
+    "family": "UAC Sans TC",
+    "weight": 400,
+    "sha256": "3b22b2e86386375822a5d84b7a53d94e63599335f76c6ba1ef027d983f7e3a4f",
+    "bytes": 7149184
+  },
+  {
+    "path": "assets/fonts/native/UACSansTC-Bold.ttf",
+    "source": "ui/public/fonts/noto/NotoSansTC.ttf",
+    "family": "UAC Sans TC",
+    "weight": 700,
+    "sha256": "df6afecd4e53e955ac0dd38bac198c461eeb2eba9c47984a28d47878ae392f9a",
+    "bytes": 7143712
+  },
+  {
+    "path": "assets/fonts/native/UACSansKR-Regular.ttf",
+    "source": "ui/public/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Regular.woff2",
+    "family": "UAC Sans KR",
+    "weight": 400,
+    "sha256": "f7d433783fcf816e1e1a7deb0f52fc426db8d5ded22a8f4703dc6d16d452ec55",
+    "bytes": 2533808
+  },
+  {
+    "path": "assets/fonts/native/UACSansKR-Bold.ttf",
+    "source": "ui/public/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Bold.woff2",
+    "family": "UAC Sans KR",
+    "weight": 700,
+    "sha256": "47e665b0140c3c35d402d3f8339a4653dd24bd857ad0c620db83d6c6ef50595f",
+    "bytes": 2478456
+  }
+]

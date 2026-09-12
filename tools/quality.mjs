@@ -11,6 +11,7 @@ const commands = [
   // Build the real production UI before Rust's Tauri/custom-protocol targets
   // inspect frontendDist. The UI runner also enforces TS, ESLint and Vitest.
   [process.execPath, ['tools/ui-quality.mjs']],
+  [process.execPath, ['--test', 'tools/i18n-contract.test.mjs']],
   [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-abi.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs', 'tools/verify-android-apk.test.mjs']],
   [process.execPath, ['--test', 'tools/protocol-security.test.mjs', 'tools/prover-process.test.mjs', 'tools/protocol-diagnostic.test.mjs', 'tools/verify-android-boot-manifest.test.mjs']],
   [process.execPath, ['--test', 'tools/windows-packaging.test.mjs', 'tools/windows-installer-contract.test.mjs', 'tools/tauri-capability.test.mjs']],

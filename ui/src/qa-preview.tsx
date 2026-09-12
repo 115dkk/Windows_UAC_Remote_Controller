@@ -3,15 +3,19 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { createQaBridge, qaCase } from './qa-fixtures';
-import { ko } from './messages.ko';
+import { ko } from './messages';
+import { isPreference, setPreviewLanguage } from './i18n';
 import type { TaskbarBridge, TaskbarStatus } from './TaskbarSuggestion';
 import './styles.css';
+import './i18n.css';
 
 if (import.meta.env.MODE !== 'qa' || '__TAURI_INTERNALS__' in window) {
   throw new Error('This synthetic gallery is only available in the separate browser QA build.');
 }
 
 const fixtureName = new URLSearchParams(window.location.search).get('case') ?? 'desktop-empty';
+const previewLocale = new URLSearchParams(window.location.search).get('locale');
+setPreviewLanguage(isPreference(previewLocale) ? previewLocale : 'ko');
 const taskbarFixture = fixtureName === 'desktop-taskbar-available' || fixtureName === 'desktop-taskbar-unavailable';
 const selected = qaCase(taskbarFixture ? 'desktop-running' : fixtureName);
 const taskbarClient: TaskbarBridge | undefined = taskbarFixture ? {

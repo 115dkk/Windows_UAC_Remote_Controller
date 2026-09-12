@@ -11,14 +11,18 @@ plugins {
 val repository = projectDir.resolve("../..").canonicalFile
 val product = repository.resolve("src-tauri/gen/android/app/src/main")
 val rendererSources = listOf("RequestNotificationRenderer.kt", "ControllerStatusNotificationRenderer.kt",
-    "BootServicePolicy.kt", "PolicyOwnerRules.kt")
-val rendererResources = listOf("values/strings.xml", "values/request_colors.xml", "values-night/request_colors.xml",
+    "BootServicePolicy.kt", "PolicyOwnerRules.kt", "UntrustedDisplayText.kt")
+val localeSources = listOf("AppLanguage.kt")
+val localizedStrings = listOf("values", "values-ko", "values-fr", "values-de", "values-ja", "values-b+zh+Hans",
+    "values-b+zh+Hant", "values-es", "values-pt", "values-pt-rBR", "values-pt-rPT", "values-ar").map { "$it/strings.xml" }
+val rendererResources = localizedStrings + listOf("xml/locale_config.xml", "values/request_colors.xml", "values-night/request_colors.xml",
     "drawable/ic_request_notice.xml", "drawable/ic_request_approve.xml", "drawable/ic_request_deny.xml",
     "drawable/ic_request_details.xml", "drawable/ic_controller_service.xml")
 val sharedSource = tasks.register<Sync>("copyExactProductRenderer") {
     // Existing lightweight policy/type files supply ControllerServiceState;
     // never duplicate its enum or include the Service/Application/native owner.
     from(product.resolve("java/dev/dkk115/uacremote/background")) { include(rendererSources) }
+    from(product.resolve("java/dev/dkk115/uacremote")) { include(localeSources) }
     into(layout.buildDirectory.dir("generated/renderer"))
 }
 val sharedResources = tasks.register<Sync>("copyExactProductResources") {
@@ -32,13 +36,14 @@ val sharedReceipt = tasks.register("writeExactRendererSourceReceipt") {
     inputs.dir(sharedSource.map { it.destinationDir })
     inputs.dir(sharedResources.map { it.destinationDir })
     inputs.files(rendererSources.map { product.resolve("java/dev/dkk115/uacremote/background/$it") })
+    inputs.files(localeSources.map { product.resolve("java/dev/dkk115/uacremote/$it") })
     inputs.files(rendererResources.map { product.resolve("res/$it") })
     outputs.dir(layout.buildDirectory.dir("generated/renderer-assets"))
     doLast {
         val rows = mutableListOf<String>()
         fun record(path: String, copied: File) {
             val original = repository.resolve(path)
-            check(path.matches(Regex("[A-Za-z0-9_./-]+")))
+            check(path.matches(Regex("[A-Za-z0-9_./+-]+")))
             check(original.isFile && copied.isFile && original.length() in 1L..1_048_576L && copied.length() == original.length())
             val bytes = copied.readBytes()
             check(bytes.contentEquals(original.readBytes())) { "Shared renderer copy differs from product source" }
@@ -46,6 +51,7 @@ val sharedReceipt = tasks.register("writeExactRendererSourceReceipt") {
             rows.add("{\"path\":\"$path\",\"sha256\":\"$digest\"}")
         }
         for (name in rendererSources) record("src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/background/$name", sharedSource.get().destinationDir.resolve(name))
+        for (name in localeSources) record("src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/$name", sharedSource.get().destinationDir.resolve(name))
         for (name in rendererResources) record("src-tauri/gen/android/app/src/main/res/$name", sharedResources.get().destinationDir.resolve(name))
         val directory = layout.buildDirectory.dir("generated/renderer-assets").get().asFile
         check(directory.isDirectory || directory.mkdirs())

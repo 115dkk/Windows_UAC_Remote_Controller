@@ -1,0 +1,33 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+@font-face { font-family:"Noto Sans"; font-style:normal; font-weight:100 900; font-display:swap; src:url('/fonts/noto/NotoSans.ttf') format('truetype'); }
+@font-face { font-family:"Noto Sans Arabic"; font-style:normal; font-weight:100 900; font-display:swap; src:url('/fonts/noto/NotoSansArabic.ttf') format('truetype'); }
+@font-face { font-family:"Noto Sans JP"; font-style:normal; font-weight:100 900; font-display:swap; src:url('/fonts/noto/NotoSansJP.ttf') format('truetype'); }
+@font-face { font-family:"Noto Sans SC"; font-style:normal; font-weight:100 900; font-display:swap; src:url('/fonts/noto/NotoSansSC.ttf') format('truetype'); }
+@font-face { font-family:"Noto Sans TC"; font-style:normal; font-weight:100 900; font-display:swap; src:url('/fonts/noto/NotoSansTC.ttf') format('truetype'); }
+:root { --font-fallback:"IBM Plex Sans KR", "Noto Sans Arabic", "Noto Sans JP", "Noto Sans SC", "Noto Sans TC", sans-serif; }
+html:not(:lang(ko)) { --font-ui:"Noto Sans", var(--font-fallback); }
+html:lang(ja), .language-choices [lang="ja"] { --font-ui:"Noto Sans JP", "Noto Sans", var(--font-fallback); }
+html:lang(zh-Hans), .language-choices [lang="zh-Hans"] { --font-ui:"Noto Sans SC", "Noto Sans", var(--font-fallback); }
+html:lang(zh-Hant), .language-choices [lang="zh-Hant"] { --font-ui:"Noto Sans TC", "Noto Sans", var(--font-fallback); }
+html:lang(ar), .language-choices [lang="ar"] { --font-ui:"Noto Sans Arabic", "Noto Sans", var(--font-fallback); }
+html:lang(ko) { --font-ui:"IBM Plex Sans KR", "Noto Sans", "Noto Sans Arabic", "Noto Sans JP", "Noto Sans SC", "Noto Sans TC", "Malgun Gothic", sans-serif; }
+.language-choices bdi { font-family:var(--font-ui); }
+.language-choices [lang="ko"] { font-family:"IBM Plex Sans KR",sans-serif; }
+html:lang(ar) body { line-height:1.8; }
+html:lang(ja) body, html:lang(zh) body { word-break:normal; line-break:strict; }
+html:not(:lang(ko)) .navigation-item > span { word-break:normal; overflow-wrap:anywhere; hyphens:auto; }
+.header-actions { display:flex; align-items:center; gap:var(--space-1); flex-shrink:0; }
+.app-settings-button { padding-inline:var(--space-2); }
+.language-settings { max-height:85dvh; overflow:auto; }
+.language-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--space-2); border:0; padding:var(--space-4) 0; }
+.language-choices legend { font-weight:600; margin-block:var(--space-3); }
+.language-choices label { display:flex; align-items:center; gap:var(--space-3); min-height:44px; padding:var(--space-2); border-radius:var(--radius-control); cursor:pointer; }
+.language-choices label:first-of-type { grid-column:1/-1; }
+.language-choices label:has(input:checked) { background:var(--accent-soft); }
+.language-choices input { flex-shrink:0; }
+/* Escape malicious input first; isolate preserves surrounding Arabic layout
+   while technical strings retain an LTR paragraph base and full visible tail. */
+.original-text, .path-output, .command-region pre, bdi[dir="ltr"] { direction:ltr; unicode-bidi:isolate; text-align:start; }
+.path-output, .command-region pre { font-family:"Cascadia Code",Consolas,"Noto Sans","IBM Plex Sans KR","Noto Sans Arabic","Noto Sans JP","Noto Sans SC","Noto Sans TC",monospace; }
+[dir="rtl"] .disclosure-button > .icon:not(.chevron-expanded) { transform:scaleX(-1); }
+@media (max-width:24rem) { .language-choices { grid-template-columns:minmax(0,1fr); } .header-actions { flex-wrap:wrap; } }

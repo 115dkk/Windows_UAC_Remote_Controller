@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { ReactNode } from 'react';
-export type IconName = 'pc' | 'phone' | 'request' | 'clock' | 'history' | 'refresh' | 'chevron' | 'lock' | 'link' | 'alert' | 'check' | 'close' | 'plus' | 'qr';
+export type IconName = 'pc' | 'phone' | 'request' | 'clock' | 'history' | 'refresh' | 'chevron' | 'lock' | 'link' | 'alert' | 'check' | 'close' | 'plus' | 'qr' | 'settings';
 
 export function Icon({ name, className = '' }: { name: IconName; className?: string }) {
   const paths: Record<IconName, ReactNode> = {
+    settings: <><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></>,
     pc: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8m-4-4v4" /></>,
     phone: <><rect x="6" y="2" width="12" height="20" rx="3" /><path d="M10 18h4M10 5h4" /></>,
     request: <><rect x="4" y="3" width="16" height="18" rx="3" /><path d="m8 12 3 3 5-6" /></>,

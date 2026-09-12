@@ -8,6 +8,7 @@ mod diagnostic;
 mod elevation;
 mod filesystem;
 mod firewall;
+mod language;
 #[cfg(target_pointer_width = "64")]
 mod overlapped_pipe;
 #[cfg(target_pointer_width = "64")]
@@ -20,6 +21,7 @@ mod security;
 mod taskbar;
 mod trust_store;
 
+pub use language::{LanguageError, get_language_settings, set_language_preference};
 pub use taskbar::{
     TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin,
     initialize_desktop_shell_identity, shutdown_desktop_shell,

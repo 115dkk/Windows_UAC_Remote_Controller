@@ -3,7 +3,9 @@ import type { ReactNode } from 'react';
 import type { AppSnapshot, MobileReadiness, ServiceAction } from './contracts';
 import { Icon } from './icons';
 import type { IconName } from './icons';
-import { ko, serviceActionText, serviceStateText } from './messages.ko';
+import { ko, serviceActionText, serviceStateText } from './messages';
+import { tr } from './i18n';
+import { displayText } from './displayText';
 
 export function EmptyState({ icon, title, description, children }: {
   icon: IconName; title: string; description: string; children?: ReactNode;
@@ -28,7 +30,7 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
       <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><p className="eyebrow">{ko.serviceLabel}</p><h2 id="service-heading">{serviceTitle}</h2></div></div>
       {service && <p className={`state-line ${service.remoteRequestsReady ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{service.remoteRequestsReady ? ko.remoteReady : ko.remoteNotReady}</p>}
       <p className="service-description">{description}</p>
-      <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi>{snapshot.computerName || '—'}</bdi></dd></div></dl>
+      <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName || '—')}</bdi></dd></div></dl>
       {service?.controlHint === 'needs_installer' && <p className="supporting-text">{ko.serviceNeedsInstaller}</p>}
       {service?.controlHint === 'unsupported' && <p className="supporting-text">{ko.serviceUnsupported}</p>}
       {service && service.allowedActions.length > 0 && <div className="service-actions">{actions.filter((action) => service.allowedActions.includes(action)).map((action) =>

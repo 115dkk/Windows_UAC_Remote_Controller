@@ -2,7 +2,9 @@
 import { useEffect, useId, useState } from 'react';
 import type { ControllerBridge, RequestDetailsView, RequestView } from './contracts';
 import { Icon } from './icons';
-import { ko } from './messages.ko';
+import { ko } from './messages';
+import { displayText, hasDirectionControls } from './displayText';
+import { tr } from './i18n';
 
 function DetailsBody({ request, read, retry }: { request: RequestView; read: ControllerBridge['requestDetails']; retry: () => void }) {
   const [body, setBody] = useState<RequestDetailsView | null>(null);
@@ -28,10 +30,11 @@ function DetailsBody({ request, read, retry }: { request: RequestView; read: Con
   if (!body) return <p role="status">{ko.detailsLoading}</p>;
   return <>
     {(request.programElided || request.pathElided) && <dl className="request-facts">
-      {request.programElided && <div><dt>{ko.program}</dt><dd dir="auto">{body.programName}</dd></div>}
-      {request.pathElided && <div><dt>{ko.executable}</dt><dd className="path-output" dir="auto">{body.executablePath}</dd></div>}
+      {request.programElided && <div><dt>{ko.program}</dt><dd className="original-text" dir="ltr">{displayText(body.programName)}</dd></div>}
+      {request.pathElided && <div><dt>{ko.executable}</dt><dd className="path-output original-text" dir="ltr">{displayText(body.executablePath)}</dd></div>}
     </dl>}
-    <pre dir="auto">{body.details}</pre>
+    {hasDirectionControls(body.details) && <p className="supporting-text" role="note">{tr('숨은 방향 제어 문자를 눈에 보이게 표시했어요.')}</p>}
+    <pre className="original-text" dir="ltr">{displayText(body.details)}</pre>
   </>;
 }
 

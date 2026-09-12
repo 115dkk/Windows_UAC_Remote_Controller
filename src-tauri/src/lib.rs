@@ -5,6 +5,7 @@ mod admission;
 #[cfg(target_os = "android")]
 mod android_window;
 mod commands;
+mod language;
 mod lifecycle_policy;
 mod mobile;
 mod taskbar;
@@ -94,6 +95,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_snapshot,
+            language::get_language,
+            language::set_language,
             commands::save_notification_policy,
             commands::control_service,
             commands::begin_pairing,

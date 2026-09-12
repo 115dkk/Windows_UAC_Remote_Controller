@@ -8,18 +8,20 @@
 //! hooks, and it creates no process, network connection, key or pairing grant.
 #![allow(unsafe_code)]
 
+use presentation_i18n::{Locale, tr};
 use qrcode::{Color, QrCode};
 use std::{fmt, mem, ptr, time::Instant};
 use windows::{
     Win32::{
-        Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
-            CreateCompatibleDC, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DT_CENTER,
-            DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject,
-            DrawTextW, EndPaint, FF_DONTCARE, FW_BOLD, FW_NORMAL, FillRect, HBRUSH, HDC, HFONT,
-            HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject,
-            SetBkMode, SetTextColor, TRANSPARENT,
+            AddFontMemResourceEx, BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+            CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+            DEFAULT_CHARSET, DT_CENTER, DT_NOPREFIX, DT_RTLREADING, DT_SINGLELINE, DT_VCENTER,
+            DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_BOLD,
+            FW_NORMAL, FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
+            PAINTSTRUCT, RemoveFontMemResourceEx, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
+            TRANSPARENT,
         },
         System::{
             LibraryLoader::GetModuleHandleW,
@@ -33,13 +35,14 @@ use windows::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN},
             WindowsAndMessaging::{
-                BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-                GetClientRect, GetSystemMetrics, HMENU, KillTimer, MSG, PM_REMOVE, PeekMessageW,
-                RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SetTimer, SetWindowLongPtrW,
-                ShowWindow, TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_COMMAND,
-                WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_CHILD,
-                WS_POPUP, WS_VISIBLE,
+                BN_CLICKED, BS_DEFPUSHBUTTON, BS_MULTILINE, BS_PUSHBUTTON, CREATESTRUCTW,
+                CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics, HMENU, KillTimer,
+                MSG, PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
+                SendMessageW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+                UnregisterClassW, WINDOW_EX_STYLE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN,
+                WM_NCCREATE, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD,
+                WS_EX_RTLREADING, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -47,7 +50,6 @@ use windows::{
 };
 
 const CLASS_NAME: &str = "UacRemoteControllerPairingRenderer";
-const CAPTION: &str = "UAC 원격 승인";
 const CONFIRM_ID: usize = 1001;
 const CANCEL_ID: usize = 1002;
 const TIMER_ID: usize = 1;
@@ -94,6 +96,8 @@ struct WindowOwner {
     title_font: HFONT,
     body_font: HFONT,
     code_font: HFONT,
+    font_resources: Vec<HANDLE>,
+    locale: Locale,
     background: HBRUSH,
     surface: HBRUSH,
     border: HBRUSH,
@@ -114,6 +118,61 @@ impl fmt::Debug for RendererWindow {
 }
 
 impl WindowOwner {
+    fn copy(&self, source: &'static str) -> &'static str {
+        tr(self.locale, source)
+    }
+
+    fn window_direction(&self) -> WINDOW_EX_STYLE {
+        // Do not use WS_EX_LAYOUTRTL: it would also mirror QR pixel geometry.
+        if self.locale.is_rtl() {
+            WS_EX_RTLREADING
+        } else {
+            WINDOW_EX_STYLE(0)
+        }
+    }
+
+    fn text_direction(&self) -> windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT {
+        if self.locale.is_rtl() {
+            DT_RTLREADING
+        } else {
+            windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0)
+        }
+    }
+
+    fn remaining_copy(&self) -> String {
+        // Only these fixed formatting placeholders are replaced; translated
+        // text is not a format string. Trusted LTR embedding keeps mm:ss ordered.
+        let minutes = format!("{:02}", self.remaining_second / 60);
+        let seconds = format!("{:02}", self.remaining_second % 60);
+        let time = format!("\u{202a}{minutes}:{seconds}\u{202c}");
+        self.copy("남은 시간 {:02}:{:02}")
+            .replace("{:02}:{:02}", &time)
+    }
+
+    fn register_fonts(&mut self) -> Result<(), Error> {
+        let mut files = Vec::from(font_bytes(Locale::En));
+        if font_face(self.locale) != "UAC Sans" {
+            files.extend(font_bytes(self.locale));
+        }
+        for bytes in files {
+            let length = u32::try_from(bytes.len()).map_err(|_| Error::InvalidState)?;
+            let mut count = 0_u32;
+            // SAFETY: immutable compile-time font bytes remain live for the
+            // process; exact length and initialized output, no caller font/path.
+            let resource = unsafe {
+                AddFontMemResourceEx(bytes.as_ptr().cast(), length, None, &raw mut count)
+            };
+            if resource.is_invalid() {
+                return Err(WinError::from_thread().into());
+            }
+            self.font_resources.push(resource); // Adopt before validating count.
+            if count == 0 {
+                return Err(Error::InvalidState);
+            }
+        }
+        Ok(())
+    }
+
     fn create(text: &str, deadline: Instant) -> Result<RendererWindow, Error> {
         if Instant::now() >= deadline {
             return Err(Error::InvalidState);
@@ -146,6 +205,13 @@ impl WindowOwner {
             title_font: HFONT::default(),
             body_font: HFONT::default(),
             code_font: HFONT::default(),
+            font_resources: Vec::new(),
+            // Cosmetic current-account preference only. The helper's admitted
+            // account can differ from the starter's for alternate-admin UAC;
+            // never inspect another user's hive or add a locale IPC argument.
+            locale: crate::get_language_settings()
+                .map(|settings| settings.effective_locale())
+                .unwrap_or(Locale::En),
             background: HBRUSH::default(),
             surface: HBRUSH::default(),
             border: HBRUSH::default(),
@@ -181,12 +247,12 @@ impl WindowOwner {
             return Err(Error::InvalidState);
         }
         let class_name = wide(CLASS_NAME);
-        let caption = wide(CAPTION);
+        let caption = wide(self.copy("UAC 원격 승인"));
         // SAFETY: this Box remains pinned until creation returns; WM_NCCREATE stores
         // its pointer in GWLP_USERDATA. The pointer is cleared before destruction.
         self.hwnd = unsafe {
             CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                self.window_direction(),
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(caption.as_ptr()),
                 WS_POPUP | WS_VISIBLE,
@@ -202,9 +268,11 @@ impl WindowOwner {
         };
         // SAFETY: the newly created owned top-level window remains live.
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
-        self.title_font = font(dpi, 20, FW_BOLD.0 as i32)?;
-        self.body_font = font(dpi, 14, FW_NORMAL.0 as i32)?;
-        self.code_font = font(dpi, 40, FW_BOLD.0 as i32)?;
+        self.register_fonts()?;
+        self.title_font = font(dpi, 20, FW_BOLD.0 as i32, font_face(self.locale))?;
+        self.body_font = font(dpi, 14, FW_NORMAL.0 as i32, font_face(self.locale))?;
+        // Comparison digits are immutable ASCII and always use the Latin face.
+        self.code_font = font(dpi, 40, FW_BOLD.0 as i32, "UAC Sans")?;
         self.background = brush(0xf2f6f7)?;
         self.surface = brush(0xffffff)?;
         self.border = brush(0xd7e3e7)?;
@@ -284,18 +352,18 @@ impl WindowOwner {
             return Ok(());
         }
         let button = wide("BUTTON");
-        let confirm = wide("숫자가 같아요");
-        let cancel = wide("다릅니다, 취소");
+        let confirm = wide(self.copy("숫자가 같아요"));
+        let cancel = wide(self.copy("다릅니다, 취소"));
         // SAFETY: fixed standard child controls parented to the owned top-level window.
         unsafe {
             self.confirm = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                self.window_direction(),
                 PCWSTR(button.as_ptr()),
                 PCWSTR(confirm.as_ptr()),
                 WS_CHILD
                     | WS_VISIBLE
                     | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
-                        BS_DEFPUSHBUTTON as u32,
+                        (BS_DEFPUSHBUTTON | BS_MULTILINE) as u32,
                     ),
                 0,
                 0,
@@ -307,12 +375,14 @@ impl WindowOwner {
                 None,
             )?;
             self.cancel = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                self.window_direction(),
                 PCWSTR(button.as_ptr()),
                 PCWSTR(cancel.as_ptr()),
                 WS_CHILD
                     | WS_VISIBLE
-                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(BS_PUSHBUTTON as u32),
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
+                        (BS_PUSHBUTTON | BS_MULTILINE) as u32,
+                    ),
                 0,
                 0,
                 1,
@@ -322,6 +392,20 @@ impl WindowOwner {
                 Some(self.instance),
                 None,
             )?;
+            // Both fixed child controls borrow this owner's live font only;
+            // windows are destroyed before the HFONT and memory-font resources.
+            SendMessageW(
+                self.confirm,
+                WM_SETFONT,
+                Some(WPARAM(self.body_font.0 as usize)),
+                Some(LPARAM(1)),
+            );
+            SendMessageW(
+                self.cancel,
+                WM_SETFONT,
+                Some(WPARAM(self.body_font.0 as usize)),
+                Some(LPARAM(1)),
+            );
         }
         self.layout_buttons()
     }
@@ -337,15 +421,20 @@ impl WindowOwner {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
         let scale = |value: i32| value * dpi / 96;
         let button_width = scale(184);
-        let button_height = scale(48);
+        let button_height = scale(60);
         let gap = scale(16);
         let left = (rect.right - button_width * 2 - gap) / 2;
         let top = rect.bottom / 2 + scale(120);
+        let (confirm_left, cancel_left) = if self.locale.is_rtl() {
+            (left + button_width + gap, left)
+        } else {
+            (left, left + button_width + gap)
+        };
         // SAFETY: both child controls and their parent remain live and thread-owned.
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::MoveWindow(
                 self.confirm,
-                left,
+                confirm_left,
                 top,
                 button_width,
                 button_height,
@@ -353,7 +442,7 @@ impl WindowOwner {
             )?;
             windows::Win32::UI::WindowsAndMessaging::MoveWindow(
                 self.cancel,
-                left + button_width + gap,
+                cancel_left,
                 top,
                 button_width,
                 button_height,
@@ -475,15 +564,15 @@ impl WindowOwner {
         draw_text(
             dc,
             self.title_font,
-            "UAC 원격 승인 · PC 연결",
+            self.copy("UAC 원격 승인 · PC 연결"),
             RECT {
                 left: left + scale(32),
                 top: top + scale(26),
                 right: left + card_width - scale(32),
-                bottom: top + scale(66),
+                bottom: top + scale(92),
             },
             0x152c35,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         match self.screen {
             Screen::Invitation => {
@@ -526,23 +615,24 @@ impl WindowOwner {
         draw_text(
             dc,
             self.body_font,
-            "UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요.",
+            self.copy("UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요."),
             RECT {
                 left: left + scale(36),
-                top: top + scale(76),
+                top: top + scale(100),
                 right: left + card_width - scale(36),
-                bottom: top + scale(126),
+                bottom: top + scale(176),
             },
             0x536971,
-            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         // SAFETY: screen metric reads have no caller-owned pointers.
         let shorter = unsafe { GetSystemMetrics(SM_CXSCREEN).min(GetSystemMetrics(SM_CYSCREEN)) };
-        let target = shorter * 38 / 100;
+        let available_height = (card_height - scale(280)).max(1);
+        let target = (shorter * 38 / 100).min(available_height);
         let module_px = (target / (self.module_width + QUIET_MODULES * 2) as i32).max(1);
         let total = module_px * (self.module_width + QUIET_MODULES * 2) as i32;
         let qr_left = left + (card_width - total) / 2;
-        let qr_top = top + (card_height - total) / 2;
+        let qr_top = top + scale(190) + (available_height - total).max(0) / 2;
         let white = RECT {
             left: qr_left,
             top: qr_top,
@@ -574,11 +664,7 @@ impl WindowOwner {
         draw_text(
             dc,
             self.body_font,
-            &format!(
-                "남은 시간 {:02}:{:02}",
-                self.remaining_second / 60,
-                self.remaining_second % 60
-            ),
+            &self.remaining_copy(),
             RECT {
                 left: left + scale(24),
                 top: qr_top + total + scale(18),
@@ -586,7 +672,7 @@ impl WindowOwner {
                 bottom: qr_top + total + scale(52),
             },
             0x536971,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | self.text_direction(),
         );
         Ok(())
     }
@@ -602,7 +688,7 @@ impl WindowOwner {
         draw_text(
             dc,
             self.body_font,
-            "휴대폰에 표시된 숫자와 같은지 확인해 주세요.",
+            self.copy("휴대폰에 표시된 숫자와 같은지 확인해 주세요."),
             RECT {
                 left: left + scale(36),
                 top: top + scale(100),
@@ -610,7 +696,7 @@ impl WindowOwner {
                 bottom: top + scale(150),
             },
             0x536971,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         draw_text(
             dc,
@@ -639,7 +725,7 @@ impl WindowOwner {
         draw_text(
             dc,
             self.title_font,
-            text,
+            tr(self.locale, text),
             RECT {
                 left: left + scale(48),
                 top: top + scale(170),
@@ -647,7 +733,7 @@ impl WindowOwner {
                 bottom: top + scale(300),
             },
             0x152c35,
-            DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX,
+            DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
     }
 
@@ -682,6 +768,7 @@ impl WindowOwner {
             self.confirm = HWND::default();
             self.cancel = HWND::default();
         }
+        let mut objects_deleted = true;
         for object in [
             HGDIOBJ(self.title_font.0),
             HGDIOBJ(self.body_font.0),
@@ -694,6 +781,7 @@ impl WindowOwner {
                 // SAFETY: each uniquely owned GDI object is deleted once after the window.
                 unsafe {
                     if !DeleteObject(object).as_bool() {
+                        objects_deleted = false;
                         first.get_or_insert(Error::Native(WinError::from_thread()));
                     }
                 }
@@ -702,6 +790,16 @@ impl WindowOwner {
         self.title_font = HFONT::default();
         self.body_font = HFONT::default();
         self.code_font = HFONT::default();
+        // If HWND/GDI cleanup was uncertain, leave the private font resources
+        // registered until process teardown rather than invalidating a borrower.
+        let release_fonts = objects_deleted && first.is_none();
+        for resource in self.font_resources.drain(..).filter(|_| release_fonts) {
+            // SAFETY: successfully registered owned memory-font handle; every
+            // window/HFONT borrowing it has been destroyed/deleted above.
+            if !unsafe { RemoveFontMemResourceEx(resource) }.as_bool() {
+                first.get_or_insert(Error::Native(WinError::from_thread()));
+            }
+        }
         self.background = HBRUSH::default();
         self.surface = HBRUSH::default();
         self.border = HBRUSH::default();
@@ -841,8 +939,50 @@ fn brush(value: u32) -> Result<HBRUSH, Error> {
     }
 }
 
-fn font(dpi: u32, points: i32, weight: i32) -> Result<HFONT, Error> {
-    let face = wide("Malgun Gothic");
+fn font_face(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Ko => "UAC Sans KR",
+        Locale::Ja => "UAC Sans JP",
+        Locale::ZhHans => "UAC Sans SC",
+        Locale::ZhHant => "UAC Sans TC",
+        Locale::Ar => "UAC Sans Arabic",
+        _ => "UAC Sans",
+    }
+}
+
+fn font_bytes(locale: Locale) -> [&'static [u8]; 2] {
+    macro_rules! family {
+        ($name:literal) => {
+            [
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/fonts/native/",
+                    $name,
+                    "-Regular.ttf"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/fonts/native/",
+                    $name,
+                    "-Bold.ttf"
+                ))
+                .as_slice(),
+            ]
+        };
+    }
+    match locale {
+        Locale::Ko => family!("UACSansKR"),
+        Locale::Ja => family!("UACSansJP"),
+        Locale::ZhHans => family!("UACSansSC"),
+        Locale::ZhHant => family!("UACSansTC"),
+        Locale::Ar => family!("UACSansArabic"),
+        _ => family!("UACSans"),
+    }
+}
+
+fn font(dpi: u32, points: i32, weight: i32, face: &str) -> Result<HFONT, Error> {
+    let face = wide(face);
     let height = -(points * dpi as i32 / 72);
     // SAFETY: fixed face and value parameters; returned font is uniquely owned.
     let font = unsafe {

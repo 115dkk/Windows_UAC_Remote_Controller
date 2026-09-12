@@ -16,6 +16,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
+import dev.dkk115.uacremote.AppLanguage
 import dev.dkk115.uacremote.R
 
 /** App-owned controls only. Fixture rendering needs no QR/camera or FLAG_SECURE exception. */
@@ -26,21 +27,37 @@ internal class PairingScannerView(
     onConfirm: () -> Unit = {},
     onReject: () -> Unit = {},
 ) : ScrollView(context) {
+    // The dialog already owns a frozen localized Context. Select from that
+    // snapshot, not a fresh preference read that could mix languages mid-flow.
+    private val bodyTypeface = context.resources.getFont(when (
+        AppLanguage.match(context.resources.configuration.locales[0].toLanguageTag())
+    ) {
+        "ko" -> R.font.noto_sans_kr
+        "ja" -> R.font.noto_sans_jp
+        "zh-Hans" -> R.font.noto_sans_sc
+        "zh-Hant" -> R.font.noto_sans_tc
+        "ar" -> R.font.noto_sans_arabic
+        else -> R.font.noto_sans
+    })
+    private val latinTypeface = context.resources.getFont(R.font.noto_sans)
     private val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val heading = TextView(context).apply {
         setText(R.string.pairing_scanner_title); textSize = 24f
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        typeface = Typeface.create(bodyTypeface, Typeface.BOLD)
+        includeFontPadding = true
         setTextColor(context.getColor(R.color.pairing_scanner_text))
         isAccessibilityHeading = true; isFocusableInTouchMode = true
     }
     private val message = TextView(context).apply {
         id = R.id.pairing_scanner_message
         textSize = 17f; setTextColor(context.getColor(R.color.pairing_scanner_text))
+        typeface = bodyTypeface; includeFontPadding = true
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         setLineSpacing(dp(4).toFloat(), 1f)
     }
     private val detail = TextView(context).apply {
         textSize = 16f; setTextColor(context.getColor(R.color.pairing_scanner_muted))
+        typeface = bodyTypeface; includeFontPadding = true
     }
     private val previewContainer = FrameLayout(context).apply {
         background = GradientDrawable().apply {
@@ -52,6 +69,10 @@ internal class PairingScannerView(
     private val code = TextView(context).apply {
         id = R.id.pairing_scanner_code
         textSize = 32f; letterSpacing = 0.12f; fontFeatureSettings = "tnum"
+        // Visual comparison bytes stay ASCII with a bundled Latin face even
+        // when the surrounding copy and spoken digit names are Arabic.
+        typeface = Typeface.create(latinTypeface, Typeface.BOLD)
+        includeFontPadding = true
         setTextColor(context.getColor(R.color.pairing_scanner_text))
         gravity = Gravity.CENTER
         textDirection = View.TEXT_DIRECTION_LTR
@@ -63,6 +84,8 @@ internal class PairingScannerView(
 
     init {
         id = R.id.pairing_scanner_root
+        layoutDirection = resources.configuration.layoutDirection
+        textDirection = View.TEXT_DIRECTION_LOCALE
         isFillViewport = true
         setBackgroundColor(context.getColor(R.color.pairing_scanner_bg))
         addView(column, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
@@ -86,6 +109,7 @@ internal class PairingScannerView(
 
     private fun button(label: Int, primary: Boolean, action: () -> Unit) = MaterialButton(context).apply {
         setText(label); isAllCaps = false; textSize = 16f; minHeight = dp(48)
+        typeface = bodyTypeface; includeFontPadding = true
         insetTop = 0; insetBottom = 0; cornerRadius = dp(16); stateListAnimator = null
         setPadding(dp(16), dp(12), dp(16), dp(12))
         backgroundTintList = ColorStateList.valueOf(context.getColor(if (primary) R.color.pairing_scanner_accent else R.color.pairing_scanner_surface))
@@ -146,7 +170,8 @@ internal class PairingScannerView(
         detail.visibility = if (detailText != null) VISIBLE else GONE
         val comparing = displayedState == PairingScannerState.COMPARE
         code.text = if (comparing) PairingScannerCopy.groupedCode(requireNotNull(comparisonCode)) else ""
-        code.contentDescription = if (comparing) PairingScannerCopy.codeDescription(requireNotNull(comparisonCode)) else null
+        code.contentDescription = if (comparing) PairingScannerCopy.codeDescription(requireNotNull(comparisonCode),
+            context.getString(R.string.pairing_digit_names).split(',')) else null
         code.visibility = if (comparing) VISIBLE else GONE
         confirmButton.visibility = if (comparing) VISIBLE else GONE
         rejectButton.visibility = if (comparing) VISIBLE else GONE

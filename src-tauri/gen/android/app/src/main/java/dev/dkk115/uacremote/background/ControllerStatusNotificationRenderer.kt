@@ -8,10 +8,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.os.Build
 import dev.dkk115.uacremote.R
+import dev.dkk115.uacremote.AppLanguage
 
 /** Existing status presentation only. Caller owns the real state, open intent,
  * notification posting and foreground lifetime; this class starts no owner. */
-internal class ControllerStatusNotificationRenderer(private val context: Context) {
+internal class ControllerStatusNotificationRenderer(private val source: Context) {
+    private val context: Context get() = AppLanguage.context(source)
     fun ensureChannel() {
         val manager = context.getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
         val channel = NotificationChannel(CHANNEL_ID, context.getString(R.string.controller_service_channel), NotificationManager.IMPORTANCE_LOW)
@@ -23,6 +25,7 @@ internal class ControllerStatusNotificationRenderer(private val context: Context
     }
 
     fun build(state: ControllerServiceState, open: PendingIntent): Notification {
+        val context = this.context
         val body = when (state) {
             ControllerServiceState.WAITING_FOR_UNLOCK -> R.string.controller_service_locked
             ControllerServiceState.PREPARING -> R.string.controller_service_preparing

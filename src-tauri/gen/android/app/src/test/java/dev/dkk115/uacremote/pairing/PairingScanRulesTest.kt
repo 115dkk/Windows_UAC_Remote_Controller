@@ -31,11 +31,15 @@ class PairingScanRulesTest {
         }
     }
 
-    @Test fun comparisonCopyGroupsDigitsAndSpeaksEachKoreanDigitIncludingZero() {
+    @Test fun comparisonCopyGroupsAsciiDigitsAndLocalizesOnlyTheirSpokenNames() {
         assertEquals("123 456", PairingScannerCopy.groupedCode("123456"))
-        assertEquals("일, 이, 삼, 사, 오, 육", PairingScannerCopy.codeDescription("123456"))
+        assertEquals("one, two, three, four, five, six", PairingScannerCopy.codeDescription("123456"))
         assertEquals("007 890", PairingScannerCopy.groupedCode("007890"))
-        assertEquals("영, 영, 칠, 팔, 구, 영", PairingScannerCopy.codeDescription("007890"))
+        assertEquals("zero, zero, seven, eight, nine, zero", PairingScannerCopy.codeDescription("007890"))
+        assertEquals("영, 영, 칠, 팔, 구, 영", PairingScannerCopy.codeDescription("007890",
+            listOf("영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구")))
+        assertEquals("صفر, واحد, اثنان, ثلاثة, أربعة, خمسة", PairingScannerCopy.codeDescription("012345",
+            listOf("صفر", "واحد", "اثنان", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة")))
     }
 
     @Test fun comparisonCopyRejectsMalformedDigitsBeforeFormatting() {

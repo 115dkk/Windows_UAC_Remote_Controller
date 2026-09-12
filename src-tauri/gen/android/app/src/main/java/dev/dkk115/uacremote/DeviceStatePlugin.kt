@@ -74,7 +74,7 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
         if (captured == null) {
             // Fixed-token CI diagnostic: which command was refused and why (thread or origin), never payloads.
             android.util.Log.i("UacScan", "stage=dispatch rejected command=${invoke.command} main=${Looper.myLooper() == Looper.getMainLooper()} origin=${origin != null} bound=${commands != null}")
-            try { invoke.reject("휴대폰 상태를 확인하지 못했어요.", "mobile_state_unavailable") } catch (_: Exception) { }
+            try { invoke.reject("mobile_state_unavailable", "mobile_state_unavailable") } catch (_: Exception) { }
             return
         }
         action(captured, invoke)
@@ -95,6 +95,8 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
     @Command fun openPairingScanner(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openPairingScanner)
     @Command fun openLockSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openLockSettings)
     @Command fun openNotificationSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openNotificationSettings)
+    @Command fun getLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::getLanguage)
+    @Command fun setLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::setLanguage)
 
     companion object {
         private val bindings = DeviceStateBindingSlot<MainActivity, WebView>()

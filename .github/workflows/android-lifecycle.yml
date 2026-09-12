@@ -140,7 +140,7 @@ jobs:
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back emulated
           # Preserve every original lifecycle/first-unlock check and its limits.
           # The separately bounded scanner step uses that same unlocked fixture.
-          script: node tools/android-lifecycle-ci.mjs && node tools/android-pairing-scan-ci.mjs
+          script: node tools/android-lifecycle-ci.mjs && node tools/android-pairing-scan-ci.mjs && node tools/android-language-ci.mjs
       - name: Retain exact APKs and lifecycle evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24

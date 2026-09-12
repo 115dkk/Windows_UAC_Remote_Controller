@@ -135,7 +135,9 @@ class GalleryActivity : Activity() {
         check(used in 1..65_536)
         JSONObject(String(bytes, 0, used, Charsets.UTF_8)).also {
             check(it.getInt("schema") == 1 && it.getString("scope") == "exact-shared-renderer-inputs")
-            check(it.getJSONArray("files").length() == 12)
+            // Six exact Kotlin inputs and twenty resources, including every
+            // native locale catalog. The ROOT runner also checks ordered hashes.
+            check(it.getJSONArray("files").length() == 26)
         }
     }
 

@@ -83,6 +83,12 @@ export default class GalleryReporter implements Reporter {
     const packageData = JSON.parse(readFileSync(require.resolve('@playwright/test/package.json'), 'utf8')) as { version?: unknown };
     const rows = galleryCases.map((selected) => ({ ...selected, attempts: this.results.get(selected.id) ?? [] }));
     if (rows.some((row) => row.attempts.length === 0)) this.artifactErrors.push('The full declared gallery did not execute.');
+    // Include separately declared multilingual/security cases and their real
+    // attachments instead of hiding them behind the original Korean case list.
+    for (const [id, attempts] of this.results) {
+      if (rows.some(row => row.id === id)) continue;
+      rows.push({ id, fixture:'i18n/client-synthetic', viewport:{width:0,height:0}, colorScheme:'light', forcedColors:'none', action:'overview', attempts });
+    }
     const finalStatus = this.artifactErrors.length > 0 ? 'failed' : result.status;
     const manifest = {
       schemaVersion: 1, runId: this.options.runId, generatedAt: new Date().toISOString(),

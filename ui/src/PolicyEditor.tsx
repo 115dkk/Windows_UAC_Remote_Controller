@@ -3,9 +3,11 @@ import { useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AlertMode, NotificationPolicy, Schedule } from './contracts';
 import { Icon } from './icons';
-import { alertModeText, ko, timeWindowLabel, weekdayOptions } from './messages.ko';
+import { alertModeText, ko, timeWindowLabel, weekdayOptions } from './messages';
 import { draftFromPolicy, parseDraft, samePolicy, timeToMinute } from './policy-draft';
 import type { DraftErrors, PolicyDraft, WindowDraft } from './policy-draft';
+import { tr } from './i18n';
+import { ko as sourceKo } from './messages.ko';
 
 export function PolicyEditor({ policy, available, unavailableTitle = ko.policyUnavailableTitle, unavailableBody = ko.policyUnavailableBody, disabled, saving, onSave }: {
   policy: NotificationPolicy | null; available: boolean; unavailableTitle?: string; unavailableBody?: string; disabled: boolean; saving: boolean;
@@ -57,13 +59,13 @@ export function PolicyEditor({ policy, available, unavailableTitle = ko.policyUn
       const confirmed = await onSave(result.policy);
       if (confirmed && samePolicy(confirmed, result.policy)) {
         setDraft(null);
-        setNotice(ko.saved);
+        setNotice(sourceKo.saved);
       } else if (confirmed) {
-        setNotice(ko.saveFailure);
+        setNotice(sourceKo.saveFailure);
       }
     } catch {
       // Injected/test bridges may throw too. Never expose exception text or discard the draft.
-      setNotice(ko.saveFailure);
+      setNotice(sourceKo.saveFailure);
     } finally {
       submitLock.current = false;
       setSubmitting(false);
@@ -98,19 +100,19 @@ export function PolicyEditor({ policy, available, unavailableTitle = ko.policyUn
           return <fieldset className="time-window" key={window.id}><legend>{timeWindowLabel(index)}</legend>
             <div className="window-heading"><span>{ko.weekdays}</span><button type="button" className="button quiet" aria-label={`${timeWindowLabel(index)} ${ko.removeWindow}`} onClick={() => edit({ ...value, windows: value.windows.filter((item) => item.id !== window.id) })}>{ko.removeWindow}</button></div>
             <div className="weekday-list" role="group" aria-label={`${timeWindowLabel(index)} ${ko.weekdays}`}>{weekdayOptions.map((day) => <label className={`weekday-chip ${window.days & day.bit ? 'selected' : ''}`} key={day.bit}><input type="checkbox" aria-label={day.label} checked={Boolean(window.days & day.bit)} aria-invalid={Boolean(windowErrors?.days)} aria-describedby={windowErrors?.days ? `${fieldId}-days-error` : undefined} onChange={() => changeWindow(window.id, { days: window.days ^ day.bit })} /><span>{day.short}</span></label>)}</div>
-            {windowErrors?.days && <p className="field-error" id={`${fieldId}-days-error`}>{windowErrors.days}</p>}
+            {windowErrors?.days && <p className="field-error" id={`${fieldId}-days-error`}>{tr(windowErrors.days)}</p>}
             <div className="time-fields"><label htmlFor={`${fieldId}-start`}><span>{ko.startTime}</span><input id={`${fieldId}-start`} type="time" step="60" value={window.start} aria-invalid={Boolean(windowErrors?.time)} aria-describedby={windowErrors?.time ? `${fieldId}-time-error` : undefined} onChange={(event) => changeWindow(window.id, { start: event.target.value })} /></label><span className="time-separator" aria-hidden="true">—</span><label htmlFor={`${fieldId}-end`}><span>{ko.endTime}</span><input id={`${fieldId}-end`} type="time" step="60" value={window.endOfDay ? '00:00' : window.end} disabled={window.endOfDay} aria-invalid={Boolean(windowErrors?.time)} aria-describedby={windowErrors?.time ? `${fieldId}-time-error` : nextDay ? `${fieldId}-next-day` : undefined} onChange={(event) => changeWindow(window.id, { end: event.target.value })} /></label></div>
             <label className="end-of-day"><input type="checkbox" checked={window.endOfDay} onChange={(event) => changeWindow(window.id, { endOfDay: event.target.checked })} /><span>{ko.endOfDay}</span></label>
             {nextDay && <p className="next-day supporting-text" id={`${fieldId}-next-day`}>{ko.nextDay}</p>}
-            {windowErrors?.time && <p className="field-error" id={`${fieldId}-time-error`}>{windowErrors.time}</p>}
+            {windowErrors?.time && <p className="field-error" id={`${fieldId}-time-error`}>{tr(windowErrors.time)}</p>}
           </fieldset>;
         })}
-        {errors.summary && <p className="field-error" role="alert">{errors.summary}</p>}
+        {errors.summary && <p className="field-error" role="alert">{tr(errors.summary)}</p>}
         <button type="button" className="button secondary add-window" onClick={() => edit({ ...value, windows: [...value.windows, freshWindow()] })}><Icon name="plus" />{ko.addWindow}</button>
         <p className="supporting-text schedule-boundary">{ko.scheduleBoundary}</p>
       </div>}
     </fieldset>
     <fieldset className="surface form-section" disabled={busy}><legend>{ko.alertMode}</legend><div className="alert-modes">{(['sound', 'vibrate_only', 'silent'] as const).map((mode: AlertMode) => <label className={`alert-option ${value.alert === mode ? 'selected' : ''}`} key={mode}><input type="radio" name={`${id}-alert`} checked={value.alert === mode} aria-labelledby={`${id}-alert-${mode}-title`} aria-describedby={`${id}-alert-description`} onChange={() => edit({ ...value, alert: mode })} /><span id={`${id}-alert-${mode}-title`}>{alertModeText[mode]}</span></label>)}</div><p id={`${id}-alert-description`} className="supporting-text">{ko.alertDescription}</p></fieldset>
-    <div className="policy-footer"><p className="draft-status" role="status" aria-live="polite">{notice ?? (dirty ? ko.dirty : '')}</p><div className="form-actions"><button type="button" className="button secondary" disabled={!dirty || busy} onClick={() => { setDraft(null); setErrors({ windows: {} }); setNotice(ko.cancelledDraft); }}>{ko.cancel}</button><button type="submit" className="button primary" disabled={!dirty || disabled || busy}>{busy ? ko.saving : ko.save}</button></div></div>
+    <div className="policy-footer"><p className="draft-status" role="status" aria-live="polite">{notice ? tr(notice) : (dirty ? ko.dirty : '')}</p><div className="form-actions"><button type="button" className="button secondary" disabled={!dirty || busy} onClick={() => { setDraft(null); setErrors({ windows: {} }); setNotice(sourceKo.cancelledDraft); }}>{ko.cancel}</button><button type="submit" className="button primary" disabled={!dirty || disabled || busy}>{busy ? ko.saving : ko.save}</button></div></div>
   </form>;
 }

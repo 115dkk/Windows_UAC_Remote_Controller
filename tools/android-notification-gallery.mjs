@@ -15,8 +15,11 @@ const background = 'src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote
 const resources = 'src-tauri/gen/android/app/src/main/res';
 const productServiceSource = `${background}/ControllerForegroundService.kt`;
 export const sharedRendererInputs = Object.freeze([
-  ...['RequestNotificationRenderer.kt', 'ControllerStatusNotificationRenderer.kt', 'BootServicePolicy.kt', 'PolicyOwnerRules.kt'].map((name) => `${background}/${name}`),
-  ...['values/strings.xml', 'values/request_colors.xml', 'values-night/request_colors.xml', 'drawable/ic_request_notice.xml',
+  ...['RequestNotificationRenderer.kt', 'ControllerStatusNotificationRenderer.kt', 'BootServicePolicy.kt', 'PolicyOwnerRules.kt', 'UntrustedDisplayText.kt'].map((name) => `${background}/${name}`),
+  'src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/AppLanguage.kt',
+  ...['values', 'values-ko', 'values-fr', 'values-de', 'values-ja', 'values-b+zh+Hans', 'values-b+zh+Hant',
+    'values-es', 'values-pt', 'values-pt-rBR', 'values-pt-rPT', 'values-ar'].map((directory) => `${resources}/${directory}/strings.xml`),
+  ...['xml/locale_config.xml', 'values/request_colors.xml', 'values-night/request_colors.xml', 'drawable/ic_request_notice.xml',
     'drawable/ic_request_approve.xml', 'drawable/ic_request_deny.xml', 'drawable/ic_request_details.xml', 'drawable/ic_controller_service.xml'].map((name) => `${resources}/${name}`),
 ]);
 const apk = 'tools/android-notification-gallery/build/outputs/apk/debug/notification-renderer-gallery-only-debug.apk';
@@ -164,11 +167,17 @@ async function main() {
     receipt.sourceSha256 = hash(readFileSync(resolve(root, source)));
     receipt.sharedSources = sharedRendererInputs.map((path) => ({ path, sha256: hash(readFileSync(resolve(root, path))) }));
     receipt.productServiceSourceSha256 = hash(readFileSync(resolve(root, productServiceSource)));
-    const statusExpectations = statusResourceExpectations(readFileSync(resolve(root, `${resources}/values/strings.xml`), 'utf8'));
+    const statusExpectations = statusResourceExpectations(readFileSync(resolve(root, `${resources}/values-ko/strings.xml`), 'utf8'));
     receipt.apkSha256 = hash(readFileSync(resolve(root, apk)));
     receipt.sdk = run(['shell', 'getprop', 'ro.build.version.sdk']).trim();
     receipt.abi = run(['shell', 'getprop', 'ro.product.cpu.abi']).trim();
     run(['install', '-r', resolve(root, apk)]);
+    // The gallery has intentionally Korean baseline assertions. Use the real
+    // per-app OS preference rather than replacing production locale logic or
+    // changing the whole emulator's language/SystemUI expansion controls.
+    run(['shell', 'cmd', 'locale', 'set-app-locales', application, '--user', '0', '--locales', 'ko-KR']);
+    receipt.appLanguage = { requested: 'ko-KR',
+      osObservation: run(['shell', 'cmd', 'locale', 'get-app-locales', application, '--user', '0']).trim() };
     run(['shell', 'pm', 'grant', application, 'android.permission.POST_NOTIFICATIONS']);
     // Preserve the causal setup barrier against late PACKAGE_CHANGED reason5
     // cancellation, before the FIRST Activity/notification. Android36's fixed

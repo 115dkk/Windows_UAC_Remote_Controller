@@ -11,7 +11,7 @@ internal enum class PairingScannerState { PREPARING, PERMISSION_PENDING, PERMISS
 
 /** Presentation only. A displayed code or state never accepts a connection. */
 internal object PairingScannerCopy {
-    private val spokenDigits = listOf("영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구")
+    private val spokenDigits = listOf("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
     private fun validCode(code: String?): Boolean =
         code != null && code.length == 6 && code.all { it in '0'..'9' }
 
@@ -23,9 +23,10 @@ internal object PairingScannerCopy {
         return code.substring(0, 3) + " " + code.substring(3)
     }
 
-    fun codeDescription(code: String): String {
+    fun codeDescription(code: String, digits: List<String> = spokenDigits): String {
         require(validCode(code))
-        return code.map { spokenDigits[it - '0'] }.joinToString(", ")
+        require(digits.size == 10 && digits.all { it.isNotBlank() && it.length <= 32 })
+        return code.map { digits[it - '0'] }.joinToString(", ")
     }
 }
 
