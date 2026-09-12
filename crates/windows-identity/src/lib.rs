@@ -115,8 +115,10 @@ impl PcIdentityKey {
     ///
     /// This is a real storage mutation when called by the authorized service.
     /// It is not called automatically by this crate, its tests or any CLI.
-    /// Built-in policies and the protected DACL must be accepted and read back
-    /// before finalization; persistence is checked again through a reopened key.
+    /// Built-in security policies and the protected DACL must be accepted and
+    /// read back before finalization. PCP's unfinished length/scope placeholders
+    /// are accepted only then; completed properties and the P-256 public blob
+    /// must pass strict validation after finalization and through a reopened key.
     /// A collision fails. It never treats an existing key as its own to delete.
     ///
     /// `CreationStateUncertain` requires operator attention: after a failed

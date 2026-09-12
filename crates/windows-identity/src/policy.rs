@@ -104,12 +104,46 @@ impl fmt::Debug for ObservedKeyPolicy<'_> {
 
 impl ObservedKeyPolicy<'_> {
     pub fn validate(&self) -> Result<(), IdentityError> {
+        self.validate_common()?;
+        if self.length_bits != 256 {
+            return Err(IdentityError::Policy(
+                IdentityPolicy::P256SigningKeyRequired,
+            ));
+        }
+        if self.key_type != 0x20 {
+            return Err(IdentityError::Policy(IdentityPolicy::MachineKeyRequired));
+        }
+        Ok(())
+    }
+
+    /// Only the uniquely owned, not-yet-finalized fixed P-256 creation handle
+    /// may use this check. PCP reports length/scope as zero until finalization.
+    /// It is not a usable key: final validation AND P-256 public-blob validation
+    /// are required before the capability is returned, and again on reopening.
+    #[cfg(not(feature = "lab-software-identity"))]
+    pub fn validate_unfinalized(&self) -> Result<(), IdentityError> {
+        self.validate_common()?;
+        if !matches!(self.length_bits, 0 | 256) {
+            return Err(IdentityError::Policy(
+                IdentityPolicy::P256SigningKeyRequired,
+            ));
+        }
+        if !matches!(self.key_type, 0 | 0x20) {
+            return Err(IdentityError::Policy(IdentityPolicy::MachineKeyRequired));
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> Result<(), IdentityError> {
         if !utf16_property_matches(self.name, PERSISTENT_KEY_NAME) {
             return Err(IdentityError::Policy(IdentityPolicy::FixedKeyNameRequired));
         }
-        if !utf16_property_matches(self.algorithm, "ECDSA_P256")
+        // PCP canonicalizes the requested ECDSA_P256 name to ECDSA. The name
+        // alone never proves a curve: finalized length and the exact ECS1
+        // public blob/curve point remain mandatory in the native adapter.
+        if !(utf16_property_matches(self.algorithm, "ECDSA_P256")
+            || utf16_property_matches(self.algorithm, "ECDSA"))
             || !utf16_property_matches(self.algorithm_group, "ECDSA")
-            || self.length_bits != 256
         {
             return Err(IdentityError::Policy(
                 IdentityPolicy::P256SigningKeyRequired,
@@ -121,10 +155,6 @@ impl ObservedKeyPolicy<'_> {
         }
         if self.export != 0 {
             return Err(IdentityError::Policy(IdentityPolicy::NonExportableRequired));
-        }
-        // NCRYPT_MACHINE_KEY_FLAG only, not merely any flag-containing value.
-        if self.key_type != 0x20 {
-            return Err(IdentityError::Policy(IdentityPolicy::MachineKeyRequired));
         }
         Ok(())
     }
@@ -406,6 +436,102 @@ mod tests {
         assert!(observation.validate().is_err());
         observation.length_bits = 256;
         observation.algorithm_group = &algorithm;
+        assert!(observation.validate().is_err());
+    }
+
+    #[test]
+    fn canonical_ecdsa_name_still_requires_completed_p256_machine_policy() {
+        let name = wide(PERSISTENT_KEY_NAME);
+        let algorithm = wide("ECDSA");
+        let mut observation = ObservedKeyPolicy {
+            name: &name,
+            algorithm: &algorithm,
+            algorithm_group: &algorithm,
+            length_bits: 256,
+            usage: 2,
+            export: 0,
+            key_type: 32,
+        };
+        assert!(observation.validate().is_ok());
+        for length in [0, 1, 255, 384, 521, u32::MAX] {
+            observation.length_bits = length;
+            assert!(observation.validate().is_err());
+        }
+        observation.length_bits = 256;
+        for key_type in [0, 1, 33, u32::MAX] {
+            observation.key_type = key_type;
+            assert!(observation.validate().is_err());
+        }
+    }
+
+    #[cfg(not(feature = "lab-software-identity"))]
+    #[test]
+    fn observed_pcp_unfinished_fields_are_never_completed_key_evidence() {
+        let name = wide(PERSISTENT_KEY_NAME);
+        let algorithm = wide("ECDSA");
+        let mut observation = ObservedKeyPolicy {
+            name: &name,
+            algorithm: &algorithm,
+            algorithm_group: &algorithm,
+            length_bits: 0,
+            usage: 2,
+            export: 0,
+            key_type: 0,
+        };
+        // Actual unfinalized PCP metadata observed on the operator's TPM.
+        assert!(observation.validate_unfinalized().is_ok());
+        assert!(observation.validate().is_err());
+        observation.length_bits = 256;
+        assert!(observation.validate_unfinalized().is_ok());
+        assert!(observation.validate().is_err());
+        observation.key_type = 32;
+        assert!(observation.validate().is_ok());
+        for length in [1, 255, 384, 521, u32::MAX] {
+            observation.length_bits = length;
+            assert!(observation.validate_unfinalized().is_err());
+        }
+        observation.length_bits = 0;
+        for key_type in [1, 33, u32::MAX] {
+            observation.key_type = key_type;
+            assert!(observation.validate_unfinalized().is_err());
+        }
+        observation.key_type = 0;
+        observation.export = 1;
+        assert!(observation.validate_unfinalized().is_err());
+        observation.export = 0;
+        observation.usage = 0x00ff_ffff;
+        assert!(observation.validate_unfinalized().is_err());
+    }
+
+    #[test]
+    fn canonical_name_acceptance_does_not_admit_other_algorithms_or_groups() {
+        let name = wide(PERSISTENT_KEY_NAME);
+        let group = wide("ECDSA");
+        for algorithm in ["ECDH", "ECDH_P256", "ECDSA_P384", "RSA", "ECDSA\0extra"] {
+            let algorithm = wide(algorithm);
+            let observation = ObservedKeyPolicy {
+                name: &name,
+                algorithm: &algorithm,
+                algorithm_group: &group,
+                length_bits: 256,
+                usage: 2,
+                export: 0,
+                key_type: 32,
+            };
+            assert!(observation.validate().is_err());
+            #[cfg(not(feature = "lab-software-identity"))]
+            assert!(observation.validate_unfinalized().is_err());
+        }
+        let other_group = wide("ECDH");
+        let observation = ObservedKeyPolicy {
+            name: &name,
+            algorithm: &group,
+            algorithm_group: &other_group,
+            length_bits: 256,
+            usage: 2,
+            export: 0,
+            key_type: 32,
+        };
         assert!(observation.validate().is_err());
     }
 

@@ -195,8 +195,9 @@ fn configure_unfinalized(
         descriptor.bytes(),
         descriptor_parts().0,
     )?;
-    // Some providers may not support these pre-finalization checks. In that
-    // case do NOT finalize first and repair permissions afterward: reject them.
+    // Read back security configuration before finalization. Only this uniquely
+    // owned Creating handle may have PCP's unfinished length/scope placeholders;
+    // finalization and reopening must pass the strict completed-key checks.
     #[cfg(not(feature = "lab-software-identity"))]
     {
         validate_key(key, service_sid)
@@ -228,7 +229,7 @@ fn validate_key(key: &OwnedKey, service_sid: &[u8; 32]) -> Result<(), IdentityEr
         0,
         operation,
     )?;
-    ObservedKeyPolicy {
+    let observation = ObservedKeyPolicy {
         name: &name,
         algorithm: &algorithm,
         algorithm_group: &algorithm_group,
@@ -236,8 +237,15 @@ fn validate_key(key: &OwnedKey, service_sid: &[u8; 32]) -> Result<(), IdentityEr
         usage: property_u32(handle, NCRYPT_KEY_USAGE_PROPERTY, operation)?,
         export: property_u32(handle, NCRYPT_EXPORT_POLICY_PROPERTY, operation)?,
         key_type: property_u32(handle, NCRYPT_KEY_TYPE_PROPERTY, operation)?,
+    };
+    #[cfg(not(feature = "lab-software-identity"))]
+    if key.lifecycle.permits_configuration() {
+        observation.validate_unfinalized()?;
+    } else {
+        observation.validate()?;
     }
-    .validate()?;
+    #[cfg(feature = "lab-software-identity")]
+    observation.validate()?;
     let descriptor = property_bytes::<MAX_DESCRIPTOR_BYTES>(
         handle,
         NCRYPT_SECURITY_DESCR_PROPERTY,
