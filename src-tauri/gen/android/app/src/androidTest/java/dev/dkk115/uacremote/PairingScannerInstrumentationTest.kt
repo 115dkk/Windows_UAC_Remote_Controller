@@ -94,6 +94,13 @@ class PairingScannerInstrumentationTest {
                 throw AssertionError("Scanner window never appeared: launch=$launch nativeGate=$gate notice=$notice directStarted=$started directResult=$direct launchAfterDirect=$launchAfter ${onMain { app.controllerLifecycleDiagnosticLines() }}", error)
             }
             assertTrue(onMain { secureScannerWindow() })
+            onMain {
+                val scanner = requireNotNull(scannerWindow())
+                assertSame("Localized scanner must retain the original Activity window owner",
+                    host.getSystemService(Context.WINDOW_SERVICE), scanner.context.getSystemService(Context.WINDOW_SERVICE))
+                assertEquals(AppLanguage.effective(host),
+                    AppLanguage.match(scanner.context.resources.configuration.locales[0].toLanguageTag()))
+            }
             await { onMain { scannerMessage() == host.getString(R.string.pairing_scanner_scanning) } }
             assertFalse(onMain { app.canOpenPairingScanner(host) })
             onMain {

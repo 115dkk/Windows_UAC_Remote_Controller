@@ -17,6 +17,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.os.UserManager
 import android.provider.Settings
+import android.view.ContextThemeWrapper
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -53,7 +54,13 @@ internal class PairingScannerDialog(
             if (view === originalDecor) main.post { finishIfReleased() }
         }
     }
-    private val dialog = object : Dialog(AppLanguage.context(activity), R.style.Theme_PairingScanner) {
+    // Keep the ORIGINAL Activity as the base so WINDOW_SERVICE retains its
+    // window token. A standalone createConfigurationContext loses that owner.
+    // Override only resources, before the Dialog first resolves the theme.
+    private val localizedHost = ContextThemeWrapper(activity, R.style.Theme_PairingScanner).apply {
+        applyOverrideConfiguration(Configuration(AppLanguage.context(activity).resources.configuration))
+    }
+    private val dialog = object : Dialog(localizedHost, R.style.Theme_PairingScanner) {
         // Back/cancel and SDK dismiss requests converge on the same one-attempt
         // owner. A callback must never trigger a second underlying dismiss.
         override fun cancel() { this@PairingScannerDialog.close() }
