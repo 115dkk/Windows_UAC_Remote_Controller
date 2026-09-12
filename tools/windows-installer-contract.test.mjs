@@ -14,6 +14,7 @@ const instructions = (source) => source.split('\n').map((line) => line.trim())
   .filter((line) => line && !line.startsWith(';') && !line.startsWith('# '));
 const template = instructions(read('src-tauri/windows/installer.nsi'));
 const hooks = instructions(read('src-tauri/windows/packaging-hooks.nsh'));
+const firewall = read('crates/windows-service-host/src/ffi/firewall.rs');
 const base = JSON.parse(read('src-tauri/tauri.conf.json'));
 const overlay = JSON.parse(read('src-tauri/windows/package-config.json'));
 
@@ -81,11 +82,12 @@ test('branding migration preserves installation identity and only renames owned 
   ordered(migration, ['!insertmacro IsShortcutTarget "${OLD}" "$INSTDIR\\${MAINBINARYNAME}.exe"',
     'Pop $0', '${If} $0 = 1', '${If} ${FileExists} "${NEW}"', 'Call UacFail', '${EndIf}',
     'ClearErrors', 'Rename "${OLD}" "${NEW}"', '${If} ${Errors}', 'Call UacFail']);
-  for (const name of ['CreateOrUpdateStartMenuShortcut', 'CreateOrUpdateDesktopShortcut']) {
+  for (const [name, choice] of [['CreateOrUpdateStartMenuShortcut', '$UacStartMenuChoice'], ['CreateOrUpdateDesktopShortcut', '$UacDesktopChoice']]) {
     const body = block(template, `Function ${name}`, 'FunctionEnd');
     const rename = body.findIndex(line => line.startsWith('!insertmacro UacMigrateShortcut'));
-    assert.ok(rename >= 0 && rename < position(body, '${If} $UpdateMode = 1'), 'existing owned shortcut migrates before update creation is skipped');
-    assert.ok(position(body, '${If} $NoShortcutMode <> 1') < rename);
+    ordered(body, ['${If} $NoShortcutMode = 1', '${OrIf} ' + choice + ' <> ${BST_CHECKED}', 'Return', '${EndIf}']);
+    assert.ok(position(body, 'Return') < rename, 'unchecked shortcuts remain untouched, including legacy names');
+    assert.ok(!body.includes('${If} $UpdateMode = 1'), 'an upgrade may explicitly opt into a shortcut');
   }
   const uninstall = section('Uninstall');
   for (const path of ['$SMPROGRAMS\\$AppStartMenuFolder', '$SMPROGRAMS', '$DESKTOP']) {
@@ -93,6 +95,84 @@ test('branding migration preserves installation identity and only renames owned 
       'Pop $0', '${If} $0 = 1', `!insertmacro UnpinShortcut "${path}\\\${INSTALLATIONID}.lnk"`,
       'ClearErrors', `Delete "${path}\\\${INSTALLATIONID}.lnk"`, '${If} ${Errors}', 'Call un.UacFail']);
   }
+});
+
+test('shortcut defaults detect registered, partial and explicit upgrades once before writes', () => {
+  const init = block(template, 'Function .onInit', 'FunctionEnd');
+  ordered(init, ['Call UacFixedLocation', 'SetRegView 64', 'Call UacInitializeShortcutChoices']);
+  assert.equal(template.filter(line => line === 'Call UacInitializeShortcutChoices').length, 1);
+  const defaults = block(template, 'Function UacInitializeShortcutChoices', 'FunctionEnd');
+  ordered(defaults, ['StrCpy $UacExistingInstall 0', 'EnumRegValue $0 HKLM "${UNINSTKEY}" 0', '${IfNot} ${Errors}',
+    'StrCpy $UacExistingInstall 1', 'EnumRegValue $0 HKLM "${MANUPRODUCTKEY}" 0', '${IfNot} ${Errors}',
+    'StrCpy $UacExistingInstall 1', '${If} ${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"',
+    '${OrIf} ${FileExists} "$INSTDIR\\uac-service.exe"', '${OrIf} $UpdateMode = 1', 'StrCpy $UacExistingInstall 1']);
+  ordered(defaults, ['StrCpy $UacDesktopChoice ${BST_CHECKED}', 'StrCpy $UacStartMenuChoice ${BST_CHECKED}',
+    'StrCpy $UacTaskbarChoice ${BST_CHECKED}', '${If} $UacExistingInstall = 1', '${OrIf} $NoShortcutMode = 1',
+    'StrCpy $UacDesktopChoice ${BST_UNCHECKED}', 'StrCpy $UacStartMenuChoice ${BST_UNCHECKED}',
+    'StrCpy $UacTaskbarChoice ${BST_UNCHECKED}', '${EndIf}', '${If} $PassiveMode = 1', '${OrIf} ${Silent}',
+    'StrCpy $UacTaskbarChoice ${BST_UNCHECKED}']);
+});
+
+test('one shortcut page retains Back/Next state and explains the taskbar dependency', () => {
+  ordered(template, ['Page custom UacShortcutPage UacShortcutPageLeave', '!insertmacro MUI_PAGE_INSTFILES']);
+  assert.ok(!template.some(line => /MUI_FINISHPAGE_SHOWREADME|MUI_PAGE_STARTMENU/u.test(line)));
+  const page = block(template, 'Function UacShortcutPage', 'FunctionEnd');
+  ordered(page, ['${If} $PassiveMode = 1', '${OrIf} $NoShortcutMode = 1', 'Abort']);
+  for (const [control, choice] of [['Desktop', 'Desktop'], ['StartMenu', 'StartMenu'], ['Taskbar', 'Taskbar']]) {
+    position(page, '${NSD_SetState} $Uac' + control + 'Checkbox $Uac' + choice + 'Choice');
+    position(page, '${NSD_OnClick} $Uac' + control + 'Checkbox UacShortcutChanged');
+    position(block(template, 'Function UacShortcutPageLeave', 'FunctionEnd'), '${NSD_GetState} $Uac' + control + 'Checkbox $Uac' + choice + 'Choice');
+  }
+  const changed = block(template, 'Function UacShortcutChanged', 'FunctionEnd');
+  ordered(changed, ['Pop $0', '${If} $0 = $UacTaskbarCheckbox', '${AndIf} $UacTaskbarChoice = ${BST_CHECKED}',
+    'StrCpy $UacStartMenuChoice ${BST_CHECKED}', '${NSD_SetState} $UacStartMenuCheckbox $UacStartMenuChoice',
+    '${ElseIf} $UacStartMenuChoice <> ${BST_CHECKED}', 'StrCpy $UacTaskbarChoice ${BST_UNCHECKED}',
+    '${NSD_SetState} $UacTaskbarCheckbox $UacTaskbarChoice']);
+  assert.ok(page.some(line => line.includes('$(UacShortcutHint)')));
+});
+
+test('taskbar preference is bounded machine state after successful service install, never an installer pin call', () => {
+  ordered(section('Install'), ['Call CreateOrUpdateStartMenuShortcut', 'Call CreateOrUpdateDesktopShortcut',
+    '!insertmacro NSIS_HOOK_POSTINSTALL', 'Call UacSaveTaskbarPreference']);
+  const save = block(template, 'Function UacSaveTaskbarPreference', 'FunctionEnd');
+  ordered(save, ['WriteRegDWORD HKLM "${UNINSTKEY}" "TaskbarPinRequested" 0',
+    'WriteRegStr HKLM "${UNINSTKEY}" "TaskbarPinRequestVersion" "${VERSION}"',
+    '${If} $NoShortcutMode <> 1', '${AndIf} $PassiveMode <> 1', '${AndIfNot} ${Silent}',
+    '${AndIf} $UacStartMenuChoice = ${BST_CHECKED}', '${AndIf} $UacTaskbarChoice = ${BST_CHECKED}',
+    'WriteRegDWORD HKLM "${UNINSTKEY}" "TaskbarPinRequested" 1']);
+  for (const [index, line] of save.entries()) if (line.startsWith('WriteReg')) {
+    assert.equal(save[index - 1], 'ClearErrors');
+    assert.equal(save[index + 1], '${If} ${Errors}');
+    assert.equal(save[index + 3], 'Call UacFail');
+  }
+  assert.ok(!save.some(line => /HKCU|Exec|System::Call/u.test(line)));
+  assert.ok(!template.some(line => /RequestPin|PinToTaskbar|taskbarpin|InvokeVerb/u.test(line)));
+  const collision = block(template, '!macro UacRequireOwnedShortcutOrMissing PATH', '!macroend');
+  ordered(collision, ['${If} ${FileExists} "${PATH}"', '!insertmacro IsShortcutTarget "${PATH}" "$INSTDIR\\${MAINBINARYNAME}.exe"',
+    'Pop $0', '${If} $0 <> 1', 'Call UacFail']);
+});
+
+test('embedded relay firewall changes require protected elevated ownership and a fixed narrow rule', () => {
+  for (const name of ['provision_embedded_relay_firewall', 'remove_embedded_relay_firewall']) {
+    const start = firewall.indexOf(`pub(crate) fn ${name}() -> Result<(), ServiceError> {`);
+    assert.ok(start >= 0, 'firewall API accepts no caller-selected paths or rule parameters');
+    const body = firewall.slice(start, firewall.indexOf('\n}', start));
+    assert.ok(body.indexOf('require_elevated()?') < body.indexOf('validate_installation(true)?'));
+    assert.ok(body.indexOf('validate_installation(true)?') < body.indexOf('ComApartment::enter(operation)?'));
+  }
+  for (const token of ['const RULE_NAME: &str = "dev.dkk115.uacremote.embedded-relay.v1";',
+    'const LOCAL_PORT: &str = "7443";', 'rule.SetApplicationName(&application)?;', 'rule.SetServiceName(&service)?;',
+    'rule.SetProtocol(NET_FW_IP_PROTOCOL_TCP.0)?;', 'rule.SetLocalPorts(&port)?;',
+    'rule.SetDirection(NET_FW_RULE_DIR_IN)?;', 'rule.SetProfiles(NET_FW_PROFILE2_PRIVATE.0)?;',
+    'rule.SetEdgeTraversal(false.into())?;', 'rules.Add(&rule)', 'rules.Remove(&BSTR::from(RULE_NAME))']) {
+    assert.ok(firewall.includes(token), `Missing fixed firewall boundary: ${token}`);
+  }
+  assert.ok(firewall.indexOf('rule.SetProtocol(') < firewall.indexOf('rule.SetLocalPorts('));
+  assert.ok(firewall.indexOf('rule.SetProfiles(') < firewall.indexOf('rules.Add(&rule)'));
+  assert.ok(firewall.indexOf('rules.Add(&rule)') < firewall.indexOf('rules.Item(&name)'));
+  assert.doesNotMatch(firewall, /put_FirewallEnabled|put_DefaultInboundAction|RestoreLocalFirewallDefaults|NET_FW_PROFILE2_ALL|NET_FW_PROFILE2_PUBLIC|Command::new/u);
+  assert.ok(firewall.includes('struct ComApartment(PhantomData<Rc<()>>)'));
+  assert.ok(firewall.includes('unsafe { CoUninitialize() }'));
 });
 
 test('source contract runs PREINSTALL before destination writes and POSTINSTALL after all packaged files', () => {
@@ -257,7 +337,7 @@ test('source contract retains checked ancestor pins and differentiates installat
 
 test('source contract defines every custom outcome once in Korean and English without raw native error labels', () => {
   const definitions = new Map();
-  for (const line of hooks.filter((value) => value.startsWith('LangString Uac'))) {
+  for (const line of [...template, ...hooks].filter((value) => value.startsWith('LangString Uac'))) {
     const match = /^LangString (Uac[A-Za-z0-9]+) (1033|1042) "(.+)"$/u.exec(line);
     assert.ok(match, `Unsupported custom language declaration: ${line}`);
     const [, name, language, text] = match;

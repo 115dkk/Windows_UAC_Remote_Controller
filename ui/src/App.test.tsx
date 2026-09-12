@@ -224,6 +224,14 @@ describe('pairing progress in the device collection', () => {
 });
 
 describe('Windows relay address settings', () => {
+  it('starts the bundled relay without requiring an address field', async () => {
+    const snapshot = qaCase('desktop-running').snapshot;
+    const onSetRelay = vi.fn().mockResolvedValue(snapshot);
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    fireEvent.click(screen.getByRole('button', { name: '이 PC의 내장 중계 사용' }));
+    await waitFor(() => expect(onSetRelay).toHaveBeenCalledWith('embedded'));
+    expect(screen.getByRole('textbox', { name: ko.relayAddress })).toHaveValue('');
+  });
   function managementSnapshot(): AppSnapshot {
     return qaCase('desktop-running').snapshot;
   }

@@ -22,6 +22,7 @@ pub enum ManagementRequest {
     Query,
     RemoveDevice { device: DeviceId },
     SetRelay { address: SocketAddr },
+    UseEmbeddedRelay,
 }
 
 impl fmt::Debug for ManagementRequest {
@@ -85,6 +86,7 @@ pub fn encode_request(request: &ManagementRequest) -> Result<Vec<u8>, Management
     let mut writer = Writer::new();
     match request {
         ManagementRequest::Query => writer.byte(1),
+        ManagementRequest::UseEmbeddedRelay => writer.byte(4),
         ManagementRequest::RemoveDevice { device } => {
             writer.byte(2);
             writer.bytes(device.as_bytes());
@@ -103,6 +105,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
         1 => ManagementRequest::Query,
+        4 => ManagementRequest::UseEmbeddedRelay,
         2 => ManagementRequest::RemoveDevice {
             device: DeviceId::from_bytes(reader.array()?)
                 .map_err(|_| ManagementCodecError::Malformed)?,

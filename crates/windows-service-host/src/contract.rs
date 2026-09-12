@@ -20,6 +20,7 @@ pub enum Command {
     Uninstall,
     ProbeOnce,
     Relay(SocketAddr),
+    EmbeddedRelay,
     RemoveDevice(approval_protocol::DeviceId),
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
@@ -119,6 +120,7 @@ pub enum ServiceControlIntent {
     Uninstall,
     RemoveDevice(#[serde(with = "device_id_hex")] approval_protocol::DeviceId),
     SetRelay(SocketAddr),
+    UseEmbeddedRelay,
 }
 
 /// The presentation carries a device id as the same 64 lowercase hex characters
@@ -154,6 +156,7 @@ impl fmt::Debug for Command {
             Self::Uninstall => "Command::Uninstall",
             Self::ProbeOnce => "Command::ProbeOnce",
             Self::Relay(_) => "Command::Relay(redacted)",
+            Self::EmbeddedRelay => "Command::EmbeddedRelay",
             Self::RemoveDevice(_) => "Command::RemoveDevice(redacted)",
             Self::Pair(_) => "Command::Pair(redacted)",
             Self::PairRenderer(_) => "Command::PairRenderer(redacted)",
@@ -172,6 +175,7 @@ impl fmt::Debug for ServiceControlIntent {
             Self::Uninstall => "ServiceControlIntent::Uninstall",
             Self::RemoveDevice(_) => "ServiceControlIntent::RemoveDevice(redacted)",
             Self::SetRelay(_) => "ServiceControlIntent::SetRelay(redacted)",
+            Self::UseEmbeddedRelay => "ServiceControlIntent::UseEmbeddedRelay",
         })
     }
 }
@@ -187,6 +191,7 @@ impl ServiceControlIntent {
             Self::Uninstall => "uninstall".into(),
             Self::RemoveDevice(device) => format!("remove {}", device_hex(device)),
             Self::SetRelay(address) => format!("relay {address}"),
+            Self::UseEmbeddedRelay => "relay-auto".into(),
         }
     }
 }
@@ -311,6 +316,7 @@ impl Command {
             return Err(ServiceError::InvalidArguments);
         }
         match first.as_ref().to_str() {
+            Some("relay-auto") => Ok(Self::EmbeddedRelay),
             Some("status") => Ok(Self::Status),
             Some("service") => Ok(Self::Service),
             Some("install") => Ok(Self::Install),
@@ -433,6 +439,8 @@ pub enum ServiceOperation {
     LaunchElevatedHelper,
     WaitElevatedHelper,
     RequestProbe,
+    ConfigureFirewall,
+    RemoveFirewall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

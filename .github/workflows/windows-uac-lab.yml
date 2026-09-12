@@ -154,6 +154,12 @@ jobs:
           }
           if ($startExit -ne 0) { Write-Output 'start returned nonzero although the service is running; recorded.' }
           exit 0
+      - name: Exercise service-owned embedded relay and exact firewall rule
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          ./tools/windows-embedded-relay-lab.ps1 -ServiceExecutable (Join-Path $env:LAB_DIR 'uac-service.exe') | Tee-Object -FilePath "$env:LAB_EVIDENCE/embedded-relay.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Lab experiment (evidence only) - start the same service with an unrestricted service SID
         id: experiment
         if: ${{ steps.start.outputs.product_running != 'true' }}

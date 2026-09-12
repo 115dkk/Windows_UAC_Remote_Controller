@@ -113,6 +113,8 @@ pub use ffi::{
 };
 
 pub const SERVICE_NAME: &str = "UacRemoteController";
+#[cfg(windows)]
+pub use ffi::{TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin};
 pub const SERVICE_DISPLAY_NAME: &str = "휴대폰 승인";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
@@ -275,6 +277,18 @@ pub fn configure_relay(endpoint: std::net::SocketAddr) -> Result<(), ServiceErro
     #[cfg(not(windows))]
     {
         let _ = endpoint;
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Explicit administrator choice of the packaged background relay.
+pub fn configure_embedded_relay() -> Result<(), ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        native::configure_relay_mode(None)
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
         Err(ServiceError::UnsupportedPlatform)
     }
 }

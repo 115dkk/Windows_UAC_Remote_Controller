@@ -52,6 +52,10 @@ fn run() -> Result<(), ServiceError> {
             windows_service_host::configure_relay(endpoint)?;
             windows_service_host::query_status()
         }
+        Command::EmbeddedRelay => {
+            windows_service_host::configure_embedded_relay()?;
+            windows_service_host::query_status()
+        }
         Command::RemoveDevice(device) => {
             windows_service_host::remove_device(device)?;
             windows_service_host::query_status()

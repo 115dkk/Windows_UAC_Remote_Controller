@@ -7,6 +7,7 @@
 mod diagnostic;
 mod elevation;
 mod filesystem;
+mod firewall;
 #[cfg(target_pointer_width = "64")]
 mod overlapped_pipe;
 #[cfg(target_pointer_width = "64")]
@@ -16,9 +17,13 @@ mod pairing_peer;
 #[cfg(target_pointer_width = "64")]
 pub(crate) mod probe_supervisor;
 mod security;
+mod taskbar;
 mod trust_store;
 
+pub use taskbar::{TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin};
+
 pub(crate) use elevation::request_elevated_control;
+pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_relay_firewall};
 #[cfg(target_pointer_width = "64")]
 pub(crate) use pairing_client::run_pair_helper;
 #[cfg(target_pointer_width = "64")]

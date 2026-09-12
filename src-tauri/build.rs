@@ -14,6 +14,8 @@ fn main() {
         "open_pairing_scanner",
         "request_details",
         "set_relay",
+        "taskbar_offer",
+        "request_taskbar_pin",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("Tauri application build configuration must be valid");

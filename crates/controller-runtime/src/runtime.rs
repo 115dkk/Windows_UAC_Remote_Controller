@@ -101,6 +101,9 @@ pub trait PlatformAdapter: Send {
     fn set_relay(&self, _address: &str) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported)
     }
+    fn use_embedded_relay(&self) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
 }
 
 /// Published state and cancellation seam for one asynchronous pairing attempt.
@@ -512,7 +515,11 @@ impl AppRuntime {
         if self.platform != Platform::Windows {
             return Err(PlatformError::Unsupported.into());
         }
-        let address = parse_relay_address(address).ok_or_else(invalid_relay_issue)?;
+        let address = if address == "embedded" {
+            None
+        } else {
+            Some(parse_relay_address(address).ok_or_else(invalid_relay_issue)?)
+        };
         let before = self.snapshot();
         if let Some(issue) = before.issue {
             return Err(issue);
@@ -533,9 +540,11 @@ impl AppRuntime {
                 next_action: Some("상태를 새로 확인한 뒤 다시 시도해 주세요."),
             });
         }
-        self.adapter
-            .set_relay(&address.to_string())
-            .map_err(|_| management_mutation_issue())?;
+        match address {
+            Some(address) => self.adapter.set_relay(&address.to_string()),
+            None => self.adapter.use_embedded_relay(),
+        }
+        .map_err(|_| management_mutation_issue())?;
         if service.state == Some(ServiceState::Running) {
             self.refresh_after_running_management_mutation()
         } else {

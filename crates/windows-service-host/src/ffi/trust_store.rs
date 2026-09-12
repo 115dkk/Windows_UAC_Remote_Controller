@@ -290,19 +290,28 @@ impl TrustDirectory {
             let bytes = read_exact_bounded(&file, size, MAX_RELAY_FILE_BYTES)?;
             owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
             file.close()?;
-            parse_relay_endpoint(&bytes).map(Some)
+            if bytes == b"embedded\n" {
+                Ok(None)
+            } else {
+                parse_relay_endpoint(&bytes).map(Some)
+            }
         })
     }
 
-    pub(crate) fn write_relay_endpoint(
+    pub(crate) fn write_relay_configuration(
         &mut self,
-        endpoint: SocketAddr,
+        endpoint: Option<SocketAddr>,
     ) -> Result<(), ServiceError> {
         if !matches!(self.context, AccessContext::Elevated) {
             return Err(unavailable());
         }
-        validate_relay_endpoint(endpoint)?;
-        let bytes = format!("{endpoint}\n").into_bytes();
+        if let Some(endpoint) = endpoint {
+            validate_relay_endpoint(endpoint)?;
+        }
+        let bytes = endpoint.map_or_else(
+            || b"embedded\n".to_vec(),
+            |endpoint| format!("{endpoint}\n").into_bytes(),
+        );
         if bytes.len() as u64 > MAX_RELAY_FILE_BYTES {
             return Err(unavailable());
         }
@@ -347,7 +356,7 @@ impl TrustDirectory {
             let stored = read_exact_bounded(&file, size, MAX_RELAY_FILE_BYTES)?;
             owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
             file.close()?;
-            if stored != bytes || parse_relay_endpoint(&stored)? != endpoint {
+            if stored != bytes {
                 return Err(unavailable());
             }
             owner.require_known_directory_entries(false)

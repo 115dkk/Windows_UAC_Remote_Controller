@@ -92,6 +92,10 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             .map_err(|_| PlatformError::ControlFailed)?;
         completed_mutation(ServiceControlIntent::SetRelay(address))
     }
+
+    fn use_embedded_relay(&self) -> Result<(), PlatformError> {
+        completed_mutation(ServiceControlIntent::UseEmbeddedRelay)
+    }
 }
 
 fn remove_device_intent(device_id: &str) -> Result<ServiceControlIntent, PlatformError> {

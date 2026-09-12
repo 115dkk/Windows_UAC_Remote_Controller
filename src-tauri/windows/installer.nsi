@@ -23,6 +23,7 @@ ManifestDPIAwareness PerMonitorV2
 {{/if}}
 
 !include MUI2.nsh
+!include nsDialogs.nsh
 !include FileFunc.nsh
 !include x64.nsh
 !include WordFunc.nsh
@@ -137,11 +138,30 @@ ${StrLoc}
   ${EndIf}
 !macroend
 
+!macro UacRequireOwnedShortcutOrMissing PATH
+  ${If} ${FileExists} "${PATH}"
+    !insertmacro IsShortcutTarget "${PATH}" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 <> 1
+      StrCpy $UacFailure "$(UacCopyFailed)"
+      Call UacFail
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 Var PassiveMode
 Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var UacExistingInstall
+Var UacDesktopChoice
+Var UacStartMenuChoice
+Var UacTaskbarChoice
+Var UacShortcutDialog
+Var UacDesktopCheckbox
+Var UacStartMenuCheckbox
+Var UacTaskbarCheckbox
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -227,7 +247,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !endif
 
 ; Define registry key to store installer language
-!define MUI_LANGDLL_REGISTRY_ROOT "HKCU"
+!define MUI_LANGDLL_REGISTRY_ROOT "HKLM"
 !define MUI_LANGDLL_REGISTRY_KEY "${MANUPRODUCTKEY}"
 !define MUI_LANGDLL_REGISTRY_VALUENAME "Installer Language"
 
@@ -255,15 +275,10 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Fixed native Program Files location; no /D or directory-selection override.
 
-; 6. Start menu shortcut page
+; 6. One explicit page for all shortcut choices. The folder is fixed, not a
+; registry-selected or user-entered elevated write destination.
 Var AppStartMenuFolder
-!if "${STARTMENUFOLDER}" != ""
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-  !define MUI_STARTMENUPAGE_DEFAULTFOLDER "${STARTMENUFOLDER}"
-!else
-  !define MUI_PAGE_CUSTOMFUNCTION_PRE Skip
-!endif
-!insertmacro MUI_PAGE_STARTMENU Application $AppStartMenuFolder
+Page custom UacShortcutPage UacShortcutPageLeave
 
 ; 7. Installation page
 !insertmacro MUI_PAGE_INSTFILES
@@ -273,10 +288,6 @@ Var AppStartMenuFolder
 ; Don't auto jump to finish page after installation page,
 ; because the installation page has useful info that can be used debug any issues with the installer.
 !define MUI_FINISHPAGE_NOAUTOCLOSE
-; Use show readme button in the finish page as a button create a desktop shortcut
-!define MUI_FINISHPAGE_SHOWREADME
-!define MUI_FINISHPAGE_SHOWREADME_TEXT "$(createDesktop)"
-!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateOrUpdateDesktopShortcut
 ; No postinstall app execution from the elevated installer.
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
 !insertmacro MUI_PAGE_FINISH
@@ -301,6 +312,145 @@ Var AppStartMenuFolder
   !include "{{this}}"
 {{/each}}
 
+LangString UacShortcutsTitle 1042 "바로가기 선택"
+LangString UacShortcutsTitle 1033 "Choose shortcuts"
+LangString UacShortcutsSubtitle 1042 "앱을 어디에서 열지 선택하세요."
+LangString UacShortcutsSubtitle 1033 "Choose where you will open the app."
+LangString UacShortcutsFresh 1042 "새 설치입니다. 원하는 바로가기를 선택해 주세요."
+LangString UacShortcutsFresh 1033 "New installation. Choose the shortcuts you want."
+LangString UacShortcutsUpgrade 1042 "업그레이드 또는 복구 설치입니다. 선택하지 않은 기존 바로가기는 그대로 둡니다."
+LangString UacShortcutsUpgrade 1033 "Upgrade or repair. Existing shortcuts remain unchanged when not selected."
+LangString UacShortcutDesktop 1042 "바탕화면에 추가"
+LangString UacShortcutDesktop 1033 "Add to desktop"
+LangString UacShortcutStartMenu 1042 "시작 메뉴의 앱 목록에 추가"
+LangString UacShortcutStartMenu 1033 "Add to the Start menu app list"
+LangString UacShortcutTaskbar 1042 "작업표시줄에 추가 (앱에서 Windows 확인)"
+LangString UacShortcutTaskbar 1033 "Add to taskbar — confirm with Windows in the app"
+LangString UacShortcutHint 1042 "작업표시줄 추가에는 시작 메뉴 바로가기도 필요해 함께 선택됩니다. 설치 후 앱을 열면 고정 방법을 안내합니다. Windows 버전에 따라 직접 고정해야 할 수 있어요."
+LangString UacShortcutHint 1033 "Taskbar pinning also needs a Start menu shortcut, so both are selected together. Open the app after setup for pinning instructions. Some Windows versions require manual pinning."
+
+Function UacInitializeShortcutChoices
+  ; Evaluate once before registration/payload writes. A partial installation is
+  ; an upgrade too; /UPDATE is an additional conservative signal, not the only one.
+  StrCpy $AppStartMenuFolder "${STARTMENUFOLDER}"
+  StrCpy $UacExistingInstall 0
+  ClearErrors
+  EnumRegValue $0 HKLM "${UNINSTKEY}" 0
+  ${IfNot} ${Errors}
+    StrCpy $UacExistingInstall 1
+  ${EndIf}
+  ClearErrors
+  EnumRegValue $0 HKLM "${MANUPRODUCTKEY}" 0
+  ${IfNot} ${Errors}
+    StrCpy $UacExistingInstall 1
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\uac-service.exe"
+  ${OrIf} $UpdateMode = 1
+    StrCpy $UacExistingInstall 1
+  ${EndIf}
+  StrCpy $UacDesktopChoice ${BST_CHECKED}
+  StrCpy $UacStartMenuChoice ${BST_CHECKED}
+  StrCpy $UacTaskbarChoice ${BST_CHECKED}
+  ${If} $UacExistingInstall = 1
+  ${OrIf} $NoShortcutMode = 1
+    StrCpy $UacDesktopChoice ${BST_UNCHECKED}
+    StrCpy $UacStartMenuChoice ${BST_UNCHECKED}
+    StrCpy $UacTaskbarChoice ${BST_UNCHECKED}
+  ${EndIf}
+  ; Unattended setup never requests a later taskbar prompt without a choice.
+  ${If} $PassiveMode = 1
+  ${OrIf} ${Silent}
+    StrCpy $UacTaskbarChoice ${BST_UNCHECKED}
+  ${EndIf}
+FunctionEnd
+
+Function UacShortcutPage
+  ${If} $PassiveMode = 1
+  ${OrIf} $NoShortcutMode = 1
+    Abort
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(UacShortcutsTitle)" "$(UacShortcutsSubtitle)"
+  nsDialogs::Create 1018
+  Pop $UacShortcutDialog
+  ${If} $UacShortcutDialog == error
+    StrCpy $UacFailure "$(UacCopyFailed)"
+    Call UacFail
+  ${EndIf}
+  ${If} $UacExistingInstall = 1
+    ${NSD_CreateLabel} 0 0 100% 28u "$(UacShortcutsUpgrade)"
+  ${Else}
+    ${NSD_CreateLabel} 0 0 100% 28u "$(UacShortcutsFresh)"
+  ${EndIf}
+  Pop $0
+  ${NSD_CreateCheckbox} 0 32u 100% 24u "$(UacShortcutDesktop)"
+  Pop $UacDesktopCheckbox
+  ${NSD_SetState} $UacDesktopCheckbox $UacDesktopChoice
+  ${NSD_OnClick} $UacDesktopCheckbox UacShortcutChanged
+  ${NSD_CreateCheckbox} 0 60u 100% 24u "$(UacShortcutStartMenu)"
+  Pop $UacStartMenuCheckbox
+  ${NSD_SetState} $UacStartMenuCheckbox $UacStartMenuChoice
+  ${NSD_OnClick} $UacStartMenuCheckbox UacShortcutChanged
+  ${NSD_CreateCheckbox} 0 88u 100% 24u "$(UacShortcutTaskbar)"
+  Pop $UacTaskbarCheckbox
+  ${NSD_SetState} $UacTaskbarCheckbox $UacTaskbarChoice
+  ${NSD_OnClick} $UacTaskbarCheckbox UacShortcutChanged
+  ${NSD_CreateLabel} 0 118u 100% 44u "$(UacShortcutHint)"
+  Pop $0
+  nsDialogs::Show
+FunctionEnd
+
+Function UacShortcutChanged
+  Pop $0
+  ${NSD_GetState} $UacDesktopCheckbox $UacDesktopChoice
+  ${NSD_GetState} $UacStartMenuCheckbox $UacStartMenuChoice
+  ${NSD_GetState} $UacTaskbarCheckbox $UacTaskbarChoice
+  ${If} $0 = $UacTaskbarCheckbox
+  ${AndIf} $UacTaskbarChoice = ${BST_CHECKED}
+    StrCpy $UacStartMenuChoice ${BST_CHECKED}
+    ${NSD_SetState} $UacStartMenuCheckbox $UacStartMenuChoice
+  ${ElseIf} $UacStartMenuChoice <> ${BST_CHECKED}
+    StrCpy $UacTaskbarChoice ${BST_UNCHECKED}
+    ${NSD_SetState} $UacTaskbarCheckbox $UacTaskbarChoice
+  ${EndIf}
+FunctionEnd
+
+Function UacShortcutPageLeave
+  ; OnClick already retains changes when navigating Back. Capture again on Next.
+  ${NSD_GetState} $UacDesktopCheckbox $UacDesktopChoice
+  ${NSD_GetState} $UacStartMenuCheckbox $UacStartMenuChoice
+  ${NSD_GetState} $UacTaskbarCheckbox $UacTaskbarChoice
+FunctionEnd
+
+Function UacSaveTaskbarPreference
+  ; This is a version-scoped app suggestion, never permission to pin silently.
+  ; HKLM avoids writing another administrator's HKCU during alternate-user UAC.
+  ClearErrors
+  WriteRegDWORD HKLM "${UNINSTKEY}" "TaskbarPinRequested" 0
+  ${If} ${Errors}
+    StrCpy $UacFailure "$(UacCopyFailed)"
+    Call UacFail
+  ${EndIf}
+  ClearErrors
+  WriteRegStr HKLM "${UNINSTKEY}" "TaskbarPinRequestVersion" "${VERSION}"
+  ${If} ${Errors}
+    StrCpy $UacFailure "$(UacCopyFailed)"
+    Call UacFail
+  ${EndIf}
+  ${If} $NoShortcutMode <> 1
+  ${AndIf} $PassiveMode <> 1
+  ${AndIfNot} ${Silent}
+  ${AndIf} $UacStartMenuChoice = ${BST_CHECKED}
+  ${AndIf} $UacTaskbarChoice = ${BST_CHECKED}
+    ClearErrors
+    WriteRegDWORD HKLM "${UNINSTKEY}" "TaskbarPinRequested" 1
+    ${If} ${Errors}
+      StrCpy $UacFailure "$(UacCopyFailed)"
+      Call UacFail
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
@@ -324,6 +474,8 @@ Function .onInit
   !insertmacro SetContext
 
   Call UacFixedLocation
+  SetRegView 64
+  Call UacInitializeShortcutChoices
 
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
@@ -461,27 +613,13 @@ Section Install
     WriteRegStr SHCTX "${UNINSTKEY}" "HelpLink" "${HOMEPAGE}"
   !endif
 
-  ; Create start menu shortcut
-  !insertmacro MUI_STARTMENU_WRITE_BEGIN Application
-    Call CreateOrUpdateStartMenuShortcut
-  !insertmacro MUI_STARTMENU_WRITE_END
-
-  ; A pre-existing desktop shortcut gets the new display name on interactive
-  ; upgrades too, without creating one when the user had not chosen it.
-  ${If} $NoShortcutMode <> 1
-    !insertmacro UacMigrateShortcut "$DESKTOP\${INSTALLATIONID}.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
-  ${EndIf}
-
-  ; Create desktop shortcut for silent and passive installers
-  ; because finish page will be skipped
-  ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
-    Call CreateOrUpdateDesktopShortcut
-  ${EndIf}
+  Call CreateOrUpdateStartMenuShortcut
+  Call CreateOrUpdateDesktopShortcut
 
   !ifmacrodef NSIS_HOOK_POSTINSTALL
     !insertmacro NSIS_HOOK_POSTINSTALL
   !endif
+  Call UacSaveTaskbarPreference
 
   ; Auto close this page for passive mode
   ${If} $PassiveMode = 1
@@ -495,6 +633,7 @@ SectionEnd
 Function un.onInit
   !insertmacro SetContext
   Call un.UacFixedLocation
+  StrCpy $AppStartMenuFolder "${STARTMENUFOLDER}"
 
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_UNINIT
@@ -582,7 +721,6 @@ Section Uninstall
     !insertmacro DeleteAppUserModelId
 
     ; Remove start menu shortcut
-    !insertmacro MUI_STARTMENU_GETFOLDER Application $AppStartMenuFolder
     !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Pop $0
     ${If} $0 = 1
@@ -689,23 +827,21 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
-  ; Renaming an existing owned shortcut also applies to /UPDATE. Never create a
-  ; previously absent shortcut, overwrite another file or follow another target.
-  ${If} $NoShortcutMode <> 1
-    !insertmacro UacMigrateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk" "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
-    !insertmacro UacMigrateShortcut "$SMPROGRAMS\${INSTALLATIONID}.lnk" "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  ${If} $NoShortcutMode = 1
+  ${OrIf} $UacStartMenuChoice <> ${BST_CHECKED}
+    Return
   ${EndIf}
-  ; Skip creating shortcut if in update mode or no shortcut mode
-  ; but always create if migrating from wix
-  ${If} $WixMode = 0
-    ${If} $UpdateMode = 1
-    ${OrIf} $NoShortcutMode = 1
-      Return
-    ${EndIf}
-  ${EndIf}
+  !insertmacro UacMigrateShortcut "$SMPROGRAMS\${INSTALLATIONID}.lnk" "$SMPROGRAMS\${PRODUCTNAME}.lnk"
 
   !if "${STARTMENUFOLDER}" != ""
+    !insertmacro UacMigrateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${INSTALLATIONID}.lnk" "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    !insertmacro UacRequireOwnedShortcutOrMissing "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    ClearErrors
     CreateDirectory "$SMPROGRAMS\$AppStartMenuFolder"
+    ${If} ${Errors}
+      StrCpy $UacFailure "$(UacCopyFailed)"
+      Call UacFail
+    ${EndIf}
     ClearErrors
     CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     ${If} ${Errors}
@@ -714,6 +850,7 @@ Function CreateOrUpdateStartMenuShortcut
     ${EndIf}
     !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
   !else
+    !insertmacro UacRequireOwnedShortcutOrMissing "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     ClearErrors
     CreateShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     ${If} ${Errors}
@@ -725,18 +862,13 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
-  ${If} $NoShortcutMode <> 1
-    !insertmacro UacMigrateShortcut "$DESKTOP\${INSTALLATIONID}.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
+  ${If} $NoShortcutMode = 1
+  ${OrIf} $UacDesktopChoice <> ${BST_CHECKED}
+    Return
   ${EndIf}
-  ; Skip creating shortcut if in update mode or no shortcut mode
-  ; but always create if migrating from wix
-  ${If} $WixMode = 0
-    ${If} $UpdateMode = 1
-    ${OrIf} $NoShortcutMode = 1
-      Return
-    ${EndIf}
-  ${EndIf}
+  !insertmacro UacMigrateShortcut "$DESKTOP\${INSTALLATIONID}.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
 
+  !insertmacro UacRequireOwnedShortcutOrMissing "$DESKTOP\${PRODUCTNAME}.lnk"
   ClearErrors
   CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
   ${If} ${Errors}

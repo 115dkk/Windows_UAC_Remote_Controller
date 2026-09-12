@@ -37,6 +37,15 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       setSubmitting(false);
     }
   }
+  async function useEmbeddedRelay() {
+    if (relayDisabled || submitLock.current) return;
+    submitLock.current = true;
+    setSubmitting(true);
+    setError(null);
+    try { await onSetRelay('embedded'); }
+    catch { setError(ko.saveFailure); }
+    finally { submitLock.current = false; setSubmitting(false); }
+  }
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void saveRelay();
@@ -45,17 +54,25 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
   const pairingActive = pairing?.phase === 'connecting' || pairing?.phase === 'waiting_for_admin' || pairing?.phase === 'helper_running';
   const unavailable = snapshot.dataAvailability.devices !== 'available';
   const unavailableState = <EmptyState icon="link" title={ko.devicesUnavailable} description={ko.devicesUnavailableBody} />;
-  const relayForm = snapshot.platform === 'windows' && <form className="policy-form" onSubmit={submit} aria-label={ko.relayAddress}>
+  const relayForm = snapshot.platform === 'windows' && <>
+    <section className="surface form-section" aria-label="PC 내장 중계">
+      <h2>PC 내장 중계</h2>
+      <p className="supporting-text">중계 기능이 앱에 포함되어 있어요. PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.</p>
+      <p className="supporting-text">휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.</p>
+      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void useEmbeddedRelay(); }}>{submitting ? ko.saving : '이 PC의 내장 중계 사용'}</button>
+      {error && <p className="field-error" role="alert">{error}</p>}
+    </section>
+    <section aria-label="외부 중계 서버"><h2>고급 설정: 외부 중계 서버</h2>
+    <form className="policy-form" onSubmit={submit} aria-label={ko.relayAddress}>
     <fieldset className="surface form-section" disabled={relayDisabled || submitting}>
       <legend><label htmlFor={`${id}-relay`}>{ko.relayAddress}</label></legend>
       <input id={`${id}-relay`} type="text" value={address} autoComplete="off" spellCheck={false}
         aria-describedby={`${id}-relay-hint ${id}-relay-status`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
       <p id={`${id}-relay-hint`} className="supporting-text">{ko.relayAddressHint}</p>
       <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
-      {error && <p className="field-error" role="alert">{error}</p>}
       <div className="collection-actions"><button type="submit" className="button primary" disabled={relayDisabled || submitting || !address.trim()}>{submitting ? ko.saving : ko.save}</button></div>
     </fieldset>
-  </form>;
+  </form></section></>;
   const pc = snapshot.platform === 'windows';
   const qrDisabled = disabled || !snapshot.canPair || pairingActive || !snapshot.relayConfigured;
   const recovery = snapshot.service?.installed === false ? ko.pairingPcInstallFirst

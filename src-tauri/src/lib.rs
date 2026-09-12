@@ -7,6 +7,7 @@ mod android_window;
 mod commands;
 mod lifecycle_policy;
 mod mobile;
+mod taskbar;
 
 #[cfg(not(target_os = "android"))]
 use controller_runtime::{AppIssue, AppPrivateDirectory, AppRuntime, Platform, PlatformAdapter};
@@ -95,6 +96,8 @@ pub fn run() {
             commands::open_pairing_scanner,
             commands::remove_device,
             commands::set_relay,
+            taskbar::taskbar_offer,
+            taskbar::request_taskbar_pin,
             commands::decide_request,
             commands::request_details,
             commands::clear_activity,

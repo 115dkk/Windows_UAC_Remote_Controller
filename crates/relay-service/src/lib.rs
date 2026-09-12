@@ -5,6 +5,7 @@
 
 mod client;
 mod config;
+mod hosted;
 mod relay;
 mod wire;
 
@@ -16,6 +17,7 @@ pub use config::{
     MAX_ACCEPTED_CONNECTIONS, MAX_WAITING_ROOMS, RelayError, RelayLimits, RelayLimitsError,
     RelayReport,
 };
+pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay, local_endpoint};
 pub use relay::run;
 pub use tokio_util::sync::CancellationToken;
 pub use wire::{

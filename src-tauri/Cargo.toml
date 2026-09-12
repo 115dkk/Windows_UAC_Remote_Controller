@@ -27,6 +27,9 @@ controller-runtime = { path = "../crates/controller-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-service-host = { path = "../crates/windows-service-host" }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 

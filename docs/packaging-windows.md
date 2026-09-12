@@ -88,6 +88,42 @@ There is no directory selection, `/D` override, registry-selected old uninstalle
 WiX migration execution, post-install app launch or silent `/R` launch. Users
 open the non-elevated desktop application through normal shortcuts afterwards.
 
+### Shortcut choices
+
+Interactive setup has one **바로가기 선택 / Choose shortcuts** page before file
+installation. It offers desktop, Start menu **app-list entry** (not Start pinned
+tiles), and a taskbar pinning suggestion. Fresh interactive installs select all
+three; upgrades and repairs select none. Detection runs once in `.onInit`, before
+writing registration or payloads, and recognizes existing machine registration,
+either fixed installed app/service executable, or `/UPDATE`. Checkbox clicks
+retain choices when navigating Back and Next; revisiting the page does not reset
+defaults.
+
+Unchecked options leave existing shortcuts untouched, including their legacy
+names. Explicitly selected options may create/update their exact shortcut or
+migrate an owned legacy shortcut; a conflicting unrelated target is rejected.
+`/NS` suppresses shortcut work and the taskbar suggestion. Silent and passive
+fresh installs create desktop/Start menu entries by default, while unattended
+upgrades preserve them. Silent/passive installs never request a taskbar prompt.
+
+Taskbar selection also selects the Start menu entry, as explained on the page;
+clearing Start menu clears taskbar selection. The installer never pins directly
+or launches the application elevated. After successful service installation it
+writes the bounded suggestion in the **64-bit HKLM** key
+`Software\Microsoft\Windows\CurrentVersion\Uninstall\휴대폰 승인`:
+
+- `TaskbarPinRequested`: DWORD `0` or `1`.
+- `TaskbarPinRequestVersion`: REG_SZ with the installed package version.
+
+Writes reset the request to zero first, write the version, then opt into one only
+for the interactive selected case; every write checks failure. This is a UI
+preference, never authorization to pin. It avoids writing another administrator's
+HKCU during alternate-user elevation. The app owns the foreground Windows
+confirmation or instructions for manual pinning; Windows version/policy may
+require a manual step. See Microsoft's
+[taskbar pinning requirements](https://learn.microsoft.com/en-us/windows/apps/develop/windows-integration/pin-to-taskbar).
+Uninstall removes the existing fixed uninstall key with these preferences.
+
 The custom template preserves Tauri's NSIS OS chrome and Korean/English resources.
 Before any program-folder write or execution of an existing service helper it:
 
@@ -123,6 +159,23 @@ Installation runs only these fixed installed CLI operations:
 "<fixed Program Files>\휴대폰 승인\uac-service.exe" install
 "<fixed Program Files>\휴대폰 승인\uac-service.exe" start
 ```
+
+The installed service's `install` operation provisions the embedded relay's
+Windows Firewall rule through the private Windows-only COM boundary. It requires
+an elevated non-impersonating token and validates/pins its own fixed executable.
+Rule `dev.dkk115.uacremote.embedded-relay.v1` allows inbound TCP **7443** only for
+that executable **and** service `UacRemoteController`, on **Private** profiles
+only, with edge traversal disabled. A detached rule is fully configured before
+publication and its stored tuple is checked. Firewall failure stops installation;
+no global policy, Public profile, UPnP/router, or NAT setting is modified.
+
+Uninstall removes only that named rule through `INetFwRules::Remove`. Windows
+documents a missing rule as a no-op; permission/COM failures remain errors. This
+does not launch `netsh` or parse localized command output. Group Policy, existing
+block rules and network reachability still apply; a stored local allowance is
+not evidence of an actual phone connection. Primary contracts:
+[INetFwRules::Add](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-add),
+[INetFwRules::Remove](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nf-netfw-inetfwrules-remove).
 
 An existing service must stop before its binaries are replaced. A missing old
 helper is accepted only with actual SCM service absence; no temporary helper is
@@ -170,7 +223,8 @@ MIT notice in `LICENSE-TAURI-MIT.txt`. Local changes are GPL-2.0-or-later:
 fixed destination; early protected preflight; exact service/helper assertions;
 checked lifecycle/file/shortcut calls; no registry-command maintenance, recursive
 app-data deletion, basename process kill or elevated app-launch fallback;
-prerequisite-only WebView2. Current resources, file-association and deep-link
+prerequisite-only WebView2; stateful fresh/upgrade shortcut options and a bounded
+app-side taskbar suggestion. Current resources, file-association and deep-link
 collections are empty and the build helper refuses unsupported expansion.
 
 Relevant primary contracts: [Tauri NSIS customization](https://v2.tauri.app/distribute/windows-installer/#customizing-the-nsis-installer),
