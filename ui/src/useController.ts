@@ -175,9 +175,10 @@ export function useController(bridge: ControllerBridge) {
           return null;
         }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        const mayOpen = scannerReturn.current.pending && document.visibilityState === 'visible'
+        const visible = document.visibilityState === 'visible';
+        const mayOpen = scannerReturn.current.pending && visible
           && exposedBySnapshot(snapshot, command);
-        publish({ ...current.current, snapshot, refreshing: false, busy: mayOpen ? 'scan_pairing' : null,
+        publish({ ...current.current, snapshot: visible ? snapshot : withoutRequestBodies(snapshot), refreshing: false, busy: mayOpen ? 'scan_pairing' : null,
           stale: false, error: null, notice: null, requestObservedAt: performance.now() });
         if (!mayOpen) {
           scannerReturn.current = { pending: false, opened: false, wake: false };
