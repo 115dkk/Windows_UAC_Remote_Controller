@@ -430,6 +430,7 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         for request in [
             ManagementRequest::Query,
+            ManagementRequest::UseEmbeddedRelay,
             ManagementRequest::RemoveDevice { device: device(1) },
             ManagementRequest::SetRelay { address },
         ] {

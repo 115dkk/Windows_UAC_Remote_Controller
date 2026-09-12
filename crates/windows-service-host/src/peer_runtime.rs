@@ -659,6 +659,20 @@ impl<'key> ServiceSession<'key> {
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
+    fn withdraw_relay(&mut self) {
+        // Readiness, the dialer and the active invitation describe one endpoint.
+        // Withdraw them together; callers retain every worker until drained.
+        self.relay = None;
+        if let Some(dialer) = self.dialer.as_mut() {
+            dialer.cancel();
+        }
+        if !self.pairing.enrollment_is_absent() {
+            self.pairing
+                .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
     fn poll_embedded_relay(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
         if !self.embedded_mode
             || self.pending_relay.is_some()
@@ -681,14 +695,7 @@ impl<'key> ServiceSession<'key> {
                 return Ok(());
             }
             self.embedded_relay = None;
-            if !self.pairing.enrollment_is_absent() {
-                self.pairing
-                    .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
-            }
-            self.relay = None;
-            if let Some(dialer) = self.dialer.as_mut() {
-                dialer.cancel();
-            }
+            self.withdraw_relay();
         }
         if self.embedded_relay.is_none() {
             // A port collision or offline network disables connection readiness,
@@ -709,14 +716,7 @@ impl<'key> ServiceSession<'key> {
             None
         };
         if self.relay.is_some() && self.relay != endpoint {
-            self.relay = None;
-            if let Some(dialer) = self.dialer.as_mut() {
-                dialer.cancel();
-            }
-            if !self.pairing.enrollment_is_absent() {
-                self.pairing
-                    .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
-            }
+            self.withdraw_relay();
         }
         if self
             .embedded_relay
@@ -1416,7 +1416,9 @@ impl<'key> ServiceSession<'key> {
 
     #[cfg(all(windows, target_pointer_width = "64"))]
     fn poll_dialer(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
-        let Some(mut dialer) = self.dialer.take() else {
+        // Keep the worker owned by the session across fallible registry reads.
+        // An error must leave it counted for the normal cancellation/drain path.
+        let Some(dialer) = self.dialer.as_mut() else {
             return Ok(());
         };
         let routes = self
@@ -1425,7 +1427,6 @@ impl<'key> ServiceSession<'key> {
             .ok_or(PeerRuntimeError::Closed)?
             .routes()?;
         let carriers = dialer.poll(&routes, now);
-        self.dialer = Some(dialer);
         for carrier in carriers {
             let device = carrier.device;
             if self
@@ -1557,18 +1558,11 @@ impl<'key> ServiceSession<'key> {
                 }
                 crate::native::configure_relay_for_running_service(address)
                     .map_err(|_| PeerRuntimeError::Registry)?;
-                let mut old_dialer = self.dialer.take();
-                if let Some(dialer) = old_dialer.as_mut() {
-                    dialer.cancel();
-                }
+                self.withdraw_relay();
+                let old_dialer = self.dialer.take();
                 if let Some(host) = self.embedded_relay.as_ref() {
                     host.cancel();
                 }
-                if !self.pairing.enrollment_is_absent() {
-                    self.pairing
-                        .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
-                }
-                self.relay = None;
                 self.pending_relay = Some(PendingRelayReplacement {
                     address,
                     old_dialer,

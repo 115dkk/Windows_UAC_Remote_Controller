@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TaskbarSuggestion } from './TaskbarSuggestion';
+import type { TaskbarBridge } from './TaskbarSuggestion';
 import type { AppSnapshot, ControllerBridge, PairedDeviceView, ServiceAction } from './contracts';
 import { ActivityPanel, DevicesPanel } from './CollectionPanels';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -30,7 +31,7 @@ function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
   ] : [{ page: 'status', label: ko.status, icon: 'pc', available: true }, devices, activity];
 }
 
-export function App({ bridge, initialPage }: { bridge: ControllerBridge; initialPage?: ClientPage }) {
+export function App({ bridge, initialPage, taskbarClient }: { bridge: ControllerBridge; initialPage?: ClientPage; taskbarClient?: TaskbarBridge }) {
   const controller = useController(bridge);
   const readDetails = useCallback((id: string) => bridge.requestDetails(id), [bridge]);
   const [navigationState, setNavigationState] = useState<{ page: ClientPage | null; reviewKey: string | null }>({ page: initialPage ?? null, reviewKey: null });
@@ -104,7 +105,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{snapshot.issue.message}</p>{snapshot.issue.nextAction && <p className="supporting-text">{snapshot.issue.nextAction}</p>}</div></section>}
       <div className={`global-feedback ${busy || notice ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{busy ? (busy === 'policy' ? ko.saving : ko.pending) : notice}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} onAction={serviceAction} />}
-      {!phone && page === 'status' && <TaskbarSuggestion />}
+      {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
       {phone && page === 'schedule' && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}

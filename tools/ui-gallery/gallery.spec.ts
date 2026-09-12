@@ -154,6 +154,14 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture.startsWith('desktop-')) await expect(page.locator('button[data-pairing-scanner="open"]')).toHaveCount(0);
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
+    if (fixture === 'desktop-taskbar-available' || fixture === 'desktop-taskbar-unavailable') {
+      await page.getByRole('heading', { name: '작업 표시줄에서 바로 열기' }).scrollIntoViewIfNeeded();
+      await gallery.capture('taskbar-suggestion', 'CLIENT/SYNTHETIC · 설치 선택 안내, 실제 Windows 고정 아님');
+    }
+    if (fixture === 'desktop-devices' || fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
+      await page.getByRole('button', { name: '이 PC의 내장 중계 사용' }).scrollIntoViewIfNeeded();
+      await gallery.capture('embedded-relay', 'CLIENT/SYNTHETIC · 내장 중계 진입과 외부 중계 안내');
+    }
     if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
       await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
     }

@@ -96,6 +96,10 @@ impl PlatformAdapter for SyntheticOwner {
         self.0.relay_changes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    fn use_embedded_relay(&self) -> Result<(), PlatformError> {
+        self.0.relay_changes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 fn absent(control: ControlHint) -> ServiceObservation {
@@ -586,6 +590,19 @@ fn relay_requires_a_numeric_canonical_socket_and_requeries_only_while_running() 
     );
     assert_eq!(running_owner.0.relay_changes.load(Ordering::SeqCst), 1);
     assert_eq!(running_owner.0.management_reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn embedded_relay_uses_the_same_checked_management_owner_without_an_address() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    owner.set_management(Ok(management(Vec::new(), true)));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    assert!(runtime.set_relay("embedded").unwrap().relay_configured);
+    assert_eq!(owner.0.relay_changes.load(Ordering::SeqCst), 1);
+    owner.set_observation(Err(PlatformError::StatusUnavailable));
+    assert!(runtime.set_relay("embedded").is_err());
+    assert_eq!(owner.0.relay_changes.load(Ordering::SeqCst), 1);
 }
 
 #[test]

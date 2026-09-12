@@ -15,7 +15,7 @@ function registeredCommands() {
   const source = readFileSync(join(root, 'src-tauri/src/lib.rs'), 'utf8');
   const block = /tauri::generate_handler!\[([\s\S]*?)\]/u.exec(source);
   assert.ok(block, 'invoke handler block missing');
-  const commands = [...block[1].matchAll(/commands::([a-z_]+)/gu)].map((match) => match[1]);
+  const commands = [...block[1].matchAll(/(?:commands|taskbar)::([a-z_]+)/gu)].map((match) => match[1]);
   assert.ok(commands.length >= 5, 'unexpectedly few registered commands');
   return commands;
 }

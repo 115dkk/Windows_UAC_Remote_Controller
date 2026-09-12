@@ -23,6 +23,8 @@ export const galleryCases: readonly GalleryCase[] = [
   row('desktop-empty-980', 'desktop-empty', 980, 740),
   row('desktop-unavailable-minimum-760', 'desktop-unavailable', 760, 580),
   row('desktop-running-980', 'desktop-running', 980, 740),
+  row('desktop-taskbar-available-980', 'desktop-taskbar-available', 980, 900),
+  row('desktop-taskbar-unavailable-760', 'desktop-taskbar-unavailable', 760, 900, 'overview', 'dark'),
   row('desktop-running-minimum-760', 'desktop-running', 760, 580),
   row('desktop-remove-dialog-760', 'desktop-running', 760, 580, 'remove-feature'),
   { ...row('desktop-running-text-size-200-760', 'desktop-running', 760, 580), rootTextSizePercent: 200 },
