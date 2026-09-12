@@ -46,5 +46,8 @@ authentication/SCM-readiness relaxation is introduced.
 
 Hosted CI has no physical TPM. Safe policy regression tests and the lab software
 provider cannot establish that this machine's completed key/startup succeeds.
+The Quality gate runs windows-identity tests separately without default/lab
+features: the workspace all-features suite selects the lab provider and would
+otherwise exclude the production-only unfinished policy regression test.
 The operator's current UAC availability permits a separately announced native
 follow-up using the CI-built production binary; record its actual result.

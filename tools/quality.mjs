@@ -15,6 +15,10 @@ const commands = [
   [process.execPath, ['--test', 'tools/protocol-security.test.mjs', 'tools/prover-process.test.mjs', 'tools/protocol-diagnostic.test.mjs', 'tools/verify-android-boot-manifest.test.mjs']],
   [process.execPath, ['--test', 'tools/windows-packaging.test.mjs', 'tools/windows-installer-contract.test.mjs', 'tools/tauri-capability.test.mjs']],
   ['cargo', ['fmt', '--all', '--', '--check']],
+  // --all-features selects the lab Software KSP and excludes PCP-only policy
+  // cases. Exercise the production identity policy separately on both hosts.
+  // These are safe policy/codec tests, never actual TPM/key operations.
+  ['cargo', ['test', '--package', 'windows-identity', '--no-default-features', '--locked']],
   ['cargo', ['clippy', '--workspace', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings']],
   ['cargo', ['test', '--workspace', '--all-targets', '--all-features', '--locked']],
   ['cargo', ['test', '--workspace', '--doc', '--all-features', '--locked']],
