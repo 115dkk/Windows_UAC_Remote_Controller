@@ -61,6 +61,9 @@ async function unlockDisposableEmulator() {
   adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
   await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=true/.test(value)
     && value.includes('screenState=SCREEN_STATE_ON') && value.includes('interactiveState=INTERACTIVE_STATE_AWAKE'), 'test keyguard awake');
+  // Cold boot can report screen-on before UIAutomator can read an idle root.
+  // Read-only warmup, fresh files and bounded retries; no PIN/input is replayed.
+  await until(ui, view => Boolean(view.document.querySelector('[resource-id="com.android.systemui:id/keyguard_long_press"]')), 'stable test keyguard hierarchy', 10);
   // Reuse the existing bounded SystemUI ceremony: fresh observed control
   // bounds, one PIN attempt, no guessed swipe/keyboard focus or stale input.
   const bootId = adb(['shell', 'cat', '/proc/sys/kernel/random/boot_id']).trim();
