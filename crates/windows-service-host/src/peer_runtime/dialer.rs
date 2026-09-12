@@ -419,12 +419,14 @@ mod tests {
         }
         assert!(accepted.try_recv().is_err());
         dialer.release(device(1));
-        assert_eq!(accepted.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
         let deadline = Instant::now() + Duration::from_secs(5);
+        // Like the host driver, keep polling while release is pending: the
+        // bounded command queue may be full after the quiet-period polls.
         while dialer.poll(&routes, Instant::now()).is_empty() {
             assert!(Instant::now() < deadline);
             thread::yield_now();
         }
+        assert_eq!(accepted.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
         dialer.cancel();
         while !dialer.drain() {
             thread::yield_now();
