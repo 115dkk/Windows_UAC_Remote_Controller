@@ -952,24 +952,21 @@ fn font_face(locale: Locale) -> &'static str {
 
 fn font_bytes(locale: Locale) -> [&'static [u8]; 2] {
     macro_rules! family {
-        ($name:literal) => {
-            [
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/fonts/native/",
-                    $name,
-                    "-Regular.ttf"
-                ))
-                .as_slice(),
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/fonts/native/",
-                    $name,
-                    "-Bold.ttf"
-                ))
-                .as_slice(),
-            ]
-        };
+        ($name:literal) => {{
+            const REGULAR: &[u8] = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/native/",
+                $name,
+                "-Regular.ttf"
+            ));
+            const BOLD: &[u8] = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/native/",
+                $name,
+                "-Bold.ttf"
+            ));
+            [REGULAR, BOLD]
+        }};
     }
     match locale {
         Locale::Ko => family!("UACSansKR"),
