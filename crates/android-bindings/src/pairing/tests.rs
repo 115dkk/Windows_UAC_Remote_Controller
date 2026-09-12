@@ -107,6 +107,7 @@ struct Platform {
     request: Mutex<Option<Arc<NativeKeyCreationRequest>>>,
     transport_binding: Mutex<Option<Arc<NativeTransportBinding>>>,
     transport_releases: AtomicUsize,
+    intake_notices: sync_mpsc::SyncSender<()>,
 }
 
 fn public(seed: u8) -> TlsPublicKey {
@@ -264,6 +265,9 @@ impl NativePlatform for Platform {
         Err(BridgeError::NativeUnavailable)
     }
     fn intake_progress(&self) -> Result<(), BridgeError> {
+        self.intake_notices
+            .try_send(())
+            .expect("bounded pairing fixture intake notices");
         Ok(())
     }
     fn advance_approval_drain_for_denial(
@@ -378,6 +382,7 @@ struct Fixture {
     platform: Arc<Platform>,
     clock: Arc<TestClock>,
     temp: tempfile::TempDir,
+    intake_notices: sync_mpsc::Receiver<()>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -387,6 +392,7 @@ impl Fixture {
     // exercise pointer identity. Production still acquires one process owner.
     fn with_lease(lease: Arc<OwnerLease>) -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let (intake_progress, intake_notices) = sync_mpsc::sync_channel(128);
         let clock = Arc::new(TestClock {
             origin: Instant::now(),
             seconds: AtomicU64::new(1),
@@ -411,6 +417,7 @@ impl Fixture {
             request: Mutex::new(None),
             transport_binding: Mutex::new(None),
             transport_releases: AtomicUsize::new(0),
+            intake_notices: intake_progress,
         });
         let (boot, reading) = map_clock(platform.clock().unwrap()).unwrap();
         let (owner, _) = DurableInbox::create_fresh_host_model(
@@ -450,6 +457,7 @@ impl Fixture {
             platform,
             clock,
             temp,
+            intake_notices,
         }
     }
     fn context(&self, nonce: u8) -> KeyCreationContext {
@@ -483,7 +491,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self.controller.shutdown_native_owner();
+        self.controller.stop_intake();
         // The mock retains the last creation request for assertions. A request
         // minted from a QR scan reaches the scan guard through its clock, and the
         // guard reaches this platform through the native socket clock, so the
@@ -494,7 +502,47 @@ impl Drop for Fixture {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+        // SERIAL remains held by each caller until this fixture has dropped.
+        // Logical shutdown/resource-drained notification is not thread exit:
+        // the I/O worker retains the process lease through its final callback.
+        // Match the existing intake/lib fixtures: consume real progress wakes,
+        // continue downward cleanup, then join the original completed worker.
+        let limit = Instant::now() + Duration::from_secs(10);
+        let mut cleanup = self.controller.shutdown_native_owner();
+        for _ in 0..128 {
+            match cleanup {
+                Ok(()) => {
+                    self.controller.intake.join_completed_for_tests();
+                    return;
+                }
+                Err(BridgeError::Busy | BridgeError::NativeUnavailable) => {
+                    self.intake_notices
+                        .recv_timeout(limit.saturating_duration_since(Instant::now()))
+                        .expect("bounded actual pairing fixture cleanup progress");
+                    cleanup = self.controller.continue_native_cleanup();
+                }
+                Err(error) => panic!("unexpected pairing fixture cleanup: {error:?}"),
+            }
+        }
+        panic!("bounded pairing fixture cleanup notification count");
     }
+}
+
+#[test]
+fn fixture_teardown_releases_the_real_intake_thread_lease_before_the_next_owner() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let original_lease = Arc::downgrade(&fixture.controller._owner_lease);
+    fixture.controller.start_intake_reactor().unwrap();
+    drop(fixture);
+    assert!(
+        original_lease.upgrade().is_none(),
+        "fixture teardown must release the original controller and I/O lease"
+    );
+    let next = OwnerLease::acquire().expect("previous fixture must already be quiescent");
+    drop(next);
 }
 fn acceptance_fields(created: &CreatedPairingKeys, nonce: u8) -> EnrollmentAcceptanceFields {
     let keys = created.local_keys();
