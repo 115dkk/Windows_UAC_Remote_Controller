@@ -23,7 +23,7 @@ function setup() {
       return pending.promise.finally(() => { nativeReadHeld = false; });
     }).mockResolvedValue(snapshot);
   const openPairingScanner = vi.fn<ControllerBridge['openPairingScanner']>(() => nativeReadHeld
-    ? Promise.reject({ code: 'app_busy' }) : Promise.resolve());
+    ? Promise.reject(Object.assign(new Error('synthetic native read busy'), { code: 'app_busy' })) : Promise.resolve());
   const bridge = { ...createQaBridge(snapshot), snapshot: read, openPairingScanner };
   return { snapshot, pending, read, openPairingScanner, bridge };
 }
@@ -67,7 +67,10 @@ describe('scanner intent waits for the actual background read', () => {
     const entry = await screen.findByRole('button', { name: ko.openPairingScanner });
     fireEvent(window, new Event('focus'));
     fireEvent.click(entry);
-    await act(async () => { test.pending.reject(new Error('synthetic-read-failure')); });
+    await act(async () => {
+      test.pending.reject(new Error('synthetic-read-failure'));
+      await test.pending.promise.catch(() => undefined);
+    });
     expect(await screen.findByText(ko.loadFailure)).toBeVisible();
     expect(entry).toBeDisabled();
     expect(test.openPairingScanner).not.toHaveBeenCalled();
