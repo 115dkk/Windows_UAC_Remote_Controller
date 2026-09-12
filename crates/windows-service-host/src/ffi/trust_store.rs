@@ -826,27 +826,6 @@ fn parse_bootstrap_permit(bytes: &[u8]) -> Option<bool> {
     }
 }
 
-#[cfg(test)]
-mod bootstrap_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_exact_pending_permit_authorizes_one_bootstrap() {
-        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_PENDING), Some(true));
-        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_CONSUMED), Some(false));
-        for bytes in [
-            b"".as_slice(),
-            b"UACREG1",
-            b"UACREG1P\n",
-            b"UACREG2P",
-            b"UACREG1X",
-        ] {
-            assert_eq!(parse_bootstrap_permit(bytes), None);
-        }
-        assert_eq!(BOOTSTRAP_PENDING.len(), BOOTSTRAP_CONSUMED.len());
-    }
-}
-
 /// The relay endpoint rules shared with the elevated CLI verb.
 fn validate_relay_endpoint(endpoint: SocketAddr) -> Result<(), ServiceError> {
     crate::contract::validate_relay_endpoint(endpoint).map_err(|_| unavailable())
@@ -875,6 +854,22 @@ fn parse_relay_endpoint(bytes: &[u8]) -> Result<SocketAddr, ServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_pending_permit_authorizes_one_bootstrap() {
+        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_PENDING), Some(true));
+        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_CONSUMED), Some(false));
+        for bytes in [
+            b"".as_slice(),
+            b"UACREG1",
+            b"UACREG1P\n",
+            b"UACREG2P",
+            b"UACREG1X",
+        ] {
+            assert_eq!(parse_bootstrap_permit(bytes), None);
+        }
+        assert_eq!(BOOTSTRAP_PENDING.len(), BOOTSTRAP_CONSUMED.len());
+    }
     use windows::Win32::Storage::FileSystem::{
         DELETE, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE, FILE_FLAG_BACKUP_SEMANTICS,

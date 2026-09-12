@@ -71,11 +71,11 @@ usage and protected descriptor **before** finalization. If those checks fail,
 the handle is discarded without making a usable key. A provider that needs a
 permissive finalized key before applying its ACL is unsupported by this path.
 
-Finalization uses the silent flag without disabling validation. Actual policy
-and public material are checked again, including a separately reopened handle.
-Only successful finalization of this transaction's new key arms rollback.
-Subsequent validation failure deletes that owned object; deletion failure is
-reported as `CleanupFailed`. Drop has best-effort cleanup for unwind paths.
+Finalization uses the silent flag without disabling validation. The persisted
+key is reopened, every completed policy and public point is validated, and its
+point must match the creation handle. Only the reopened handle is returned.
+Validation failure retains the persisted key and original error. Drop releases
+native handles only; neither failure nor unwinding performs key deletion.
 
 If finalization itself fails, `CreationStateUncertain` reports that persistence
 cannot be proven. The adapter frees its handle but does not delete by name, retry
