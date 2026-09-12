@@ -53,14 +53,15 @@ describe('installer taskbar suggestion', () => {
   it('disables duplicate clicks and reports cancellation without success', async () => {
     let resolve!: (status: TaskbarStatus) => void;
     const native = client();
-    native.request = vi.fn(() => new Promise<TaskbarStatus>((accept) => { resolve = accept; }));
+    const pending = new Promise<TaskbarStatus>((accept) => { resolve = accept; });
+    native.request = vi.fn(() => pending);
     render(<TaskbarSuggestion client={native} />);
     const button = await screen.findByRole('button', { name: '작업 표시줄에 고정' });
     fireEvent.click(button);
     fireEvent.click(button);
     expect(button).toBeDisabled();
     expect(native.request).toHaveBeenCalledTimes(1);
-    await act(() => resolve('declined'));
+    await act(async () => { resolve('declined'); await pending; });
     expect(await screen.findByRole('status')).toHaveTextContent('추가되지 않았어요');
     expect(screen.queryByRole('button', { name: '작업 표시줄에 고정' })).not.toBeInTheDocument();
   });
