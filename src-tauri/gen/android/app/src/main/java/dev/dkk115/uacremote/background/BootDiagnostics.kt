@@ -165,7 +165,7 @@ internal object BootDiagnostics {
                 is RuntimeException -> "RUNTIME"
                 else -> "OTHER"
             }
-            val text = value.message.orEmpty()
+            val text = value.message.orEmpty().take(1024)
             val reason = when {
                 text.contains("UniFFI contract version mismatch") -> "CONTRACT_VERSION"
                 text.contains("UniFFI API checksum mismatch") -> "API_CHECKSUM"
@@ -179,8 +179,9 @@ internal object BootDiagnostics {
                 it.className.startsWith("com.sun.jna.") || it.className.startsWith("dev.dkk115.uacremote.nativecore.")
             }
             val candidate = frame?.let { "${it.className}.${it.methodName}:${it.lineNumber}" }.orEmpty()
-            val site = if (candidate.length in 1..180 && candidate.all { it.isLetterOrDigit() && it.code < 128 || it in ".$_<>:-" }) candidate else "unknown"
-            lines.add("stage=CONTRACT_LINKAGE depth=$depth kind=$kind reason=$reason site=$site")
+            val site = if (candidate.length in 1..180 && candidate.all { it.isLetterOrDigit() && it.code < 128 || it in "._<>:-" || it == '$' }) candidate else "unknown"
+            val symbol = Regex("(?:ffi_|uniffi_)uac_android_controller_[A-Za-z0-9_]+").find(text)?.value?.take(80) ?: "none"
+            lines.add("stage=CONTRACT_LINKAGE depth=$depth kind=$kind reason=$reason site=$site symbol=$symbol")
             current = if (value is ExceptionInInitializerError) value.exception ?: value.cause else value.cause
             if (current === value) return lines
         }
