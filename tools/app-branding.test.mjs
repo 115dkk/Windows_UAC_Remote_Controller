@@ -40,6 +40,8 @@ test('every Android density uses generated project icons, including round and ad
 
 test('Windows bundle points to generated project PNG/ICO resources', () => {
   const config = JSON.parse(text('src-tauri/tauri.conf.json'));
+  assert.equal(config.bundle.windows.nsis.installerIcon, 'icons/icon.ico');
+  assert.equal(config.bundle.windows.nsis.uninstallerIcon, 'icons/icon.ico');
   for (const path of config.bundle.icon) assert.ok(bytes(`src-tauri/${path}`).length > 100, path);
   const ico = bytes('src-tauri/icons/icon.ico');
   assert.equal(ico.readUInt16LE(0), 0);

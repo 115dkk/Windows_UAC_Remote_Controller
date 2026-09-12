@@ -39,6 +39,8 @@
         "installMode": "perMachine",
         "languages": ["Korean", "English"],
         "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
         "template": "windows/installer.nsi",
         "installerHooks": "windows/packaging-hooks.nsh"
       }
