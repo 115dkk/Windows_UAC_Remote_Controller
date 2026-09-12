@@ -465,6 +465,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
     }
 
     private fun initialize(started: Long) {
+        var registeringContract = false
         try {
             if (lifecycle.phase() != PolicyOwnerPhase.STARTING) return
             if (PolicyOwnerBounds.responseExpired(started, SystemClock.elapsedRealtime())) {
@@ -476,9 +477,11 @@ internal class ApplicationPolicyActor(private val application: Application) {
             // Run the generator's contract/API checksum checks before any
             // controller operation; our coarse ABI number is not a substitute.
             bootTrace.initializing(OwnerInitializationStep.GENERATED_CONTRACT)
+            registeringContract = true
             uniffiEnsureInitialized()
             bootTrace.initializing(OwnerInitializationStep.BRIDGE_ABI)
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
+            registeringContract = false
             // Rust alone decides initial creation versus adoption/migration.
             // In particular Kotlin never pre-clears notifications or retries a
             // failed open by creating a new store.
@@ -492,6 +495,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             requests.progress()
         } catch (failure: Throwable) {
             rethrowFatal(failure)
+            if (registeringContract) BootDiagnostics.recordContractLinkage(failure)
             failOwner(failureStatus(failure, initializing = true), OwnerFailureOrigin.INIT_EXCEPTION, failure)
         } finally {
             main.removeCallbacks(initializationTimeout)

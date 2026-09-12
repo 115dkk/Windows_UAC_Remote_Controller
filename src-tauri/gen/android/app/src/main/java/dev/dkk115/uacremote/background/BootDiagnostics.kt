@@ -147,6 +147,49 @@ internal class OwnerBootTrace(private val emit: (OwnerDiagnosticRecord) -> Unit)
 /** Observation only: no retained state, files, retries or lifecycle decisions. */
 internal object BootDiagnostics {
     const val MAX_LINE_CHARS = 384
+    /** Only called during generated contract registration, before opening any
+     * app state/keys. Never emit Throwable text, paths, arguments or addresses. */
+    internal fun contractLinkageLines(failure: Throwable): List<String> {
+        val lines = ArrayList<String>()
+        var current: Throwable? = failure
+        repeat(4) { depth ->
+            val value = current ?: return lines
+            val kind = when (value) {
+                is ExceptionInInitializerError -> "INITIALIZER"
+                is UnsatisfiedLinkError -> "UNSATISFIED_LINK"
+                is NoClassDefFoundError -> "CLASS_MISSING"
+                is NoSuchMethodError -> "METHOD_MISSING"
+                is NoSuchFieldError -> "FIELD_MISSING"
+                is IllegalArgumentException -> "ARGUMENT"
+                is IllegalStateException -> "STATE"
+                is RuntimeException -> "RUNTIME"
+                else -> "OTHER"
+            }
+            val text = value.message.orEmpty()
+            val reason = when {
+                text.contains("UniFFI contract version mismatch") -> "CONTRACT_VERSION"
+                text.contains("UniFFI API checksum mismatch") -> "API_CHECKSUM"
+                text.contains("Unable to load library") -> "LIBRARY_LOAD"
+                text.contains("Error looking up function") || text.contains("undefined symbol") -> "SYMBOL_LOOKUP"
+                text.contains("Structure") || text.contains("field order") || text.contains("newInstance") -> "STRUCTURE"
+                text.contains("native library", ignoreCase = true) && text.contains("incompatible", ignoreCase = true) -> "NATIVE_VERSION"
+                else -> "OTHER"
+            }
+            val frame = value.stackTrace.firstOrNull {
+                it.className.startsWith("com.sun.jna.") || it.className.startsWith("dev.dkk115.uacremote.nativecore.")
+            }
+            val candidate = frame?.let { "${it.className}.${it.methodName}:${it.lineNumber}" }.orEmpty()
+            val site = if (candidate.length in 1..180 && candidate.all { it.isLetterOrDigit() && it.code < 128 || it in ".$_<>:-" }) candidate else "unknown"
+            lines.add("stage=CONTRACT_LINKAGE depth=$depth kind=$kind reason=$reason site=$site")
+            current = if (value is ExceptionInInitializerError) value.exception ?: value.cause else value.cause
+            if (current === value) return lines
+        }
+        return lines
+    }
+    internal fun recordContractLinkage(failure: Throwable) {
+        try { for (line in contractLinkageLines(failure)) if (line.length <= MAX_LINE_CHARS) Log.i("UacBoot", line) }
+        catch (_: Throwable) { /* Diagnostics never change failure handling. */ }
+    }
     fun record(value: BootDiagnosticRecord) {
         try {
             val line = value.line()
