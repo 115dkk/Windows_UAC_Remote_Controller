@@ -4,7 +4,11 @@
 //! Begin functions run on the foreground Tauri UI thread; returned operations
 //! only await the already-started agile WinRT operation off that thread.
 
-use std::{future::Future, pin::Pin};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use windows::{
     UI::Shell::{ITaskbarManagerDesktopAppSupportStatics, TaskbarManager},
     Win32::{
@@ -16,6 +20,7 @@ use windows::{
             },
             WinRT::{RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize},
         },
+        UI::Shell::SetCurrentProcessExplicitAppUserModelID,
     },
     core::{PCWSTR, factory, w},
 };
@@ -45,6 +50,21 @@ pub struct TaskbarOffer {
 }
 
 type Operation<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+static SHELL_IDENTITY_READY: AtomicBool = AtomicBool::new(false);
+
+/// Set this GUI process's fixed shell identity during interactive app startup,
+/// before any window is created. It matches the bundle identifier used by the
+/// installer for Start-menu/Desktop shortcuts. Never call from the service.
+/// This neither creates a shortcut nor requests taskbar pinning.
+pub fn initialize_desktop_shell_identity() -> Result<(), &'static str> {
+    // SAFETY: the sole argument is the product's static NUL-terminated identity,
+    // with lifetime beyond this synchronous call. No raw pointer or arbitrary
+    // identity is accepted from presentation, configuration or another process.
+    let result = unsafe { SetCurrentProcessExplicitAppUserModelID(w!("dev.dkk115.uacremote")) }
+        .map_err(|_| "desktop_shell_identity_unavailable");
+    SHELL_IDENTITY_READY.store(result.is_ok(), Ordering::Release);
+    result
+}
 
 /// Read-only installer suggestion and actual OS capability/pinned state.
 /// Call on the initialized foreground app UI thread; never prompts to pin.
@@ -105,6 +125,9 @@ pub fn begin_taskbar_pin() -> Operation<TaskbarStatus> {
 }
 
 fn manager() -> Option<TaskbarManager> {
+    if !SHELL_IDENTITY_READY.load(Ordering::Acquire) {
+        return None;
+    }
     // Old Windows requires a Microsoft-issued application-specific LAF token.
     // We have no such grant; expose manual shell instructions instead.
     if read_dword(LAF_KEY, LAF_SEED).ok()?.unwrap_or(0) != 0 {

@@ -59,7 +59,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       <h2>PC 내장 중계</h2>
       <p className="supporting-text">중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.</p>
       <p className="supporting-text">휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.</p>
-      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void enableEmbeddedRelay(); }}>{submitting ? ko.saving : '이 PC의 내장 중계 사용'}</button>
+      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void enableEmbeddedRelay(); }}>이 PC의 내장 중계 사용</button>
       {error && <p className="field-error" role="alert">{error}</p>}
     </section>
     <section aria-label="외부 중계 서버"><h2>고급 설정: 외부 중계 서버</h2>

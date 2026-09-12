@@ -61,6 +61,10 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(mobile::init())
         .setup(|app| {
+            // Shell integration is optional. A failure disables the taskbar
+            // request, not the approval app; this is never called by the service.
+            #[cfg(windows)]
+            let _ = windows_service_host::initialize_desktop_shell_identity();
             // A failed runtime is kept as an explicit error, not replaced by
             // successful default state. The UI can render the real failure.
             #[cfg(not(target_os = "android"))]

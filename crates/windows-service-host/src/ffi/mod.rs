@@ -20,7 +20,10 @@ mod security;
 mod taskbar;
 mod trust_store;
 
-pub use taskbar::{TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin};
+pub use taskbar::{
+    TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin,
+    initialize_desktop_shell_identity,
+};
 
 pub(crate) use elevation::request_elevated_control;
 pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_relay_firewall};

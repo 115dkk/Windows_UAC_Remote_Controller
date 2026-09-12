@@ -22,7 +22,7 @@ function acknowledge(version: string) {
   try { localStorage.setItem(acknowledgmentKey, version); } catch { /* Session dismissal still works. */ }
 }
 
-export function TaskbarSuggestion({ client = bridge }: { client?: TaskbarBridge }) {
+export function TaskbarSuggestion({ client = bridge }: { client?: TaskbarBridge | undefined }) {
   const [offer, setOffer] = useState<TaskbarOffer | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [busy, setBusy] = useState(false);

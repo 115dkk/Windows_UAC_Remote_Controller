@@ -31,7 +31,7 @@ function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
   ] : [{ page: 'status', label: ko.status, icon: 'pc', available: true }, devices, activity];
 }
 
-export function App({ bridge, initialPage, taskbarClient }: { bridge: ControllerBridge; initialPage?: ClientPage; taskbarClient?: TaskbarBridge }) {
+export function App({ bridge, initialPage, taskbarClient }: { bridge: ControllerBridge; initialPage?: ClientPage; taskbarClient?: TaskbarBridge | undefined }) {
   const controller = useController(bridge);
   const readDetails = useCallback((id: string) => bridge.requestDetails(id), [bridge]);
   const [navigationState, setNavigationState] = useState<{ page: ClientPage | null; reviewKey: string | null }>({ page: initialPage ?? null, reviewKey: null });
