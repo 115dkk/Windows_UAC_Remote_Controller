@@ -96,6 +96,7 @@ export function useController(bridge: ControllerBridge) {
   const revision = useRef(0);
   const liveOwner = useRef<ControllerBridge | null>(null);
   const readPending = useRef(false);
+  const activeRead = useRef<{ owner: ControllerBridge; promise: Promise<AppSnapshot> } | null>(null);
   const commandPending = useRef(false);
   const scannerReturn = useRef({ pending: false, opened: false, wake: false });
   const scannerFocusRevision = useRef(0);
@@ -124,8 +125,10 @@ export function useController(bridge: ControllerBridge) {
     const attempt = ++revision.current;
     const previous = current.current.owner === bridge ? current.current : emptyState(bridge);
     publish({ ...previous, refreshing: true, notice: null });
+    const read = { owner: bridge, promise: readSnapshot(bridge) };
+    activeRead.current = read;
     try {
-      const snapshot = await readSnapshot(bridge);
+      const snapshot = await read.promise;
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
       publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
     } catch {
@@ -133,6 +136,7 @@ export function useController(bridge: ControllerBridge) {
       const latest = current.current;
       publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: ko.loadFailure, notice: null });
     } finally {
+      if (activeRead.current === read) activeRead.current = null;
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
     }
   }, [bridge, publish, scannerReturnRevision]);
@@ -147,6 +151,10 @@ export function useController(bridge: ControllerBridge) {
       void refresh();
       return null;
     }
+    // A renderer revision cannot cancel the native read's admission lease.
+    // Serialize this camera-entry intent behind that exact read, then recheck
+    // its fresh capability. Never queue approval/denial or a generic command.
+    const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -155,6 +163,27 @@ export function useController(bridge: ControllerBridge) {
     publish({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
     let scannerOpened = false;
     try {
+      if (scannerRead) {
+        let snapshot: AppSnapshot;
+        try { snapshot = await scannerRead.promise; }
+        catch {
+          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+          scannerReturn.current = { pending: false, opened: false, wake: false };
+          const latest = current.current;
+          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
+            refreshing: false, busy: null, stale: true, error: ko.loadFailure, notice: null });
+          return null;
+        }
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        const mayOpen = scannerReturn.current.pending && document.visibilityState === 'visible'
+          && exposedBySnapshot(snapshot, command);
+        publish({ ...current.current, snapshot, refreshing: false, busy: mayOpen ? 'scan_pairing' : null,
+          stale: false, error: null, notice: null, requestObservedAt: performance.now() });
+        if (!mayOpen) {
+          scannerReturn.current = { pending: false, opened: false, wake: false };
+          return null;
+        }
+      }
       if (command.kind === 'scan_pairing') {
         await bridge.openPairingScanner();
         scannerOpened = true;
@@ -219,6 +248,7 @@ export function useController(bridge: ControllerBridge) {
   useEffect(() => {
     liveOwner.current = bridge;
     readPending.current = false;
+    activeRead.current = null;
     commandPending.current = false;
     scannerReturn.current = { pending: false, opened: false, wake: false };
     scannerFocusRevision.current = 0;
