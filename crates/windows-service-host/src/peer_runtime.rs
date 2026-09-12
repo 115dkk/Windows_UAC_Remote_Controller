@@ -681,6 +681,10 @@ impl<'key> ServiceSession<'key> {
                 return Ok(());
             }
             self.embedded_relay = None;
+            if !self.pairing.enrollment_is_absent() {
+                self.pairing
+                    .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
+            }
             self.relay = None;
             if let Some(dialer) = self.dialer.as_mut() {
                 dialer.cancel();
@@ -1559,6 +1563,10 @@ impl<'key> ServiceSession<'key> {
                 }
                 if let Some(host) = self.embedded_relay.as_ref() {
                     host.cancel();
+                }
+                if !self.pairing.enrollment_is_absent() {
+                    self.pairing
+                        .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
                 }
                 self.relay = None;
                 self.pending_relay = Some(PendingRelayReplacement {

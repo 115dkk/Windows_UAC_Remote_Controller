@@ -53,7 +53,7 @@ describe('installer taskbar suggestion', () => {
   it('disables duplicate clicks and reports cancellation without success', async () => {
     let resolve!: (status: TaskbarStatus) => void;
     const native = client();
-    native.request = vi.fn(() => new Promise((accept) => { resolve = accept; }));
+    native.request = vi.fn(() => new Promise<TaskbarStatus>((accept) => { resolve = accept; }));
     render(<TaskbarSuggestion client={native} />);
     const button = await screen.findByRole('button', { name: '작업 표시줄에 고정' });
     fireEvent.click(button);

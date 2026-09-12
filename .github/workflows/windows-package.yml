@@ -54,6 +54,10 @@ jobs:
         run: npm run package:windows
       - name: Inspect actual installer payload without executing it
         run: npm run inspect:windows-package
+      - name: Verify and capture native installer choices without installing
+        shell: pwsh
+        run: |
+          ./tools/windows-installer-options-gallery.ps1 -Installer (Resolve-Path target/windows-package/controller-setup.exe) -OutputDirectory target/windows-package/options-gallery
       - name: Retain the installer and exact payload inspection
         if: ${{ !cancelled() && steps.package.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
