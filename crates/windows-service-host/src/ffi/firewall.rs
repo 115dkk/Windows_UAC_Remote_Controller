@@ -108,7 +108,7 @@ pub(crate) fn provision_embedded_relay_firewall() -> Result<(), ServiceError> {
                 && installed.LocalPorts()? == port
                 && installed.Direction()? == NET_FW_RULE_DIR_IN
                 && installed.Profiles()? == NET_FW_PROFILE2_PRIVATE.0
-                && installed.InterfaceTypes()? == BSTR::from("All")
+                && installed.InterfaceTypes()? == "All"
                 && !installed.EdgeTraversal()?.as_bool()
                 && installed.Action()? == NET_FW_ACTION_ALLOW
                 && installed.Enabled()?.as_bool())

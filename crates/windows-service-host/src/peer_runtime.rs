@@ -1457,11 +1457,11 @@ impl<'key> ServiceSession<'key> {
             return Ok(());
         }
         pending.old_dialer = None;
-        if let Some(host) = self.embedded_relay.as_mut() {
-            if !host.drain() {
-                self.pending_relay = Some(pending);
-                return Ok(());
-            }
+        if let Some(host) = self.embedded_relay.as_mut()
+            && !host.drain()
+        {
+            self.pending_relay = Some(pending);
+            return Ok(());
         }
         self.embedded_relay = None;
         self.relay_retry_at = Instant::now();

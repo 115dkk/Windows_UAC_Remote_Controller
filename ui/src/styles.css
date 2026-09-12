@@ -163,6 +163,8 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .navigation-item.passive { background: transparent; color: var(--muted); }
 .radio-option:has(input:disabled), .alert-option:has(input:disabled), .weekday-chip:has(input:disabled), .end-of-day:has(input:disabled), input[type="time"]:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 .pairing-entry { padding: var(--space-5); margin-bottom: var(--space-6); }
+.auxiliary-card { margin-top: var(--space-6); }
+.relay-advanced > h2 { font-size: var(--text-normal); margin-bottom: var(--space-4); }
 .pairing-entry h2 { font-size: var(--text-normal); }
 .pairing-entry > .supporting-text { margin-top: var(--space-3); }
 .pairing-entry > .button { margin-top: var(--space-4); width: 100%; }

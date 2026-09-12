@@ -63,7 +63,7 @@ export function TaskbarSuggestion({ client = bridge }: { client?: TaskbarBridge 
     } catch { setOffer({ ...offer, status: 'unavailable' }); }
     finally { inFlight.current = false; setBusy(false); }
   }
-  return <section className="surface pairing-entry" aria-labelledby={heading} aria-busy={busy}>
+  return <section className="surface pairing-entry auxiliary-card" aria-labelledby={heading} aria-busy={busy}>
     <h2 id={heading}>작업 표시줄에서 바로 열기</h2>
     <p id={description} className="supporting-text" role={unavailable ? 'status' : undefined}>{unavailable
       ? `${offer.status === 'declined' ? '작업 표시줄에 추가되지 않았어요.' : '지금은 앱에서 작업 표시줄 고정을 마무리할 수 없어요.'} 실행 중인 UAC 원격 승인 아이콘을 마우스 오른쪽 버튼으로 누르고 ‘작업 표시줄에 고정’을 선택할 수 있어요.`
