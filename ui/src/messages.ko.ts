@@ -190,8 +190,9 @@ export function policyUnavailableText(service: PhoneServiceView | null): string 
   if (service?.state === 'waiting_for_unlock') return ko.policyUnlockFirst;
   if (service?.state === 'preparing') return ko.policyPreparing;
   if (service?.state === 'cleanup_pending') return ko.policyCleanupPending;
-  if (service?.state === 'unavailable' && service.canStop) return ko.policyRestartOwner;
-  return service?.canStart ? ko.policyStartFirst : ko.policyUnavailableBody;
+  if (service?.canStart) return ko.policyStartFirst;
+  return service?.state === 'local_settings_ready' && service.policyOwnerReady
+    ? ko.policyUnavailableBody : ko.policyRestartOwner;
 }
 export function policyUnavailableTitleText(service: PhoneServiceView | null): string {
   if (service?.state === 'local_settings_ready' && service.policyOwnerReady) return ko.policyUnavailableTitle;
