@@ -7,6 +7,14 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+test('shortcut controls and localized help stay inside the native 140u page', () => {
+  const source = readFileSync(new URL('../src-tauri/windows/installer.nsi', import.meta.url), 'utf8');
+  const controls = [...source.matchAll(/\$\{NSD_Create(?:Label|Checkbox)\} 0 (\d+)u 100% (\d+)u "\$\(UacShortcut[^)]+\)"/gu)];
+  assert.equal(controls.length, 4);
+  for (const [, top, height] of controls) assert.ok(Number(top) + Number(height) <= 140);
+  assert.match(source, /100u 100% 40u "\$\(UacShortcutHint\)"/u);
+});
+
 const root = fileURLToPath(new URL('../', import.meta.url));
 const read = (name) => readFileSync(resolve(root, name), 'utf8').replace(/\r\n?/gu, '\n');
 // Ignore whole-line source comments, not quoted SDDL/text or executable lines.

@@ -465,24 +465,25 @@ Function UacShortcutPage
     Call UacFail
   ${EndIf}
   ${If} $UacExistingInstall = 1
-    ${NSD_CreateLabel} 0 0 100% 28u "$(UacShortcutsUpgrade)"
+    ${NSD_CreateLabel} 0 0 100% 24u "$(UacShortcutsUpgrade)"
   ${Else}
-    ${NSD_CreateLabel} 0 0 100% 28u "$(UacShortcutsFresh)"
+    ${NSD_CreateLabel} 0 0 100% 24u "$(UacShortcutsFresh)"
   ${EndIf}
   Pop $0
-  ${NSD_CreateCheckbox} 0 32u 100% 24u "$(UacShortcutDesktop)"
+  ${NSD_CreateCheckbox} 0 24u 100% 24u "$(UacShortcutDesktop)"
   Pop $UacDesktopCheckbox
   ${NSD_SetState} $UacDesktopCheckbox $UacDesktopChoice
   ${NSD_OnClick} $UacDesktopCheckbox UacShortcutChanged
-  ${NSD_CreateCheckbox} 0 60u 100% 24u "$(UacShortcutStartMenu)"
+  ${NSD_CreateCheckbox} 0 48u 100% 24u "$(UacShortcutStartMenu)"
   Pop $UacStartMenuCheckbox
   ${NSD_SetState} $UacStartMenuCheckbox $UacStartMenuChoice
   ${NSD_OnClick} $UacStartMenuCheckbox UacShortcutChanged
-  ${NSD_CreateCheckbox} 0 88u 100% 24u "$(UacShortcutTaskbar)"
+  ${NSD_CreateCheckbox} 0 72u 100% 24u "$(UacShortcutTaskbar)"
   Pop $UacTaskbarCheckbox
   ${NSD_SetState} $UacTaskbarCheckbox $UacTaskbarChoice
   ${NSD_OnClick} $UacTaskbarCheckbox UacShortcutChanged
-  ${NSD_CreateLabel} 0 118u 100% 44u "$(UacShortcutHint)"
+  ; Keep the whole localized hint within the 140u custom-page client area.
+  ${NSD_CreateLabel} 0 100u 100% 40u "$(UacShortcutHint)"
   Pop $0
   nsDialogs::Show
 FunctionEnd

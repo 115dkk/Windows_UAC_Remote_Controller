@@ -61,18 +61,38 @@ function checkedReply(value: NativeLanguage): NativeLanguage {
     || value.systemLocales.some(tag => typeof tag !== 'string' || tag.length > 85)) throw new Error('language_reply_invalid');
   return value;
 }
+// Native commands also update the window title. Order invocation, reply
+// validation and publication together, rather than merely discarding old JS
+// replies after native side effects have already happened.
+let nativeLanguageTail: Promise<void> = Promise.resolve();
+let pendingNativeRefresh: Promise<void> | undefined;
+function nativeLanguageOperation(operation: () => Promise<void>): Promise<void> {
+  const result = nativeLanguageTail.then(operation);
+  // Recover the private tail without hiding an explicit save error from its caller.
+  nativeLanguageTail = result.catch(() => {});
+  return result;
+}
 export async function refreshLanguage(): Promise<void> {
   if (isTauri()) {
-    try { const value = checkedReply(await invoke<NativeLanguage>('get_language')); accept(value.preference, value.systemLocales); return; }
-    catch { /* Language-only fallback; no authority or request state is inferred. */ }
+    // Focus/languagechange bursts share one outstanding read, including time
+    // waiting behind a save, instead of accumulating an unbounded read queue.
+    if (!pendingNativeRefresh) {
+      pendingNativeRefresh = nativeLanguageOperation(async () => {
+        try { const value = checkedReply(await invoke<NativeLanguage>('get_language')); accept(value.preference, value.systemLocales); }
+        catch { accept(state.preference, browserLanguages()); /* Presentation-only fallback. */ }
+      }).finally(() => { pendingNativeRefresh = undefined; });
+    }
+    return pendingNativeRefresh;
   }
   accept(state.preference, browserLanguages());
 }
 export async function setLanguage(preference: LanguagePreference): Promise<void> {
   if (!isPreference(preference)) throw new Error('invalid_language');
   if (isTauri()) {
-    const value = checkedReply(await invoke<NativeLanguage>('set_language', {language:preference}));
-    accept(value.preference, value.systemLocales);
+    await nativeLanguageOperation(async () => {
+      const value = checkedReply(await invoke<NativeLanguage>('set_language', {language:preference}));
+      accept(value.preference, value.systemLocales);
+    });
   } else {
     // Browser preview preference only; installed apps use their native owner.
     localStorage.setItem('uac-language', preference);
