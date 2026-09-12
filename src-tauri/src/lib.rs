@@ -112,6 +112,10 @@ pub fn run() {
         .expect("native application host could not run");
 
     app.run(|_app, event| {
+        #[cfg(windows)]
+        if matches!(&event, tauri::RunEvent::Exit) {
+            windows_service_host::shutdown_desktop_shell();
+        }
         #[cfg(target_os = "android")]
         android_window::on_event(_app, &event);
         if let tauri::RunEvent::ExitRequested { code, api, .. } = event

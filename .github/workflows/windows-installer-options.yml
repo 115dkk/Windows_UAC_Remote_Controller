@@ -1,0 +1,57 @@
+name: Native installer options (existing CI artifact)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful payload-producing Windows package run
+        required: true
+        type: string
+      source_sha:
+        description: Exact trusted package source commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  options:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify the artifact producer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:SOURCE_RUN -notmatch '^[0-9]+$' -or $env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid producer coordinates' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_SHA -or $run.name -ne 'Windows package' -or $run.head_branch -ne 'codex/native-runtime' -or $run.event -ne 'push') { throw 'Unexpected package producer' }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run }}
+          name: windows-x64-package-${{ inputs.source_sha }}
+          path: target/options-input
+      - name: Check the built installer and exercise its pre-install UI
+        shell: pwsh
+        run: |
+          $manifest = Get-Content target/options-input/manifest.json -Raw | ConvertFrom-Json
+          $installer = (Resolve-Path target/options-input/controller-setup.exe).Path
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.installer.sha256) { throw 'Installer bytes differ from package manifest' }
+          ./tools/windows-installer-options-gallery.ps1 -Installer $installer -OutputDirectory target/options-gallery
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: native-installer-options-${{ github.run_id }}
+          path: target/options-gallery/
+          if-no-files-found: error

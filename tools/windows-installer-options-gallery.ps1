@@ -7,8 +7,6 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $root = [Windows.Automation.AutomationElement]::RootElement
 $scope = [Windows.Automation.TreeScope]::Descendants
-$buttonType = [Windows.Automation.ControlType]::Button
-$checkType = [Windows.Automation.ControlType]::CheckBox
 foreach ($mode in @('fresh','upgrade')) {
     $arguments = if ($mode -eq 'upgrade') { @('/UPDATE') } else { @() }
     $start = @{ FilePath = $Installer; PassThru = $true; WindowStyle = 'Normal' }
@@ -33,15 +31,14 @@ foreach ($mode in @('fresh','upgrade')) {
             $window = @($windows | Where-Object { $ownedIds.Contains($_.Current.ProcessId) }) | Select-Object -First 1
             if (-not $window) { Start-Sleep -Milliseconds 200; continue }
             $elements = @($window.FindAll($scope, [Windows.Automation.Condition]::TrueCondition))
-            $page = @($elements | ForEach-Object { "{0}: {1}" -f $_.Current.AutomationId,$_.Current.Name }) -join ' | '
+            $page = @($elements | ForEach-Object { "{0} {1} enabled={2}: {3}" -f $_.Current.AutomationId,$_.Current.ControlType.ProgrammaticName,$_.Current.IsEnabled,$_.Current.Name }) -join ' | '
             if ($page -ne $lastPage) { Write-Output "$mode wizard: $($page.Substring(0,[Math]::Min(4000,$page.Length)))"; $lastPage = $page }
-            $checks = @($window.FindAll($scope, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,$checkType)))
+            $checks = @($elements | Where-Object { $_.Current.Name -match '^(바탕화면에 추가|시작 메뉴의 앱 목록에 추가|작업표시줄에 추가|Add to desktop|Add to the Start menu app list|Add to taskbar)' })
             $desktop = @($checks | Where-Object { $_.Current.Name -match '바탕화면에 추가|Add to desktop' })
             if ($desktop.Count -eq 1) { $found = $true; break }
-            $buttons = @($window.FindAll($scope, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,$buttonType)))
             # Only known Welcome/License navigation. Never an Install button.
-            $next = @($buttons | Where-Object { $_.Current.IsEnabled -and ($_.Current.Name -replace '&','') -match '^(다음|Next|동의함|I Agree)' }) | Select-Object -First 1
-            if ($next) { $next.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
+            $next = @($elements | Where-Object { $_.Current.IsEnabled -and ($_.Current.Name -replace '&','') -match '^(다음|Next|동의함|I Agree)' }) | Select-Object -First 1
+            if ($next) { Write-Output "Invoking wizard navigation: $($next.Current.Name)"; $next.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
             Start-Sleep -Milliseconds 200
         }
         if (-not $found -or $checks.Count -ne 3) { throw "Expected three installer shortcut choices; processExited=$($process.HasExited), ownedPids=$($ownedIds -join ','); lastPage=$lastPage" }

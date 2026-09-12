@@ -79,7 +79,7 @@ pub fn begin_taskbar_offer() -> Operation<TaskbarOffer> {
         });
     };
     let prepared = (|| {
-        let _apartment = Apartment::enter()?;
+        ensure_apartment()?;
         let manager = manager()?;
         let allowed = manager.IsPinningAllowed().ok()?;
         Some((manager.IsCurrentAppPinnedAsync().ok()?, allowed))
@@ -105,7 +105,7 @@ pub fn begin_taskbar_offer() -> Operation<TaskbarOffer> {
 /// The OS return value, not intent or API dispatch, determines success.
 pub fn begin_taskbar_pin() -> Operation<TaskbarStatus> {
     let operation = (|| {
-        let _apartment = Apartment::enter()?;
+        ensure_apartment()?;
         let manager = manager()?;
         if !manager.IsPinningAllowed().ok()? {
             return None;
@@ -137,20 +137,50 @@ fn manager() -> Option<TaskbarManager> {
     TaskbarManager::GetDefault().ok()
 }
 
-struct Apartment;
+thread_local! {
+    // RoUninitialize closes this thread's WinRT RPC connections. Keep its
+    // initialization alive across the asynchronous Windows consent operation.
+    // Explicit RunEvent::Exit cleanup owns RoUninitialize: Windows TLS
+    // destructors can run under loader lock and must not close/pump COM RPC.
+    static SHELL_APARTMENT: std::cell::RefCell<Option<Apartment>> = const { std::cell::RefCell::new(None) };
+}
+
+fn ensure_apartment() -> Option<()> {
+    if !SHELL_IDENTITY_READY.load(Ordering::Acquire) {
+        return None;
+    }
+    SHELL_APARTMENT.with(|owner| {
+        let mut owner = owner.try_borrow_mut().ok()?;
+        if owner.is_none() {
+            *owner = Some(Apartment::enter()?);
+        }
+        Some(())
+    })
+}
+
+struct Apartment(std::marker::PhantomData<std::rc::Rc<()>>);
 impl Apartment {
     fn enter() -> Option<Self> {
         // SAFETY: called only on the Tauri UI thread, already an STA. Each
-        // successful additional WinRT initialization is balanced on this same
-        // thread; Tauri retains its own apartment while the agile op completes.
+        // successful WinRT initialization is retained in this thread's storage
+        // until the host's explicit UI-thread Exit callback balances it.
         unsafe { RoInitialize(RO_INIT_SINGLETHREADED) }.ok()?;
-        Some(Self)
+        Some(Self(std::marker::PhantomData))
+    }
+    fn close(self) {
+        // SAFETY: taken from this UI thread's storage only by explicit host
+        // shutdown outside loader lock; one matching successful initialization.
+        unsafe { RoUninitialize() };
     }
 }
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        // SAFETY: same lexical UI-thread scope as successful RoInitialize.
-        unsafe { RoUninitialize() };
+
+/// Call from the Tauri UI-thread Exit event, never a TLS destructor or worker.
+/// An abrupt process exit relies on OS reclamation and cannot balance callbacks.
+pub fn shutdown_desktop_shell() {
+    SHELL_IDENTITY_READY.store(false, Ordering::Release);
+    let apartment = SHELL_APARTMENT.with(|owner| owner.try_borrow_mut().ok()?.take());
+    if let Some(apartment) = apartment {
+        apartment.close();
     }
 }
 

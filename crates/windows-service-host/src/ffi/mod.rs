@@ -22,7 +22,7 @@ mod trust_store;
 
 pub use taskbar::{
     TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin,
-    initialize_desktop_shell_identity,
+    initialize_desktop_shell_identity, shutdown_desktop_shell,
 };
 
 pub(crate) use elevation::request_elevated_control;

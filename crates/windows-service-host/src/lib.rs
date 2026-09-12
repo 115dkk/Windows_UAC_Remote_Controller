@@ -116,7 +116,7 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 #[cfg(windows)]
 pub use ffi::{
     TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin,
-    initialize_desktop_shell_identity,
+    initialize_desktop_shell_identity, shutdown_desktop_shell,
 };
 pub const SERVICE_DISPLAY_NAME: &str = "휴대폰 승인";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
