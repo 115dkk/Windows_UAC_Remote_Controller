@@ -21,6 +21,7 @@ const report = { source: expected, commit: readFileSync('evidence/product-commit
   release: true, minified: true, pregrantedCameraPermission: true,
   pairedPcCount: 0, physicalDeviceVerified: false, authenticationVerified: false, checks: [], passed: false };
 let clicks = 0;
+let captures = 0;
 function adb(args, binary = false) {
   const value = spawnSync(adbPath, ['-s', serial, ...args], { encoding: binary ? undefined : 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
   if (value.error || value.signal || value.status !== 0) throw new Error(`ADB command failed: ${args[0]}`);
@@ -29,17 +30,46 @@ function adb(args, binary = false) {
 function dump() { return adb(['shell', 'dumpsys', 'activity', 'service', `${pkg}/.background.ControllerForegroundService`]); }
 async function until(read, accept, description, attempts = 40) {
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const value = read();
+    let value;
+    try { value = read(); }
+    catch (failure) {
+      // UIAutomator can be temporarily non-idle during a real transition.
+      // Retry only fresh hierarchy reads; never repeat credential/input actions.
+      if (read !== ui) throw failure;
+      await setTimeout(1000);
+      continue;
+    }
     if (accept(value)) return value;
     await setTimeout(1000);
   }
   throw new Error(`Timed out: ${description}`);
 }
 function ui() {
-  adb(['shell', 'uiautomator', 'dump', '/sdcard/uac-release-ui.xml']);
-  const xml = adb(['shell', 'cat', '/sdcard/uac-release-ui.xml']);
+  const path = `/sdcard/uac-release-ui-${captures++}.xml`;
+  adb(['shell', 'uiautomator', 'dump', path]);
+  const xml = adb(['shell', 'cat', path]);
   assert.ok(xml.length < 1024 * 1024);
   return { xml, document: new JSDOM(xml, { contentType: 'text/xml' }).window.document };
+}
+async function unlockDisposableEmulator() {
+  // One ordinary PIN attempt on the named disposable AVD, before app install.
+  // Explicitly lock first so emulator boot/keyguard timing cannot hide the app.
+  adb(['shell', 'input', 'keyevent', 'KEYCODE_SLEEP']);
+  await setTimeout(300);
+  adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
+  await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=true/.test(value), 'test keyguard visible');
+  adb(['shell', 'input', 'swipe', '540', '1800', '540', '600', '400']);
+  const pin = await until(ui, view => Boolean(view.document.querySelector('[resource-id="com.android.systemui:id/pinEntry"]')), 'test PIN entry');
+  const entry = pin.document.querySelector('[resource-id="com.android.systemui:id/pinEntry"]');
+  assert.equal(entry.getAttribute('package'), 'com.android.systemui');
+  assert.equal(entry.getAttribute('password'), 'true');
+  assert.equal(entry.getAttribute('text'), '');
+  assert.equal(entry.getAttribute('enabled'), 'true');
+  adb(['shell', 'input', 'text', '2468']);
+  adb(['shell', 'input', 'keyevent', 'KEYCODE_ENTER']);
+  const unlocked = await until(() => adb(['shell', 'dumpsys', 'window', 'policy']), value => /\bshowing=false/.test(value), 'test keyguard dismissed');
+  assert.match(unlocked, /\bsecure=true/);
+  writeFileSync('evidence/unlocked-window-policy.txt', unlocked);
 }
 function nodeFor(view, label) {
   return [...view.document.querySelectorAll('node')].find(node => node.getAttribute('text') === label || node.getAttribute('content-desc') === label);
@@ -77,6 +107,7 @@ try {
   adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
   // Public synthetic emulator lock, not a user credential or authentication test.
   adb(['shell', 'locksettings', 'set-pin', '2468']);
+  await unlockDisposableEmulator();
   adb(['install', resolve(process.env.RUNNER_TEMP, 'startup.apk')]);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.CAMERA']);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.POST_NOTIFICATIONS']);
