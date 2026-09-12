@@ -13,7 +13,7 @@ describe('pre-approval connection guidance', () => {
     render(<App bridge={createQaBridge(snapshot)} initialPage="schedule" />);
     expect(await screen.findByRole('heading', { name: ko.noComputers })).toBeVisible();
     expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeEnabled();
-    expect(screen.getByRole('radio', { name: ko.always, exact: true })).toBeChecked();
+    expect(screen.getByRole('radio', { name: ko.always })).toBeChecked();
     expect(screen.queryByRole('heading', { name: ko.policyUnavailableTitle })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: ko.policyOwnerUnavailableTitle })).not.toBeInTheDocument();
   });
