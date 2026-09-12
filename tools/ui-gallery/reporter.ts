@@ -4,8 +4,9 @@ import { createRequire } from 'node:module';
 import { arch, platform, release } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { FullConfig, FullResult, Reporter, TestCase, TestResult } from '@playwright/test/reporter';
-import { galleryCases } from './cases';
+import type { FullConfig, FullResult, Reporter, Suite, TestCase, TestResult } from '@playwright/test/reporter';
+import { declaredGalleryCases } from './declared-cases';
+import { i18nGalleryCases } from './i18n-cases';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const output = resolve(root, 'target/ui-gallery');
@@ -31,10 +32,14 @@ export default class GalleryReporter implements Reporter {
   private readonly results = new Map<string, Attempt[]>();
   private readonly runnerErrors: string[] = [];
   private readonly artifactErrors: string[] = [];
+  private registeredCases: string[] = [];
 
   constructor(private readonly options: { runId: string }) {}
 
-  onBegin(config: FullConfig): void { this.config = config; }
+  onBegin(config: FullConfig, suite: Suite): void {
+    this.config = config;
+    this.registeredCases = suite.allTests().map(test => test.title);
+  }
   onError(error: { message?: string }): void {
     if (this.runnerErrors.length < 20) this.runnerErrors.push((error.message ?? 'Runner error without a message').slice(0, 4000));
   }
@@ -81,25 +86,40 @@ export default class GalleryReporter implements Reporter {
       this.artifactErrors.push('Current-run compiled-QA/HEAD provenance is unavailable; do not treat old files as this run.');
     }
     const packageData = JSON.parse(readFileSync(require.resolve('@playwright/test/package.json'), 'utf8')) as { version?: unknown };
-    const rows = galleryCases.map((selected) => ({ ...selected, attempts: this.results.get(selected.id) ?? [] }));
-    if (rows.some((row) => row.attempts.length === 0)) this.artifactErrors.push('The full declared gallery did not execute.');
-    // Include separately declared multilingual/security cases and their real
-    // attachments instead of hiding them behind the original Korean case list.
-    for (const [id, attempts] of this.results) {
-      if (rows.some(row => row.id === id)) continue;
-      rows.push({ id, fixture:'i18n/client-synthetic', viewport:{width:0,height:0}, colorScheme:'light', forcedColors:'none', action:'overview', attempts });
+    const rows = declaredGalleryCases.map(selected => ({ ...selected, attempts: this.results.get(selected.id) ?? [] }));
+    const expectedIds = new Set(declaredGalleryCases.map(selected => selected.id));
+    const registeredCounts = new Map<string, number>();
+    for (const id of this.registeredCases) registeredCounts.set(id, (registeredCounts.get(id) ?? 0) + 1);
+    const unexpectedResults = [...this.results].filter(([id]) => !expectedIds.has(id)).map(([id, attempts]) => ({ id, attempts }));
+    const completeness = {
+      declaredCases: declaredGalleryCases.length,
+      declaredI18nCases: i18nGalleryCases.length,
+      duplicateDeclarations: [...expectedIds].filter(id => declaredGalleryCases.filter(selected => selected.id === id).length !== 1),
+      missingRegistrations: [...expectedIds].filter(id => !registeredCounts.has(id)),
+      duplicateRegistrations: [...registeredCounts].filter(([, count]) => count !== 1).map(([id]) => id),
+      unexpectedRegistrations: [...registeredCounts.keys()].filter(id => !expectedIds.has(id)),
+      missingResults: rows.filter(row => row.attempts.length === 0).map(row => row.id),
+      skippedCases: rows.filter(row => row.attempts.some(attempt => attempt.status === 'skipped')).map(row => row.id),
+      unpassedCases: rows.filter(row => row.attempts.some(attempt => attempt.status !== 'passed')).map(row => row.id),
+      repeatedAttempts: rows.filter(row => row.attempts.length > 1 || row.attempts.some(attempt => attempt.retry !== 0)).map(row => row.id),
+      missingCaptures: rows.filter(row => row.attempts.some(attempt => attempt.status === 'passed'
+        && !attempt.attachments.some(attachment => attachment.type === 'image/png' && attachment.name.startsWith('gallery-')))).map(row => row.id),
+      unexpectedResults: unexpectedResults.map(row => row.id),
+    };
+    for (const [category, ids] of Object.entries(completeness)) {
+      if (Array.isArray(ids) && ids.length > 0) this.artifactErrors.push(`${category}: ${ids.join(', ')}`);
     }
     const finalStatus = this.artifactErrors.length > 0 ? 'failed' : result.status;
     const manifest = {
       schemaVersion: 1, runId: this.options.runId, generatedAt: new Date().toISOString(),
       scope: 'CLIENT / SYNTHETIC', visualReview: 'ROOT_REQUIRED_NOT_PERFORMED_BY_HARNESS',
       limitations: ['Not native shell/UAC Secure Desktop evidence', 'Not Android Keystore/auth/notification or package-lifecycle evidence', 'Not latency, OS delivery, approval, or pixel-baseline proof'],
-      runnerStatus: result.status, finalStatus, expectedCases: galleryCases.length, executedCases: this.results.size,
+      runnerStatus: result.status, finalStatus, expectedCases: declaredGalleryCases.length, executedCases: this.results.size,
       environment: { os: platform(), osRelease: release(), architecture: arch(), node: process.version,
         playwright: typeof packageData.version === 'string' ? packageData.version : null,
         browser: 'chromium', locale: 'ko-KR', timezone: 'Asia/Seoul', reducedMotion: 'reduce',
         workers: this.config?.workers ?? null, retriesConfigured: this.config?.projects.map((project) => project.retries) ?? [] },
-      build, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors, cases: rows,
+      build, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors, completeness, cases: rows, unexpectedResults,
     };
     writeFileSync(resolve(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     const cards = rows.map((row) => {
@@ -109,9 +129,9 @@ export default class GalleryReporter implements Reporter {
         const files = attempt.attachments.map((attachment) => `<li><a href="${linkPath(attachment.path)}">${escapeHtml(attachment.name)}</a></li>`).join('');
         return `<p>실행기 상태: ${escapeHtml(attempt.status)} · 시도 ${String(attempt.retry + 1)}</p>${pictures || '<p>이 시도의 이미지 없음. 실패/설정 기록을 확인하세요.</p>'}<details><summary>관찰·콘솔·실패·첨부 파일</summary><pre>${escapeHtml(JSON.stringify({ errors: attempt.errors, observation: attempt.observation }, null, 2))}</pre><ul>${files}</ul></details>`;
       }).join('');
-      return `<section><h2>${escapeHtml(row.id)}</h2><p>${escapeHtml(row.fixture)} · ${String(row.viewport.width)}×${String(row.viewport.height)} · ${escapeHtml(row.colorScheme)} · forced-colors ${escapeHtml(row.forcedColors)}</p>${attempts || '<p>실행되지 않음. 캡처/검수 증거가 없습니다.</p>'}</section>`;
+      return `<section><h2>${escapeHtml(row.id)}</h2><p>${escapeHtml(row.fixture)} · ${String(row.viewport.width)}×${String(row.viewport.height)} · ${escapeHtml('locale' in row ? row.locale : 'ko')} · ${escapeHtml(row.colorScheme)} · forced-colors ${escapeHtml(row.forcedColors)}</p>${attempts || '<p>실행되지 않음. 캡처/검수 증거가 없습니다.</p>'}</section>`;
     }).join('');
-    writeFileSync(resolve(output, 'index.html'), `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CLIENT · SYNTHETIC 갤러리</title><style>body{margin:0;padding:24px;background:#f2f6f7;color:#152c35;font:16px/1.6 system-ui,sans-serif}header,section{max-width:1280px;margin:0 auto 24px;padding:20px;background:#fbfdfd;border:1px solid #d4e0e5;border-radius:12px}h1,h2{overflow-wrap:anywhere}h2{font-size:18px}a{color:#0b7285}figure{display:inline-block;vertical-align:top;margin:12px 16px 12px 0;max-width:100%;width:420px}img{display:block;width:100%;height:auto;border:1px solid #d4e0e5}pre{white-space:pre-wrap;overflow-wrap:anywhere}summary{cursor:pointer}a:focus-visible,summary:focus-visible{outline:3px solid #0b7285;outline-offset:3px}</style><header><h1>CLIENT · SYNTHETIC 화면 갤러리</h1><p>화면 예시 · 실제 연결 아님. 자동 실행 결과는 시각 검수나 네이티브 서비스·UAC·휴대폰 인증의 성공 증거가 아닙니다.</p><p>ROOT가 실제 이미지와 화면 상태를 검토해야 합니다. 실패 이미지·trace도 첨부 파일로 보존됩니다.</p><p><a href="manifest.json">JSON 매니페스트</a> · 갤러리 최종 상태: ${escapeHtml(finalStatus)} · 실행 ${String(this.results.size)}/${String(galleryCases.length)}</p><details><summary>빌드·HEAD·환경·실행 실패</summary><pre>${escapeHtml(JSON.stringify({ build, environment: manifest.environment, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors }, null, 2))}</pre></details></header>${cards}</html>\n`);
+    writeFileSync(resolve(output, 'index.html'), `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CLIENT · SYNTHETIC 갤러리</title><style>body{margin:0;padding:24px;background:#f2f6f7;color:#152c35;font:16px/1.6 system-ui,sans-serif}header,section{max-width:1280px;margin:0 auto 24px;padding:20px;background:#fbfdfd;border:1px solid #d4e0e5;border-radius:12px}h1,h2{overflow-wrap:anywhere}h2{font-size:18px}a{color:#0b7285}figure{display:inline-block;vertical-align:top;margin:12px 16px 12px 0;max-width:100%;width:420px}img{display:block;width:100%;height:auto;border:1px solid #d4e0e5}pre{white-space:pre-wrap;overflow-wrap:anywhere}summary{cursor:pointer}a:focus-visible,summary:focus-visible{outline:3px solid #0b7285;outline-offset:3px}</style><header><h1>CLIENT · SYNTHETIC 화면 갤러리</h1><p>화면 예시 · 실제 연결 아님. 자동 실행 결과는 시각 검수나 네이티브 서비스·UAC·휴대폰 인증의 성공 증거가 아닙니다.</p><p>ROOT가 실제 이미지와 화면 상태를 검토해야 합니다. 실패 이미지·trace도 첨부 파일로 보존됩니다.</p><p><a href="manifest.json">JSON 매니페스트</a> · 갤러리 최종 상태: ${escapeHtml(finalStatus)} · 실행 ${String(this.results.size)}/${String(declaredGalleryCases.length)}</p><details><summary>빌드·HEAD·환경·실행 실패</summary><pre>${escapeHtml(JSON.stringify({ build, completeness, environment: manifest.environment, runnerErrors: this.runnerErrors, artifactErrors: this.artifactErrors }, null, 2))}</pre></details></header>${cards}</html>\n`);
     if (this.artifactErrors.length > 0) return { status: 'failed' };
   }
 }

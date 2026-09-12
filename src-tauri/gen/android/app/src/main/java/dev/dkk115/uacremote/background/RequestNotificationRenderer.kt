@@ -16,7 +16,8 @@ import dev.dkk115.uacremote.AppLanguage
 
 /** Plain bounded display DTO for the real renderer and isolated synthetic CI.
  * Production constructs it ONLY after the original opaque Rust handle check. */
-internal class RequestNotificationContent(val program: String, val path: String) {
+internal class RequestNotificationContent(val program: String, val path: String,
+    val programElided: Boolean, val pathElided: Boolean) {
     init { require(program.isNotEmpty() && program.length <= 512 && path.isNotEmpty() && path.length <= 1024) }
     override fun toString(): String = "RequestNotificationContent([redacted])"
 }
@@ -73,10 +74,14 @@ internal class RequestNotificationRenderer(context: Context) {
         require(remainingMillis in 1..300_000L)
         val context = this.context // One locale snapshot for this notification.
         val bidi = BidiFormatter.getInstance(context.resources.configuration.locales[0])
-        val program = bidi.unicodeWrap(UntrustedDisplayText.escape(content.program), TextDirectionHeuristics.FIRSTSTRONG_LTR)
+        // Executable identifiers share the same fixed LTR base as paths, even
+        // when the first letter is Arabic. Input must not choose the base.
+        val program = bidi.unicodeWrap(UntrustedDisplayText.escape(content.program), TextDirectionHeuristics.LTR)
         val path = bidi.unicodeWrap(UntrustedDisplayText.escape(content.path), TextDirectionHeuristics.LTR)
         val summary = context.getString(R.string.request_notification_summary, program, path)
-        val fits = UntrustedDisplayText.fitsNotification(summary)
+        // Rust's bounded preview also reports whether the ORIGINAL suffix was
+        // elided before this renderer. Never treat that prefix as a full name.
+        val fits = !content.programElided && !content.pathElided && UntrustedDisplayText.fitsNotification(summary)
         val shown = if (fits) summary else context.getString(R.string.request_notification_public_body)
         val publicVersion = NotificationCompat.Builder(context, channel(mode))
             .setSmallIcon(R.drawable.ic_request_notice)

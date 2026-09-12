@@ -3,13 +3,9 @@
 // review; they do not certify Android/Windows native rendering or approval.
 import type { Locator, Page, TestInfo } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
-import type { GalleryCase } from './cases';
 import { galleryLocales, galleryText, test, expect } from './session';
 import type { GalleryLocale } from './session';
-
-function selected(id: string, fixture: string, width: number, height: number): GalleryCase {
-  return { id, fixture, viewport: { width, height }, colorScheme: 'light', forcedColors: 'none', action: 'overview' };
-}
+import { i18nBidiCase, i18nDesktopCases, i18nHistoryCases, i18nPhoneCases, i18nSettingsCases } from './i18n-cases';
 
 async function documentLocale(page: Page, locale: GalleryLocale): Promise<void> {
   await expect(page.locator('html')).toHaveAttribute('lang', locale);
@@ -78,9 +74,10 @@ async function recordLocalizedFont(page: Page, info: TestInfo, locale: GalleryLo
   }
 }
 
-for (const locale of galleryLocales) {
-  test(`i18n-${locale}-desktop`, async ({ page, gallery }, info) => {
-    await gallery.open(selected(`i18n-${locale}-desktop`, 'desktop-pairing-ready', 980, 820), locale);
+for (const selected of i18nDesktopCases) {
+  const { locale } = selected;
+  test(selected.id, async ({ page, gallery }, info) => {
+    await gallery.open(selected, locale);
     await documentLocale(page, locale);
     await recordLocalizedFont(page, info, locale);
     const pairing = page.getByRole('button', { name: galleryText(locale, 'UAC 원격 승인'), exact: true });
@@ -88,9 +85,12 @@ for (const locale of galleryLocales) {
     await readable(pairing);
     await gallery.capture('localized-desktop', `CLIENT/SYNTHETIC · ${locale} desktop pairing entry and typography`);
   });
+}
 
-  test(`i18n-${locale}-phone`, async ({ page, gallery }, info) => {
-    await gallery.open(selected(`i18n-${locale}-phone`, 'phone-pending', 390, 900), locale);
+for (const selected of i18nPhoneCases) {
+  const { locale } = selected;
+  test(selected.id, async ({ page, gallery }, info) => {
+    await gallery.open(selected, locale);
     await documentLocale(page, locale);
     await recordLocalizedFont(page, info, locale);
     await expect(page.locator('.program-name')).toHaveText('설정 도우미.exe');
@@ -108,9 +108,10 @@ for (const locale of galleryLocales) {
   });
 }
 
-for (const locale of ['fr', 'de', 'ar'] as const) {
-  test(`i18n-${locale}-settings-320`, async ({ page, gallery }) => {
-    await gallery.open(selected(`i18n-${locale}-settings-320`, 'phone-pending', 320, 740), locale);
+for (const selected of i18nSettingsCases) {
+  const { locale } = selected;
+  test(selected.id, async ({ page, gallery }) => {
+    await gallery.open(selected, locale);
     const name = galleryText(locale, '앱 설정');
     const trigger = page.getByRole('button', { name, exact: true });
     await expect(page.getByRole('navigation').getByRole('button', { name, exact: true })).toHaveCount(0);
@@ -132,9 +133,12 @@ for (const locale of ['fr', 'de', 'ar'] as const) {
     await expect(trigger).toBeFocused();
     await documentLocale(page, locale);
   });
+}
 
-  test(`i18n-${locale}-history-390`, async ({ page, gallery }) => {
-    await gallery.open(selected(`i18n-${locale}-history-390`, 'phone-history', 390, 844), locale);
+for (const selected of i18nHistoryCases) {
+  const { locale } = selected;
+  test(selected.id, async ({ page, gallery }) => {
+    await gallery.open(selected, locale);
     await documentLocale(page, locale);
     const dates = page.locator('time');
     await expect(dates).toHaveCount(2);
@@ -148,8 +152,8 @@ for (const locale of ['fr', 'de', 'ar'] as const) {
   });
 }
 
-test('i18n-ar-bidi-original-details', async ({ page, gallery }) => {
-  await gallery.open(selected('i18n-ar-bidi-original-details', 'phone-bidi', 390, 900), 'ar');
+test(i18nBidiCase.id, async ({ page, gallery }) => {
+  await gallery.open(i18nBidiCase, i18nBidiCase.locale);
   await documentLocale(page, 'ar');
   const program = page.locator('.program-name > bdi');
   const path = page.locator('.request-card > .request-facts .path-output');

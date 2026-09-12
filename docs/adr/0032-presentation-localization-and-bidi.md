@@ -43,7 +43,8 @@ WebView technical text gets LTR isolated paragraphs, never `dir=auto` or
 `unicode-bidi:plaintext`. All original DTOs, callbacks and protocol data remain
 unchanged. A displayed warning distinguishes escaped controls from ordinary
 text. Native notifications escape before BidiFormatter wrapping; if full escaped
-text exceeds the notification budget, show a details instruction and omit its
+text exceeds the notification budget, or the source projection has already
+elided its name/path, show a details instruction and omit its
 Approve action rather than silently truncating the visible filename tail.
 
 References: [UAX9](https://www.unicode.org/reports/tr9/),

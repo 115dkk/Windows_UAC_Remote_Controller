@@ -211,7 +211,8 @@ internal class NativeRequestRegistry(
             if (now < 0 || current.deadlineNanos <= now.toULong() || current.validUntilNanos <= now.toULong()) throw BridgeException.RequestUnavailable()
             val remaining = ((current.deadlineNanos - now.toULong()) / 1_000_000uL).toLong()
             if (remaining <= 0) throw BridgeException.RequestUnavailable()
-            val notification = renderer.build(RequestNotificationContent(current.program, current.path), mode, quiet, remaining, intents)
+            val notification = renderer.build(RequestNotificationContent(current.program, current.path,
+                current.programElided, current.pathElided), mode, quiet, remaining, intents)
             synchronized(owned.notificationLock) {
                 checkedPreview(owned)
                 if (owned.notificationFailed) throw BridgeException.NativeUnavailable()

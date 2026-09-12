@@ -24,7 +24,9 @@ export const PHASES = ['initial', 'verify-enabled', 'stop', 'verify-stopped', 's
 const TEST_CLASS = `${PACKAGE}.ControllerLifecycleTest`;
 const RUNNER = `${TEST_PACKAGE}/androidx.test.runner.AndroidJUnitRunner`;
 const MAX_APK = 256 * 1024 * 1024;
-export const SOURCE_ROOTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'package.json', 'package-lock.json', '.node-version', 'crates', 'src-tauri', 'ui', 'tools', 'vendor', '.github/workflows/android-lifecycle.yml']);
+export const SOURCE_ROOTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'package.json', 'package-lock.json', '.node-version',
+  'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json',
+  'crates', 'src-tauri', 'ui', 'locales', 'assets/fonts', 'tools', 'vendor', '.github/workflows/android-lifecycle.yml']);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const requireThat = (value, message) => { if (!value) throw new Error(message); };
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -48,7 +50,17 @@ export function requireSameSource(before, after) {
   'Malformed source file binding.');
   requireThat(before?.version === 1 && after?.version === 1 && /^[0-9a-f]{40}$/.test(before.commit) &&
     before.commit === after.commit && Object.keys(before.files ?? {}).length > 0 &&
-    JSON.stringify(before.files) === JSON.stringify(after.files), 'Build source changed or snapshot is incomplete.');
+    JSON.stringify(before.files) === JSON.stringify(after.files),
+  `Build source changed or snapshot is incomplete. Changed input paths: ${changedSourcePaths(before.files, after.files).slice(0, 8).join(', ') || '(commit, schema, inventory or ordering)'}`);
+}
+
+/** Diagnostic names only; never normalize or accept a changed build input. */
+export function changedSourcePaths(before, after) {
+  for (const files of [before, after]) requireThat(files !== null && typeof files === 'object' && !Array.isArray(files) &&
+    Object.values(files).every((entry) => entry !== null && typeof entry === 'object'), 'Malformed source file map.');
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().filter((path) =>
+    !Object.hasOwn(before, path) || !Object.hasOwn(after, path) ||
+    before[path].bytes !== after[path].bytes || before[path].sha256 !== after[path].sha256);
 }
 
 export function requireSameBoot(expected, actual) {
@@ -295,6 +307,9 @@ export async function main(args = process.argv.slice(2)) {
       return; // Operational preparation is not a passing lifecycle test.
     }
     const sourceFile = join(evidence, 'source-input.json'); regular(sourceFile, 4 * 1024 * 1024);
+    // Retain actual postbuild fingerprints before the strict equality gate so
+    // failed CI identifies source drift instead of discarding its only evidence.
+    json(join(directory, 'source-observed.json'), current);
     requireSameSource(JSON.parse(readFileSync(sourceFile, 'utf8')), current);
     result.source = { commit: current.commit, snapshotSha256: sha(readFileSync(sourceFile)) };
     const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;

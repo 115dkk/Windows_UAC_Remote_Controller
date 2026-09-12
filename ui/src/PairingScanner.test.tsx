@@ -136,6 +136,7 @@ describe('native QR-input entry, separate from pairing', () => {
     expect(entry).toBeEnabled();
     await waitFor(() => expect(entry).toHaveFocus());
     screen.getByRole('button', { name: ko.refresh }).focus();
+    await user.tab(); expect(screen.getByRole('button', { name: '앱 설정' })).toHaveFocus();
     await user.tab(); expect(entry).toHaveFocus();
     expect(openPairingScanner).toHaveBeenCalledTimes(1);
     expect(snapshot.devices).toEqual([]); expect(snapshot.canPair).toBe(false);

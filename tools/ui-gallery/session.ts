@@ -3,11 +3,13 @@ import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import type { Browser, Page, TestInfo } from '@playwright/test';
 import type { GalleryCase } from './cases';
+import { galleryLocales } from './i18n-cases';
+import type { GalleryLocale } from './i18n-cases';
+export { galleryLocales } from './i18n-cases';
+export type { GalleryLocale } from './i18n-cases';
 
 const bannerText = '화면 예시 · 실제 연결 아님';
 const maxMessages = 50;
-export const galleryLocales = ['ko', 'en', 'fr', 'de', 'ja', 'zh-Hans', 'zh-Hant', 'es', 'pt-BR', 'pt-PT', 'ar'] as const;
-export type GalleryLocale = typeof galleryLocales[number];
 const catalogs = new Map<GalleryLocale, Record<string, string>>(galleryLocales.map(locale => [
   locale, JSON.parse(readFileSync(new URL(`../../locales/${locale}.json`, import.meta.url), 'utf8')) as Record<string, string>,
 ]));

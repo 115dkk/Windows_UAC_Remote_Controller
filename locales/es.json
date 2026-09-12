@@ -157,7 +157,7 @@
   "앱의 저장 권한과 설치 상태를 확인한 뒤 다시 열어 주세요.": "Comprueba los permisos de almacenamiento y la instalación de la aplicación, y vuelve a abrirla.",
   "언어": "Idioma",
   "언어 설정을 저장하지 못했어요. 다시 시도해 주세요.": "No se pudo guardar el idioma. Inténtalo de nuevo.",
-  "언어를 바꿔도 PC 요청, 파일 경로와 연결 확인 숫자는 원문 그대로 표시합니다.": "Aunque cambies el idioma, las solicitudes del PC, las rutas de archivos y los números de confirmación de conexión se mostrarán en su forma original.",
+  "언어를 바꿔도 PC 요청, 파일 경로와 연결 확인 숫자는 원문 그대로 표시합니다.": "Cambiar el idioma no traduce las solicitudes del PC, las rutas de archivos ni los números de verificación del emparejamiento.",
   "연결 시간이 지났어요. 다시 시도해 주세요.": "Se agotó el tiempo de conexión. Inténtalo de nuevo.",
   "연결 안 됨": "Sin conexión",
   "연결 절차가 끝났어요. 잠시 뒤 목록에서 휴대폰을 확인해 주세요.": "El proceso de conexión terminó. Comprueba en unos instantes si el teléfono aparece en la lista.",

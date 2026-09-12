@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { AVD, PACKAGE, TEST_PACKAGE, SOURCE_ROOTS, inspectTestManifest, isPassiveReady, parseInstrumentation, parsePassiveDump,
-  requireCi, requireDevice, requireSameSource, servicePresence, requireSameBoot, commandEvidenceComplete,
+  requireCi, requireDevice, requireSameSource, changedSourcePaths, servicePresence, requireSameBoot, commandEvidenceComplete,
   finalizeLifecycleResult, nativeOperationUnconfirmed } from './android-lifecycle-ci.mjs';
 import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, extensionCommandLimits, requireFirstUnlockDevice,
   frameworkUserState, isPassiveWaitingForUnlock, hierarchyPath, requireHierarchyCompletion,
@@ -53,12 +53,52 @@ test('prebuild source snapshot rejects changed commit, missing or mutated inputs
 
 test('native lifecycle source binding includes the actual vendored Android implementation', () => {
   assert.ok(Object.isFrozen(SOURCE_ROOTS));
-  for (const input of ['Cargo.toml', 'Cargo.lock', 'crates', 'src-tauri', 'vendor', 'tools']) assert.ok(SOURCE_ROOTS.includes(input));
+  for (const input of ['Cargo.toml', 'Cargo.lock', 'crates', 'src-tauri', 'vendor', 'tools', 'locales', 'assets/fonts',
+    'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json']) assert.ok(SOURCE_ROOTS.includes(input));
   assert.equal(new Set(SOURCE_ROOTS).size, SOURCE_ROOTS.length);
   assert.throws(() => SOURCE_ROOTS.push('untracked-source'));
   const source = { version: 1, commit: 'a'.repeat(40), files: { 'vendor/wry/src/android/binding.rs': { bytes: 20, sha256: 'b'.repeat(64) } } };
   const changed = structuredClone(source); changed.files['vendor/wry/src/android/binding.rs'].sha256 = 'c'.repeat(64);
   assert.throws(() => requireSameSource(source, changed));
+});
+
+test('catalog, embedded font and build configuration changes remain source failures with named diagnostics', () => {
+  for (const malformed of [null, undefined, [], 42, { 'Cargo.lock': null }]) {
+    assert.throws(() => changedSourcePaths(malformed, {}), /Malformed source file map/);
+    assert.throws(() => changedSourcePaths({}, malformed), /Malformed source file map/);
+  }
+  for (const path of ['locales/ar.json', 'assets/fonts/native/UACSansArabic-Regular.ttf',
+    'crates/presentation-i18n/src/lib.rs', 'vite.config.ts', 'tsconfig.app.json', 'Cargo.lock']) {
+    const before = { version: 1, commit: 'a'.repeat(40), files: { [path]: { bytes: 20, sha256: 'b'.repeat(64) } } };
+    const after = structuredClone(before);
+    after.files[path].sha256 = 'c'.repeat(64);
+    assert.deepEqual(changedSourcePaths(before.files, after.files), [path]);
+    assert.throws(() => requireSameSource(before, after), (failure) =>
+      failure.message.startsWith('Build source changed or snapshot is incomplete.') && failure.message.includes(path));
+    assert.deepEqual(changedSourcePaths(before.files, {}), [path]);
+    assert.deepEqual(changedSourcePaths({}, before.files), [path]);
+  }
+});
+
+test('Cargo lock bytes are bound exactly even when a build only canonicalizes package ordering', () => {
+  const before = { version: 1, commit: 'a'.repeat(40), files: { 'Cargo.lock': { bytes: 300, sha256: 'b'.repeat(64) } } };
+  const reordered = structuredClone(before);
+  reordered.files['Cargo.lock'].sha256 = 'c'.repeat(64);
+  assert.throws(() => requireSameSource(before, reordered), /Cargo\.lock/);
+});
+
+test('the committed Cargo lock lists packages in canonical name order before source capture', () => {
+  const lock = readFileSync(new URL('../Cargo.lock', import.meta.url), 'utf8');
+  const names = [...lock.matchAll(/^\[\[package\]\]\r?\nname = "([A-Za-z0-9_-]+)"$/gm)].map((match) => match[1]);
+  assert.ok(names.length > 0);
+  assert.deepEqual(names, [...names].sort(), 'A newly inserted package must not make Cargo rewrite captured source bytes.');
+});
+
+test('the postbuild inventory is retained before a mismatch can terminate lifecycle evidence', () => {
+  const driver = readFileSync(new URL('./android-lifecycle-ci.mjs', import.meta.url), 'utf8');
+  const record = "json(join(directory, 'source-observed.json'), current);";
+  const verify = "requireSameSource(JSON.parse(readFileSync(sourceFile, 'utf8')), current);";
+  assert.ok(driver.indexOf(record) >= 0 && driver.indexOf(record) < driver.indexOf(verify));
 });
 
 test('reboot and package observations stay bound to the expected kernel boot identity', () => {

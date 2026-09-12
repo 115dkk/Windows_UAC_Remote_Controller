@@ -29,11 +29,11 @@ class RequestNotificationPolicyTest {
     @Test fun HostileLookingPreviewIsRetainedAsPlainTextAndDebugIsRedacted() {
         val program = "<script>synthetic</script>"
         val path = "C:\\synthetic\\אבג\\실행 파일.exe"
-        val content = RequestNotificationContent(program, path)
+        val content = RequestNotificationContent(program, path, false, false)
         assertEquals(program, content.program); assertEquals(path, content.path)
         assertFalse(content.toString().contains(program)); assertFalse(content.toString().contains(path))
     }
     @Test(expected = IllegalArgumentException::class) fun OversizedPreviewCannotReachRenderer() {
-        RequestNotificationContent("x".repeat(513), "synthetic.exe")
+        RequestNotificationContent("x".repeat(513), "synthetic.exe", false, false)
     }
 }

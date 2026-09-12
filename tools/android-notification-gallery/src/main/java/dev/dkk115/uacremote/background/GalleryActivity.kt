@@ -56,7 +56,7 @@ class GalleryActivity : Activity() {
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             }
             val notification = renderer.build(
-                RequestNotificationContent("PowerShell", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+                RequestNotificationContent("PowerShell", "C:\\Program Files\\PowerShell\\7\\pwsh.exe", false, false),
                 mode, selected == "restore", 60_000,
                 RequestNotificationActions(pending("open"), pending("approve"), pending("deny"), pending("details")),
             )

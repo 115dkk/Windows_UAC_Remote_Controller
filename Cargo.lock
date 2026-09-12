@@ -2950,6 +2950,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
+name = "presentation-i18n"
+version = "0.1.0-alpha.15"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5308,14 +5316,6 @@ dependencies = [
  "bitflags 2.13.1",
  "widestring",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "presentation-i18n"
-version = "0.1.0-alpha.15"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
