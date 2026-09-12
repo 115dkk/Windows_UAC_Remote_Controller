@@ -9,7 +9,7 @@ const runId = randomUUID();
 
 export default defineConfig({
   testDir: './tools/ui-gallery',
-  testMatch: ['gallery.spec.ts', 'i18n.spec.ts'],
+  testMatch: ['gallery.spec.ts', 'i18n.spec.ts', 'header.spec.ts'],
   outputDir: './target/ui-gallery/results',
   globalSetup: './tools/ui-gallery/preflight.ts',
   fullyParallel: false,

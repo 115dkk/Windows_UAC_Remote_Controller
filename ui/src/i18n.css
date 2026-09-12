@@ -19,9 +19,6 @@ html:lang(ar) body { line-height:1.8; }
 html:lang(ar) h1, html:lang(ar) h2, html:lang(ar) h3 { line-height:2.2; }
 html:lang(ja) body, html:lang(zh) body { word-break:normal; line-break:strict; }
 html:not(:lang(ko)) .navigation-item > span { word-break:normal; overflow-wrap:anywhere; hyphens:auto; }
-.header-actions { display:flex; align-items:center; gap:var(--space-1); flex-shrink:0; flex-wrap:wrap; max-width:100%; }
-.phone-shell .page-header { flex-wrap:wrap; }
-.app-settings-button { padding-inline:var(--space-2); }
 .language-settings { max-height:85dvh; overflow:auto; }
 .language-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--space-2); border:0; padding:var(--space-4) 0; }
 .language-choices legend { font-weight:600; margin-block:var(--space-3); }
@@ -34,4 +31,4 @@ html:not(:lang(ko)) .navigation-item > span { word-break:normal; overflow-wrap:a
 .original-text, .path-output, .command-region pre, bdi[dir="ltr"] { direction:ltr; unicode-bidi:isolate; text-align:start; }
 .path-output, .command-region pre { font-family:"Cascadia Code",Consolas,"Noto Sans","IBM Plex Sans KR","Noto Sans Arabic","Noto Sans JP","Noto Sans SC","Noto Sans TC",monospace; }
 [dir="rtl"] .disclosure-button > .icon:not(.chevron-expanded) { transform:scaleX(-1); }
-@media (max-width:24rem) { .language-choices { grid-template-columns:minmax(0,1fr); } .header-actions { flex-wrap:wrap; } }
+@media (max-width:24rem) { .language-choices { grid-template-columns:minmax(0,1fr); } }

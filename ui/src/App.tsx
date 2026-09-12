@@ -90,7 +90,8 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   function clearActivity() {
     setConfirmation({ title: ko.clearTitle, body: ko.clearBody, confirmLabel: ko.clearActivity, onConfirm: () => { void controller.run({ kind: 'clear' }); } });
   }
-  const refreshButton = <div className="header-actions"><button className="button quiet refresh-button" type="button" disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" />{refreshing ? ko.refreshing : ko.refresh}</button><button className="button quiet app-settings-button" type="button" aria-label={tr('앱 설정')} title={tr('앱 설정')} aria-haspopup="dialog" disabled={busy !== null || confirmation !== null} onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button></div>;
+  const refreshLabel = refreshing ? ko.refreshing : ko.refresh;
+  const refreshButton = <div className="header-actions"><button className="button quiet refresh-button" type="button" aria-label={refreshLabel} title={refreshLabel} disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" /><span className="refresh-label">{refreshLabel}</span></button><button className="button quiet app-settings-button" type="button" aria-label={tr('앱 설정')} title={tr('앱 설정')} aria-haspopup="dialog" disabled={busy !== null || confirmation !== null} onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button></div>;
 
   const settingsDialog = settingsOpen && <LanguageSettings onClose={() => setSettingsOpen(false)} />;
   if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ? tr(error) : ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main>{settingsDialog}</div>;
@@ -99,6 +100,10 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   const items = navigationFor(snapshot);
   const title = !phone && page === 'status' ? ko.homeTitle
     : items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
+  const description = !phone && page === 'status' ? ko.homePurpose
+    : page === 'schedule' ? ko.scheduleIntro
+      : page === 'requests' && snapshot.requests.some(request => request.state === 'pending')
+        && snapshot.dataAvailability.requests === 'available' ? ko.requestIntro : null;
   const navigation = <aside className="navigation-shell">
     <div className="app-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div>
     <nav aria-label={ko.navigation}>{items.map((item) => item.available
@@ -109,7 +114,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
 
   const main = <main id="main-content" className="main-scroll" tabIndex={-1}>
     <div className="page-content">
-      <header className="page-header"><div><h1 tabIndex={-1}>{title}</h1>{!phone && page === 'status' && <p>{ko.homePurpose}</p>}{page === 'requests' && snapshot.requests.some((request) => request.state === 'pending') && snapshot.dataAvailability.requests === 'available' && <p>{ko.requestIntro}</p>}{page === 'schedule' && <p>{ko.scheduleIntro}</p>}</div>{refreshButton}</header>
+      <header className="page-header"><h1 tabIndex={-1}>{title}</h1>{refreshButton}{description && <p className="page-description">{description}</p>}</header>
       {stale && <p className="stale-label"><Icon name="alert" />{ko.stale}</p>}
       {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{tr(error)}</p></section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(snapshot.issue.message)}</p>{snapshot.issue.nextAction && <p className="supporting-text">{tr(snapshot.issue.nextAction)}</p>}</div></section>}

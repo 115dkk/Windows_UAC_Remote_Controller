@@ -147,10 +147,18 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .rail-caption { margin-top: auto; padding: var(--space-8) var(--space-3) 0; color: var(--muted); font-size: var(--text-small); }
 .main-scroll { min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: contain; scrollbar-gutter: stable; scroll-padding-block: var(--space-6); }
 .page-content { max-width: var(--content-max); margin-inline: auto; padding: var(--space-8); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-8); }
-.page-header > div { min-width: 0; }
-.desktop-shell .page-header { flex-wrap: wrap; }
-.page-header p { color: var(--muted); margin-top: var(--space-2); }
+.page-header { container: page-heading / inline-size; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; column-gap: var(--space-4); row-gap: var(--space-2); margin-bottom: var(--space-8); --header-target: var(--target-desktop); }
+.page-header > h1 { grid-column: 1; grid-row: 1; min-width: 0; }
+.page-header > .header-actions { grid-column: 2; grid-row: 1; justify-self: end; align-items: start; flex-wrap: nowrap; max-width: none; }
+.page-header .page-description { grid-column: 1 / -1; color: var(--muted); }
+/* Compact by default, including engines without container-query support.
+   Width is measured in text-relative units, not title/description length. */
+.page-header .refresh-label { display: none; }
+.page-header .header-actions .refresh-button, .page-header .header-actions .app-settings-button { inline-size: var(--header-target); block-size: var(--header-target); min-block-size: var(--header-target); padding: 0; flex: 0 0 auto; }
+@container page-heading (min-width: 20em) {
+  .page-header .refresh-label { display: inline; }
+  .page-header .header-actions .refresh-button { inline-size: auto; block-size: auto; padding-inline: var(--space-2); }
+}
 .button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-width: var(--target-desktop); min-height: var(--target-desktop); padding: var(--space-2) var(--space-5); border: 1px solid transparent; border-radius: var(--radius-control); font-weight: 600; line-height: 1.5; text-align: center; transition: transform var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard); }
 .button:active:not(:disabled), button.navigation-item:active:not(:disabled), .disclosure-button:active:not(:disabled) { transform: scale(.96); }
 .button.primary { color: var(--on-accent); background: var(--accent); }
@@ -169,6 +177,8 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .pairing-entry > .supporting-text { margin-top: var(--space-3); }
 .pairing-entry > .button { margin-top: var(--space-4); width: 100%; }
 .refresh-button { flex: 0 0 auto; font-weight: 500; }
+.header-actions { display:flex; align-items:center; gap:var(--space-1); flex-shrink:0; flex-wrap:wrap; max-width:100%; }
+.app-settings-button { padding-inline:var(--space-2); }
 .surface { background: var(--surface); border-radius: var(--radius-card); box-shadow: var(--shadow-surface); }
 .service-card { padding: var(--space-8); }
 .service-heading-row { display: flex; gap: var(--space-4); align-items: center; }
@@ -220,8 +230,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .mobile-notices > .supporting-text { margin-bottom: var(--space-4); }
 .phone-shell { display: grid; grid-template-rows: minmax(0, 1fr) auto; font-family: var(--font-ui); }
 .phone-shell .page-content { max-width: var(--phone-content-max); padding: calc(var(--space-6) + env(safe-area-inset-top, 0px)) var(--space-5) var(--space-8); }
-.phone-shell .page-header { margin-bottom: var(--space-6); }
-.phone-shell .page-header .refresh-button { padding-inline: var(--space-2); }
+.phone-shell .page-header { margin-bottom: var(--space-6); --header-target: var(--target-phone); }
 .phone-shell .navigation-shell { padding: var(--space-2) max(var(--space-2), env(safe-area-inset-right, 0px)) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)) max(var(--space-2), env(safe-area-inset-left, 0px)); background: var(--surface); border-top: 1px solid var(--line); }
 .phone-shell .app-brand, .phone-shell .rail-caption { display: none; }
 .phone-shell .navigation-shell nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-1); width: 100%; max-width: var(--phone-content-max); margin-inline: auto; }
@@ -345,7 +354,6 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 @media (max-width: 24rem) {
   .phone-shell .page-content { padding-inline: var(--space-4); }
   .request-card { padding: var(--space-5); }
-  .page-header { flex-wrap: wrap; }
   .phone-shell .navigation-item { padding-inline: 0; }
 }
 @media (max-width: 20rem) {
