@@ -5,6 +5,7 @@ import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import dev.dkk115.uacremote.nativecore.BridgeException
 
 internal enum class BootDiagnosticAction { LOCKED_BOOT, BOOT, PACKAGE_REPLACED }
 internal enum class BootDiagnosticFailure { SECURITY, BACKGROUND_START, OTHER }
@@ -61,7 +62,12 @@ internal enum class OwnerFailureOrigin {
     CALL_TIMER_POST, CALL_TIMEOUT, CALL_WORKER_DEADLINE, CALL_EXCEPTION, CALL_MAIN_DEADLINE, CALL_MAIN_POST,
     REQUEST_MAINTENANCE, APPROVAL_OWNER, DENIAL_OWNER,
 }
-internal enum class OwnerFailureCategory { NOT_CAPTURED, LINKAGE, SECURITY, STATE_CHECK, OTHER }
+internal enum class OwnerFailureCategory {
+    NOT_CAPTURED, LINKAGE, SECURITY, STATE_CHECK, OTHER,
+    BRIDGE_STORAGE_UNAVAILABLE, BRIDGE_INVALID_POLICY, BRIDGE_LIFECYCLE_INTEGRATION_REQUIRED,
+    BRIDGE_OWNER_FAULTED, BRIDGE_LOCAL_KEYS_RECONCILIATION_REQUIRED, BRIDGE_LOCAL_KEYS_UNAVAILABLE,
+    BRIDGE_NATIVE_UNAVAILABLE, BRIDGE_INVALID_OBSERVATION, BRIDGE_BUSY, BRIDGE_CLOSED,
+}
 
 /** Closed diagnostic metadata only; no Throwable, native handle or user input. */
 internal data class OwnerDiagnosticRecord(
@@ -211,6 +217,16 @@ internal object BootDiagnostics {
         is LinkageError -> OwnerFailureCategory.LINKAGE
         is SecurityException -> OwnerFailureCategory.SECURITY
         is IllegalStateException -> OwnerFailureCategory.STATE_CHECK
+        is BridgeException.StorageUnavailable -> OwnerFailureCategory.BRIDGE_STORAGE_UNAVAILABLE
+        is BridgeException.InvalidPolicy -> OwnerFailureCategory.BRIDGE_INVALID_POLICY
+        is BridgeException.LifecycleIntegrationRequired -> OwnerFailureCategory.BRIDGE_LIFECYCLE_INTEGRATION_REQUIRED
+        is BridgeException.OwnerFaulted -> OwnerFailureCategory.BRIDGE_OWNER_FAULTED
+        is BridgeException.LocalKeysReconciliationRequired -> OwnerFailureCategory.BRIDGE_LOCAL_KEYS_RECONCILIATION_REQUIRED
+        is BridgeException.LocalKeysUnavailable -> OwnerFailureCategory.BRIDGE_LOCAL_KEYS_UNAVAILABLE
+        is BridgeException.NativeUnavailable -> OwnerFailureCategory.BRIDGE_NATIVE_UNAVAILABLE
+        is BridgeException.InvalidObservation -> OwnerFailureCategory.BRIDGE_INVALID_OBSERVATION
+        is BridgeException.Busy -> OwnerFailureCategory.BRIDGE_BUSY
+        is BridgeException.Closed -> OwnerFailureCategory.BRIDGE_CLOSED
         else -> OwnerFailureCategory.OTHER
     }
 

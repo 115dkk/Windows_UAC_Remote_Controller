@@ -951,30 +951,40 @@ fn font_face(locale: Locale) -> &'static str {
 }
 
 fn font_bytes(locale: Locale) -> [&'static [u8]; 2] {
-    macro_rules! family {
-        ($name:literal) => {{
-            const REGULAR: &[u8] = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/fonts/native/",
-                $name,
-                "-Regular.ttf"
-            ));
-            const BOLD: &[u8] = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/fonts/native/",
-                $name,
-                "-Bold.ttf"
-            ));
-            [REGULAR, BOLD]
-        }};
-    }
+    // Literal include paths and explicit slice types keep each font visible to
+    // rust-analyzer without nested macro/concat/env expansion and coercion.
+    // These are the same fixed compile-time inputs; no runtime path is accepted.
+    static LATIN_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSans-Regular.ttf");
+    static LATIN_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSans-Bold.ttf");
+    static KOREAN_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansKR-Regular.ttf");
+    static KOREAN_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansKR-Bold.ttf");
+    static JAPANESE_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansJP-Regular.ttf");
+    static JAPANESE_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansJP-Bold.ttf");
+    static SIMPLIFIED_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansSC-Regular.ttf");
+    static SIMPLIFIED_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansSC-Bold.ttf");
+    static TRADITIONAL_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansTC-Regular.ttf");
+    static TRADITIONAL_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansTC-Bold.ttf");
+    static ARABIC_REGULAR: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansArabic-Regular.ttf");
+    static ARABIC_BOLD: &[u8] =
+        include_bytes!("../../../../../assets/fonts/native/UACSansArabic-Bold.ttf");
     match locale {
-        Locale::Ko => family!("UACSansKR"),
-        Locale::Ja => family!("UACSansJP"),
-        Locale::ZhHans => family!("UACSansSC"),
-        Locale::ZhHant => family!("UACSansTC"),
-        Locale::Ar => family!("UACSansArabic"),
-        _ => family!("UACSans"),
+        Locale::Ko => [KOREAN_REGULAR, KOREAN_BOLD],
+        Locale::Ja => [JAPANESE_REGULAR, JAPANESE_BOLD],
+        Locale::ZhHans => [SIMPLIFIED_REGULAR, SIMPLIFIED_BOLD],
+        Locale::ZhHant => [TRADITIONAL_REGULAR, TRADITIONAL_BOLD],
+        Locale::Ar => [ARABIC_REGULAR, ARABIC_BOLD],
+        _ => [LATIN_REGULAR, LATIN_BOLD],
     }
 }
 

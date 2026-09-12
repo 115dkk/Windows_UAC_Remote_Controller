@@ -2,6 +2,7 @@
 package dev.dkk115.uacremote.background
 
 import android.content.Intent
+import dev.dkk115.uacremote.nativecore.BridgeException
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -13,6 +14,32 @@ import org.junit.Test
 
 /** Pure formatting/category tests. No Log call, boot or service execution. */
 class BootDiagnosticsTest {
+    @Test fun nativeBridgeFailuresKeepFixedDistinctCategoriesWithoutChangingTheStatus() {
+        val failures = listOf(
+            BridgeException.StorageUnavailable() to OwnerFailureCategory.BRIDGE_STORAGE_UNAVAILABLE,
+            BridgeException.InvalidPolicy() to OwnerFailureCategory.BRIDGE_INVALID_POLICY,
+            BridgeException.LifecycleIntegrationRequired() to OwnerFailureCategory.BRIDGE_LIFECYCLE_INTEGRATION_REQUIRED,
+            BridgeException.OwnerFaulted() to OwnerFailureCategory.BRIDGE_OWNER_FAULTED,
+            BridgeException.LocalKeysReconciliationRequired() to OwnerFailureCategory.BRIDGE_LOCAL_KEYS_RECONCILIATION_REQUIRED,
+            BridgeException.LocalKeysUnavailable() to OwnerFailureCategory.BRIDGE_LOCAL_KEYS_UNAVAILABLE,
+            BridgeException.NativeUnavailable() to OwnerFailureCategory.BRIDGE_NATIVE_UNAVAILABLE,
+            BridgeException.InvalidObservation() to OwnerFailureCategory.BRIDGE_INVALID_OBSERVATION,
+            BridgeException.Busy() to OwnerFailureCategory.BRIDGE_BUSY,
+            BridgeException.Closed() to OwnerFailureCategory.BRIDGE_CLOSED,
+        )
+        assertEquals(failures.size, failures.map { it.second }.toSet().size)
+        for ((failure, expected) in failures) {
+            val actual = BootDiagnostics.ownerFailureCategory(failure)
+            assertEquals(expected, actual)
+            val line = OwnerDiagnosticRecord(OwnerDiagnosticEvent.OWNER_FIRST_FAILURE,
+                OwnerInitializationStep.OPEN_NATIVE_OWNER, PolicyOwnerPhase.STARTING,
+                OwnerFailureOrigin.INIT_EXCEPTION, actual, PolicyStatus.STORAGE_UNAVAILABLE).line()
+            assertTrue(line.contains(" owner_category=${expected.name}"))
+            assertTrue(line.endsWith(" owner_status=STORAGE_UNAVAILABLE"))
+            assertFalse(line.contains("Exception"))
+        }
+    }
+
     @Test fun onlyFixedAcceptedBootActionCategoriesCanReachTheRecord() {
         assertEquals(BootDiagnosticAction.LOCKED_BOOT, BootDiagnostics.bootAction(Intent.ACTION_LOCKED_BOOT_COMPLETED))
         assertEquals(BootDiagnosticAction.BOOT, BootDiagnostics.bootAction(Intent.ACTION_BOOT_COMPLETED))
