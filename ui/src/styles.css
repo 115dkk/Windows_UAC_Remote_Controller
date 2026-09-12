@@ -118,7 +118,7 @@ h1 { font-size: var(--text-title); line-height: 1.35; font-weight: var(--weight-
 h2 { font-size: var(--text-section); line-height: 1.45; font-weight: 600; }
 h3 { font-size: var(--text-body); font-weight: 600; }
 p { text-wrap: pretty; word-break: keep-all; overflow-wrap: anywhere; }
-button, label, bdi, dd, li { overflow-wrap: anywhere; }
+button, label, bdi, dt, dd, li, legend { overflow-wrap: anywhere; }
 button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
@@ -281,6 +281,7 @@ fieldset { min-width: 0; margin: 0; }
 .schedule-modes { display: flex; flex-direction: column; gap: var(--space-2); }
 .radio-option { display: flex; gap: var(--space-3); align-items: flex-start; min-height: var(--target-phone); padding: var(--space-3); margin-inline: calc(-1 * var(--space-3)); border-radius: var(--radius-control); cursor: pointer; border: 1px solid transparent; }
 .radio-option.selected { background: var(--accent-soft); }
+.radio-option > span { min-width: 0; }
 input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); flex: 0 0 auto; width: 1.125rem; height: 1.125rem; margin: var(--space-1) 0 0; }
 .option-title { display: block; font-size: var(--text-body); font-weight: 500; }
 .option-description { display: block; font-size: var(--text-small); color: var(--muted); margin-top: var(--space-1); }
