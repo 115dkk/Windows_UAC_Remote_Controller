@@ -8,6 +8,16 @@ import { ko } from './messages.ko';
 import { createQaBridge, qaCase } from './qa-fixtures';
 
 describe('pre-approval connection guidance', () => {
+  it('allows both QR entry and default notification settings before any PC is paired', async () => {
+    const snapshot = qaCase('phone-scanner-launch').snapshot;
+    render(<App bridge={createQaBridge(snapshot)} initialPage="schedule" />);
+    expect(await screen.findByRole('heading', { name: ko.noComputers })).toBeVisible();
+    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeEnabled();
+    expect(screen.getByRole('radio', { name: ko.always, exact: true })).toBeChecked();
+    expect(screen.queryByRole('heading', { name: ko.policyUnavailableTitle })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: ko.policyOwnerUnavailableTitle })).not.toBeInTheDocument();
+  });
+
   it('keeps PC setup reachable before inventory is available and explains the disabled QR action', async () => {
     const snapshot = qaCase('desktop-unavailable').snapshot;
     const beginPairing = vi.fn(() => Promise.resolve(snapshot));
@@ -102,7 +112,7 @@ describe('pre-approval connection guidance', () => {
     expect(await screen.findByRole('region', { name: ko.pairComputer })).toBeVisible();
     expect(screen.queryByRole('heading', { name: ko.noComputers })).not.toBeInTheDocument();
     expect(screen.getByText(ko.serviceUnknown)).toBeVisible();
-    expect(screen.getByRole('heading', { name: ko.policyUnavailableTitle })).toBeVisible();
+    expect(screen.getByRole('heading', { name: ko.policyOwnerUnavailableTitle })).toBeVisible();
     expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
     expect(screen.getByRole('button', { name: ko.refresh })).toBeEnabled();
   });

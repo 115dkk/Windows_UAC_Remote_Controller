@@ -7,8 +7,8 @@ import { alertModeText, ko, timeWindowLabel, weekdayOptions } from './messages.k
 import { draftFromPolicy, parseDraft, samePolicy, timeToMinute } from './policy-draft';
 import type { DraftErrors, PolicyDraft, WindowDraft } from './policy-draft';
 
-export function PolicyEditor({ policy, available, unavailableBody = ko.policyUnavailableBody, disabled, saving, onSave }: {
-  policy: NotificationPolicy | null; available: boolean; unavailableBody?: string; disabled: boolean; saving: boolean;
+export function PolicyEditor({ policy, available, unavailableTitle = ko.policyUnavailableTitle, unavailableBody = ko.policyUnavailableBody, disabled, saving, onSave }: {
+  policy: NotificationPolicy | null; available: boolean; unavailableTitle?: string; unavailableBody?: string; disabled: boolean; saving: boolean;
   onSave: (policy: NotificationPolicy) => Promise<NotificationPolicy | null>;
 }) {
   // A null draft follows refreshed native settings. A real draft never gets overwritten by a refresh.
@@ -77,7 +77,7 @@ export function PolicyEditor({ policy, available, unavailableBody = ko.policyUna
   // Stay mounted across transient unavailability, but render no stale/default
   // policy controls. The memory-only draft remains until this client is closed.
   if (policy === null || !available || value === null) return <section className="notice-box" role="status" aria-labelledby={`${id}-unavailable`}>
-    <Icon name="clock" /><div><h2 id={`${id}-unavailable`}>{ko.policyUnavailableTitle}</h2><p>{unavailableBody}</p>{draft !== null && <p className="supporting-text">{ko.policyDraftKept}</p>}</div>
+    <Icon name="clock" /><div><h2 id={`${id}-unavailable`}>{unavailableTitle}</h2><p>{unavailableBody}</p>{draft !== null && <p className="supporting-text">{ko.policyDraftKept}</p>}</div>
   </section>;
 
   return <form ref={form} className="policy-form" onSubmit={submit} noValidate

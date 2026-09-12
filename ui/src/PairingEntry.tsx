@@ -20,6 +20,6 @@ export function PairingEntry({ snapshot, disabled, onOpenScanner, scannerButtonR
     <button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button primary"
       disabled={disabled || !canScan} aria-describedby={`${description}${canScan ? '' : ` ${unavailable}`}`}
       onClick={onOpenScanner}>{ko.openPairingScanner}</button>
-    {!canScan && <p id={unavailable} className="supporting-text">{ko.pairingScannerNotReady}</p>}
+    {!canScan && <p id={unavailable} className="supporting-text">{snapshot.phoneService?.state === 'unavailable' ? ko.policyRestartOwner : ko.pairingScannerNotReady}</p>}
   </section>;
 }

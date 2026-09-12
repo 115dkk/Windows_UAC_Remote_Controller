@@ -6,7 +6,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import type { Confirmation } from './ConfirmDialog';
 import { Icon } from './icons';
 import type { IconName } from './icons';
-import { ko, policyUnavailableText, serviceActionText, serviceConfirmText } from './messages.ko';
+import { ko, policyUnavailableText, policyUnavailableTitleText, serviceActionText, serviceConfirmText } from './messages.ko';
 import { PolicyEditor } from './PolicyEditor';
 import { PhoneServicePanel } from './PhoneServicePanel';
 import { PairingEntry } from './PairingEntry';
@@ -108,7 +108,7 @@ export function App({ bridge, initialPage }: { bridge: ControllerBridge; initial
       {phone && page === 'schedule' && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
-      {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
+      {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableTitle={policyUnavailableTitleText(snapshot.phoneService)} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });
         return result?.policy ?? null;
       }} /></div>}

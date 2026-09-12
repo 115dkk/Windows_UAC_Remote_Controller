@@ -29,7 +29,7 @@ describe('Android service controls from actual snapshot capabilities', () => {
     expect(screen.getByText(ko.phoneBootOff)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: ko.phoneStartAction })).toBeEnabled();
     expect(screen.queryByRole('button', { name: ko.phoneStopAction })).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: ko.policyUnavailableTitle })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: ko.policyStoppedTitle })).toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.phoneActivity })).not.toBeInTheDocument();

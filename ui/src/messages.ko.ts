@@ -89,6 +89,12 @@ export const ko = {
   phoneServiceReadyBody: '앱 설정을 사용할 수 있어요. 받은 요청은 요청 화면에서 확인해 주세요.',
   policyUnavailableTitle: '알림 시간 설정을 읽을 수 없어요',
   policyUnavailableBody: '현재 설정을 다시 확인해 주세요. 읽기 전에는 변경할 수 없어요.',
+  policyOwnerUnavailableTitle: '앱 준비를 완료하지 못했어요',
+  policyStoppedTitle: '휴대폰 승인을 켜 주세요',
+  policyPreparingTitle: '알림 설정을 준비하고 있어요',
+  policyUnlockTitle: '휴대폰 잠금을 풀어 주세요',
+  policyCleanupTitle: '휴대폰 승인을 정리하고 있어요',
+  policyRestartOwner: 'QR 촬영과 알림 설정을 준비하지 못했어요. 최신 버전으로 업데이트한 뒤 다시 확인해 주세요.',
   policyStartFirst: '휴대폰 승인을 켠 뒤 설정을 다시 확인해 주세요.',
   policyPreparing: '앱 설정을 준비하고 있어요. 잠시 후 다시 확인해 주세요.',
   policyUnlockFirst: '휴대폰 잠금이 해제된 뒤 설정을 다시 확인해 주세요.',
@@ -184,7 +190,18 @@ export function policyUnavailableText(service: PhoneServiceView | null): string 
   if (service?.state === 'waiting_for_unlock') return ko.policyUnlockFirst;
   if (service?.state === 'preparing') return ko.policyPreparing;
   if (service?.state === 'cleanup_pending') return ko.policyCleanupPending;
+  if (service?.state === 'unavailable' && service.canStop) return ko.policyRestartOwner;
   return service?.canStart ? ko.policyStartFirst : ko.policyUnavailableBody;
+}
+export function policyUnavailableTitleText(service: PhoneServiceView | null): string {
+  if (service?.state === 'local_settings_ready' && service.policyOwnerReady) return ko.policyUnavailableTitle;
+  switch (service?.state) {
+    case 'stopped': return ko.policyStoppedTitle;
+    case 'preparing': return ko.policyPreparingTitle;
+    case 'waiting_for_unlock': return ko.policyUnlockTitle;
+    case 'cleanup_pending': return ko.policyCleanupTitle;
+    default: return ko.policyOwnerUnavailableTitle;
+  }
 }
 export const serviceActionText: Record<ServiceAction, string> = {
   install: 'PC 연결 기능 설치', start: '휴대폰 승인 켜기', stop: '휴대폰 승인 끄기', restart: '휴대폰 승인 다시 켜기', uninstall: 'PC 연결 기능 제거',

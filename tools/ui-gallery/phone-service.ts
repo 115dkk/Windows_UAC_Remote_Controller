@@ -2,6 +2,8 @@
 import { expect } from '@playwright/test';
 import type { test as GalleryTest } from './session';
 import { phoneServiceGalleryCases } from './phone-service-cases';
+import { policyUnavailableTitleText } from '../../ui/src/messages.ko';
+import { qaCase } from '../../ui/src/qa-fixtures';
 
 /** ROOT registers these once, and lists the same cases in the report inventory. */
 export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
@@ -21,7 +23,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await expect(page.getByRole('radio', { name: '항상', exact: true })).toBeChecked();
         await expect(panel.getByText('켜짐', { exact: true })).toBeVisible();
       } else {
-        await expect(page.getByRole('heading', { name: '알림 시간 설정을 읽을 수 없어요', exact: true })).toBeVisible();
+        await expect(page.getByRole('heading', { name: policyUnavailableTitleText(qaCase(selected.fixture).snapshot.phoneService), exact: true })).toBeVisible();
         await expect(page.getByRole('radio')).toHaveCount(0);
         await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
       }
