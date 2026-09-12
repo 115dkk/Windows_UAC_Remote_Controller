@@ -20,6 +20,7 @@ const pkg = 'dev.dkk115.uacremote';
 const report = { source: expected, commit: readFileSync('evidence/product-commit.txt', 'utf8').trim(),
   release: true, minified: true, pregrantedCameraPermission: true,
   pairedPcCount: 0, physicalDeviceVerified: false, authenticationVerified: false, checks: [], passed: false };
+let clicks = 0;
 function adb(args, binary = false) {
   const value = spawnSync(adbPath, ['-s', serial, ...args], { encoding: binary ? undefined : 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
   if (value.error || value.signal || value.status !== 0) throw new Error(`ADB command failed: ${args[0]}`);
@@ -47,11 +48,19 @@ async function clickLabel(label) {
   const view = await until(ui, view => Boolean(nodeFor(view, label)), label, 15);
   const node = nodeFor(view, label);
   assert.equal(node.getAttribute('enabled'), 'true', label);
+  assert.equal(node.getAttribute('clickable'), 'true', label);
   const bounds = /^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/.exec(node.getAttribute('bounds'));
   assert.ok(bounds, label);
   const [, left, top, right, bottom] = bounds.map(Number);
   assert.ok(right > left && bottom > top && right <= 4096 && bottom <= 4096);
-  adb(['shell', 'input', 'tap', String(Math.floor((left + right) / 2)), String(Math.floor((top + bottom) / 2))]);
+  adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
+  const x = String(Math.floor((left + right) / 2)), y = String(Math.floor((top + bottom) / 2));
+  // A short held touchscreen gesture, with the display awake, rather than a
+  // zero-duration input that can be consumed merely waking the emulator.
+  adb(['shell', 'input', 'touchscreen', 'swipe', x, y, x, y, '120']);
+  clicks += 1;
+  writeFileSync(`evidence/click-${clicks}-before.xml`, view.xml);
+  writeFileSync(`evidence/click-${clicks}-after.xml`, ui().xml);
 }
 try {
   const manifest = readFileSync('evidence/manifest.xml', 'utf8');
@@ -61,12 +70,19 @@ try {
   assert.equal(adb(['shell', 'getprop', 'ro.kernel.qemu']).trim(), '1');
   assert.match(adb(['emu', 'avd', 'name']), /^uac-release-startup-ci\r?\n/);
   assert.equal(adb(['shell', 'getprop', 'ro.product.cpu.abi']).trim(), 'x86_64');
+  // Disposable emulator foreground-test preconditions. The configured secure
+  // lock remains intact; no personal-device or product authentication setting.
+  adb(['shell', 'svc', 'power', 'stayon', 'true']);
+  adb(['shell', 'settings', 'put', 'system', 'screen_off_timeout', '1800000']);
+  adb(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
   // Public synthetic emulator lock, not a user credential or authentication test.
   adb(['shell', 'locksettings', 'set-pin', '2468']);
   adb(['install', resolve(process.env.RUNNER_TEMP, 'startup.apk')]);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.CAMERA']);
   adb(['shell', 'pm', 'grant', pkg, 'android.permission.POST_NOTIFICATIONS']);
   adb(['shell', 'am', 'start', '-W', '-n', `${pkg}/.MainActivity`]);
+  writeFileSync('evidence/power.txt', adb(['shell', 'dumpsys', 'power']));
+  writeFileSync('evidence/window-policy.txt', adb(['shell', 'dumpsys', 'window', 'policy']));
   const state = await until(dump, value => /owner_phase=(READY|FAILED|CLOSED)/.test(value), 'native owner startup');
   writeFileSync('evidence/owner.txt', state);
   if (expected === 'alpha4-negative-control') {
@@ -100,5 +116,11 @@ try {
   try { writeFileSync('evidence/owner-final.txt', dump()); } catch {}
   if (expected === 'current') try { writeFileSync('evidence/final-ui.xml', ui().xml); } catch {}
   try { writeFileSync('evidence/native-startup.log', adb(['logcat', '-d', '-s', 'UacBoot:I', 'UacScan:I', '*:S'])); } catch {}
+  if (expected === 'current') try {
+    const pid = adb(['shell', 'pidof', pkg]).trim();
+    assert.match(pid, /^\d+$/);
+    // This process is a fresh unpaired CI install; no request/QR/key is supplied.
+    writeFileSync('evidence/client-errors.log', adb(['logcat', '-d', `--pid=${pid}`, '-s', 'chromium:E', 'AndroidRuntime:E', '*:S']));
+  } catch {}
   writeFileSync('evidence/result.json', JSON.stringify(report, null, 2));
 }
