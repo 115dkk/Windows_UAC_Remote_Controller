@@ -14,7 +14,9 @@ html:lang(ko) { --font-ui:"IBM Plex Sans KR", "Noto Sans", "Noto Sans Arabic", "
 .language-choices bdi { font-family:var(--font-ui); }
 .language-choices [lang="ko"] { font-family:"IBM Plex Sans KR",sans-serif; }
 html:lang(ar) body { line-height:1.8; }
-html:lang(ar) h1, html:lang(ar) h2, html:lang(ar) h3 { line-height:1.8; }
+/* Noto Sans Arabic includes tall marks above/below the baseline. Reserve its
+   full heading metrics rather than inheriting the compact Latin heading box. */
+html:lang(ar) h1, html:lang(ar) h2, html:lang(ar) h3 { line-height:2.2; }
 html:lang(ja) body, html:lang(zh) body { word-break:normal; line-break:strict; }
 html:not(:lang(ko)) .navigation-item > span { word-break:normal; overflow-wrap:anywhere; hyphens:auto; }
 .header-actions { display:flex; align-items:center; gap:var(--space-1); flex-shrink:0; flex-wrap:wrap; max-width:100%; }
