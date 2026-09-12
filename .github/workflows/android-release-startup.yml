@@ -59,7 +59,10 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - name: Build genuine minified non-debuggable release APK
         working-directory: product
-        run: npm run tauri -- android build --target x86_64 --apk --ci
+        run: |
+          mkdir -p ../evidence
+          git rev-parse HEAD > ../evidence/product-commit.txt
+          npm run tauri -- android build --target x86_64 --apk --ci
       - name: Sign disposable test APK and preserve build evidence
         shell: bash
         env:

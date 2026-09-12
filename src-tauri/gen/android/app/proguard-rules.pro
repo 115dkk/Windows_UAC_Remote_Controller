@@ -25,5 +25,14 @@
 # fields, constructors and method shapes. Debug APKs do not exercise R8.
 # Keep this generated ABI and its native loader; the rest of release stays shrunk.
 -keep class dev.dkk115.uacremote.nativecore.** { *; }
--keep class com.sun.jna.** { *; }
+-keep class com.sun.jna.* { *; }
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+
+# JNA's documented Android configuration excludes optional desktop AWT types.
+# Keep this list limited to the four types reported by the real release R8 job;
+# no missing Android/native ABI class or general warning is suppressed.
+# https://github.com/java-native-access/jna/blob/master/www/FrequentlyAskedQuestions.md#jna-on-android
+-dontwarn java.awt.Component
+-dontwarn java.awt.GraphicsEnvironment
+-dontwarn java.awt.HeadlessException
+-dontwarn java.awt.Window
