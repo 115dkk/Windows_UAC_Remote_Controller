@@ -117,14 +117,15 @@ impl PcIdentityKey {
     /// It is not called automatically by this crate, its tests or any CLI.
     /// Built-in security policies and the protected DACL must be accepted and
     /// read back before finalization. PCP's unfinished length/scope placeholders
-    /// are accepted only then; completed properties and the P-256 public blob
-    /// must pass strict validation after finalization and through a reopened key.
+    /// are accepted only then. The persisted key is reopened and must pass every
+    /// completed policy and P-256 public-blob check before it is returned; its
+    /// public point must also match the original creation handle.
     /// A collision fails. It never treats an existing key as its own to delete.
     ///
     /// `CreationStateUncertain` requires operator attention: after a failed
     /// finalize the adapter cannot prove whether the provider persisted the key.
-    /// It will not delete by name or silently retry/overwrite. `CleanupFailed`
-    /// likewise explicitly reports a failed rollback of its own finalized key.
+    /// It will not delete or silently retry/overwrite. `FinalizedKeyRejected`
+    /// retains the persisted key and the original validation error for recovery.
     pub fn create_for_service() -> Result<Self, IdentityError> {
         #[cfg(windows)]
         {
@@ -293,6 +294,8 @@ pub enum IdentityEncodingError {
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
+    #[error("finalized PC identity retained after validation failed: {cause}")]
+    FinalizedKeyRejected { cause: Box<Self> },
     #[error("TPM-backed PC identity is supported only on Windows")]
     UnsupportedPlatform,
     #[error("PC identity policy rejected: {0:?}")]

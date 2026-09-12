@@ -461,6 +461,8 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
             .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
         ffi::provision_activity_directory()?;
         ffi::provision_trust_directory()?;
+        ffi::TrustDirectory::open_for_elevated_configuration()?
+            .authorize_missing_registry_bootstrap()?;
         Ok(())
     };
     prepare().map_err(incomplete)?;

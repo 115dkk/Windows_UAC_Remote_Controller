@@ -46,6 +46,9 @@ const DIRECTORY_NAME: &str = "trust";
 const FILE_NAME: &str = "devices.journal";
 const RELAY_FILE_NAME: &str = "relay-endpoint.v1";
 const RELAY_STAGING_FILE_NAME: &str = "relay-endpoint.v1.staging";
+const BOOTSTRAP_FILE_NAME: &str = "initial-registry-permit.v1";
+const BOOTSTRAP_PENDING: &[u8; 8] = b"UACREG1P";
+const BOOTSTRAP_CONSUMED: &[u8; 8] = b"UACREG1C";
 const MAX_RELAY_FILE_BYTES: u64 = 48;
 pub(crate) const MAX_TRUST_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
@@ -119,6 +122,63 @@ impl fmt::Debug for TrustDirectory {
     }
 }
 impl TrustDirectory {
+    /// Explicit elevated reinstall may finish an interrupted first bootstrap.
+    /// Existing (even corrupt/empty) journals are never replaced by this grant.
+    pub(crate) fn authorize_missing_registry_bootstrap(&mut self) -> Result<(), ServiceError> {
+        if !matches!(self.context, AccessContext::Elevated) {
+            return Err(unavailable());
+        }
+        if !self.is_empty_registry_absent()? {
+            return Ok(());
+        }
+        self.operate(|owner| {
+            let file = match owner.open_named(BOOTSTRAP_FILE_NAME, false)? {
+                Some(file) => {
+                    owner.read_bootstrap_permit(&file)?;
+                    file
+                }
+                None => owner
+                    .open_named(BOOTSTRAP_FILE_NAME, true)?
+                    .ok_or_else(unavailable)?,
+            };
+            owner.inspect_named_file(&file, BOOTSTRAP_FILE_NAME, 8)?;
+            write_all_and_flush(&file, BOOTSTRAP_PENDING)?;
+            if !owner.read_bootstrap_permit(&file)? {
+                return Err(unavailable());
+            }
+            file.close()
+        })
+    }
+
+    /// Consume before any registry creation. A crash after consumption requires
+    /// a new elevated reinstall, not an automatic reset on a later boot.
+    pub(crate) fn take_missing_registry_bootstrap(&mut self) -> Result<bool, ServiceError> {
+        if !matches!(self.context, AccessContext::Service) {
+            return Err(unavailable());
+        }
+        self.operate(|owner| {
+            let Some(file) = owner.open_named(BOOTSTRAP_FILE_NAME, false)? else {
+                return Ok(false);
+            };
+            let pending = owner.read_bootstrap_permit(&file)?;
+            if pending {
+                write_all_and_flush(&file, BOOTSTRAP_CONSUMED)?;
+                if owner.read_bootstrap_permit(&file)? {
+                    return Err(unavailable());
+                }
+            }
+            file.close()?;
+            Ok(pending)
+        })
+    }
+
+    fn read_bootstrap_permit(&self, file: &TrustHandle) -> Result<bool, ServiceError> {
+        let size = self.inspect_named_file(file, BOOTSTRAP_FILE_NAME, 8)?;
+        let bytes = read_exact_bounded(file, size, 8)?;
+        self.inspect_named_file(file, BOOTSTRAP_FILE_NAME, 8)?;
+        parse_bootstrap_permit(&bytes).ok_or_else(unavailable)
+    }
+
     pub(crate) fn open_for_service() -> Result<Self, ServiceError> {
         service_context()?;
         Self::open(AccessContext::Service)
@@ -424,6 +484,7 @@ impl TrustDirectory {
                     && name != ".."
                     && name != FILE_NAME
                     && name != RELAY_FILE_NAME
+                    && name != BOOTSTRAP_FILE_NAME
                     && !(allow_staging && name == RELAY_STAGING_FILE_NAME)
                 {
                     return Err(unavailable());
@@ -723,17 +784,21 @@ fn read_exact_bounded(
     Ok(bytes)
 }
 
-/// Writes the whole content from the start of a freshly created empty file and
-/// flushes it. Partial writes advance once only; any failure poisons the owner.
+/// Writes an empty file or an exact-size fixed permit update; never truncates.
+/// Partial writes advance once only; any failure poisons the owner.
 fn write_all_and_flush(file: &TrustHandle, bytes: &[u8]) -> Result<(), ServiceError> {
     let handle = file.handle()?;
+    let size = file_size(handle)?;
+    if size != 0 && size != bytes.len() as u64 {
+        return Err(unavailable());
+    }
     seek(handle, FILE_BEGIN, 0)?;
     let mut offset = 0;
     while offset < bytes.len() {
         let count = (bytes.len() - offset).min(IO_CHUNK_BYTES);
         let mut written = 0;
-        // SAFETY: fixed owned synchronous handle at offset zero of an empty
-        // CREATE_NEW file, bounded immutable caller-owned bytes and exclusive
+        // SAFETY: fixed owned synchronous handle at offset zero of an empty or
+        // exact-size file, bounded immutable caller-owned bytes and exclusive
         // scalar output. The API retains neither pointer.
         unsafe {
             WriteFile(
@@ -751,6 +816,35 @@ fn write_all_and_flush(file: &TrustHandle, bytes: &[u8]) -> Result<(), ServiceEr
     }
     // SAFETY: same still-exclusive file; acknowledge only an actual OS flush.
     unsafe { FlushFileBuffers(handle.0) }.map_err(|_| unavailable())
+}
+
+fn parse_bootstrap_permit(bytes: &[u8]) -> Option<bool> {
+    match bytes {
+        value if value == BOOTSTRAP_PENDING => Some(true),
+        value if value == BOOTSTRAP_CONSUMED => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_pending_permit_authorizes_one_bootstrap() {
+        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_PENDING), Some(true));
+        assert_eq!(parse_bootstrap_permit(BOOTSTRAP_CONSUMED), Some(false));
+        for bytes in [
+            b"".as_slice(),
+            b"UACREG1",
+            b"UACREG1P\n",
+            b"UACREG2P",
+            b"UACREG1X",
+        ] {
+            assert_eq!(parse_bootstrap_permit(bytes), None);
+        }
+        assert_eq!(BOOTSTRAP_PENDING.len(), BOOTSTRAP_CONSUMED.len());
+    }
 }
 
 /// The relay endpoint rules shared with the elevated CLI verb.

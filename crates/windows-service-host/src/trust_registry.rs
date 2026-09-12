@@ -286,9 +286,10 @@ impl<'identity> ServiceRegistry<'identity> {
         })
     }
 
-    /// Called only in runtime's actual successful-new-key branch after verifying
-    /// the fixed trust directory was empty. Not a first-QR/enrollment grant.
-    pub(crate) fn initialize_empty_after_key_creation(
+    /// Called only after successful new-key creation or an elevated install's
+    /// consumed one-use missing-registry permit, with a fully validated key.
+    /// The fixed trust directory must be empty; this is not enrollment authority.
+    pub(crate) fn initialize_empty_for_bootstrap(
         identity: &'identity windows_identity::PcIdentityKey,
         directory: crate::ffi::TrustDirectory,
     ) -> Result<Self, RegistryError> {

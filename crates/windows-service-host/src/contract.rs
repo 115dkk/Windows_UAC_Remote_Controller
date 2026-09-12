@@ -612,6 +612,9 @@ impl ServiceError {
             I::KeyNotFound => Self::IdentityKeyNotFound,
             I::CreationStateUncertain { hresult } => Self::IdentityCreationUncertain { hresult },
             I::CleanupFailed { hresult, .. } => Self::IdentityCleanupFailed { hresult },
+            // Preserve the actual policy/Windows failure. No compensating key
+            // deletion occurs, so an unrelated cleanup error cannot hide it.
+            I::FinalizedKeyRejected { cause } => Self::from_identity(*cause),
             I::HandleAlreadyReleased => Self::IdentityHandleAlreadyReleased,
         }
     }
@@ -998,6 +1001,18 @@ mod tests {
             assert_eq!(error.service_diagnostic_code(), expected);
             assert_eq!(error.exit_code(), 1);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retained_finalized_key_preserves_the_original_failure_code() {
+        use windows_identity::{IdentityError as I, IdentityPolicy as P};
+        let original = I::Policy(P::MachineKeyRequired);
+        let retained = ServiceError::from_identity(I::FinalizedKeyRejected {
+            cause: Box::new(original),
+        });
+        assert_eq!(retained.service_diagnostic_code(), 0xE100_000C);
+        assert_eq!(retained.exit_code(), 1);
     }
 
     #[cfg(windows)]

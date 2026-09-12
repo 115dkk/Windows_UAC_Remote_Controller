@@ -39,23 +39,18 @@ fn full_control_mask(mask: u32) -> bool {
             || mask & STANDARD_AND_SPECIFIC_ALL == STANDARD_AND_SPECIFIC_ALL)
 }
 
-/// Ownership state, not authorization. In particular, a failed finalization is
-/// NOT proof that this transaction owns the persistent name and may delete it.
+/// Private handle phase, not authorization. No phase grants persistent deletion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KeyLifecycle {
     Established,
     Creating,
     FinalizationUncertain,
-    RollbackPending,
+    FinalizedUnvalidated,
 }
 
 impl KeyLifecycle {
     pub const fn permits_configuration(self) -> bool {
         matches!(self, Self::Creating)
-    }
-
-    pub const fn permits_rollback(self) -> bool {
-        matches!(self, Self::RollbackPending)
     }
 }
 
@@ -382,22 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn only_successfully_finalized_new_key_is_eligible_for_rollback() {
+    fn only_unfinalized_creation_can_use_incomplete_metadata() {
         assert!(KeyLifecycle::Creating.permits_configuration());
         for state in [
             KeyLifecycle::Established,
             KeyLifecycle::FinalizationUncertain,
-            KeyLifecycle::RollbackPending,
+            KeyLifecycle::FinalizedUnvalidated,
         ] {
             assert!(!state.permits_configuration());
-        }
-        assert!(KeyLifecycle::RollbackPending.permits_rollback());
-        for state in [
-            KeyLifecycle::Established,
-            KeyLifecycle::Creating,
-            KeyLifecycle::FinalizationUncertain,
-        ] {
-            assert!(!state.permits_rollback());
         }
     }
 

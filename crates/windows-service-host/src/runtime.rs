@@ -164,6 +164,9 @@ fn run(
     let registry_absent = trust_directory
         .is_empty_registry_absent()
         .map_err(|error| error.at_startup(5))?;
+    let bootstrap_authorized = trust_directory
+        .take_missing_registry_bootstrap()
+        .map_err(|error| error.at_startup(5))?;
     // Keep every protected preflight before SCM Running, but defer the first
     // platform-provider/key call until this exact entry thread has successfully
     // reported Running with NO accepted controls. This one-use in-process gate
@@ -178,6 +181,7 @@ fn run(
     enum IdentityOrigin {
         Existing,
         CreatedNow,
+        ResumedInitial,
     }
     let opened = run_platform_step(
         startup_began,
@@ -187,9 +191,13 @@ fn run(
     let (identity, origin) = match opened {
         Ok(identity) => {
             if registry_absent {
-                return Err(ServiceError::RegistryUnavailable);
+                if !bootstrap_authorized {
+                    return Err(ServiceError::RegistryUnavailable);
+                }
+                (identity, IdentityOrigin::ResumedInitial)
+            } else {
+                (identity, IdentityOrigin::Existing)
             }
-            (identity, IdentityOrigin::Existing)
         }
         Err(IdentityError::KeyNotFound) => {
             // Do not create a replacement key beside older trust data. Missing
@@ -214,8 +222,8 @@ fn run(
         .map_err(|error| error.at_startup(6))?;
     let registry = match origin {
         IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
-        IdentityOrigin::CreatedNow => {
-            ServiceRegistry::initialize_empty_after_key_creation(&identity, trust_directory)
+        IdentityOrigin::CreatedNow | IdentityOrigin::ResumedInitial => {
+            ServiceRegistry::initialize_empty_for_bootstrap(&identity, trust_directory)
         }
     }
     .map_err(registry_error)?;

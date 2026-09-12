@@ -5,8 +5,8 @@
 //! LocalSystem with this service's enabled SID; an impersonating thread is
 //! rejected rather than reverted or given another token. Provider/key properties
 //! are queried from live handles, with fixed bounded buffers and no UI fallback.
-//! Only a handle whose finalization succeeded in THIS create transaction may be
-//! rolled back with NCryptDeleteKey. Opened/pre-existing keys are never deleted.
+//! Finalized keys survive failed validation. Handles are released, never used
+//! for compensating persistent deletion; a later authorized startup may reopen.
 
 use std::{fmt, marker::PhantomData, mem, rc::Rc};
 
@@ -28,7 +28,7 @@ use windows::{
                 NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_LENGTH_PROPERTY, NCRYPT_MACHINE_KEY_FLAG,
                 NCRYPT_NAME_PROPERTY, NCRYPT_PROV_HANDLE, NCRYPT_PROVIDER_HANDLE_PROPERTY,
                 NCRYPT_SECURITY_DESCR_PROPERTY, NCRYPT_SECURITY_DESCR_SUPPORT_PROPERTY,
-                NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey,
+                NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey, NCryptExportKey,
                 NCryptFinalizeKey, NCryptFreeObject, NCryptGetProperty, NCryptIsAlgSupported,
                 NCryptOpenKey, NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash,
             },
@@ -101,24 +101,31 @@ impl ServiceKey {
         reject_thread_impersonation()?;
         key.finalize()?;
         let validation = (|| {
-            validate_key(&key, &service_sid)?;
+            // Finalization is a persistence boundary, not evidence that the
+            // creation handle refreshed every cached property. The durable,
+            // reopened object must pass ALL completed-key checks before use.
             let original_public = export_public(&key)?;
             let reopened = OwnedKey::open_existing(&provider)?;
             validate_key(&reopened, &service_sid)?;
             let reopened_public = export_public(&reopened)?;
-            reopened.close()?;
             if original_public != reopened_public {
                 return Err(IdentityError::Policy(
                     IdentityPolicy::ReopenedPublicKeyMismatch,
                 ));
             }
-            Ok(())
+            Ok(reopened)
         })();
-        if let Err(cause) = validation {
-            return Err(key.rollback(cause));
-        }
-        key.lifecycle = KeyLifecycle::Established;
-        Ok(Self { key, provider })
+        let reopened = validation.map_err(|cause| IdentityError::FinalizedKeyRejected {
+            cause: Box::new(cause),
+        })?;
+        key.close()
+            .map_err(|cause| IdentityError::FinalizedKeyRejected {
+                cause: Box::new(cause),
+            })?;
+        Ok(Self {
+            key: reopened,
+            provider,
+        })
     }
 
     pub(super) fn public_sec1(&self) -> Result<PcPublicKey, IdentityError> {
@@ -204,7 +211,7 @@ fn configure_unfinalized(
     }
     // Lab only: the software KSP answers NTE_BAD_KEY_STATE to property reads on
     // an unfinalized key. create() still validates and reopens the finalized key
-    // and rolls it back on any mismatch; production keeps the pre-check above.
+    // and retains it on any mismatch; production keeps the pre-check above.
     #[cfg(feature = "lab-software-identity")]
     {
         let _ = (key, service_sid);
@@ -264,8 +271,11 @@ fn descriptor_parts() -> OBJECT_SECURITY_INFORMATION {
 fn export_public(key: &OwnedKey) -> Result<PcPublicKey, IdentityError> {
     let mut blob = [0_u8; PUBLIC_BLOB_BYTES];
     let mut returned = 0_u32;
-    // SAFETY: the live borrowed key has been policy-validated by every call site.
-    // This fixed blob type exports ONLY public ECC coordinates, never private or
+    // SAFETY: the live key is either fully validated or the fixed creation
+    // handle after checked preconfiguration/finalization. The latter's public
+    // point stays internal for comparison with a strictly validated reopened
+    // key; it never becomes a usable capability on its own. This fixed blob
+    // type exports ONLY public ECC coordinates, never private or
     // opaque transport material. Output has exactly 72 initialized writable
     // bytes, returned is aligned separate u32 storage, and no pointers escape.
     unsafe {
@@ -431,8 +441,7 @@ impl Drop for OwnedProvider {
 
 struct OwnedKey {
     handle: Option<NCRYPT_KEY_HANDLE>,
-    // Armed only AFTER successful finalization of a key created by this owner.
-    // Failed finalization never grants authority to delete a colliding key.
+    // Only Creating permits incomplete metadata. No state grants deletion.
     lifecycle: KeyLifecycle,
     _thread_affinity: PhantomData<Rc<()>>,
 }
@@ -543,44 +552,11 @@ impl OwnedKey {
                 hresult: error.code().0,
             }
         })?;
-        self.lifecycle = KeyLifecycle::RollbackPending;
+        self.lifecycle = KeyLifecycle::FinalizedUnvalidated;
         Ok(())
     }
 
-    fn rollback(mut self, cause: IdentityError) -> IdentityError {
-        if !self.lifecycle.permits_rollback() {
-            return cause;
-        }
-        let Some(handle) = self.handle else {
-            return cause;
-        };
-        // SAFETY: this is solely the newly created handle whose finalization
-        // succeeded in this transaction. No opened/pre-existing key ever arms
-        // rollback. DeleteKey deletes this object and frees its handle on success;
-        // on failure Windows permits FreeObject, performed by Drop below.
-        match unsafe { NCryptDeleteKey(handle, NCRYPT_SILENT_FLAG.0) } {
-            Ok(()) => {
-                self.handle = None;
-                self.lifecycle = KeyLifecycle::Established;
-                cause
-            }
-            Err(error) => {
-                // Do not retry deletion from Drop after an explicit failed attempt.
-                self.lifecycle = KeyLifecycle::FinalizationUncertain;
-                IdentityError::CleanupFailed {
-                    cause: Box::new(cause),
-                    hresult: error.code().0,
-                }
-            }
-        }
-    }
-
     fn close(mut self) -> Result<(), IdentityError> {
-        if self.lifecycle.permits_rollback() {
-            // A pending transaction must commit explicitly or roll back. An
-            // accidental close must not silently persist an unvalidated new key.
-            return Err(malformed(IdentityOperation::CloseKey));
-        }
         let handle = self
             .handle
             .take()
@@ -595,16 +571,7 @@ impl OwnedKey {
 impl Drop for OwnedKey {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            if self.lifecycle.permits_rollback() {
-                // SAFETY: only a successfully finalized newly created key can
-                // arm this guard. Unwinding before commit rolls back that object,
-                // never an object opened by name. Successful deletion frees it.
-                if unsafe { NCryptDeleteKey(handle, NCRYPT_SILENT_FLAG.0) }.is_ok() {
-                    return;
-                }
-            }
-            // SAFETY: unique native reference; DeleteKey either wasn't called or
-            // failed (in which case documentation permits FreeObject). Unfinalized
+            // SAFETY: unique native reference, released once. Unfinalized
             // handles are discarded without deleting a potentially colliding name.
             // Drop cannot report failure; successful callers may use explicit close.
             let _ = unsafe { NCryptFreeObject(NCRYPT_HANDLE(handle.0)) };
