@@ -252,7 +252,7 @@ impl TrustDirectory {
     }
 
     /// A narrow storage observation only. true means the exact journal was
-    /// absent and the pinned directory contained only the optional relay file.
+    /// absent and the pinned directory contained only the optional relay/permit files.
     /// It is NOT pairing/bootstrap authorization and cannot justify recreating a
     /// PC key. Unknown entries, a leftover staging file, access failures and
     /// races are errors, never absence.

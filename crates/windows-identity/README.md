@@ -46,7 +46,7 @@ substitute for Windows authentication. Public key access is not pairing authorit
   reference retrieved from the key is independently checked and freed.
 - Protected DACL, SYSTEM owner/group, exactly two non-inherited allow ACEs:
   SYSTEM and this service SID, each with `GENERIC_ALL`. Service-SID administration
-  rights support initialization/finalization/rollback under the host's planned
+  rights support initialization/finalization/use under the host's configured
   `SERVICE_SID_TYPE_RESTRICTED` token. No other principal is admitted. No public
   policy-edit or deletion method is exposed.
 - Only `ECCPUBLICBLOB` export exists: exact 72 bytes, ECDSA P-256 magic, 32-byte
@@ -59,8 +59,8 @@ substitute for Windows authentication. Public key access is not pairing authorit
 The descriptor parser intentionally accepts only the specified self-relative
 layout and exact masks. Unexpected provider normalization or an unsupported
 property is a failure, not evidence permitting a broader access policy.
-Whether the Platform KSP returns this exact representation before finalization
-and under the actual Restricted service token remains unverified. A secure but
+The pre-finalization descriptor was observed on the operator's TPM; complete
+service readiness under the unrestricted SID still needs verification. A secure but
 different representation must be investigated by semantic policy review and
 native evidence, not silently accepted or described as a working configuration.
 
@@ -92,7 +92,7 @@ shape checks. No native key integration test is supplied, ignored or otherwise;
 
 On an explicitly authorized isolated Windows machine, root must separately verify:
 
-1. LocalSystem + installed restricted service SID operation, and rejection of
+1. LocalSystem + installed unrestricted service SID operation, and rejection of
    ordinary/elevated users, missing/disabled/deny-only service SID and all thread
    impersonation. Nonprivileged opening should stop before opening any KSP.
 2. Platform KSP properties before finalize, protected owner/group/DACL persistence,
@@ -101,7 +101,7 @@ On an explicitly authorized isolated Windows machine, root must separately verif
 3. Explicit creation, reopen/restart/reboot stability, public/signature agreement,
    private-export denial, collision races, existing wrong-policy keys and policy
    tampering. Never change a production identity to manufacture a test fixture.
-4. Failed configuration/finalization/rollback, handle allocation/release failures,
+4. Failed configuration/finalization/validation, handle allocation/release failures,
    crash/power-loss remnants and operator recovery without unintended rotation.
 5. The future service/protocol boundary: no externally reachable generic signing,
    key management, enrollment or authorization path. Actual phone pairing, TLS,
