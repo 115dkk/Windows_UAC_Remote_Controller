@@ -25,7 +25,11 @@
 # fields, constructors and method shapes. Debug APKs do not exercise R8.
 # Keep this generated ABI and its native loader; the rest of release stays shrunk.
 -keep class dev.dkk115.uacremote.nativecore.** { *; }
--keep class com.sun.jna.* { *; }
+-keep class com.sun.jna.** { *; }
+# NativeMappedConverter reflectively constructs ByReference/IntegerType and
+# other derived values even when Kotlin never explicitly invokes their ctor.
+-keep class * extends com.sun.jna.* { *; }
+-keepclassmembers class * extends com.sun.jna.* { public *; }
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
 
 # JNA's documented Android configuration excludes optional desktop AWT types.

@@ -58,6 +58,31 @@ jobs:
           ' "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  native-startup:
+    name: Require the tagged minified Android startup proof
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out exact release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Require successful old-build control and actual release startup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          run="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$sha" --workflow android-release-startup.yml --event push --limit 10 --json databaseId --jq '.[0].databaseId')"
+          [[ "$run" =~ ^[0-9]+$ ]] || { echo 'No startup proof registered for the tagged commit.' >&2; exit 1; }
+          gh run watch "$run" --repo "$GITHUB_REPOSITORY" --compact --exit-status --interval 10
+
   android:
     name: Android arm64 release APK (signed)
     needs: version
@@ -239,7 +264,7 @@ jobs:
 
   publish:
     name: Publish the GitHub prerelease
-    needs: [version, android, windows, relay-linux]
+    needs: [version, android, windows, relay-linux, native-startup]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

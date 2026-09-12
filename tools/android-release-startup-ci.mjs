@@ -85,6 +85,10 @@ try {
     report.checks.push('actual-client-button-opens-native-scanner-before-pairing');
     await clickLabel('닫기');
     await clickLabel('알림 시간');
+    await until(ui, view => Boolean(nodeFor(view, '휴대폰 승인 켜짐')), 'schedule owner panel');
+    // The first policy choice can be below the connection and service cards on
+    // this fixed Pixel 6 portrait emulator. Exercise scrolling, not DOM injection.
+    adb(['shell', 'input', 'swipe', '540', '1800', '540', '850', '400']);
     const settings = await until(ui, view => Boolean(nodeFor(view, '항상')), 'default schedule before pairing');
     assert.ok(!settings.xml.includes('알림 시간 설정을 읽을 수 없어요'));
     writeFileSync('evidence/unpaired-settings-ui.xml', settings.xml);
@@ -94,6 +98,7 @@ try {
 } finally {
   // Fixed-token diagnostics only; no general logcat or request/QR/key content.
   try { writeFileSync('evidence/owner-final.txt', dump()); } catch {}
+  if (expected === 'current') try { writeFileSync('evidence/final-ui.xml', ui().xml); } catch {}
   try { writeFileSync('evidence/native-startup.log', adb(['logcat', '-d', '-s', 'UacBoot:I', 'UacScan:I', '*:S'])); } catch {}
   writeFileSync('evidence/result.json', JSON.stringify(report, null, 2));
 }
