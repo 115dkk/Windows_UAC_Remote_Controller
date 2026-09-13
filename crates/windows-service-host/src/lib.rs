@@ -23,6 +23,18 @@ mod diagnostic;
     feature = "lab-client-diagnostics"
 ))]
 mod lab_client_notes;
+#[cfg(all(
+    windows,
+    target_pointer_width = "64",
+    feature = "lab-client-diagnostics"
+))]
+mod lab_pairing_offer;
+#[cfg(all(
+    windows,
+    target_pointer_width = "64",
+    feature = "lab-client-diagnostics"
+))]
+pub use lab_pairing_offer::run as lab_probe_pairing_offer;
 pub mod management_protocol;
 /// Disposable lab builds only: the SCM exit code drops HRESULTs, so the lab
 /// keeps the failure text next to the activity journal for the evidence upload.

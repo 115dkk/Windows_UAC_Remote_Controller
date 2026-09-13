@@ -70,7 +70,7 @@ fn local_navigation(url: &tauri::Url) -> bool {
 pub fn run() {
     lab_startup_note!("run_enter");
     #[cfg(all(windows, feature = "lab-startup-notes"))]
-    lab_startup::probe_pairing_offer();
+    windows_service_host::lab_probe_pairing_offer();
     let builder = tauri::Builder::default().plugin(mobile::init());
     lab_startup_note!("builder_ready");
     let app = builder

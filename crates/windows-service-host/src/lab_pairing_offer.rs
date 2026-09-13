@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Disposable CI pre-authorization probe. Read one genuine Starter Offer, then
 //! cancel/drain the original owner. Never launch a helper or return Offer bytes.
+use crate::{PairingClient, PairingClientError, PairingClientProgress, pairing_handoff::Frame};
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -8,11 +9,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use windows_service_host::{
-    PairingClient, PairingClientError, PairingClientProgress, pairing_handoff::Frame,
-};
 
-pub(crate) fn run() {
+pub fn run() {
     if std::env::var_os("UAC_LAB_PAIRING_OFFER").as_deref() != Some(std::ffi::OsStr::new("1")) {
         return;
     }
