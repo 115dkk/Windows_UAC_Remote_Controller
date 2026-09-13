@@ -74,7 +74,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       <p className="supporting-text">{tr('휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.')}</p>
       <button type="button" className="button primary" disabled={relayDisabled || submitting || embeddedSelected} onClick={() => { void enableEmbeddedRelay(); }}>{tr(embeddedSelected ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용')}</button>
       {embeddedSelected && snapshot.service?.state === 'stopped' && <>
-        <p className="supporting-text">{tr('내장 중계 설정을 저장했어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 시작해요.')}</p>
+        <p className="supporting-text">{tr('내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.')}</p>
         {onOpenStatus && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
       </>}
       {error && <p className="field-error" role="alert">{error}</p>}

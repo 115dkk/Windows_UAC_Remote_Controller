@@ -6,7 +6,7 @@
   "내장 중계를 준비하지 못했어요. PC의 네트워크와 중계 설정을 확인해 주세요.": "Der integrierte Relay konnte nicht vorbereitet werden. PC-Netzwerk und Relay-Einstellungen prüfen.",
   "중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.": "Der Betriebszustand des Relays konnte nicht geprüft werden. Erneut prüfen.",
   "내장 중계 선택됨": "Integrierter Relay ausgewählt",
-  "내장 중계 설정을 저장했어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 시작해요.": "Einstellungen des integrierten Relays gespeichert. Telefonfreigabe auf der Statusseite einschalten, um den Relay zu starten.",
+  "내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.": "Der integrierte Relay ist ausgewählt. Telefonfreigabe auf der Statusseite einschalten, um den Relay vorzubereiten.",
   "외부 중계 서버 주소를 저장하면 내장 중계 대신 사용해요.": "Eine gespeicherte externe Relay-Adresse ersetzt den integrierten Relay.",
   "숨은 방향 제어 문자를 눈에 보이게 표시했어요.": "Unsichtbare Zeichen zur Textrichtung werden sichtbar dargestellt.",
   "Android 휴대폰에서 앱을 열어 주세요.": "Öffnen Sie die App auf Ihrem Android-Smartphone.",

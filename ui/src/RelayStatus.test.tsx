@@ -85,7 +85,7 @@ describe('Windows relay observation and service recovery', () => {
     fireEvent.click(selected);
     expect(setRelay).toHaveBeenCalledExactlyOnceWith('embedded');
     expect(screen.getByText('내장 중계 중지됨 · 수신 대기하지 않아요.')).toBeVisible();
-    expect(screen.getByText('내장 중계 설정을 저장했어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 시작해요.')).toBeVisible();
+    expect(screen.getByText('내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.')).toBeVisible();
     expect(screen.queryByText('중계 서버 주소가 설정되어 있어요.')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
     expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeVisible();

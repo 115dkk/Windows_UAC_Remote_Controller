@@ -6,7 +6,7 @@
   "내장 중계를 준비하지 못했어요. PC의 네트워크와 중계 설정을 확인해 주세요.": "Could not prepare the embedded relay. Check the PC network and relay settings.",
   "중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.": "Could not check the relay runtime state. Check again.",
   "내장 중계 선택됨": "Embedded relay selected",
-  "내장 중계 설정을 저장했어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 시작해요.": "Embedded relay settings saved. Turn on phone approval on the status screen to start the relay.",
+  "내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.": "Embedded relay selected. Turn on phone approval on the status screen to prepare the relay.",
   "외부 중계 서버 주소를 저장하면 내장 중계 대신 사용해요.": "Saving an external relay address replaces the embedded relay.",
   "숨은 방향 제어 문자를 눈에 보이게 표시했어요.": "Hidden text-direction controls are shown explicitly.",
   "Android 휴대폰에서 앱을 열어 주세요.": "Open the app on your Android phone.",
