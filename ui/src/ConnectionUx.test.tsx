@@ -26,7 +26,8 @@ describe('pre-approval connection guidance', () => {
     const entry = screen.getByRole('button', { name: ko.pairPhone });
     expect(entry).toBeDisabled();
     expect(screen.getByText(ko.pairingQrPurpose)).toBeVisible();
-    expect(screen.getByText(ko.pairingPcInstallFirst)).toBeVisible();
+    expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
+    expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
     fireEvent.click(entry);
     expect(beginPairing).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
