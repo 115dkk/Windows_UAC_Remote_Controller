@@ -203,6 +203,15 @@ pub(crate) fn management_mutation(
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
+fn management_client_error_at(_stage: &'static str, _error: PairingClientError) -> ServiceError {
+    // CI-only fixed categories/stages. Never emit peer metadata, request bytes,
+    // command arguments, keys or arbitrary OS text into diagnostics.
+    #[cfg(feature = "lab-software-identity")]
+    lab::record_note(&format!("management client {_stage}: {_error}"));
+    ServiceError::ManagementRefused
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
 fn management_exchange(
     request: management_protocol::ManagementRequest,
 ) -> Result<management_protocol::ManagementResponse, ServiceError> {
@@ -214,13 +223,16 @@ fn management_exchange(
     let start = Instant::now();
     let deadline = start + Duration::from_secs(30);
     let mut client = PairingClient::connect_management(start, deadline)
-        .map_err(|_| ServiceError::ManagementRefused)?;
+        .map_err(|error| management_client_error_at("connect", error))?;
     let exchange = (|| {
         client
             .begin_write(&wire)
-            .map_err(|_| ServiceError::ManagementRefused)?;
+            .map_err(|error| management_client_error_at("begin_write", error))?;
         loop {
-            match client.poll().map_err(|_| ServiceError::ManagementRefused)? {
+            match client
+                .poll()
+                .map_err(|error| management_client_error_at("poll_write", error))?
+            {
                 PairingClientProgress::Pending => std::thread::sleep(POLL_DELAY),
                 PairingClientProgress::Written => break,
                 _ => return Err(ServiceError::ManagementRefused),
@@ -228,9 +240,12 @@ fn management_exchange(
         }
         client
             .begin_read()
-            .map_err(|_| ServiceError::ManagementRefused)?;
+            .map_err(|error| management_client_error_at("begin_read", error))?;
         loop {
-            match client.poll().map_err(|_| ServiceError::ManagementRefused)? {
+            match client
+                .poll()
+                .map_err(|error| management_client_error_at("poll_read", error))?
+            {
                 PairingClientProgress::Pending => std::thread::sleep(POLL_DELAY),
                 PairingClientProgress::Read(bytes) => {
                     return management_protocol::decode_response(&bytes)
@@ -246,7 +261,7 @@ fn management_exchange(
         match client.drain() {
             Ok(true) => break Ok(()),
             Ok(false) => std::thread::sleep(POLL_DELAY),
-            Err(_) => break Err(ServiceError::ManagementRefused),
+            Err(error) => break Err(management_client_error_at("cleanup", error)),
         }
     };
     match (exchange, cleanup) {

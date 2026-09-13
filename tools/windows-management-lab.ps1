@@ -16,7 +16,11 @@ function Confirm-ServiceAndRelay {
 }
 function Read-RelayStatus {
     $raw = & $ServiceExecutable relay-status
-    if ($LASTEXITCODE -ne 0) { throw 'Authenticated management query failed' }
+    if ($LASTEXITCODE -ne 0) {
+        $observed = Get-CimInstance Win32_Service -Filter "Name='UacRemoteController'"
+        Write-Output ("Query failure: serviceState={0} originalPidRetained={1} exit={2} specific={3}" -f $observed.State,($observed.ProcessId -eq $serviceProcess),$observed.ExitCode,$observed.ServiceSpecificExitCode)
+        throw 'Authenticated management query failed'
+    }
     $reply = $raw | ConvertFrom-Json
     if (-not $reply.embedded_relay -or -not $reply.relay_listening -or -not $reply.relay_configured -or $reply.device_count -ne 0) { throw 'Actual relay observation mismatch' }
     Confirm-ServiceAndRelay
