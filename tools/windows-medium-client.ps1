@@ -127,7 +127,7 @@ namespace UacCiMedium {
                 bool initial = GetTokenInformation(token, kind, IntPtr.Zero, 0, out length);
                 int code = Marshal.GetLastWin32Error();
                 Require(!initial && code == 122 && length > 0 && length <= 1048576,
-                    "Invalid token information size");
+                    "Invalid variable token information size: class=" + kind + " code=" + code + " bytes=" + length);
                 Pointer = Marshal.AllocHGlobal(checked((int)length));
                 try {
                     uint returned;
@@ -160,7 +160,17 @@ namespace UacCiMedium {
             }
         }
         private static int Scalar(IntPtr token, int kind) {
-            using (Information value = new Information(token, kind)) return value.Integer(0);
+            // Same exact-DWORD contract as the product. Fixed token classes
+            // do not share the variable-size NULL-buffer probe contract.
+            IntPtr value = Marshal.AllocHGlobal(4);
+            try {
+                Marshal.WriteInt32(value, 0);
+                uint returned;
+                if (!GetTokenInformation(token, kind, value, 4, out returned))
+                    throw Error("GetTokenInformation(scalar " + kind + ")");
+                Require(returned == 4, "Invalid scalar token size: class=" + kind);
+                return Marshal.ReadInt32(value);
+            } finally { Marshal.FreeHGlobal(value); }
         }
         private static TokenFacts Inspect(IntPtr token) {
             TokenFacts facts = new TokenFacts();
