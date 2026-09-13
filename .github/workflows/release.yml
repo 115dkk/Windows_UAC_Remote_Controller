@@ -82,6 +82,9 @@ jobs:
           run="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$sha" --workflow android-release-startup.yml --event push --limit 10 --json databaseId --jq '.[0].databaseId')"
           [[ "$run" =~ ^[0-9]+$ ]] || { echo 'No startup proof registered for the tagged commit.' >&2; exit 1; }
           gh run watch "$run" --repo "$GITHUB_REPOSITORY" --compact --exit-status --interval 10
+          native="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$sha" --workflow windows-uac-lab.yml --event push --limit 10 --json databaseId --jq '.[0].databaseId')"
+          [[ "$native" =~ ^[0-9]+$ ]] || { echo 'No native QR pairing/denial proof registered for the tagged commit.' >&2; exit 1; }
+          gh run watch "$native" --repo "$GITHUB_REPOSITORY" --compact --exit-status --interval 10
 
   android:
     name: Android arm64 release APK (signed)

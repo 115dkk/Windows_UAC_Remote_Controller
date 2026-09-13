@@ -1153,6 +1153,11 @@ impl ServicePairing {
             signer,
             pc_signing_key: original.pc_key,
             pc_transport_key,
+            #[cfg(all(feature = "lab-e2e", not(test)))]
+            verification: Some(
+                super::enrollment::ci_verification()
+                    .map_err(|_| Failure::SignerPolicyUnavailable)?,
+            ),
             #[cfg(test)]
             verification: None,
         })
@@ -1543,9 +1548,8 @@ impl ServicePairing {
         self.check_policy()
     }
     fn retire(&mut self, failure: Option<Failure>, rearm: bool) {
+        let diagnostic = failure.filter(|_| self.first_failure.is_none());
         if let Some(error) = failure {
-            #[cfg(all(windows, feature = "lab-software-identity"))]
-            crate::lab::record_note(&format!("pairing retire: {error:?}"));
             self.first_failure.get_or_insert(error);
         }
         if let Some(protocol) = self.protocol.as_mut() {
@@ -1571,6 +1575,28 @@ impl ServicePairing {
         }
         self.state = State::Draining;
         self.rearm = rearm && self.enabled && !crate::entry::stop_requested();
+        // Log only after admission is invalidated and cleanup has been requested.
+        if let Some(error) = diagnostic {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note(&format!("pairing retire: {error:?}"));
+            match error {
+                Failure::Native(error) => crate::ffi::pairing_diagnostics::peer_failure(error),
+                error => crate::ffi::pairing_diagnostics::service_failure_kind(match error {
+                    Failure::Protocol => 1,
+                    Failure::Random => 2,
+                    Failure::Epoch => 3,
+                    Failure::Window => 4,
+                    Failure::Cancelled => 5,
+                    Failure::Generation => 6,
+                    Failure::Preparation(_) => 7,
+                    Failure::Identity => 8,
+                    Failure::RelayUnconfigured => 9,
+                    Failure::SignerPolicyUnavailable => 10,
+                    Failure::Enrollment => 11,
+                    Failure::Native(_) => 0,
+                }),
+            }
+        }
     }
     pub(super) fn shutdown(&mut self) {
         self.enabled = false;

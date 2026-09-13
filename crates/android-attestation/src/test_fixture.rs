@@ -192,6 +192,46 @@ impl SyntheticRkp {
         })
     }
 
+    /// Reissue only synthetic leaves against a live CI invitation. The root and
+    /// all three ephemeral SOFTWARE keys remain unchanged. This never supplies
+    /// Android hardware evidence and is absent without the test-anchor feature.
+    pub fn reissue_for_challenge(
+        &mut self,
+        challenge: [u8; 32],
+    ) -> Result<(), crate::VerificationError> {
+        let [approval, denial, transport] = self.public_keys();
+        let expected =
+            ExpectedKeyBundle::from_trusted_host(challenge, approval, denial, transport)?;
+        for (index, role) in [KeyRole::Approval, KeyRole::Denial, KeyRole::Transport]
+            .into_iter()
+            .enumerate()
+        {
+            self.replace_leaf_description(index, &Self::description_for_challenge(role, challenge));
+        }
+        self.expected = expected;
+        Ok(())
+    }
+
+    /// Typed, denial-only fixture operation. There is no approval signer or
+    /// arbitrary-byte signing entry point. The caller must first verify a live
+    /// request from its enrolled PC; this signature is not native authentication.
+    pub fn sign_denial(
+        &self,
+        binding: approval_protocol::RequestBinding,
+        device: approval_protocol::DeviceId,
+    ) -> Result<approval_protocol::SignedDecision, approval_protocol::SignatureError> {
+        let statement = approval_protocol::UnsignedDecision::new(
+            binding,
+            device,
+            approval_protocol::DecisionPurpose::Deny,
+        );
+        let signature = self.leaves[1]
+            .pair
+            .sign(&SystemRandom::new(), &statement.signing_bytes())
+            .map_err(|_| approval_protocol::SignatureError::VerificationFailed)?;
+        approval_protocol::SignedDecision::from_der(statement, signature.as_ref())
+    }
+
     pub fn transport_signer(&self) -> SyntheticTransportSigner {
         SyntheticTransportSigner {
             pair: Arc::clone(&self.leaves[2].pair),
@@ -223,6 +263,10 @@ impl SyntheticRkp {
     }
 
     pub(crate) fn default_description(role: KeyRole) -> Vec<u8> {
+        Self::description_for_challenge(role, CHALLENGE)
+    }
+
+    fn description_for_challenge(role: KeyRole, challenge: [u8; 32]) -> Vec<u8> {
         let package = sequence([octets(b"dev.dkk115.uacremote"), uint(2)]);
         let app = sequence([set([package]), set([octets(&SIGNER_DIGEST)])]);
         let software = sequence([explicit(709, &octets(&app))]);
@@ -255,7 +299,7 @@ impl SyntheticRkp {
             enumerated(1),
             uint(400),
             enumerated(1),
-            octets(&CHALLENGE),
+            octets(&challenge),
             octets(&[]),
             software,
             hardware,

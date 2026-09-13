@@ -15,7 +15,7 @@ use android_attestation::{
     CandidateEvidence, ExpectedKeyBundle, TrustedStatusSnapshot, VerificationError,
     VerificationPolicy, VerifiedKeyBundle, fetch_google_status, verify_key_bundle,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "lab-e2e"))]
 use android_attestation::{TestAttestationAnchor, verify_key_bundle_with_test_anchors};
 use approval_protocol::{DeviceId, PcIdentity};
 use framed_transport::{
@@ -69,14 +69,44 @@ pub(super) struct EnrollmentInputs {
     pub(super) signer: Arc<ServiceTlsSigner>,
     pub(super) pc_signing_key: TlsPublicKey,
     pub(super) pc_transport_key: TlsPublicKey,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "lab-e2e"))]
     pub(super) verification: Option<TestVerification>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "lab-e2e"))]
 pub(super) struct TestVerification {
     pub(super) status: TrustedStatusSnapshot,
     pub(super) anchors: Vec<TestAttestationAnchor>,
+}
+
+/// Compile-only software-CI profile. The bootstrap harness creates this fixed
+/// public certificate under SYSTEM/Admin-owned CI storage before QR entry.
+/// The ordinary product build has neither this loader nor this trust selection.
+#[cfg(all(feature = "lab-e2e", not(test)))]
+pub(super) fn ci_verification() -> Result<TestVerification, VerificationError> {
+    use std::io::Read;
+    use std::os::windows::fs::MetadataExt;
+    let path = r"C:\ProgramData\UacRemoteCiE2e\phone-root.der";
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| VerificationError::InvalidPolicy)?;
+    if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 || metadata.len() > 8192 {
+        return Err(VerificationError::InvalidPolicy);
+    }
+    let file = std::fs::File::open(path).map_err(|_| VerificationError::InvalidPolicy)?;
+    let mut bytes = Vec::new();
+    file.take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| VerificationError::InvalidPolicy)?;
+    if bytes.len() > 8192 {
+        return Err(VerificationError::Bounds);
+    }
+    let anchor = TestAttestationAnchor::from_self_signed_der(
+        bytes,
+        android_attestation::TestAttestationRootKind::CurrentP384,
+    )?;
+    Ok(TestVerification {
+        status: TrustedStatusSnapshot::from_test_response(br#"{"entries":{}}"#)?,
+        anchors: vec![anchor],
+    })
 }
 impl fmt::Debug for EnrollmentInputs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -523,17 +553,17 @@ async fn run(
         .collect();
     let evidence = CandidateEvidence::new(&approval, &denial, &transport)
         .map_err(EnrollmentError::Attestation)?;
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "lab-e2e")))]
     let status = fetch_google_status().map_err(|error| match error {
         VerificationError::StatusUnavailable | VerificationError::StaleStatus => {
             EnrollmentError::StatusUnavailable
         }
         other => EnrollmentError::Attestation(other),
     })?;
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "lab-e2e")))]
     let verified = verify_key_bundle(&evidence, &expected, &inputs.expected.policy, &status)
         .map_err(EnrollmentError::Attestation)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "lab-e2e"))]
     let (verified, status) = if let Some(test) = inputs.verification {
         let verified = verify_key_bundle_with_test_anchors(
             &evidence,

@@ -15,6 +15,9 @@ lab-software-identity = ["windows-identity/lab-software-identity"]
 # Fixed-stage client observations in disposable GUI lab builds only. The same
 # package-rejected startup marker is present; never enable this feature to ship.
 lab-client-diagnostics = []
+# Never shipped: full native integration with an explicitly synthetic phone CA.
+# Includes the package-rejected software KSP profile; no runtime trust switch.
+lab-e2e = ["lab-software-identity", "test-attestation-anchors"]
 test-attestation-anchors = ["android-attestation/test-attestation-anchors"]
 
 [dependencies]
@@ -60,6 +63,7 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_EventLog",
     "Win32_System_Memory",
     "Win32_System_IO",
     "Win32_System_JobObjects",

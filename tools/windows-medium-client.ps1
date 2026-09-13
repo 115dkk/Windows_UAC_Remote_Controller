@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # CI-only, Windows PowerShell 5.1 / PowerShell 7, 64-bit. Never shipped.
 [CmdletBinding()]
-param([switch]$InspectOnly)
+param([switch]$InspectOnly, [switch]$PairingE2e)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -80,6 +80,7 @@ namespace UacCiMedium {
     // process lookup, external PID adoption, service control or token mutation.
     public sealed class Launcher : IDisposable {
         private IntPtr logonToken, password, process, thread, profileProcess, profileThread;
+        private bool pairingE2e;
         private string userName;
         private bool accountCreated;
         private const int PasswordCharacters = 36;
@@ -214,7 +215,9 @@ namespace UacCiMedium {
             if (!condition) throw new InvalidOperationException(operation);
         }
 
-        public Launcher() {
+        public Launcher() : this(false, false) {}
+        public Launcher(bool pairingE2e, bool requester) {
+            this.pairingE2e = pairingE2e;
             try {
                 CreateStandardAccount();
                 if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
@@ -225,8 +228,9 @@ namespace UacCiMedium {
                 // probe once and requires its bounded successful exit.
                 string probe = Path.Combine(Environment.GetFolderPath(
                     Environment.SpecialFolder.System), "cmd.exe");
+                if (requester) probe = Path.Combine(Path.GetDirectoryName(Application), "uac-ci-requester.exe");
                 ProcessInformation information = CreateSuspended(probe,
-                    "\"" + probe + "\" /d /c exit 0", IntPtr.Zero);
+                    "\"" + probe + "\"" + (requester ? "" : " /d /c exit 0"), IntPtr.Zero);
                 profileProcess = information.hProcess;
                 profileThread = information.hThread;
                 Facts = InspectProcess(profileProcess);
@@ -272,6 +276,12 @@ namespace UacCiMedium {
             status = NetLocalGroupAddMembers(null, users, 3, ref member, 1);
             if (status != 0 && status != 1378) throw new InvalidOperationException(
                 "NetLocalGroupAddMembers(Users only) status=" + status);
+            if (pairingE2e) {
+                string adminQualified = ((NTAccount)new SecurityIdentifier("S-1-5-32-544").Translate(typeof(NTAccount))).Value;
+                string admins = adminQualified.Substring(adminQualified.LastIndexOf('\\') + 1);
+                status = NetLocalGroupAddMembers(null, admins, 3, ref member, 1);
+                Require(status == 0 || status == 1378, "Owned CI test administrator membership failed");
+            }
         }
 
         private ProcessInformation CreateSuspended(string application, string commandLine,
@@ -466,6 +476,7 @@ namespace UacCiMedium {
 
         public void Launch(string profile) {
             Verify(Facts);
+            if (pairingE2e) Require(Facts.elevationType == "Limited", "Real filtered test-administrator token required");
             Require(process == IntPtr.Zero && logonToken != IntPtr.Zero && profileProcess != IntPtr.Zero,
                 "Launcher can own only one child");
             Require(File.Exists(Application), "Fixed installed controller application missing");
@@ -487,6 +498,7 @@ namespace UacCiMedium {
                 if (previousCount == UInt32.MaxValue)
                     throw new Win32Exception(resumeError, "ResumeThread(owned child)");
                 Require(previousCount == 1, "Owned GUI initial suspend count was not exactly one");
+                if (pairingE2e) Require(ResumeThread(profileThread) == 1, "Requester resume was not single-use");
             } finally { Marshal.FreeHGlobal(environment); }
         }
 
@@ -495,6 +507,12 @@ namespace UacCiMedium {
             uint code;
             if (!GetExitCodeProcess(process, out code)) throw Error("GetExitCodeProcess(owned GUI)");
             return code;
+        }
+        public void RequireRequestDenied() {
+            Require(pairingE2e && WaitForSingleObject(profileProcess, 10000) == 0, "Requester did not exit after denial");
+            uint code;
+            Require(GetExitCodeProcess(profileProcess, out code) && code == 0, "Windows did not report request cancellation");
+            Require(!File.Exists(@"C:\ProgramData\UacRemoteCiE2e\unexpected-execution.txt"), "Harmless elevated target unexpectedly executed");
         }
 
         // Only fixed classifications leave this method. Caption/control text,
@@ -858,10 +876,11 @@ function Write-OwnedStartupObservation {
 $launcher = $null
 $nodeExit = 1
 try {
-    $launcher = New-Object UacCiMedium.Launcher
+    $launcher = [UacCiMedium.Launcher]::new([bool]$PairingE2e, [bool]($PairingE2e -and -not $InspectOnly))
     # Only enum/bool/fixed integrity facts, never account names, SIDs or tokens.
     $launcher.Facts | ConvertTo-Json -Compress | Write-Output
     $launcher.RequireMedium()
+    if ($PairingE2e -and $launcher.Facts.elevationType -ne 'Limited') { throw 'Actual filtered administrator required for consent-only UAC' }
     if ($InspectOnly) {
         $launcher.ProbeOwnedProfileProcessExit()
         Write-Output 'PASS: original fixed standard-account probe resumed once and exited zero within five seconds.'
@@ -926,6 +945,15 @@ try {
     & node (Join-Path $PSScriptRoot 'windows-management-webview-lab.mjs')
     $nodeExit = $LASTEXITCODE
     if ($null -eq $nodeExit) { throw 'Node did not supply an exit code.' }
+    if ($PairingE2e -and $nodeExit -eq 0) {
+        $launcher.RequireRequestDenied()
+        $proofPath = Join-Path $env:LAB_EVIDENCE 'pairing-e2e-proof.json'
+        $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
+        if ($proof.wirePassed -ne $true) { throw 'Wire proof missing' }
+        $proof | Add-Member -NotePropertyName nativeWindowsDenied -NotePropertyValue $true
+        $proof.passed = $true
+        $proof | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $proofPath -Encoding UTF8
+    }
 } finally {
     if ($null -ne $launcher) {
         try {

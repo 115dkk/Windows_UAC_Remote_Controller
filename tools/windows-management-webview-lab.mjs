@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { provePairingLaunch } from './windows-pairing-webview-lab.mjs';
+import { proveFullPairing } from './windows-full-pairing-lab.mjs';
 
 if (process.platform !== 'win32' || process.env.CI !== 'true' || process.env.GITHUB_ACTIONS !== 'true'
     || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Disposable hosted Windows only');
@@ -137,7 +138,8 @@ try {
     scope: 'Real product GuiMedium reads/rejected-image clients; not CliElevated/UAC consent/phone authentication',
   }, null, 2), { flag: 'wx' });
   process.stdout.write('PASS: 24 real GuiMedium snapshot checks, 16 Refresh actions, 8 rejected pipe clients; original service PID and relay listener retained.\n');
-  await provePairingLaunch({ page, ps, profile, evidence, confirmService, clientPid: launch.clientPid });
+  if (process.env.WUAC_CI_E2E === '1') await proveFullPairing({ page, ps, evidence, confirmService, clientPid: launch.clientPid });
+  else await provePairingLaunch({ page, ps, profile, evidence, confirmService, clientPid: launch.clientPid });
 } finally {
   await browser?.close();
 }

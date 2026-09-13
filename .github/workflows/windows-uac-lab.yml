@@ -9,9 +9,10 @@ name: Windows UAC lab (disposable runner)
 #      desktop", request elevation from a limited-token process so a real
 #      consent.exe prompt appears, and run the read-only `probe-once` diagnostic,
 #   4. retain the service journal, diagnostics and SCM facts as evidence.
-# It proves service startup and read-only prompt observation on a stock
-# Windows Server 2025 image. It does not approve anything and is not evidence
-# about the developer's PC or its TPM.
+# It additionally runs a fixed CI-only SYSTEM operator for the actual initial
+# pairing consent and protected QR pixels; a separate software phone registers,
+# receives a real harmless UAC request and signs Deny. The target must not run.
+# Synthetic CA/KSP never ship. No developer-PC or phone-hardware proof is implied.
 
 on:
   workflow_dispatch:
@@ -28,6 +29,12 @@ on:
       - 'tools/windows-webview-runtime-lab.ps1'
       - 'tools/windows-management-webview-lab.mjs'
       - 'tools/windows-pairing-webview-lab.mjs'
+      - 'tools/read-pairing-events.ps1'
+      - 'tools/windows-full-pairing-lab.mjs'
+      - 'tools/prepare-pairing-e2e.ps1'
+      - 'tools/ci-e2e-request.cs'
+      - 'tools/ci-phone-fixture/**'
+      - 'tools/ci-windows-operator/**'
       - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
 
@@ -40,13 +47,15 @@ concurrency:
 
 jobs:
   lab:
-    name: Service start and read-only prompt observation (lab identity)
+    name: Native QR pairing and signed UAC denial (CI identities)
     runs-on: windows-2025
     timeout-minutes: 60
     env:
       CI: 'true'
       CARGO_INCREMENTAL: '0'
       CARGO_BUILD_JOBS: '2'
+      WUAC_CI_E2E: '1'
+      UAC_ANDROID_SIGNER_SHA256: '0808080808080808080808080808080808080808080808080808080808080808'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/uac-lab-build
       LAB_DIR: C:\Program Files\휴대폰 승인
       LAB_EVIDENCE: ${{ github.workspace }}/target/uac-lab-evidence
@@ -61,7 +70,9 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
       - name: Verify a genuine medium-token fixture without changing product admission
         shell: powershell
-        run: ./tools/windows-medium-client.ps1 -InspectOnly
+        run: |
+          Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord
+          ./tools/windows-medium-client.ps1 -InspectOnly -PairingE2e
       - name: Prepare official per-machine WebView2 for the fresh standard user
         shell: pwsh
         run: ./tools/windows-webview-runtime-lab.ps1
@@ -79,13 +90,15 @@ jobs:
       - name: Build the lab service (software KSP) and the prompt helper with lab notes
         shell: pwsh
         run: |
-          cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-service-host --bin uac-service --features lab-software-identity
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-service-host --bin uac-service --features lab-e2e
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The helper's lab-diagnostics feature appends fixed-token census facts (counts, desktop names,
           # enum names; never prompt text) to the product data directory. Release builds never enable it.
           cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-prompt-probe --bin uac-prompt-probe --features lab-diagnostics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --target x86_64-pc-windows-msvc -p controller-app --bin controller-app --features custom-protocol,lab-startup-notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p ci-phone-fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $service = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/uac-service.exe"
           $bytes = [IO.File]::ReadAllBytes($service)
@@ -120,6 +133,9 @@ jobs:
             Write-Output ("{0}: {1} bytes, sha256 {2}" -f $leaf, $bytes.Length, (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant())
           }
           (Get-Acl -LiteralPath $env:LAB_DIR).Sddl
+      - name: Prepare isolated native operator and harmless request fixture
+        shell: powershell
+        run: ./tools/prepare-pairing-e2e.ps1
       - name: Record the software KSP provider facts (read-only property queries)
         shell: pwsh
         run: |
@@ -189,8 +205,18 @@ jobs:
         if: ${{ steps.start.outputs.product_running == 'true' }}
         shell: pwsh
         run: |
-          ./tools/windows-medium-client.ps1 | Tee-Object -FilePath "$env:LAB_EVIDENCE/management-recovery.txt"
+          ./tools/windows-medium-client.ps1 -PairingE2e | Tee-Object -FilePath "$env:LAB_EVIDENCE/management-recovery.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $proof = Get-Content "$env:LAB_EVIDENCE/pairing-e2e-proof.json" -Raw | ConvertFrom-Json
+          if ($proof.commit -ne $env:GITHUB_SHA -or $proof.passed -ne $true -or $proof.nativeWindowsDenied -ne $true) { throw 'Full native pairing and denial proof missing' }
+      - name: Verify bounded pairing event diagnostics on the actual service
+        # Failure diagnostics must survive even when the end-to-end stage fails.
+        if: ${{ always() && steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          $result = ./tools/read-pairing-events.ps1 -Since ([DateTimeOffset]::UtcNow.AddMinutes(-29)) | ConvertFrom-Json
+          if ($result.invalidRecords -ne 0 -or @($result.records).Count -eq 0) { throw 'Pairing diagnostic records missing or malformed' }
+          $result | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:LAB_EVIDENCE/pairing-events.json"
       - name: Lab experiment (evidence only) - start the same service with an unrestricted service SID
         id: experiment
         if: ${{ steps.start.outputs.product_running != 'true' }}

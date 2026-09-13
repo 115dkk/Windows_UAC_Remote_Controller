@@ -14,6 +14,8 @@ mod overlapped_pipe;
 #[cfg(target_pointer_width = "64")]
 mod pairing_client;
 #[cfg(target_pointer_width = "64")]
+pub(crate) mod pairing_diagnostics;
+#[cfg(target_pointer_width = "64")]
 mod pairing_peer;
 #[cfg(target_pointer_width = "64")]
 pub(crate) mod probe_supervisor;

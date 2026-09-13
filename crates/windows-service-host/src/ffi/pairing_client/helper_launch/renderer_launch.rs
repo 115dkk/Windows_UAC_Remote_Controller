@@ -131,6 +131,9 @@ impl HelperRendererLaunch {
                 return Err(Error::InvalidPhase);
             }
             inner.claimed = true;
+            crate::ffi::pairing_diagnostics::milestone(
+                crate::ffi::pairing_diagnostics::Point::RendererCreate,
+            );
             client.inner_mut().fence()?;
             request.cutoff = request.cutoff.min(
                 native_renderer::original_cutoff(client.inner_ref().budget.deadline)
@@ -278,6 +281,9 @@ impl HelperRendererLaunch {
                 thread: info.dwThreadId,
             };
             inner.metadata = Some(metadata);
+            crate::ffi::pairing_diagnostics::milestone(
+                crate::ffi::pairing_diagnostics::Point::RendererCreated,
+            );
             inner.recheck(client)?;
             native_renderer::verify_descriptor(
                 info.hProcess,
@@ -306,6 +312,9 @@ impl HelperRendererLaunch {
             if inner.request != Some(request) || !inner.created || inner.first_failure.is_some() {
                 return Err(Error::InvalidPhase);
             }
+            crate::ffi::pairing_diagnostics::milestone(
+                crate::ffi::pairing_diagnostics::Point::RendererResume,
+            );
             inner.recheck(client)?;
             native_renderer::check_setup_cutoff(request.cutoff).map_err(mapped)?;
             inner.resume.claim_resume()?; // BEFORE native call; uncertainty cannot kill/retry.

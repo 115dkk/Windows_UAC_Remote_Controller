@@ -59,6 +59,19 @@ fn mapped(error: crate::PairingPeerError) -> Error {
     peer_error_at(Stage::QueryOwnIdentity, error).into()
 }
 
+fn ui_error(error: super::renderer_ui::Error) -> Error {
+    match error {
+        super::renderer_ui::Error::Native(error) => {
+            ClientError::Service(crate::ServiceError::RendererNative {
+                stage: 20,
+                hresult: error.code().0,
+            })
+            .into()
+        }
+        super::renderer_ui::Error::InvalidState | super::renderer_ui::Error::Qr => Error::Protocol,
+    }
+}
+
 pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Error> {
     if INVOKED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -72,6 +85,9 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
     let (start, deadline) = native_renderer::budget_from_cutoff(cutoff).map_err(mapped)?;
     native_renderer::check_setup_cutoff(cutoff).map_err(mapped)?;
     let mut client = PairingClient::connect(ClientEndpoint::Renderer, start, deadline)?;
+    crate::ffi::pairing_diagnostics::milestone(
+        crate::ffi::pairing_diagnostics::Point::RendererConnected,
+    );
     client.inner_mut().fence()?;
     let connection = client
         .inner_ref()
@@ -107,6 +123,9 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
         desktop: desktop.0 as usize as u64,
         station: station.0 as usize as u64,
     };
+    crate::ffi::pairing_diagnostics::milestone(
+        crate::ffi::pairing_diagnostics::Point::RendererObjectsReady,
+    );
     let mut owner = Owner {
         client: Some(client),
         terminal: None,
@@ -174,7 +193,7 @@ impl Owner {
     fn step(&mut self) -> Result<bool, Error> {
         self.budget()?;
         let event = if let Some(window) = self.window.as_mut() {
-            window.pump().map_err(|_| Error::Protocol)?
+            window.pump().map_err(ui_error)?
         } else {
             None
         };
@@ -239,6 +258,9 @@ impl Owner {
                         }
                         native_renderer::check_cutoff(request.cutoff).map_err(mapped)?;
                         self.phase = Phase::Bound;
+                        crate::ffi::pairing_diagnostics::milestone(
+                            crate::ffi::pairing_diagnostics::Point::RendererBound,
+                        );
                         self.client_mut()?.begin_read()?;
                     }
                     Frame::RendererInvitation { invocation, text }
@@ -246,7 +268,10 @@ impl Owner {
                     {
                         self.window = Some(
                             RendererWindow::show_invitation(text.as_str(), self.deadline)
-                                .map_err(|_| Error::Protocol)?,
+                                .map_err(ui_error)?,
+                        );
+                        crate::ffi::pairing_diagnostics::milestone(
+                            crate::ffi::pairing_diagnostics::Point::WindowOpened,
                         );
                         self.phase = Phase::Invitation;
                         self.client_mut()?.begin_read()?;
@@ -258,7 +283,7 @@ impl Owner {
                             .as_mut()
                             .ok_or(Error::InvalidPhase)?
                             .show_comparison(code.as_str())
-                            .map_err(|_| Error::Protocol)?;
+                            .map_err(ui_error)?;
                         self.phase = Phase::Comparison;
                     }
                     // A failure outcome may arrive before any comparison (for
@@ -274,7 +299,7 @@ impl Owner {
                             .as_mut()
                             .ok_or(Error::InvalidPhase)?
                             .show_outcome(enrolled)
-                            .map_err(|_| Error::Protocol)?;
+                            .map_err(ui_error)?;
                         self.phase = Phase::Outcome;
                         self.client_mut()?.begin_read()?;
                     }
@@ -315,7 +340,7 @@ impl Owner {
                 .as_mut()
                 .ok_or(Error::InvalidPhase)?
                 .show_expired()
-                .map_err(|_| Error::Protocol)?;
+                .map_err(ui_error)?;
         }
         let frame = Frame::RendererDecision {
             invocation: self.invocation,
@@ -397,6 +422,17 @@ fn cutoff_record(values: impl IntoIterator<Item = (OsString, OsString)>) -> Resu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ui_windows_failure_keeps_hresult_through_helper_mapping() {
+        let hresult = 0x8007_0005_u32 as i32;
+        let error = super::ui_error(super::super::renderer_ui::Error::Native(
+            windows::core::Error::from_hresult(windows::core::HRESULT(hresult)),
+        ));
+        assert_eq!(
+            error.service_error(),
+            crate::ServiceError::RendererNative { stage: 20, hresult }
+        );
+    }
     use super::*;
     fn record(name: &str, value: &str) -> (OsString, OsString) {
         (name.into(), value.into())

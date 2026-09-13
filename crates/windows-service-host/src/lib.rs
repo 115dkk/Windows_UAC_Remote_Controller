@@ -165,7 +165,14 @@ pub(crate) fn android_signer_digest_strings() -> Vec<String> {
 pub fn run_pair_helper(id: PendingElevationId) -> Result<(), ServiceError> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
-        ffi::run_pair_helper(id).map_err(|error| error.service_error())
+        ffi::pairing_diagnostics::milestone(ffi::pairing_diagnostics::Point::HelperEnter);
+        ffi::run_pair_helper(id).map_err(|error| {
+            ffi::pairing_diagnostics::launch_failure(
+                ffi::pairing_diagnostics::Point::HelperFailure,
+                error,
+            );
+            error.service_error()
+        })
     }
     #[cfg(not(all(windows, target_pointer_width = "64")))]
     {
@@ -178,7 +185,14 @@ pub fn run_pair_helper(id: PendingElevationId) -> Result<(), ServiceError> {
 pub fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), ServiceError> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
-        ffi::run_pair_renderer(invocation).map_err(|error| error.service_error())
+        ffi::pairing_diagnostics::milestone(ffi::pairing_diagnostics::Point::RendererEnter);
+        ffi::run_pair_renderer(invocation).map_err(|error| {
+            ffi::pairing_diagnostics::launch_failure(
+                ffi::pairing_diagnostics::Point::RendererFailure,
+                error,
+            );
+            error.service_error()
+        })
     }
     #[cfg(not(all(windows, target_pointer_width = "64")))]
     {

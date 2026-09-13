@@ -20,13 +20,14 @@ members = [
     "crates/android-bindings",
     "crates/android-attestation",
     "tools/controller-uniffi-bindgen",
+    "tools/ci-phone-fixture",
     "crates/relay-service",
     "crates/framed-transport",
     "src-tauri",
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.22"
+version = "0.1.0-alpha.23"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-2.0-or-later"

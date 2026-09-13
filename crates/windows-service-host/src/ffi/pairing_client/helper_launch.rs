@@ -238,6 +238,9 @@ impl Endpoint {
                 match self.handoff.receive(frame).map_err(|_| Error::Protocol)? {
                     Next::Launch(id) => Ok(Event::Launch(id)),
                     Next::BoundLive => {
+                        crate::ffi::pairing_diagnostics::milestone(
+                            crate::ffi::pairing_diagnostics::Point::RendezvousBound,
+                        );
                         self.client.begin_read()?;
                         Ok(Event::Bound)
                     }
@@ -907,6 +910,9 @@ pub(crate) fn run_pair_helper(id: PendingElevationId) -> Result<(), Error> {
         .checked_add(MAX_LIFETIME)
         .ok_or(ClientError::InvalidDeadline)?;
     let client = PairingClient::connect_helper(start, deadline)?;
+    crate::ffi::pairing_diagnostics::milestone(
+        crate::ffi::pairing_diagnostics::Point::HelperConnected,
+    );
     let mut owner = HelperRun::new(Endpoint::helper(client, id)?)?;
     let outcome = loop {
         match owner.poll() {

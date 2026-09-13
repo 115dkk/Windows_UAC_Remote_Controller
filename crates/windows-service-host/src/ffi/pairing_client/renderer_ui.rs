@@ -58,7 +58,7 @@ const QUIET_MODULES: usize = 4;
 
 #[derive(Debug)]
 pub(super) enum Error {
-    Native(#[allow(dead_code)] WinError),
+    Native(WinError),
     InvalidState,
     Qr,
 }

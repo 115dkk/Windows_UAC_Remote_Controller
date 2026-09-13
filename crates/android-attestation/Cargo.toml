@@ -9,9 +9,10 @@ publish.workspace = true
 description = "Bounded PC-side Android key evidence verification, not enrollment authority"
 
 [features]
-test-attestation-anchors = []
+test-attestation-anchors = ["dep:approval-protocol"]
 
 [dependencies]
+approval-protocol = { path = "../approval-protocol", optional = true }
 der = { version = "=0.8.2", features = ["std", "derive", "oid"] }
 x509-cert = { version = "=0.3.0", default-features = false, features = ["std", "pem"] }
 ring = "=0.17.14"
@@ -25,6 +26,7 @@ thiserror.workspace = true
 secure-channel = { path = "../secure-channel" }
 
 [dev-dependencies]
+approval-protocol = { path = "../approval-protocol" }
 p256 = { workspace = true, features = ["pkcs8"] }
 
 [lints]
