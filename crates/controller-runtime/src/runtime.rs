@@ -111,6 +111,9 @@ pub trait PlatformAdapter: Send {
 pub trait PairingAttemptHandle: Send {
     fn state(&self) -> PairingUiState;
     fn cancel(&mut self);
+    /// Bounded join observation. Timeout must not change presentation; a failed
+    /// join must remain false on later calls, not become an absent-handle success.
+    /// Joining the worker does not waive native cleanup/admission checks.
     fn join_until(&mut self, deadline: Instant) -> bool;
 }
 
@@ -262,6 +265,7 @@ pub struct AppRuntime {
     control_progress: ControlProgress,
     pairing_starter: Box<dyn PairingStarter>,
     pairing_attempt: Option<Box<dyn PairingAttemptHandle>>,
+    pairing_worker_joined: bool,
 }
 
 impl fmt::Debug for AppRuntime {
@@ -327,6 +331,7 @@ impl AppRuntime {
             control_progress: ControlProgress::Idle,
             pairing_starter,
             pairing_attempt: None,
+            pairing_worker_joined: true,
         })
     }
 
@@ -465,16 +470,18 @@ impl AppRuntime {
             .as_ref()
             .is_some_and(|attempt| attempt.state().terminal_at.is_none())
         {
-            return Err(AppIssue {
-                code: "pairing_in_progress",
-                message: "휴대폰 연결이 이미 진행 중이에요.",
-                next_action: Some("진행 중인 연결 절차가 끝날 때까지 기다려 주세요."),
-            });
+            return Err(pairing_in_progress());
         }
-        if let Some(mut retained) = self.pairing_attempt.take() {
+        if let Some(retained) = self.pairing_attempt.as_mut() {
             retained.cancel();
-            let _ = retained.join_until(Instant::now() + Duration::from_millis(250));
+            if !self.pairing_worker_joined
+                && !retained.join_until(Instant::now() + Duration::from_millis(250))
+            {
+                return Err(pairing_in_progress());
+            }
         }
+        self.pairing_worker_joined = true;
+        drop(self.pairing_attempt.take());
         let observation = self
             .adapter
             .observe_service()
@@ -487,12 +494,21 @@ impl AppRuntime {
             return Err(service_not_ready());
         }
         self.pairing_attempt = Some(self.pairing_starter.start().map_err(pairing_issue)?);
+        // The runtime mutex serializes commands, including snapshots. Mark the
+        // owner before returning, even if its native worker has not run yet.
+        self.pairing_worker_joined = false;
+        // The immediate command response must reflect deferred management too,
+        // not retain the observation taken before this worker owned admission.
+        self.last_management = None;
         Ok(self.present())
     }
 
     pub fn remove_device(&mut self, device_id: &str) -> Result<AppSnapshot, AppIssue> {
         if self.platform != Platform::Windows {
             return Err(crate::UnwiredCapability::Unpairing.issue());
+        }
+        if self.pairing_worker_active() {
+            return Err(pairing_in_progress());
         }
         let device_id = parse_device_id(device_id).ok_or_else(invalid_device_issue)?;
         let before = self.snapshot();
@@ -521,6 +537,9 @@ impl AppRuntime {
     pub fn set_relay(&mut self, address: &str) -> Result<AppSnapshot, AppIssue> {
         if self.platform != Platform::Windows {
             return Err(PlatformError::Unsupported.into());
+        }
+        if self.pairing_worker_active() {
+            return Err(pairing_in_progress());
         }
         let address = if address == "embedded" {
             None
@@ -603,6 +622,13 @@ impl AppRuntime {
             self.last_management = None;
             return;
         }
+        if self.pairing_worker_active() {
+            // Management and Starter share the native process reservation.
+            // A refresh must not win it before the newly spawned QR worker.
+            // Do not present cached device/relay observations as freshly read.
+            self.last_management = None;
+            return;
+        }
         match self
             .adapter
             .observe_management()
@@ -666,14 +692,27 @@ impl AppRuntime {
         }
     }
 
+    fn pairing_worker_active(&mut self) -> bool {
+        let Some(attempt) = self.pairing_attempt.as_mut() else {
+            return false;
+        };
+        if !self.pairing_worker_joined && attempt.state().terminal_at.is_some() {
+            self.pairing_worker_joined = attempt.join_until(Instant::now());
+        }
+        !self.pairing_worker_joined
+    }
+
     fn pairing_view(&mut self) -> Option<PairingView> {
+        let _ = self.pairing_worker_active();
         let state = self
             .pairing_attempt
             .as_ref()
             .map(|attempt| attempt.state())?;
-        if state.terminal_at.is_some_and(|terminal| {
-            Instant::now().saturating_duration_since(terminal) >= Duration::from_secs(60)
-        }) {
+        if self.pairing_worker_joined
+            && state.terminal_at.is_some_and(|terminal| {
+                Instant::now().saturating_duration_since(terminal) >= Duration::from_secs(60)
+            })
+        {
             self.pairing_attempt = None;
             None
         } else {
@@ -774,6 +813,7 @@ impl AppRuntime {
             data_availability,
             pairing,
             can_pair: self.platform == Platform::Windows
+                && self.pairing_worker_joined
                 && self.last_service.as_ref().is_some_and(|service| {
                     service.state == Some(ServiceState::Running)
                         && service.control_hint == ControlHint::Available
@@ -942,6 +982,14 @@ impl Drop for AppRuntime {
         }
         let deadline = Instant::now() + Duration::from_millis(250);
         let _ = attempt.join_until(deadline);
+    }
+}
+
+fn pairing_in_progress() -> AppIssue {
+    AppIssue {
+        code: "pairing_in_progress",
+        message: "휴대폰 연결이 이미 진행 중이에요.",
+        next_action: Some("진행 중인 연결 절차가 끝날 때까지 기다려 주세요."),
     }
 }
 

@@ -42,6 +42,7 @@ impl PairingStarter for WindowsPairingStarter {
             state,
             cancelled,
             worker: Some(worker),
+            join_failed: false,
         }))
     }
 }
@@ -50,6 +51,7 @@ struct WindowsPairingAttempt {
     state: Arc<Mutex<PairingUiState>>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    join_failed: bool,
 }
 
 impl std::fmt::Debug for WindowsPairingAttempt {
@@ -62,10 +64,26 @@ impl std::fmt::Debug for WindowsPairingAttempt {
 
 impl PairingAttemptHandle for WindowsPairingAttempt {
     fn state(&self) -> PairingUiState {
-        self.state.lock().map(|state| *state).unwrap_or_else(|_| {
-            let now = Instant::now();
-            PairingUiState::failure(PairingFailure::Unavailable, now, now)
-        })
+        self.state
+            .lock()
+            .map(|state| {
+                if state.terminal_at.is_none()
+                    && (self.join_failed
+                        || self.worker.as_ref().is_some_and(JoinHandle::is_finished))
+                {
+                    PairingUiState::failure(
+                        PairingFailure::Unavailable,
+                        state.started_at,
+                        Instant::now(),
+                    )
+                } else {
+                    *state
+                }
+            })
+            .unwrap_or_else(|_| {
+                let now = Instant::now();
+                PairingUiState::failure(PairingFailure::Unavailable, now, now)
+            })
     }
 
     fn cancel(&mut self) {
@@ -73,6 +91,9 @@ impl PairingAttemptHandle for WindowsPairingAttempt {
     }
 
     fn join_until(&mut self, deadline: Instant) -> bool {
+        if self.join_failed {
+            return false;
+        }
         while self
             .worker
             .as_ref()
@@ -80,15 +101,27 @@ impl PairingAttemptHandle for WindowsPairingAttempt {
         {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                publish_failure(&self.state, PairingFailure::Unavailable);
                 return false;
             }
             thread::sleep(POLL_INTERVAL.min(remaining));
         }
-        match self.worker.take() {
-            Some(worker) => worker.join().is_ok(),
-            None => true,
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                self.join_failed = true;
+                publish_failure(&self.state, PairingFailure::Unavailable);
+                return false;
+            }
+            if let Ok(mut state) = self.state.lock()
+                && state.terminal_at.is_none()
+            {
+                *state = PairingUiState::failure(
+                    PairingFailure::Unavailable,
+                    state.started_at,
+                    Instant::now(),
+                );
+            }
         }
+        true
     }
 }
 
@@ -297,5 +330,51 @@ fn publish_failure(state: &Mutex<PairingUiState>, failure: PairingFailure) {
     if let Ok(mut state) = state.lock() {
         let started_at = state.started_at;
         *state = PairingUiState::failure(failure, started_at, Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attempt(worker: JoinHandle<()>) -> WindowsPairingAttempt {
+        WindowsPairingAttempt {
+            state: Arc::new(Mutex::new(PairingUiState::connecting(Instant::now()))),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            worker: Some(worker),
+            join_failed: false,
+        }
+    }
+
+    #[test]
+    fn nonblocking_join_does_not_turn_a_running_worker_into_failure() {
+        let (release, wait) = std::sync::mpsc::sync_channel::<()>(1);
+        let mut value = attempt(thread::spawn(move || {
+            wait.recv().unwrap();
+        }));
+        assert!(!value.join_until(Instant::now()));
+        assert!(value.state().terminal_at.is_none());
+        release.send(()).unwrap();
+        assert!(value.join_until(Instant::now() + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn panicked_join_never_becomes_absent_handle_success() {
+        let mut value = attempt(thread::spawn(|| panic!("synthetic worker panic")));
+        assert!(!value.join_until(Instant::now() + Duration::from_secs(5)));
+        assert!(value.state().terminal_at.is_some());
+        assert!(!value.join_until(Instant::now()));
+        assert!(!value.join_until(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn normal_exit_without_publication_stays_terminal_after_join() {
+        let mut value = attempt(thread::spawn(|| {}));
+        assert!(value.join_until(Instant::now() + Duration::from_secs(5)));
+        let terminal = value.state();
+        assert!(terminal.terminal_at.is_some());
+        assert!(value.join_until(Instant::now()));
+        assert_eq!(value.state().terminal_at, terminal.terminal_at);
+        assert_eq!(value.state().phase, PairingUiPhase::Failed);
     }
 }
