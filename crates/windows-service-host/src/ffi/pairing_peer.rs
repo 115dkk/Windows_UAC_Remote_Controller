@@ -1126,6 +1126,32 @@ pub(super) struct TokenFacts {
     ui_access: u32,
 }
 impl TokenFacts {
+    /// Only the unique enabled logon SID from this observed PRIMARY token.
+    /// SID shape alone is never provenance. A malformed/disabled/deny-only or
+    /// duplicate logon-marked group fails; None means no such group exists.
+    pub(super) fn enabled_logon_sid(&self) -> Result<Option<&[u8]>, PairingPeerError> {
+        const LOGON_ID: u32 = 0xc000_0000;
+        const PREFIX: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0];
+        let mut observed = None;
+        for (sid, flags) in &self.groups {
+            if flags & LOGON_ID == 0 {
+                continue;
+            }
+            if flags & LOGON_ID != LOGON_ID
+                || sid.len() != 20
+                || !sid.starts_with(PREFIX)
+                || observed.is_some()
+            {
+                return Err(PairingPeerError::Malformed);
+            }
+            if flags & GROUP_ENABLED == 0 || flags & GROUP_DENY_ONLY != 0 {
+                return Err(PairingPeerError::Rejected);
+            }
+            observed = Some(sid.as_slice());
+        }
+        Ok(observed)
+    }
+
     pub(super) fn observe(process: HANDLE) -> Result<Self, PairingPeerError> {
         let mut token = HANDLE::default();
         // SAFETY: exact retained client process; query primary token, never
@@ -1412,6 +1438,68 @@ mod tests {
             app_container: 0,
             ui_access: 0,
         }
+    }
+
+    fn logon_sid(value: u32) -> Vec<u8> {
+        let mut bytes = vec![1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0];
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn logon_sid_requires_unique_enabled_primary_group_provenance() {
+        let mut token = facts(PairingPeerRole::Starter);
+        assert_eq!(token.enabled_logon_sid(), Ok(None));
+        token.groups.push((logon_sid(1), GROUP_ENABLED));
+        // A same-shaped ordinary group is not a logon-group observation.
+        assert_eq!(token.enabled_logon_sid(), Ok(None));
+        token.groups.pop();
+        token
+            .groups
+            .push((logon_sid(1), 0xc000_0000 | GROUP_ENABLED));
+        assert_eq!(
+            token.enabled_logon_sid().unwrap(),
+            Some(logon_sid(1).as_slice())
+        );
+        token
+            .groups
+            .push((logon_sid(1), 0xc000_0000 | GROUP_ENABLED));
+        assert_eq!(token.enabled_logon_sid(), Err(PairingPeerError::Malformed));
+    }
+
+    #[test]
+    fn partial_disabled_deny_only_and_malformed_logon_groups_fail_closed() {
+        for flags in [0x4000_0004, 0x8000_0004, 0xc000_0000, 0xc000_0014] {
+            let mut token = facts(PairingPeerRole::Starter);
+            token.groups.push((logon_sid(1), flags));
+            assert!(token.enabled_logon_sid().is_err());
+        }
+        for malformed in [SYSTEM.to_vec(), logon_sid(1)[..16].to_vec(), {
+            let mut wrong_authority = logon_sid(1);
+            wrong_authority[7] = 3;
+            wrong_authority
+        }] {
+            let mut token = facts(PairingPeerRole::Starter);
+            token.groups.push((malformed, 0xc000_0004));
+            assert_eq!(token.enabled_logon_sid(), Err(PairingPeerError::Malformed));
+        }
+    }
+
+    #[test]
+    fn bound_primary_facts_detect_same_sid_flag_change_and_other_logon() {
+        let mut original = facts(PairingPeerRole::Starter);
+        original.groups.push((logon_sid(1), 0xc000_0004));
+        let mut changed_flags = facts(PairingPeerRole::Starter);
+        changed_flags.groups.push((logon_sid(1), 0xc000_0006));
+        assert_eq!(
+            original.enabled_logon_sid().unwrap(),
+            changed_flags.enabled_logon_sid().unwrap()
+        );
+        assert!(original != changed_flags);
+        let mut changed_logon = facts(PairingPeerRole::Starter);
+        changed_logon.groups.push((logon_sid(2), 0xc000_0004));
+        assert!(original != changed_logon);
     }
     #[test]
     fn fixed_local_pipe_modes_and_non_generic_starter_rights() {

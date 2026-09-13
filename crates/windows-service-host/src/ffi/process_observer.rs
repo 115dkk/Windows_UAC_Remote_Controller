@@ -26,7 +26,11 @@ use windows::Win32::{
 };
 use windows_service::service::{Service, ServiceState};
 
-use super::{filesystem::ValidatedInstallation, security::OwnServiceSid};
+use super::{
+    filesystem::ValidatedInstallation,
+    pairing_peer::{PairingPeerError, TokenFacts},
+    security::OwnServiceSid,
+};
 use crate::{ServiceError, ServiceOperation};
 
 // Fixed lab API phases survive the outer startup error projection. This file
@@ -174,6 +178,36 @@ fn recheck_startup(
     windows_identity::verify_service_context().map_err(ServiceError::from_identity)
 }
 
+fn subject_error(error: PairingPeerError) -> ServiceError {
+    match error {
+        PairingPeerError::Native { hresult, .. } => ServiceError::WindowsCall {
+            operation: ServiceOperation::QueryToken,
+            code: hresult as u32,
+        },
+        PairingPeerError::Service(error) => error,
+        _ => ServiceError::UnsafePermissions,
+    }
+}
+
+fn current_subject() -> Result<TokenFacts, ServiceError> {
+    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
+    // SAFETY: only the borrowed current-process pseudo-handle, never a PID or
+    // caller-selected token. TokenFacts retains bounded PRIMARY-token facts.
+    unsafe { TokenFacts::observe(GetCurrentProcess()) }.map_err(subject_error)
+}
+
+fn recheck_subject(original: &TokenFacts) -> Result<(), ServiceError> {
+    let current = current_subject()?;
+    let _ = current.enabled_logon_sid().map_err(subject_error)?;
+    // Full primary-token facts include exact group SID bytes AND attributes;
+    // same-shaped logon IDs, disabled/deny-only changes and token replacement
+    // cannot be substituted between descriptor validation and publication.
+    if current != *original {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(())
+}
+
 pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     observe!(
         "context",
@@ -186,12 +220,17 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     )?;
     observe!("startup_before", recheck_startup(&installation, &service))?;
     let service_sid = OwnServiceSid::lookup()?.bytes();
+    let subject = observe!("subject_before", current_subject())?;
+    let logon_sid = observe!(
+        "logon_before",
+        subject.enabled_logon_sid().map_err(subject_error)
+    )?;
     let before = observe!("read_before", read_current_descriptor())?;
     #[cfg(feature = "lab-software-identity")]
-    for line in policy::diagnostic_summary(&before, &service_sid) {
+    for line in policy::diagnostic_summary(&before, &service_sid, logon_sid) {
         write_lab_line(&format!("before {line}\n"));
     }
-    let merged = observe!("merge", policy::merge(&before, &service_sid))?;
+    let merged = observe!("merge", policy::merge(&before, &service_sid, logon_sid))?;
     if merged.is_empty() || !merged.len().is_multiple_of(4) {
         return Err(ServiceError::UnsafePermissions);
     }
@@ -214,6 +253,7 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     if observe!("read_before_set", read_current_descriptor())? != before {
         return Err(ServiceError::UnsafePermissions);
     }
+    observe!("subject_before_set", recheck_subject(&subject))?;
     if crate::entry::stop_requested() {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -243,14 +283,15 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     }
     #[cfg(feature = "lab-software-identity")]
     note("set_dacl", 0);
+    observe!("subject_after", recheck_subject(&subject))?;
     let after = observe!("read_after", read_current_descriptor())?;
     #[cfg(feature = "lab-software-identity")]
-    for line in policy::diagnostic_summary(&after, &service_sid) {
+    for line in policy::diagnostic_summary(&after, &service_sid, logon_sid) {
         write_lab_line(&format!("after {line}\n"));
     }
     observe!(
         "readback",
-        policy::verify_readback(&before, &after, &merged, &service_sid)
+        policy::verify_readback(&before, &after, &merged, &service_sid, logon_sid)
     )?;
     observe!("startup_after", recheck_startup(&installation, &service))
 }
