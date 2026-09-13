@@ -451,7 +451,9 @@ try {
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $adminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     foreach ($entry in @(
-        @{ Sid = $clientSid; Rights = [Security.AccessControl.FileSystemRights]::Modify },
+        # Match an ordinary user-owned browser profile, including the ability
+        # to create its sandbox ACLs. This fresh cache is not service data.
+        @{ Sid = $clientSid; Rights = [Security.AccessControl.FileSystemRights]::FullControl },
         @{ Sid = $systemSid; Rights = [Security.AccessControl.FileSystemRights]::FullControl },
         @{ Sid = $adminSid; Rights = [Security.AccessControl.FileSystemRights]::FullControl }
     )) {

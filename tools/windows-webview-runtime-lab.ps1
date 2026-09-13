@@ -27,19 +27,23 @@ if (-not $before) {
     $installer = Join-Path $directory 'MicrosoftEdgeWebview2Setup.exe'
     # Microsoft-owned link published in MicrosoftEdge/WebView2Samples.
     Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer -TimeoutSec 120
-    $signature = Get-AuthenticodeSignature -LiteralPath $installer
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') { throw 'Microsoft installer signature required' }
-    $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
     # Deny replacement/deletion through signature check and the owned launch.
     $pin = [IO.File]::Open($installer,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     try {
-        if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $hash) { throw 'SDK installer changed' }
+        $signature = Get-AuthenticodeSignature -LiteralPath $installer
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') { throw 'Microsoft installer signature required' }
+        $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
         $process = Start-Process -FilePath $installer -ArgumentList '/silent','/install' -WindowStyle Hidden -PassThru
         if (-not $process.WaitForExit(180000)) { throw 'Official runtime setup completion unknown' }
         if ($process.ExitCode -ne 0) { throw "Official runtime setup failed: $($process.ExitCode)" }
     } finally { $pin.Dispose() }
     Write-Output ("Microsoft bootstrapper SHA256: {0}" -f $hash)
 }
-$after = Read-MachineRuntime
+$until = [DateTime]::UtcNow.AddSeconds(60)
+do {
+    $after = Read-MachineRuntime
+    if ($after) { break }
+    Start-Sleep -Milliseconds 500
+} while ([DateTime]::UtcNow -lt $until)
 if (-not $after) { throw 'Per-machine WebView2 runtime registration missing' }
 Write-Output ("Machine WebView2 ready for the standard user: {0}" -f $after)
