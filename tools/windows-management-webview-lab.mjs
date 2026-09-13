@@ -67,6 +67,7 @@ let browser;
 let snapshots = 0;
 let refreshes = 0;
 let rejected = 0;
+let busyReads = 0;
 try {
   await expect.poll(debuggerOwnership, { timeout: 45000, intervals: [500, 1000] })
     .toEqual({ ready: true, loopback: true, owned: true, webview: true, profile: true });
@@ -82,13 +83,23 @@ try {
   async function snapshot() {
     // Existing read-only command through this exact product WebView's IPC.
     const state = await page.evaluate(async () => {
-      const value = await window.__TAURI_INTERNALS__.invoke('app_snapshot');
+      let value;
+      try {
+        value = await window.__TAURI_INTERNALS__.invoke('app_snapshot');
+      } catch (error) {
+        // commands::with_runtime has one admission slot. A real UI Refresh
+        // may still own it; only its exact busy reply permits a bounded retry.
+        // Never serialize native error text or retry storage/worker failures.
+        if (error && typeof error === 'object' && error.code === 'app_busy') return { busy: true };
+        throw new Error('Native app_snapshot rejected with a non-busy error');
+      }
       return { schema: value.schemaVersion, platform: value.platform,
         service: value.service?.state, mode: value.relayStatus?.mode,
         relay: value.relayStatus?.state, available: value.dataAvailability.devices,
         count: value.devices.length };
     });
     confirmService();
+    if (state.busy === true) busyReads++;
     return state;
   }
   const expected = { schema: 4, platform: 'windows', service: 'running', mode: 'embedded', relay: 'listening', available: 'available', count: 0 };
@@ -97,6 +108,7 @@ try {
   for (let index = 0; index < 16; index++) {
     await page.locator('.refresh-button').click();
     refreshes++;
+    await expect(page.locator('.refresh-button')).toBeEnabled({ timeout: 15000 });
     await expect.poll(snapshot, { timeout: 15000, intervals: [500, 1000] }).toEqual(expected);
     snapshots++;
   }
@@ -111,7 +123,7 @@ try {
   confirmService();
   writeFileSync(resolve(evidence, 'management-gui-proof.json'), JSON.stringify({
     commit: process.env.GITHUB_SHA, readOnly: true, actualGuiMedium: true,
-    successfulSnapshotChecks: snapshots, refreshes, rejectedClients: rejected, originalServicePid: original.pid,
+    successfulSnapshotChecks: snapshots, refreshes, rejectedClients: rejected, busyReads, originalServicePid: original.pid,
     originalServicePidRetained: true,
     actualRelayListenerRetained: true, debuggerLoopbackAndOwned: true,
     scope: 'Real product GuiMedium reads/rejected-image clients; not CliElevated/UAC consent/phone authentication',
