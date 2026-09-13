@@ -54,6 +54,13 @@ macro_rules! observe {
 
 #[cfg(feature = "lab-software-identity")]
 fn note(phase: &'static str, code: u32) {
+    write_lab_line(&format!("observer {phase} {code}\n"));
+}
+
+// Callers supply only literal phases/numeric codes or the private policy's
+// bounded fixed-class ACL summary, never error text or SID/descriptor bytes.
+#[cfg(feature = "lab-software-identity")]
+fn write_lab_line(line: &str) {
     use std::{fs::OpenOptions, io::Write};
     let Some(root) = std::env::var_os("ProgramData") else {
         return;
@@ -61,11 +68,10 @@ fn note(phase: &'static str, code: u32) {
     let path = std::path::PathBuf::from(root)
         .join(crate::INSTALLATION_FOLDER)
         .join("process-observer.txt");
-    let line = format!("observer {phase} {code}\n");
     if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path)
         && file
             .metadata()
-            .is_ok_and(|metadata| metadata.len() + line.len() as u64 <= 8192)
+            .is_ok_and(|metadata| metadata.len().saturating_add(line.len() as u64) <= 8192)
     {
         let _ = file.write_all(line.as_bytes());
     }
@@ -181,6 +187,10 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     observe!("startup_before", recheck_startup(&installation, &service))?;
     let service_sid = OwnServiceSid::lookup()?.bytes();
     let before = observe!("read_before", read_current_descriptor())?;
+    #[cfg(feature = "lab-software-identity")]
+    for line in policy::diagnostic_summary(&before, &service_sid) {
+        write_lab_line(&format!("before {line}\n"));
+    }
     let merged = observe!("merge", policy::merge(&before, &service_sid))?;
     if merged.is_empty() || !merged.len().is_multiple_of(4) {
         return Err(ServiceError::UnsafePermissions);
@@ -234,6 +244,10 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     #[cfg(feature = "lab-software-identity")]
     note("set_dacl", 0);
     let after = observe!("read_after", read_current_descriptor())?;
+    #[cfg(feature = "lab-software-identity")]
+    for line in policy::diagnostic_summary(&after, &service_sid) {
+        write_lab_line(&format!("after {line}\n"));
+    }
     observe!(
         "readback",
         policy::verify_readback(&before, &after, &merged, &service_sid)

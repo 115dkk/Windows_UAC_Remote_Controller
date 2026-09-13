@@ -14,6 +14,18 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const KNOWN_TRUSTED_RIGHTS: u32 = 0xf01f_ffff;
 const SYSTEM_CONTROL: u32 = 0x0006_0000 | OBSERVER; // READ_CONTROL | WRITE_DAC.
 
+/// Interpret only trusted SYSTEM rights for the minimum-control guard. Windows
+/// grants QUERY_LIMITED_INFORMATION whenever QUERY_INFORMATION is granted.
+/// This arithmetic never rewrites an ACE or applies to the IU observer mask.
+fn system_control_rights(mask: u32) -> u32 {
+    let implied = if mask & 0x0400 != 0 { 0x1000 } else { 0 };
+    if mask & GENERIC_ALL != 0 {
+        SYSTEM_CONTROL
+    } else {
+        (mask | implied) & SYSTEM_CONTROL
+    }
+}
+
 #[derive(Eq, PartialEq)]
 pub(super) struct Snapshot {
     pub(super) owner: Vec<u8>,
@@ -165,11 +177,7 @@ fn check(
                 return Err(rejected());
             }
             if trustee == SYSTEM {
-                system_control |= if mask & GENERIC_ALL != 0 {
-                    SYSTEM_CONTROL
-                } else {
-                    mask
-                };
+                system_control |= system_control_rights(mask);
             }
         } else {
             return Err(rejected());
@@ -244,6 +252,107 @@ pub(super) fn startup_guard(
     } else {
         Ok(())
     }
+}
+
+/// Redacted, bounded lab summary only; never an admission input or serializer
+/// for the descriptor. Parsing stops at 128 ACEs and reports only the first 16.
+#[cfg(any(test, feature = "lab-software-identity"))]
+pub(super) fn diagnostic_summary(snapshot: &Snapshot, service_sid: &[u8]) -> Vec<String> {
+    fn class(principal: &[u8], service_sid: &[u8]) -> (&'static str, usize) {
+        if principal == SYSTEM {
+            ("SYSTEM", 0)
+        } else if principal == ADMIN {
+            ("ADMIN", 1)
+        } else if principal == service_sid
+            && crate::policy::service_sid_matches(service_sid, "NT SERVICE")
+        {
+            ("OWN_SERVICE", 2)
+        } else if principal == INTERACTIVE {
+            ("IU", 3)
+        } else {
+            ("OTHER", 4)
+        }
+    }
+
+    let acl = &snapshot.acl;
+    let header = acl.get(..8);
+    let count = header.map(|value| usize::from(u16::from_le_bytes([value[4], value[5]])));
+    let valid_header = header.is_some_and(|value| {
+        acl.len() <= MAX_ACL
+            && [2, 4].contains(&value[0])
+            && value[1] == 0
+            && value[6..8] == [0, 0]
+            && usize::from(u16::from_le_bytes([value[2], value[3]])) == acl.len()
+    });
+    let mut lines = vec![format!(
+        "acl_summary owner={} bytes={} count={} revision={} control={} header_valid={}",
+        class(&snapshot.owner, service_sid).0,
+        acl.len(),
+        count.unwrap_or(0),
+        header.map_or(0, |value| value[0]),
+        snapshot.control,
+        u8::from(valid_header),
+    )];
+    let mut offset = 8usize;
+    let mut visited = 0usize;
+    let mut counts = [0usize; 5];
+    let mut effective_control = 0u32;
+    let mut complete = valid_header;
+    if valid_header {
+        for _ in 0..count.unwrap_or(0).min(MAX_ACES) {
+            let Some(header) = acl.get(offset..offset + 4) else {
+                complete = false;
+                break;
+            };
+            let size = usize::from(u16::from_le_bytes([header[2], header[3]]));
+            if size < 4 || !size.is_multiple_of(4) {
+                complete = false;
+                break;
+            }
+            let Some(ace) = acl.get(offset..offset + size) else {
+                complete = false;
+                break;
+            };
+            let mask = ace.get(4..8).map_or(0, |value| {
+                u32::from_le_bytes([value[0], value[1], value[2], value[3]])
+            });
+            // Only ordinary allow/deny forms have the SID layout used here.
+            // Unknown ACE kinds retain numeric metadata and an OTHER class.
+            let principal = if matches!(header[0], 0 | 1) {
+                sid(ace, 8).ok().filter(|value| value.len() + 8 == size)
+            } else {
+                None
+            };
+            let (label, index) = principal.map_or(("OTHER", 4), |value| class(value, service_sid));
+            counts[index] += 1;
+            if label == "SYSTEM"
+                && header[0] == 0
+                && header[1] == 0
+                && mask != 0
+                && mask & !KNOWN_TRUSTED_RIGHTS == 0
+            {
+                effective_control |= system_control_rights(mask);
+            }
+            if visited < 16 {
+                lines.push(format!(
+                    "acl_ace index={visited} class={label} kind={} flags={} mask={mask} mask_present={} size={size}",
+                    header[0], header[1], u8::from(ace.get(4..8).is_some()),
+                ));
+            }
+            visited += 1;
+            offset += size;
+        }
+    }
+    complete &= visited == count.unwrap_or(0);
+    let padding = if complete { acl.get(offset..) } else { None };
+    lines.push(format!(
+        "acl_totals visited={visited} system={} admin={} own_service={} iu={} other={} omitted={} complete={} padding_bytes={} padding_nonzero={} system_effective_control={effective_control} system_required_control={SYSTEM_CONTROL}",
+        counts[0], counts[1], counts[2], counts[3], counts[4],
+        visited.saturating_sub(16), u8::from(complete),
+        padding.map_or(0, <[u8]>::len),
+        u8::from(padding.is_some_and(|bytes| bytes.iter().any(|byte| *byte != 0))),
+    ));
+    lines
 }
 
 #[cfg(test)]
@@ -401,5 +510,69 @@ mod tests {
         duplicate.acl[2..4].copy_from_slice(&size.to_le_bytes());
         duplicate.acl[4..6].copy_from_slice(&4u16.to_le_bytes());
         assert!(merge(&duplicate, &service_sid()).is_err());
+    }
+
+    #[test]
+    fn system_legacy_full_and_query_information_supply_implicit_limited_query() {
+        for mask in [0x001f_0fff_u32, 0x0016_0400] {
+            assert_eq!(mask & 0x1000, 0);
+            let mut before = fixture(&[]);
+            before.acl[12..16].copy_from_slice(&mask.to_le_bytes());
+            let expected = merge(&before, &service_sid()).unwrap();
+            // Only the appended IU ACE/header change; legacy SYSTEM rights
+            // stay byte-for-byte identical, including no added raw QLI bit.
+            assert_eq!(&expected[8..before.acl.len()], &before.acl[8..]);
+            assert_eq!(&expected[12..16], &mask.to_le_bytes());
+            let after = Snapshot {
+                acl: expected.clone(),
+                ..fixture(&[])
+            };
+            assert!(verify_readback(&before, &after, &expected, &service_sid()).is_ok());
+            assert_eq!(system_control_rights(mask), SYSTEM_CONTROL);
+        }
+    }
+
+    #[test]
+    fn implicit_system_query_does_not_relax_observer_or_other_required_rights() {
+        for missing in [0x0002_0000_u32, 0x0004_0000, 0x0010_0000, 0x0400] {
+            let mut before = fixture(&[]);
+            before.acl[12..16].copy_from_slice(&(0x0016_0400 & !missing).to_le_bytes());
+            assert!(merge(&before, &service_sid()).is_err());
+        }
+        for mask in [0x0400, 0x0010_0400, OBSERVER | 0x0400] {
+            assert!(merge(&fixture(&ace(INTERACTIVE, mask)), &service_sid()).is_err());
+        }
+    }
+
+    #[test]
+    fn diagnostic_summary_is_classified_and_bounds_records_and_scan() {
+        let mut before = fixture(&ace(INTERACTIVE, OBSERVER));
+        before.acl[12..16].copy_from_slice(&0x001f_0fff_u32.to_le_bytes());
+        let lines = diagnostic_summary(&before, &service_sid());
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].contains("owner=SYSTEM"));
+        assert!(lines[1].contains("class=SYSTEM"));
+        assert!(lines[2].contains("class=ADMIN"));
+        assert!(lines[3].contains("class=IU"));
+        assert!(lines[4].contains(&format!("system_effective_control={SYSTEM_CONTROL}")));
+        let unknown = [1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
+        let mut many = fixture(&[]);
+        for _ in 0..140 {
+            many.acl.extend_from_slice(&ace(&unknown, 0x1000));
+        }
+        let size = many.acl.len() as u16;
+        many.acl[2..4].copy_from_slice(&size.to_le_bytes());
+        many.acl[4..6].copy_from_slice(&142u16.to_le_bytes());
+        let lines = diagnostic_summary(&many, &service_sid());
+        assert_eq!(lines.len(), 18);
+        assert!(lines[17].contains("visited=128"));
+        assert!(lines[17].contains("complete=0"));
+        assert!(lines[17].contains("omitted=112"));
+        assert!(lines.join("\n").len() < 8192);
+        for end in 0..before.acl.len() {
+            let mut broken = fixture(&[]);
+            broken.acl.truncate(end);
+            assert!(diagnostic_summary(&broken, &service_sid()).len() <= 18);
+        }
     }
 }
