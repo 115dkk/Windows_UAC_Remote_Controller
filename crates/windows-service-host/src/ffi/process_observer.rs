@@ -19,8 +19,8 @@ use windows::Win32::{
         Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT, SetSecurityInfo},
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorControl,
         GetSecurityDescriptorLength, IsValidAcl, IsValidSecurityDescriptor,
-        LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        SE_SELF_RELATIVE, SECURITY_DESCRIPTOR_RELATIVE,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_SELF_RELATIVE,
+        SECURITY_DESCRIPTOR_RELATIVE,
     },
     System::Threading::GetCurrentProcess,
 };
@@ -29,10 +29,52 @@ use windows_service::service::{Service, ServiceState};
 use super::{filesystem::ValidatedInstallation, security::OwnServiceSid};
 use crate::{ServiceError, ServiceOperation};
 
+// Fixed lab API phases survive the outer startup error projection. This file
+// is separate from the generic failure report, which replaces its old content.
+macro_rules! observe {
+    ($phase:literal, $result:expr) => {{
+        #[cfg(feature = "lab-software-identity")]
+        {
+            let result = $result;
+            note(
+                $phase,
+                result
+                    .as_ref()
+                    .err()
+                    .map_or(0, |error: &ServiceError| error.service_diagnostic_code()),
+            );
+            result
+        }
+        #[cfg(not(feature = "lab-software-identity"))]
+        {
+            $result
+        }
+    }};
+}
+
+#[cfg(feature = "lab-software-identity")]
+fn note(phase: &'static str, code: u32) {
+    use std::{fs::OpenOptions, io::Write};
+    let Some(root) = std::env::var_os("ProgramData") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(root)
+        .join(crate::INSTALLATION_FOLDER)
+        .join("process-observer.txt");
+    let line = format!("observer {phase} {code}\n");
+    if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path)
+        && file
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() + line.len() as u64 <= 8192)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 struct Descriptor(PSECURITY_DESCRIPTOR);
 impl Descriptor {
     fn release(mut self) -> Result<(), ServiceError> {
-        let original = mem::replace(&mut self.0, PSECURITY_DESCRIPTOR::default());
+        let original = mem::take(&mut self.0);
         // SAFETY: exact non-null successful GetSecurityInfo allocation, once,
         // after every borrowed byte view was copied and ended. Never retried.
         if unsafe { LocalFree(Some(HLOCAL(original.0))) }.0.is_null() {
@@ -55,16 +97,13 @@ impl Drop for Descriptor {
 fn read_current_descriptor() -> Result<policy::Snapshot, ServiceError> {
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // SAFETY: current-process pseudo-handle is borrowed only. Returned owner,
-    // group, DACL and mandatory-label subset share one owned native descriptor.
-    // LABEL requests no full audit-SACL privilege and performs no policy write.
+    // group and DACL share one owned native descriptor. No SACL/label query is
+    // needed: publication requests ONLY DACL and cannot write MIC/SACL.
     let result = unsafe {
         GetSecurityInfo(
             GetCurrentProcess(),
             SE_KERNEL_OBJECT,
-            OWNER_SECURITY_INFORMATION
-                | GROUP_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | LABEL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             None,
             None,
             None,
@@ -130,13 +169,19 @@ fn recheck_startup(
 }
 
 pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
-    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
-    let installation = super::validate_installation(true)?;
-    let service = crate::native::running_service_for_probe(installation.executable())?;
-    recheck_startup(&installation, &service)?;
+    observe!(
+        "context",
+        windows_identity::verify_service_context().map_err(ServiceError::from_identity)
+    )?;
+    let installation = observe!("installation", super::validate_installation(true))?;
+    let service = observe!(
+        "scm",
+        crate::native::running_service_for_probe(installation.executable())
+    )?;
+    observe!("startup_before", recheck_startup(&installation, &service))?;
     let service_sid = OwnServiceSid::lookup()?.bytes();
-    let before = read_current_descriptor()?;
-    let merged = policy::merge(&before, &service_sid)?;
+    let before = observe!("read_before", read_current_descriptor())?;
+    let merged = observe!("merge", policy::merge(&before, &service_sid))?;
     if merged.is_empty() || !merged.len().is_multiple_of(4) {
         return Err(ServiceError::UnsafePermissions);
     }
@@ -150,10 +195,13 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     if !unsafe { IsValidAcl(aligned.as_ptr().cast::<ACL>()) }.as_bool() {
         return Err(ServiceError::UnsafePermissions);
     }
-    recheck_startup(&installation, &service)?;
+    observe!(
+        "startup_before_set",
+        recheck_startup(&installation, &service)
+    )?;
     // Detect a concurrent policy edit before attempting the approved merge.
     // There is no retry/overwrite loop and no compensating ACL reset.
-    if read_current_descriptor()? != before {
+    if observe!("read_before_set", read_current_descriptor())? != before {
         return Err(ServiceError::UnsafePermissions);
     }
     if crate::entry::stop_requested() {
@@ -175,12 +223,20 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
         )
     };
     if result.0 != 0 {
-        return Err(ServiceError::WindowsCall {
-            operation: ServiceOperation::HardenService,
-            code: result.0,
-        });
+        return observe!(
+            "set_dacl",
+            Err(ServiceError::WindowsCall {
+                operation: ServiceOperation::HardenService,
+                code: result.0,
+            })
+        );
     }
-    let after = read_current_descriptor()?;
-    policy::verify_readback(&before, &after, &merged, &service_sid)?;
-    recheck_startup(&installation, &service)
+    #[cfg(feature = "lab-software-identity")]
+    note("set_dacl", 0);
+    let after = observe!("read_after", read_current_descriptor())?;
+    observe!(
+        "readback",
+        policy::verify_readback(&before, &after, &merged, &service_sid)
+    )?;
+    observe!("startup_after", recheck_startup(&installation, &service))
 }
