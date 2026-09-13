@@ -410,6 +410,24 @@ namespace UacCiMedium {
 
         public void RequireMedium() { Verify(Facts); }
 
+        public void ProbeOwnedProfileProcessExit() {
+            Verify(Facts);
+            Require(process == IntPtr.Zero && profileProcess != IntPtr.Zero && profileThread != IntPtr.Zero,
+                "Preflight requires only the original fixed profile probe");
+            uint previousCount = ResumeThread(profileThread);
+            int resumeError = previousCount == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+            if (previousCount == UInt32.MaxValue)
+                throw new Win32Exception(resumeError, "ResumeThread(owned fixed preflight)");
+            Require(previousCount == 1, "Owned fixed preflight suspend count was not exactly one: " + previousCount);
+            uint result = WaitForSingleObject(profileProcess, 5000);
+            if (result == UInt32.MaxValue) throw Error("WaitForSingleObject(owned fixed preflight)");
+            Require(result == 0, "Owned fixed preflight did not exit within five seconds");
+            uint code;
+            if (!GetExitCodeProcess(profileProcess, out code))
+                throw Error("GetExitCodeProcess(owned fixed preflight)");
+            Require(code == 0, "Owned fixed preflight did not exit with code zero");
+        }
+
         private IntPtr ChildEnvironment(string profile) {
             IntPtr original;
             if (!CreateEnvironmentBlock(out original, logonToken, false))
@@ -778,7 +796,11 @@ try {
     # Only enum/bool/fixed integrity facts, never account names, SIDs or tokens.
     $launcher.Facts | ConvertTo-Json -Compress | Write-Output
     $launcher.RequireMedium()
-    if ($InspectOnly) { return }
+    if ($InspectOnly) {
+        $launcher.ProbeOwnedProfileProcessExit()
+        Write-Output 'PASS: original fixed standard-account probe resumed once and exited zero within five seconds.'
+        return
+    }
 
     if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or
         [string]::IsNullOrWhiteSpace($env:LAB_EVIDENCE)) {
