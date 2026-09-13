@@ -25,6 +25,7 @@ on:
       - 'crates/windows-observer/**'
       - 'crates/controller-runtime/**'
       - 'tools/windows-medium-client.ps1'
+      - 'tools/windows-webview-runtime-lab.ps1'
       - 'tools/windows-management-webview-lab.mjs'
       - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
@@ -60,6 +61,9 @@ jobs:
       - name: Verify a genuine medium-token fixture without changing product admission
         shell: powershell
         run: ./tools/windows-medium-client.ps1 -InspectOnly
+      - name: Prepare official per-machine WebView2 for the fresh standard user
+        shell: pwsh
+        run: ./tools/windows-webview-runtime-lab.ps1
       - name: Install pinned Node and build the actual desktop client assets
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
