@@ -565,7 +565,12 @@ impl fmt::Debug for PairingClient {
 }
 impl PairingClient {
     pub fn connect_starter(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
-        Self::connect(ClientEndpoint::Starter, started_at, deadline)
+        let result = Self::connect(ClientEndpoint::Starter, started_at, deadline);
+        #[cfg(feature = "lab-client-diagnostics")]
+        if let Err(error) = result.as_ref() {
+            crate::lab_pairing_offer::launch_failure(PairingLaunchError::Client(*error));
+        }
+        result
     }
     pub fn connect_helper(started_at: Instant, deadline: Instant) -> Result<Self, Error> {
         Self::connect(ClientEndpoint::Helper, started_at, deadline)
@@ -748,7 +753,12 @@ impl PairingClient {
     /// Starter client; obtains its ID from that authenticated pipe, not an arg.
     /// Call/poll on the same native worker, never a WebView/UI thread.
     pub fn into_helper_launch(self) -> Result<PairingHelperLaunch, PairingLaunchError> {
-        PairingHelperLaunch::from_starter(self)
+        let result = PairingHelperLaunch::from_starter(self);
+        #[cfg(feature = "lab-client-diagnostics")]
+        if let Err(error) = result.as_ref() {
+            crate::lab_pairing_offer::launch_failure(*error);
+        }
+        result
     }
     fn inner_ref(&self) -> &Inner {
         self.inner

@@ -27,6 +27,7 @@ on:
       - 'tools/windows-medium-client.ps1'
       - 'tools/windows-webview-runtime-lab.ps1'
       - 'tools/windows-management-webview-lab.mjs'
+      - 'tools/windows-pairing-webview-lab.mjs'
       - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
 

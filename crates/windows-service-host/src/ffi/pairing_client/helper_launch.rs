@@ -506,7 +506,12 @@ impl PairingHelperLaunch {
     /// May enter Windows-owned UAC once, on this same native worker. Returning
     /// Bound does not release either original native owner or produce a grant.
     pub fn poll(&mut self) -> Result<PairingLaunchProgress, Error> {
-        self.inner_mut().poll()
+        let result = self.inner_mut().poll();
+        #[cfg(feature = "lab-client-diagnostics")]
+        if let Err(error) = result.as_ref() {
+            crate::lab_pairing_offer::launch_failure(*error);
+        }
+        result
     }
     pub fn cancel(&mut self) {
         self.inner_mut().fail(Error::Cancelled);

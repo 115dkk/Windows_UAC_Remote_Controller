@@ -70,3 +70,20 @@ fn probe(output: &mut impl Write) -> Result<(), PairingClientError> {
     }
     result
 }
+
+/// Fixed, payload-free native error graph; one new leaf per disposable process.
+pub(crate) fn launch_failure(error: crate::PairingLaunchError) {
+    if std::env::var_os("UAC_LAB_PAIRING_OFFER").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    let Some(directory) = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER") else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(PathBuf::from(directory).join("pairing-launch-failure.txt"))
+    {
+        let _ = writeln!(file, "uac-ci-startup-notes-do-not-ship\n{error:?}");
+    }
+}
