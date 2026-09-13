@@ -6,6 +6,7 @@ import type { IconName } from './icons';
 import { ko, serviceActionText, serviceStateText } from './messages';
 import { tr } from './i18n';
 import { displayText } from './displayText';
+import { RelayStatusLine } from './RelayStatusLine';
 
 export function EmptyState({ icon, title, description, children }: {
   icon: IconName; title: string; description: string; children?: ReactNode;
@@ -17,6 +18,9 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
   snapshot: AppSnapshot; disabled: boolean; onAction: (action: ServiceAction) => void;
 }) {
   const service = snapshot.service;
+  const actionIssue = service?.actionIssue;
+  const issueAlreadyGlobal = actionIssue && snapshot.issue?.code === actionIssue.code
+    && snapshot.issue.message === actionIssue.message && snapshot.issue.nextAction === actionIssue.nextAction;
   const serviceTitle = !service ? ko.serviceUnknown : !service.installed ? ko.serviceMissing
     : service.state ? serviceStateText[service.state] : ko.serviceUnknown;
   const description = !service ? ko.serviceUnknownBody : !service.installed ? ko.serviceMissingBody
@@ -30,6 +34,8 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
       <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><p className="eyebrow">{ko.serviceLabel}</p><h2 id="service-heading">{serviceTitle}</h2></div></div>
       {service && <p className={`state-line ${service.remoteRequestsReady ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{service.remoteRequestsReady ? ko.remoteReady : ko.remoteNotReady}</p>}
       <p className="service-description">{description}</p>
+      <RelayStatusLine snapshot={snapshot} />
+      {actionIssue && !issueAlreadyGlobal && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(actionIssue.message)}</p>{actionIssue.nextAction && <p className="supporting-text">{tr(actionIssue.nextAction)}</p>}</div></section>}
       <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName || '—')}</bdi></dd></div></dl>
       {service?.controlHint === 'needs_installer' && <p className="supporting-text">{ko.serviceNeedsInstaller}</p>}
       {service?.controlHint === 'unsupported' && <p className="supporting-text">{ko.serviceUnsupported}</p>}

@@ -1240,8 +1240,12 @@ impl<'key> ServiceSession<'key> {
     ) -> Result<SessionProgress, PeerRuntimeError> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            if let management::ManagementProgress::Request { class, request } =
-                self.management.poll().map_err(|_| PeerRuntimeError::Io)?
+            // A deferred mutation owns its original AwaitingReply connection.
+            // Do not admit/rearm another caller until the persisted relay
+            // configuration has been applied, even if this requester exits.
+            if self.pending_relay.is_none()
+                && let management::ManagementProgress::Request { class, request } =
+                    self.management.poll().map_err(|_| PeerRuntimeError::Io)?
                 && let Some(response) = self.handle_management(class, request)?
             {
                 self.management
@@ -1510,6 +1514,12 @@ impl<'key> ServiceSession<'key> {
                     })
                     .collect();
                 Ok(Some(ManagementResponse::Snapshot {
+                    embedded_relay: self.embedded_mode,
+                    relay_listening: self.embedded_mode
+                        && self
+                            .embedded_relay
+                            .as_ref()
+                            .is_some_and(relay_service::HostedRelay::is_running),
                     relay: if self.embedded_mode
                         && !self
                             .embedded_relay

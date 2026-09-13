@@ -12,6 +12,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Command {
     Status,
+    RelayStatus,
     Service,
     Install,
     Start,
@@ -148,6 +149,7 @@ impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Status => "Command::Status",
+            Self::RelayStatus => "Command::RelayStatus",
             Self::Service => "Command::Service",
             Self::Install => "Command::Install",
             Self::Start => "Command::Start",
@@ -318,6 +320,7 @@ impl Command {
         match first.as_ref().to_str() {
             Some("relay-auto") => Ok(Self::EmbeddedRelay),
             Some("status") => Ok(Self::Status),
+            Some("relay-status") => Ok(Self::RelayStatus),
             Some("service") => Ok(Self::Service),
             Some("install") => Ok(Self::Install),
             Some("start") => Ok(Self::Start),
@@ -736,6 +739,11 @@ mod tests {
 
     #[test]
     fn management_cli_payloads_are_exact_canonical_and_redacted() {
+        assert_eq!(Command::parse(["relay-status"]), Ok(Command::RelayStatus));
+        assert_eq!(
+            Command::parse(["relay-status", "extra"]),
+            Err(ServiceError::InvalidArguments)
+        );
         let text = "112233445566778899aabbccddeeff00";
         let device = parse_device_hex(text).expect("canonical device identifier");
         assert_eq!(device_hex(device), text);

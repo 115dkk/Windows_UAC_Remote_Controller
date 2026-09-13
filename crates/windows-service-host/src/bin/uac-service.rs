@@ -12,7 +12,7 @@ fn run() -> Result<(), ServiceError> {
     if command == Command::Help {
         writeln!(
             io::stdout().lock(),
-            "uac-service [status|service|install|start|stop|restart|uninstall|probe-once|help]\n\
+            "uac-service [status|relay-status|service|install|start|stop|restart|uninstall|probe-once|help]\n\
              uac-service remove <32자리 소문자 휴대폰 식별자>\n\
              uac-service relay <숫자 IP:포트>\n\
              uac-service pair <64자리 소문자 공개 식별자>\n\
@@ -41,6 +41,36 @@ fn run() -> Result<(), ServiceError> {
             .map_err(|_| ServiceError::OutputUnavailable)?;
         return writeln!(output).map_err(|_| ServiceError::OutputUnavailable);
     }
+    if command == Command::RelayStatus {
+        // Same fixed authenticated management Query as the desktop adapter.
+        // Publish listener facts only; no device IDs, keys, endpoints or arguments.
+        let windows_service_host::management_protocol::ManagementResponse::Snapshot {
+            relay,
+            embedded_relay,
+            relay_listening,
+            devices,
+            ..
+        } = windows_service_host::management_query()?
+        else {
+            return Err(ServiceError::ManagementRefused);
+        };
+        #[derive(serde::Serialize)]
+        struct RelayStatus {
+            embedded_relay: bool,
+            relay_listening: bool,
+            relay_configured: bool,
+            device_count: usize,
+        }
+        let view = RelayStatus {
+            embedded_relay,
+            relay_listening,
+            relay_configured: relay.is_some(),
+            device_count: devices.len(),
+        };
+        let mut output = io::stdout().lock();
+        serde_json::to_writer(&mut output, &view).map_err(|_| ServiceError::OutputUnavailable)?;
+        return writeln!(output).map_err(|_| ServiceError::OutputUnavailable);
+    }
     let snapshot = match command {
         Command::Status => windows_service_host::query_status(),
         Command::Install => windows_service_host::install(),
@@ -61,6 +91,7 @@ fn run() -> Result<(), ServiceError> {
             windows_service_host::query_status()
         }
         Command::Service
+        | Command::RelayStatus
         | Command::Help
         | Command::ProbeOnce
         | Command::Pair(_)

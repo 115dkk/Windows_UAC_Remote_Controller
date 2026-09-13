@@ -7,6 +7,7 @@ import { activityText, ko } from './messages';
 import { EmptyState } from './StatusPanels';
 import { currentLocale, formatText, tr } from './i18n';
 import { displayText } from './displayText';
+import { RelayStatusLine } from './RelayStatusLine';
 
 function deviceLabel(device: PairedDeviceView, pc: boolean): string {
   // Windows management currently has no user-authored friendly-name field;
@@ -32,6 +33,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       || snapshot.service.state === 'stopped'
       || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
   const relayDisabled = disabled || snapshot.platform !== 'windows' || !relayOwnerAvailable;
+  const embeddedSelected = snapshot.relayStatus?.mode === 'embedded';
   async function saveRelay() {
     if (relayDisabled || submitLock.current || !address.trim()) return;
     submitLock.current = true;
@@ -48,7 +50,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
     }
   }
   async function enableEmbeddedRelay() {
-    if (relayDisabled || submitLock.current) return;
+    if (relayDisabled || embeddedSelected || submitLock.current) return;
     submitLock.current = true;
     setSubmitting(true);
     setError(null);
@@ -67,9 +69,14 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
   const relayForm = snapshot.platform === 'windows' && <>
     <section className="surface pairing-entry auxiliary-card" aria-label={tr('PC 내장 중계')}>
       <h2>{tr('PC 내장 중계')}</h2>
+      <RelayStatusLine snapshot={snapshot} />
       <p className="supporting-text">{tr('중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.')}</p>
       <p className="supporting-text">{tr('휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.')}</p>
-      <button type="button" className="button primary" disabled={relayDisabled || submitting} onClick={() => { void enableEmbeddedRelay(); }}>{tr('이 PC의 내장 중계 사용')}</button>
+      <button type="button" className="button primary" disabled={relayDisabled || submitting || embeddedSelected} onClick={() => { void enableEmbeddedRelay(); }}>{tr(embeddedSelected ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용')}</button>
+      {embeddedSelected && snapshot.service?.state === 'stopped' && <>
+        <p className="supporting-text">{tr('내장 중계 설정을 저장했어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 시작해요.')}</p>
+        {onOpenStatus && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
+      </>}
       {error && <p className="field-error" role="alert">{error}</p>}
     </section>
     <section className="relay-advanced" aria-label={tr('외부 중계 서버')}><h2>{tr('고급 설정: 외부 중계 서버')}</h2>
@@ -79,7 +86,9 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       <input id={`${id}-relay`} dir="ltr" type="text" value={address} autoComplete="off" spellCheck={false}
         aria-describedby={`${id}-relay-hint ${id}-relay-status`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
       <p id={`${id}-relay-hint`} className="supporting-text">{ko.relayAddressHint}</p>
-      <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
+      <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayStatus
+        ? tr('외부 중계 서버 주소를 저장하면 내장 중계 대신 사용해요.')
+        : snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
       <div className="collection-actions"><button type="submit" className="button primary" disabled={relayDisabled || submitting || !address.trim()}>{submitting ? ko.saving : ko.save}</button></div>
     </fieldset>
   </form></section></>;
@@ -93,7 +102,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
     <button type="button" className="button primary" disabled={qrDisabled} aria-describedby={`${id}-qr-purpose`} onClick={onPair}><Icon name="qr" />{ko.pairPhone}</button>
     {pairing && <p className="supporting-text" role="status">{tr(pairing.message)}</p>}
     {!pairingActive && recovery && <p className="supporting-text">{recovery}</p>}
-    {!pairingActive && !snapshot.canPair && onOpenStatus && <button type="button" className="button secondary" onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
+    {!pairingActive && !snapshot.canPair && onOpenStatus && !(embeddedSelected && snapshot.service?.state === 'stopped') && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
   </section>;
   if (unavailable) return <>{qrEntry}{unavailableState}{relayForm}</>;
   return <>

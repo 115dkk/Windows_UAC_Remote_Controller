@@ -10,7 +10,8 @@ use windows_service_host::{
 
 use crate::{
     ControlHint, ManagementDevice, ManagementObservation, ObservedServiceState, PlatformAdapter,
-    PlatformError, ServiceAction, ServiceCommandOutcome, ServiceObservation, ServiceState,
+    PlatformError, RelayMode, RelayState, RelayStatusView, ServiceAction, ServiceCommandOutcome,
+    ServiceObservation, ServiceState,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -23,13 +24,32 @@ impl PlatformAdapter for WindowsPlatformAdapter {
     }
 
     fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
-        let ManagementResponse::Snapshot { relay, devices, .. } =
-            windows_service_host::management_query().map_err(management_error)?
+        let ManagementResponse::Snapshot {
+            relay,
+            embedded_relay,
+            relay_listening,
+            devices,
+            ..
+        } = windows_service_host::management_query().map_err(management_error)?
         else {
             return Err(PlatformError::StatusUnavailable);
         };
         Ok(ManagementObservation {
             relay_configured: relay.is_some(),
+            relay_status: RelayStatusView {
+                mode: if embedded_relay {
+                    RelayMode::Embedded
+                } else {
+                    RelayMode::External
+                },
+                state: match (embedded_relay, relay_listening, relay.is_some()) {
+                    (true, true, true) => RelayState::Listening,
+                    (true, true, false) => RelayState::WaitingNetwork,
+                    (true, false, _) => RelayState::Unavailable,
+                    (false, _, true) => RelayState::ExternalConfigured,
+                    (false, _, false) => RelayState::Unknown,
+                },
+            },
             devices: devices
                 .into_iter()
                 .map(|row| ManagementDevice {

@@ -37,7 +37,22 @@ function withSyntheticDetails(value: RequestView & { readonly details: string })
 export function qaCase(name: string): QaCase {
   const windows = exampleSnapshot();
   const phone = exampleSnapshot('android');
+  const relayRunning: AppSnapshot = { ...windows, relayConfigured: true,
+    service: { installed: true, state: 'running', allowedActions: ['restart', 'stop'], controlHint: 'available', remoteRequestsReady: false },
+    relayStatus: { mode: 'embedded', state: 'listening' } };
+  const relayStopped: AppSnapshot = { ...relayRunning, relayConfigured: false,
+    service: { ...relayRunning.service!, state: 'stopped', allowedActions: ['start', 'uninstall'] },
+    relayStatus: { mode: 'embedded', state: 'stopped' } };
   switch (name) {
+    case 'desktop-relay-stopped': return { page: 'devices', snapshot: relayStopped };
+    case 'desktop-relay-listening': return { page: 'devices', snapshot: relayRunning };
+    case 'desktop-relay-waiting': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };
+    case 'desktop-relay-unknown': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false,
+      service: { ...relayRunning.service!, state: null, allowedActions: [] }, relayStatus: { mode: 'unknown', state: 'unknown' },
+      dataAvailability: { ...windows.dataAvailability, devices: 'unavailable' } } };
+    case 'desktop-relay-external': return { page: 'devices', snapshot: { ...relayRunning, relayStatus: { mode: 'external', state: 'external_configured' } } };
+    case 'desktop-start-failed': return { page: 'status', snapshot: { ...relayStopped,
+      service: { ...relayStopped.service!, actionIssue: { code: 'synthetic_start_failed', message: '작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.', nextAction: null } } } };
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
       service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };

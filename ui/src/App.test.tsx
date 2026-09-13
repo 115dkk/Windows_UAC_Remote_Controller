@@ -170,7 +170,7 @@ describe('pairing progress in the device collection', () => {
           dataAvailability: { devices, requests: 'available', activity: 'available' } };
         const onPair = vi.fn();
         const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
-        expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+        expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
         expect(screen.queryByText(ko.pairingUnavailable)).not.toBeInTheDocument();
         if (devices === 'unavailable') expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
         const button = screen.getByRole('button', { name: ko.pairPhone });
@@ -188,7 +188,7 @@ describe('pairing progress in the device collection', () => {
         dataAvailability: { devices, requests: 'available', activity: 'available' } };
       const onPair = vi.fn(), onRemove = vi.fn();
       const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
-      expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+      expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
       expect(screen.queryByText('user_cancelled')).not.toBeInTheDocument();
       const button = screen.getByRole('button', { name: ko.pairPhone });
       expect(button).toBeEnabled(); fireEvent.click(button);
@@ -197,7 +197,7 @@ describe('pairing progress in the device collection', () => {
       expect(button).toBeDisabled(); fireEvent.click(button);
       expect(onPair).toHaveBeenCalledOnce();
       view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
-      expect(screen.getByRole('status')).toHaveTextContent(pairing.message);
+      expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
       expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
       view.unmount();
     }
@@ -224,7 +224,7 @@ describe('pairing progress in the device collection', () => {
 });
 
 describe('Windows relay address settings', () => {
-  it('starts the bundled relay without requiring an address field', async () => {
+  it('selects the bundled relay without requiring an address field', async () => {
     const snapshot = qaCase('desktop-running').snapshot;
     const onSetRelay = vi.fn().mockResolvedValue(snapshot);
     render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);

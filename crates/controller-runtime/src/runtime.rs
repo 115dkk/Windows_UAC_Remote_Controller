@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActivityView, AppIssue, AppPrivateDirectory, AppSnapshot, ControlHint, DataAvailability,
-    ManagementDevice, ManagementObservation, MobileReadiness, PairingView, Platform,
-    ScreenLockState, ServiceAction, ServiceState, ServiceView, storage::PreferenceStore,
+    ManagementDevice, ManagementObservation, MobileReadiness, PairingView, Platform, RelayMode,
+    RelayState, RelayStatusView, ScreenLockState, ServiceAction, ServiceState, ServiceView,
+    storage::PreferenceStore,
 };
 
 pub const MAX_COMPUTER_NAME_BYTES: usize = 256;
@@ -254,7 +255,9 @@ pub struct AppRuntime {
     last_service: Option<ServiceView>,
     last_management: Option<ManagementObservation>,
     confirmed_relay_configured: bool,
+    confirmed_relay_mode: RelayMode,
     service_issue: Option<AppIssue>,
+    service_action_issue: Option<AppIssue>,
     mobile: MobileReadiness,
     control_progress: ControlProgress,
     pairing_starter: Box<dyn PairingStarter>,
@@ -317,7 +320,9 @@ impl AppRuntime {
             last_service: None,
             last_management: None,
             confirmed_relay_configured: false,
+            confirmed_relay_mode: RelayMode::Unknown,
             service_issue: None,
+            service_action_issue: None,
             mobile: MobileReadiness::UNAVAILABLE,
             control_progress: ControlProgress::Idle,
             pairing_starter,
@@ -398,35 +403,37 @@ impl AppRuntime {
                 next_action: Some("새로고침해 현재 상태를 확인해 주세요."),
             });
         }
-        match self
-            .adapter
-            .control_service(action)
-            .map_err(AppIssue::from)?
-        {
+        let outcome = self.adapter.control_service(action).map_err(|error| {
+            let issue = AppIssue::from(error);
+            self.service_action_issue = Some(issue);
+            issue
+        })?;
+        match outcome {
             // Cancellation is not failure or success. Return the exact observed
             // pre-command snapshot, without a speculative mutation or refresh.
             ServiceCommandOutcome::UserCancelled => Ok(before),
             ServiceCommandOutcome::Completed { observation } => {
+                self.service_action_issue =
+                    (!action_reached(action, observation.state)).then(service_action_failed);
                 self.accept_service_and_management(observation);
                 Ok(self.present())
             }
             ServiceCommandOutcome::StillRunning => {
+                self.service_action_issue = None;
                 self.control_progress = ControlProgress::StillRunning;
                 self.disable_service_actions();
                 Ok(self.present())
             }
             ServiceCommandOutcome::CompletionStatusUnknown => {
+                self.service_action_issue = None;
                 self.control_progress = ControlProgress::CompletionUnknown;
                 self.disable_service_actions();
                 Ok(self.present())
             }
             ServiceCommandOutcome::HelperFailed => {
                 self.disable_service_actions();
-                self.service_issue = Some(AppIssue {
-                    code: "service_helper_failed",
-                    message: "휴대폰 승인 설정을 변경하는 작업을 완료하지 못했습니다.",
-                    next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
-                });
+                self.service_action_issue = Some(service_action_failed());
+                self.service_issue = self.service_action_issue;
                 Ok(self.present())
             }
         }
@@ -545,11 +552,18 @@ impl AppRuntime {
             None => self.adapter.use_embedded_relay(),
         }
         .map_err(|_| management_mutation_issue())?;
+        self.confirmed_relay_mode = if address.is_none() {
+            RelayMode::Embedded
+        } else {
+            RelayMode::External
+        };
         if service.state == Some(ServiceState::Running) {
             self.refresh_after_running_management_mutation()
         } else {
             self.confirmed_relay_configured = true;
-            Ok(before_with_relay(before))
+            let mut snapshot = before_with_relay(before);
+            snapshot.relay_status = self.relay_status_view();
+            Ok(snapshot)
         }
     }
 
@@ -595,6 +609,7 @@ impl AppRuntime {
             .and_then(validate_management)
         {
             Ok(management) => {
+                self.confirmed_relay_mode = management.relay_status.mode;
                 self.last_management = Some(management);
             }
             Err(_) => {
@@ -624,6 +639,7 @@ impl AppRuntime {
             },
             control_hint,
             remote_requests_ready: false,
+            action_issue: self.service_action_issue,
         });
     }
 
@@ -665,7 +681,36 @@ impl AppRuntime {
         }
     }
 
+    fn relay_status_view(&self) -> Option<RelayStatusView> {
+        if self.platform != Platform::Windows {
+            return None;
+        }
+        let mut view = RelayStatusView {
+            mode: self.confirmed_relay_mode,
+            state: RelayState::Unknown,
+        };
+        if self
+            .service_issue
+            .is_some_and(|issue| issue.code == "service_status_stale")
+        {
+            return Some(view);
+        }
+        if let Some(service) = &self.last_service {
+            if !service.installed || service.state == Some(ServiceState::Stopped) {
+                view.state = RelayState::Stopped;
+            } else if service.state == Some(ServiceState::Running)
+                && let Some(management) = &self.last_management
+            {
+                view = management.relay_status;
+            }
+        }
+        Some(view)
+    }
+
     fn present(&mut self) -> AppSnapshot {
+        if let Some(service) = self.last_service.as_mut() {
+            service.action_issue = self.service_action_issue;
+        }
         let pairing = self.pairing_view();
         let progress_issue = self.progress_issue().map(|mut issue| {
             if self.service_issue.is_some_and(|status| status.code == "service_status_stale") {
@@ -720,6 +765,7 @@ impl AppRuntime {
             } else {
                 self.confirmed_relay_configured
             },
+            relay_status: self.relay_status_view(),
             devices,
             requests: Vec::new(),
             request_catalog: None,
@@ -757,6 +803,24 @@ impl AppRuntime {
 fn validate_management(
     observation: ManagementObservation,
 ) -> Result<ManagementObservation, PlatformError> {
+    let consistent = matches!(
+        (
+            observation.relay_status.mode,
+            observation.relay_status.state,
+            observation.relay_configured
+        ),
+        (RelayMode::Embedded, RelayState::Listening, true)
+            | (
+                RelayMode::Embedded,
+                RelayState::WaitingNetwork | RelayState::Unavailable,
+                false
+            )
+            | (RelayMode::External, RelayState::ExternalConfigured, true)
+            | (RelayMode::External, RelayState::Unknown, false)
+    );
+    if !consistent {
+        return Err(PlatformError::StatusUnavailable);
+    }
     let mut ids = BTreeSet::new();
     for device in &observation.devices {
         if device.revision == 0
@@ -809,6 +873,25 @@ fn management_device_view(device: &ManagementDevice) -> crate::PairedDeviceView 
         route_present: device.route_present,
         connected: device.connected,
         last_seen_label: None,
+    }
+}
+
+fn action_reached(action: ServiceAction, state: ObservedServiceState) -> bool {
+    match action {
+        ServiceAction::Start | ServiceAction::Restart => {
+            state == ObservedServiceState::Installed(ServiceState::Running)
+        }
+        ServiceAction::Stop => state == ObservedServiceState::Installed(ServiceState::Stopped),
+        ServiceAction::Install => matches!(state, ObservedServiceState::Installed(_)),
+        ServiceAction::Uninstall => state == ObservedServiceState::NotInstalled,
+    }
+}
+
+fn service_action_failed() -> AppIssue {
+    AppIssue {
+        code: "service_helper_failed",
+        message: "휴대폰 승인 설정을 변경하는 작업을 완료하지 못했습니다.",
+        next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
     }
 }
 

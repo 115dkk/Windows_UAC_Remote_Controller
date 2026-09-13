@@ -11,7 +11,7 @@ use approval_protocol::DeviceId;
 
 pub const MAX_MANAGEMENT_FRAME: usize = 16 * 1024;
 const MAGIC: &[u8; 4] = b"UCMG";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_IDENTITY_PROVIDER: usize = 256;
 const MAX_REFUSAL: usize = 512;
 const MAX_DIGESTS: usize = 32;
@@ -55,6 +55,10 @@ impl fmt::Debug for DeviceRow {
 pub enum ManagementResponse {
     Snapshot {
         relay: Option<SocketAddr>,
+        /// Selected service mode, independent of advertised relay readiness.
+        embedded_relay: bool,
+        /// Actual local HostedRelay listener state; always false externally.
+        relay_listening: bool,
         identity_provider: String,
         android_signer_digests: Vec<[u8; 32]>,
         devices: Vec<DeviceRow>,
@@ -124,6 +128,8 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
     match response {
         ManagementResponse::Snapshot {
             relay,
+            embedded_relay,
+            relay_listening,
             identity_provider,
             android_signer_digests,
             devices,
@@ -135,6 +141,8 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
                 return Err(ManagementCodecError::Oversized);
             }
             if identity_provider.is_empty()
+                || (!*embedded_relay && *relay_listening)
+                || (*embedded_relay && !*relay_listening && relay.is_some())
                 || identity_provider.chars().any(char::is_control)
                 || relay.is_some_and(|address| {
                     crate::contract::validate_relay_endpoint(address).is_err()
@@ -157,6 +165,8 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
             }
             writer.byte(0x81);
             writer.optional_address(*relay);
+            writer.boolean(*embedded_relay);
+            writer.boolean(*relay_listening);
             writer.text(identity_provider)?;
             writer.count(android_signer_digests.len())?;
             for digest in android_signer_digests {
@@ -197,6 +207,13 @@ pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCod
     let value = match reader.byte()? {
         0x81 => {
             let relay = reader.optional_address()?;
+            let embedded_relay = reader.boolean()?;
+            let relay_listening = reader.boolean()?;
+            if (!embedded_relay && relay_listening)
+                || (embedded_relay && !relay_listening && relay.is_some())
+            {
+                return Err(ManagementCodecError::Malformed);
+            }
             let identity_provider = reader.text(MAX_IDENTITY_PROVIDER)?;
             if identity_provider.is_empty() {
                 return Err(ManagementCodecError::Malformed);
@@ -236,6 +253,8 @@ pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCod
             }
             ManagementResponse::Snapshot {
                 relay,
+                embedded_relay,
+                relay_listening,
                 identity_provider,
                 android_signer_digests,
                 devices,
@@ -443,6 +462,8 @@ mod tests {
             ManagementResponse::Refused("요청을 처리할 수 없습니다.".into()),
             ManagementResponse::Snapshot {
                 relay: Some(address),
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "fixture".into(),
                 android_signer_digests: vec![[7; 32]],
                 devices: vec![DeviceRow {
@@ -458,6 +479,85 @@ mod tests {
             let wire = encode_response(&response).unwrap();
             assert_eq!(decode_response(&wire), Ok(response));
             assert!(wire.len() <= MAX_MANAGEMENT_FRAME);
+        }
+    }
+
+    #[test]
+    fn relay_telemetry_v2_has_fixed_boolean_encoding_and_rejects_v1() {
+        let response = ManagementResponse::Snapshot {
+            relay: None,
+            embedded_relay: true,
+            relay_listening: false,
+            identity_provider: "fixture".into(),
+            android_signer_digests: vec![],
+            devices: vec![],
+        };
+        let wire = encode_response(&response).unwrap();
+        assert_eq!(
+            wire,
+            b"UCMG\x02\x81\x00\x01\x00\x00\x07fixture\x00\x00\x00\x00"
+        );
+        assert_eq!(decode_response(&wire), Ok(response));
+        for offset in [7, 8] {
+            for noncanonical in [2, 255] {
+                let mut invalid = wire.clone();
+                invalid[offset] = noncanonical;
+                assert_eq!(
+                    decode_response(&invalid),
+                    Err(ManagementCodecError::Malformed)
+                );
+            }
+        }
+        let mut old_version = wire;
+        old_version[4] = 1;
+        assert_eq!(
+            decode_response(&old_version),
+            Err(ManagementCodecError::Malformed)
+        );
+    }
+
+    #[test]
+    fn relay_mode_listener_and_readiness_combinations_are_checked_both_ways() {
+        let address: SocketAddr = "127.0.0.1:7443".parse().unwrap();
+        for relay in [None, Some(address)] {
+            for embedded_relay in [false, true] {
+                for relay_listening in [false, true] {
+                    let response = ManagementResponse::Snapshot {
+                        relay,
+                        embedded_relay,
+                        relay_listening,
+                        identity_provider: "fixture".into(),
+                        android_signer_digests: vec![],
+                        devices: vec![],
+                    };
+                    let valid = !((!embedded_relay && relay_listening)
+                        || (embedded_relay && !relay_listening && relay.is_some()));
+                    if valid {
+                        assert_eq!(
+                            decode_response(&encode_response(&response).unwrap()),
+                            Ok(response)
+                        );
+                    } else {
+                        assert_eq!(
+                            encode_response(&response),
+                            Err(ManagementCodecError::Malformed)
+                        );
+                        let mut wire = encode_response(&ManagementResponse::Snapshot {
+                            relay,
+                            embedded_relay: false,
+                            relay_listening: false,
+                            identity_provider: "fixture".into(),
+                            android_signer_digests: vec![],
+                            devices: vec![],
+                        })
+                        .unwrap();
+                        let flags = if relay.is_some() { 14 } else { 7 };
+                        wire[flags] = u8::from(embedded_relay);
+                        wire[flags + 1] = u8::from(relay_listening);
+                        assert_eq!(decode_response(&wire), Err(ManagementCodecError::Malformed));
+                    }
+                }
+            }
         }
     }
 
@@ -478,7 +578,7 @@ mod tests {
         bad_magic[0] ^= 1;
         assert!(decode_request(&bad_magic).is_err());
         let mut bad_version = request;
-        bad_version[4] = 2;
+        bad_version[4] = 1;
         assert!(decode_request(&bad_version).is_err());
         assert_eq!(
             decode_request(&vec![0; MAX_MANAGEMENT_FRAME + 1]),
@@ -497,6 +597,8 @@ mod tests {
         };
         let response = ManagementResponse::Snapshot {
             relay: None,
+            embedded_relay: false,
+            relay_listening: false,
             identity_provider: "fixture".into(),
             android_signer_digests: vec![],
             devices: vec![row, row],
@@ -507,12 +609,14 @@ mod tests {
         );
         let mut duplicate_digest_wire = encode_response(&ManagementResponse::Snapshot {
             relay: None,
+            embedded_relay: false,
+            relay_listening: false,
             identity_provider: "fixture".into(),
             android_signer_digests: vec![[1; 32], [2; 32]],
             devices: vec![],
         })
         .unwrap();
-        let first_digest = 6 + 1 + 2 + "fixture".len() + 2;
+        let first_digest = 6 + 1 + 2 + 2 + "fixture".len() + 2;
         let second_digest = first_digest + 32;
         duplicate_digest_wire.copy_within(first_digest..second_digest, second_digest);
         assert_eq!(
@@ -522,6 +626,8 @@ mod tests {
         assert_eq!(
             encode_response(&ManagementResponse::Snapshot {
                 relay: None,
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "fixture".into(),
                 android_signer_digests: vec![[3; 32], [3; 32]],
                 devices: vec![],
@@ -541,6 +647,8 @@ mod tests {
         assert!(
             encode_response(&ManagementResponse::Snapshot {
                 relay: Some("127.0.0.1:0".parse().unwrap()),
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "fixture".into(),
                 android_signer_digests: vec![],
                 devices: vec![],
@@ -550,6 +658,8 @@ mod tests {
         assert!(
             encode_response(&ManagementResponse::Snapshot {
                 relay: None,
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "bad\nprovider".into(),
                 android_signer_digests: vec![],
                 devices: vec![],
@@ -559,6 +669,8 @@ mod tests {
         assert!(
             encode_response(&ManagementResponse::Snapshot {
                 relay: None,
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "fixture".into(),
                 android_signer_digests: vec![],
                 devices: vec![DeviceRow { revision: 0, ..row }],
@@ -568,6 +680,8 @@ mod tests {
         assert!(
             encode_response(&ManagementResponse::Snapshot {
                 relay: None,
+                embedded_relay: false,
+                relay_listening: false,
                 identity_provider: "x".repeat(MAX_IDENTITY_PROVIDER + 1),
                 android_signer_digests: vec![],
                 devices: vec![],

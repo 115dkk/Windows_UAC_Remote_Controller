@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use controller_runtime::{
     AppPrivateDirectory, AppRuntime, Availability, ControlHint, DecisionIntent, ManagementDevice,
     ManagementObservation, MobileReadiness, NotificationPermission, ObservedServiceState, Platform,
-    PlatformAdapter, PlatformError, ScreenLockState, ServiceAction, ServiceCommandOutcome,
-    ServiceObservation, ServiceState, UnavailablePairingStarter, UnavailablePlatformAdapter,
+    PlatformAdapter, PlatformError, RelayMode, RelayState, RelayStatusView, ScreenLockState,
+    ServiceAction, ServiceCommandOutcome, ServiceObservation, ServiceState,
+    UnavailablePairingStarter, UnavailablePlatformAdapter,
 };
 use serde_json::json;
 
@@ -119,6 +120,14 @@ fn installed(state: ServiceState) -> ServiceObservation {
 fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> ManagementObservation {
     ManagementObservation {
         relay_configured,
+        relay_status: RelayStatusView {
+            mode: RelayMode::External,
+            state: if relay_configured {
+                RelayState::ExternalConfigured
+            } else {
+                RelayState::Unknown
+            },
+        },
         devices,
     }
 }
@@ -393,6 +402,90 @@ fn helper_failure_is_a_fixed_failure_not_fabricated_service_success() {
     assert_eq!(service.state, Some(ServiceState::Stopped));
     assert!(service.allowed_actions.is_empty());
     assert_eq!(owner.0.controls.load(Ordering::SeqCst), 1);
+    for _ in 0..3 {
+        let refreshed = runtime.snapshot();
+        assert!(
+            refreshed.issue.is_none(),
+            "polling is not an action failure gate"
+        );
+        let service = refreshed.service.unwrap();
+        assert_eq!(service.action_issue.unwrap().code, "service_helper_failed");
+        assert!(service.allowed_actions.contains(&ServiceAction::Start));
+    }
+    owner.set_outcome(Ok(ServiceCommandOutcome::Completed {
+        observation: installed(ServiceState::Running),
+    }));
+    let retried = runtime.control_service(ServiceAction::Start).unwrap();
+    assert!(retried.service.unwrap().action_issue.is_none());
+    assert_eq!(owner.0.controls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn start_completion_that_already_reverted_to_stopped_is_not_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
+    owner.set_outcome(Ok(ServiceCommandOutcome::Completed {
+        observation: installed(ServiceState::Stopped),
+    }));
+    let mut runtime = windows_runtime(&directory, owner);
+    let result = runtime.control_service(ServiceAction::Start).unwrap();
+    let service = result.service.unwrap();
+    assert!(service.action_issue.is_some());
+    assert_eq!(service.state, Some(ServiceState::Stopped));
+    assert_eq!(
+        runtime.snapshot().relay_status.unwrap().state,
+        RelayState::Stopped
+    );
+}
+
+#[test]
+fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    let selected = runtime.set_relay("embedded").unwrap();
+    assert_eq!(
+        selected.relay_status.unwrap(),
+        RelayStatusView {
+            mode: RelayMode::Embedded,
+            state: RelayState::Stopped,
+        }
+    );
+    assert_eq!(
+        runtime.snapshot().relay_status.unwrap().state,
+        RelayState::Stopped
+    );
+    owner.set_observation(Ok(installed(ServiceState::Running)));
+    assert_eq!(
+        runtime.snapshot().relay_status.unwrap().state,
+        RelayState::Unknown
+    );
+    *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        relay_configured: false,
+        relay_status: RelayStatusView {
+            mode: RelayMode::Embedded,
+            state: RelayState::WaitingNetwork,
+        },
+        devices: Vec::new(),
+    });
+    let listening_without_address = runtime.snapshot();
+    assert!(!listening_without_address.relay_configured);
+    assert_eq!(
+        listening_without_address.relay_status.unwrap().state,
+        RelayState::WaitingNetwork
+    );
+    *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        relay_configured: true,
+        relay_status: RelayStatusView {
+            mode: RelayMode::Embedded,
+            state: RelayState::Listening,
+        },
+        devices: Vec::new(),
+    });
+    assert_eq!(
+        runtime.snapshot().relay_status.unwrap().state,
+        RelayState::Listening
+    );
 }
 
 #[test]

@@ -51,6 +51,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         mobile: None,
         policy: Some(NotificationPolicy::default()),
         relay_configured: false,
+        relay_status: None,
         devices: vec![device],
         requests: vec![request],
         request_catalog: None,

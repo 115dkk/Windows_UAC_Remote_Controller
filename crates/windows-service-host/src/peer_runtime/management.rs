@@ -2,6 +2,8 @@
 //! Service-session-owned management listener and one-request connections.
 #![forbid(unsafe_code)]
 
+use std::time::{Duration, Instant};
+
 use crate::{
     PairingPeerError, PairingPipeProgress,
     ffi::{ManagementClientClass, ManagementListener, ManagementPipe},
@@ -28,6 +30,7 @@ enum State {
     Closing(ManagementPipe),
     FailedListener(ManagementListener),
     FailedPipe(ManagementPipe),
+    Rearming { at: Instant },
     Transition,
     Stopped,
 }
@@ -88,18 +91,47 @@ impl ServiceManagement {
         &mut self,
         mut listener: ManagementListener,
         error: PairingPeerError,
-    ) -> PairingPeerError {
+    ) -> Result<ManagementProgress, PairingPeerError> {
         listener.cancel();
-        let first = self.record_failure(error);
         self.state = State::FailedListener(listener);
-        first
+        self.connection_failure(error)
     }
 
-    fn fail_pipe(&mut self, mut pipe: ManagementPipe, error: PairingPeerError) -> PairingPeerError {
+    fn fail_pipe(
+        &mut self,
+        mut pipe: ManagementPipe,
+        error: PairingPeerError,
+    ) -> Result<ManagementProgress, PairingPeerError> {
         pipe.cancel();
-        let first = self.record_failure(error);
         self.state = State::FailedPipe(pipe);
-        first
+        self.connection_failure(error)
+    }
+
+    fn connection_failure(
+        &mut self,
+        error: PairingPeerError,
+    ) -> Result<ManagementProgress, PairingPeerError> {
+        if error == PairingPeerError::CleanupUnconfirmed {
+            self.cleanup_failure.get_or_insert(error);
+            Err(error)
+        } else {
+            // Rejection, disconnect, malformed input and deadlines are local
+            // to this connection. Its ORIGINAL owner stays retained for drain.
+            Ok(ManagementProgress::Idle)
+        }
+    }
+
+    fn schedule_rearm(&mut self) {
+        self.state = if self.stopping || self.failed() {
+            State::Stopped
+        } else {
+            // At most one listener creation attempt per interval. This bounds
+            // retry work without letting a few short-lived callers permanently
+            // exhaust management availability. No live owner exists here.
+            State::Rearming {
+                at: Instant::now() + Duration::from_millis(250),
+            }
+        };
     }
 
     pub(super) fn poll(&mut self) -> Result<ManagementProgress, PairingPeerError> {
@@ -115,9 +147,9 @@ impl ServiceManagement {
                         self.state = State::Reading(pipe);
                         Ok(ManagementProgress::Idle)
                     }
-                    Err(error) => Err(self.fail_pipe(pipe, error)),
+                    Err(error) => self.fail_pipe(pipe, error),
                 },
-                Err(error) => Err(self.fail_listener(listener, error)),
+                Err(error) => self.fail_listener(listener, error),
             },
             State::Reading(mut pipe) => match pipe.poll() {
                 Ok(PairingPipeProgress::Pending) => {
@@ -127,19 +159,19 @@ impl ServiceManagement {
                 Ok(PairingPipeProgress::Read(bytes)) => {
                     let class = match pipe.class() {
                         Ok(class) => class,
-                        Err(error) => return Err(self.fail_pipe(pipe, error)),
+                        Err(error) => return self.fail_pipe(pipe, error),
                     };
                     let request = match decode_request(&bytes) {
                         Ok(request) => request,
                         Err(_) => {
-                            return Err(self.fail_pipe(pipe, PairingPeerError::InvalidMessage));
+                            return self.fail_pipe(pipe, PairingPeerError::InvalidMessage);
                         }
                     };
                     self.state = State::AwaitingReply(pipe);
                     Ok(ManagementProgress::Request { class, request })
                 }
-                Ok(_) => Err(self.fail_pipe(pipe, PairingPeerError::InvalidPhase)),
-                Err(error) => Err(self.fail_pipe(pipe, error)),
+                Ok(_) => self.fail_pipe(pipe, PairingPeerError::InvalidPhase),
+                Err(error) => self.fail_pipe(pipe, error),
             },
             State::Writing(mut pipe) => match pipe.poll() {
                 Ok(PairingPipeProgress::Pending) => {
@@ -151,28 +183,29 @@ impl ServiceManagement {
                     self.state = State::Closing(pipe);
                     Ok(ManagementProgress::Replied)
                 }
-                Ok(_) => Err(self.fail_pipe(pipe, PairingPeerError::InvalidPhase)),
-                Err(error) => Err(self.fail_pipe(pipe, error)),
+                Ok(_) => self.fail_pipe(pipe, PairingPeerError::InvalidPhase),
+                Err(error) => self.fail_pipe(pipe, error),
             },
             State::Closing(mut pipe) => match pipe.drain() {
                 Ok(false) => {
                     self.state = State::Closing(pipe);
                     Ok(ManagementProgress::Idle)
                 }
-                Ok(true) if self.stopping => {
-                    self.state = State::Stopped;
-                    Ok(ManagementProgress::Idle)
-                }
                 Ok(true) => {
-                    self.state = State::Stopped;
-                    self.listen()?;
+                    drop(pipe);
+                    self.schedule_rearm();
                     Ok(ManagementProgress::Idle)
                 }
-                Err(error) => Err(self.fail_pipe(pipe, error)),
+                Err(error) => {
+                    self.cleanup_failure.get_or_insert(error);
+                    self.state = State::FailedPipe(pipe);
+                    Err(error)
+                }
             },
             State::FailedListener(mut listener) => match listener.drain() {
                 Ok(true) => {
-                    self.state = State::Stopped;
+                    drop(listener);
+                    self.schedule_rearm();
                     Ok(ManagementProgress::Idle)
                 }
                 Ok(false) => {
@@ -182,12 +215,13 @@ impl ServiceManagement {
                 Err(error) => {
                     self.cleanup_failure.get_or_insert(error);
                     self.state = State::FailedListener(listener);
-                    Ok(ManagementProgress::Idle)
+                    Err(error)
                 }
             },
             State::FailedPipe(mut pipe) => match pipe.drain() {
                 Ok(true) => {
-                    self.state = State::Stopped;
+                    drop(pipe);
+                    self.schedule_rearm();
                     Ok(ManagementProgress::Idle)
                 }
                 Ok(false) => {
@@ -197,9 +231,33 @@ impl ServiceManagement {
                 Err(error) => {
                     self.cleanup_failure.get_or_insert(error);
                     self.state = State::FailedPipe(pipe);
-                    Ok(ManagementProgress::Idle)
+                    Err(error)
                 }
             },
+            State::Rearming { at } => {
+                if self.stopping || self.failed() {
+                    self.state = State::Stopped;
+                } else if Instant::now() < at {
+                    self.state = State::Rearming { at };
+                } else {
+                    // Unlike initial activation, transient rearm failures do
+                    // not retire the core service. Native context/first-instance
+                    // checks are still applied on every attempt.
+                    match ManagementListener::create() {
+                        Ok(mut listener) => {
+                            if let Err(error) = listener.begin_connect() {
+                                return self.fail_listener(listener, error);
+                            }
+                            self.state = State::Listening(listener);
+                        }
+                        Err(error) => {
+                            self.schedule_rearm();
+                            return self.connection_failure(error);
+                        }
+                    }
+                }
+                Ok(ManagementProgress::Idle)
+            }
             State::Dormant => {
                 self.state = State::Dormant;
                 Ok(ManagementProgress::Idle)
@@ -213,7 +271,7 @@ impl ServiceManagement {
                     self.state = State::AwaitingReply(pipe);
                     Ok(ManagementProgress::Idle)
                 }
-                Err(error) => Err(self.fail_pipe(pipe, error)),
+                Err(error) => self.fail_pipe(pipe, error),
             },
             State::Transition => {
                 self.state = State::Stopped;
@@ -231,14 +289,17 @@ impl ServiceManagement {
         };
         let wire = match encode_response(&response) {
             Ok(wire) => wire,
-            Err(_) => return Err(self.fail_pipe(pipe, PairingPeerError::InvalidMessage)),
+            Err(_) => {
+                let _ = self.fail_pipe(pipe, PairingPeerError::InvalidMessage);
+                return Err(PairingPeerError::InvalidMessage);
+            }
         };
         match pipe.begin_write(&wire) {
             Ok(()) => {
                 self.state = State::Writing(pipe);
                 Ok(())
             }
-            Err(error) => Err(self.fail_pipe(pipe, error)),
+            Err(error) => self.fail_pipe(pipe, error).map(|_| ()),
         }
     }
 
@@ -251,7 +312,7 @@ impl ServiceManagement {
             | State::Writing(pipe)
             | State::Closing(pipe)
             | State::FailedPipe(pipe) => pipe.cancel(),
-            State::Dormant => self.state = State::Stopped,
+            State::Dormant | State::Rearming { .. } => self.state = State::Stopped,
             State::Transition | State::Stopped => {}
         }
     }
@@ -265,7 +326,7 @@ impl ServiceManagement {
             | State::Writing(pipe)
             | State::Closing(pipe)
             | State::FailedPipe(pipe) => pipe.drain(),
-            State::Dormant | State::Stopped => Ok(true),
+            State::Dormant | State::Stopped | State::Rearming { .. } => Ok(true),
             State::Transition => Err(PairingPeerError::InvalidPhase),
         };
         match result {
@@ -296,5 +357,90 @@ impl ServiceManagement {
 
     pub(super) const fn failed(&self) -> bool {
         self.first_failure.is_some() || self.cleanup_failure.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These exercise the real state machine with explicitly empty native
+    // owners, not authenticated Windows clients. Installed-service native CI
+    // separately exercises real read/disconnect/malformed-query lifecycles.
+    #[test]
+    fn repeated_client_failures_retain_owner_until_drain_without_poisoning_stop() {
+        let mut management = ServiceManagement::dormant();
+        for error in [
+            PairingPeerError::EndOfStream,
+            PairingPeerError::Cancelled,
+            PairingPeerError::InvalidMessage,
+            PairingPeerError::DeadlineElapsed,
+            PairingPeerError::Rejected,
+            PairingPeerError::Closed,
+        ] {
+            assert!(matches!(
+                management.fail_pipe(ManagementPipe::empty_owner_for_test(), error),
+                Ok(ManagementProgress::Idle)
+            ));
+            assert_eq!(management.remaining_owners(), 1);
+            assert!(!management.failed());
+            assert!(matches!(management.poll(), Ok(ManagementProgress::Idle)));
+            assert_eq!(management.remaining_owners(), 0);
+            assert!(matches!(management.state, State::Rearming { .. }));
+        }
+        assert!(management.drain());
+        assert!(!management.failed());
+        assert!(matches!(management.state, State::Stopped));
+    }
+
+    #[test]
+    fn reply_to_exited_original_client_is_isolated_and_cannot_retarget() {
+        let mut management = ServiceManagement::dormant();
+        management.state = State::AwaitingReply(ManagementPipe::empty_owner_for_test());
+        assert_eq!(management.reply(ManagementResponse::Done), Ok(()));
+        assert!(matches!(management.state, State::FailedPipe(_)));
+        assert_eq!(management.remaining_owners(), 1);
+        assert_eq!(
+            management.reply(ManagementResponse::Done),
+            Err(PairingPeerError::InvalidPhase)
+        );
+        assert!(!management.failed());
+        assert!(management.drain());
+    }
+
+    #[test]
+    fn rejected_listener_drains_before_rearm_and_stop_cancels_retry() {
+        let mut management = ServiceManagement::dormant();
+        management
+            .fail_listener(
+                ManagementListener::empty_owner_for_test(),
+                PairingPeerError::Closed,
+            )
+            .unwrap();
+        assert_eq!(management.remaining_owners(), 1);
+        management.poll().unwrap();
+        assert_eq!(management.remaining_owners(), 0);
+        assert!(matches!(management.state, State::Rearming { .. }));
+        management.shutdown();
+        management.poll().unwrap();
+        assert!(matches!(management.state, State::Stopped));
+        assert!(!management.failed());
+    }
+
+    #[test]
+    fn cleanup_uncertainty_is_sticky_and_never_rearms() {
+        let mut management = ServiceManagement::dormant();
+        assert!(matches!(
+            management.fail_pipe(
+                ManagementPipe::empty_owner_for_test(),
+                PairingPeerError::CleanupUnconfirmed,
+            ),
+            Err(PairingPeerError::CleanupUnconfirmed)
+        ));
+        assert_eq!(management.remaining_owners(), 1);
+        assert!(management.failed());
+        management.poll().unwrap();
+        assert!(matches!(management.state, State::Stopped));
+        assert!(management.failed());
     }
 }

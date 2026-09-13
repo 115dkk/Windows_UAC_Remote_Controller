@@ -702,6 +702,7 @@ fn management_query_reads_the_current_software_registry_snapshot() {
             identity_provider,
             android_signer_digests,
             devices,
+            ..
         } = response
         else {
             panic!("query must return a snapshot");

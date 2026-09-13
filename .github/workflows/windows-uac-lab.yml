@@ -53,6 +53,17 @@ jobs:
         run: |
           rustup show active-toolchain
           rustup target add x86_64-pc-windows-msvc
+      - name: Install pinned Node and build the actual desktop client assets
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Build desktop assets for the real installed management client
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the lab service (software KSP) and the prompt helper with lab notes
         shell: pwsh
         run: |
@@ -61,6 +72,8 @@ jobs:
           # The helper's lab-diagnostics feature appends fixed-token census facts (counts, desktop names,
           # enum names; never prompt text) to the product data directory. Release builds never enable it.
           cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-prompt-probe --bin uac-prompt-probe --features lab-diagnostics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p controller-app --bin controller-app --features custom-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $service = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/uac-service.exe"
           $bytes = [IO.File]::ReadAllBytes($service)
@@ -87,7 +100,7 @@ jobs:
           }
           if (Test-Path -LiteralPath $env:LAB_DIR) { throw 'Product directory already exists on this runner.' }
           [IO.Directory]::CreateDirectory($env:LAB_DIR, (New-LabSecurity $true)) | Out-Null
-          foreach ($leaf in 'uac-service.exe', 'uac-prompt-probe.exe') {
+          foreach ($leaf in 'uac-service.exe', 'uac-prompt-probe.exe', 'controller-app.exe') {
             $source = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/$leaf"
             $target = Join-Path $env:LAB_DIR $leaf
             $stream = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-LabSecurity $false))
@@ -159,6 +172,12 @@ jobs:
         shell: pwsh
         run: |
           ./tools/windows-embedded-relay-lab.ps1 -ServiceExecutable (Join-Path $env:LAB_DIR 'uac-service.exe') | Tee-Object -FilePath "$env:LAB_EVIDENCE/embedded-relay.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeated authenticated management queries and rejected clients preserve the service
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          ./tools/windows-management-lab.ps1 -ServiceExecutable (Join-Path $env:LAB_DIR 'uac-service.exe') | Tee-Object -FilePath "$env:LAB_EVIDENCE/management-recovery.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Lab experiment (evidence only) - start the same service with an unrestricted service SID
         id: experiment

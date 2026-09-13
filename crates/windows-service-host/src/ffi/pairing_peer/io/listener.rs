@@ -498,6 +498,16 @@ impl fmt::Debug for ManagementListener {
 }
 
 impl ManagementListener {
+    #[cfg(test)]
+    pub(crate) const fn empty_owner_for_test() -> Self {
+        Self {
+            endpoint: None,
+            operation: None,
+            cancel_requested: false,
+            connected: false,
+        }
+    }
+
     pub(crate) fn create() -> Result<Self, Error> {
         let endpoint = ManagementServerEndpoint::create_for_running_service()?;
         Ok(Self {
@@ -581,18 +591,16 @@ impl ManagementListener {
     pub(crate) fn drain(&mut self) -> Result<bool, Error> {
         self.cancel();
         if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
+            && operation.in_flight()
         {
+            // Prepared storage was never borrowed by the kernel; Complete
+            // already observed a terminal result. Only InFlight needs polling.
             match operation.poll(endpoint.raw()) {
                 Ok(None) => return Ok(false),
-                Ok(Some(_)) if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
-                Ok(Some(_)) => {}
-                Err(error)
-                    if expected_cancel_completion(
-                        error,
-                        self.cancel_requested,
-                        operation.in_flight(),
-                    ) => {}
-                Err(_) => return Err(Error::CleanupUnconfirmed),
+                _ if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
+                // No payload/result is published during drain. A terminal
+                // error also confirms that the kernel released its borrow.
+                _ => {}
             }
         }
         drop(self.operation.take());
@@ -636,6 +644,16 @@ impl fmt::Debug for ManagementPipe {
 }
 
 impl ManagementPipe {
+    #[cfg(test)]
+    pub(crate) const fn empty_owner_for_test() -> Self {
+        Self {
+            peer: None,
+            operation: None,
+            cancel_requested: false,
+            window: None,
+        }
+    }
+
     fn check_window(&self) -> Result<(), Error> {
         self.window.as_ref().ok_or(Error::Closed)?.check()
     }
@@ -740,18 +758,17 @@ impl ManagementPipe {
 
     pub(crate) fn drain(&mut self) -> Result<bool, Error> {
         self.cancel();
-        if let (Some(peer), Some((operation, _))) = (self.peer.as_ref(), self.operation.as_mut()) {
+        if let (Some(peer), Some((operation, _))) = (self.peer.as_ref(), self.operation.as_mut())
+            && operation.in_flight()
+        {
+            // Keep unknown/incomplete I/O on this original pipe. Never poll a
+            // Prepared operation (which has no kernel borrow) as cleanup I/O.
             match operation.poll(peer.raw()) {
                 Ok(None) => return Ok(false),
-                Ok(Some(_)) if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
-                Ok(Some(_)) => {}
-                Err(error)
-                    if expected_cancel_completion(
-                        error,
-                        self.cancel_requested,
-                        operation.in_flight(),
-                    ) => {}
-                Err(_) => return Err(Error::CleanupUnconfirmed),
+                _ if operation.in_flight() => return Err(Error::CleanupUnconfirmed),
+                // EOF/oversized reads can win a race with cancellation. Once
+                // terminal, discard their data and release only this owner.
+                _ => {}
             }
         }
         drop(self.operation.take());

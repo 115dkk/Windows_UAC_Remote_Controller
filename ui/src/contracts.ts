@@ -20,6 +20,11 @@ export interface ServiceView {
   readonly allowedActions: readonly ServiceAction[];
   readonly controlHint: 'needs_installer' | 'available' | 'unsupported';
   readonly remoteRequestsReady: boolean;
+  readonly actionIssue?: AppIssue | null;
+}
+export interface RelayStatus {
+  readonly mode: 'embedded' | 'external' | 'unknown';
+  readonly state: 'listening' | 'waiting_network' | 'unavailable' | 'stopped' | 'external_configured' | 'unknown';
 }
 export interface PhoneServiceView {
   readonly state: 'stopped' | 'preparing' | 'waiting_for_unlock' | 'local_settings_ready' | 'cleanup_pending' | 'unavailable';
@@ -90,6 +95,7 @@ export interface AppSnapshot {
   readonly policy: NotificationPolicy | null;
   readonly devices: readonly PairedDeviceView[];
   readonly relayConfigured: boolean;
+  readonly relayStatus?: RelayStatus | null;
   readonly requests: readonly RequestView[];
   readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;

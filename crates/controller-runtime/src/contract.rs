@@ -51,6 +51,35 @@ pub struct ServiceView {
     pub allowed_actions: Vec<ServiceAction>,
     pub control_hint: ControlHint,
     pub remote_requests_ready: bool,
+    /// Last explicit operation outcome, not a capability or a stale-state gate.
+    pub action_issue: Option<AppIssue>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayMode {
+    Embedded,
+    External,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayState {
+    Listening,
+    WaitingNetwork,
+    Unavailable,
+    Stopped,
+    ExternalConfigured,
+    Unknown,
+}
+
+/// Listener observation is distinct from selected configuration/reachability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStatusView {
+    pub mode: RelayMode,
+    pub state: RelayState,
 }
 
 /// Phone process/service availability, never a peer or authentication claim.
@@ -170,6 +199,7 @@ pub struct ManagementDevice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagementObservation {
     pub relay_configured: bool,
+    pub relay_status: RelayStatusView,
     pub devices: Vec<ManagementDevice>,
 }
 
@@ -292,6 +322,7 @@ pub struct AppSnapshot {
     /// None means no current policy observation; never substitute defaults.
     pub policy: Option<NotificationPolicy>,
     pub relay_configured: bool,
+    pub relay_status: Option<RelayStatusView>,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
     /// None is no current native observation, not an empty provisioned map.
@@ -319,6 +350,7 @@ impl AppSnapshot {
             mobile: Some(readiness),
             policy: None,
             relay_configured: false,
+            relay_status: None,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,
@@ -360,6 +392,7 @@ impl AppSnapshot {
             mobile: Some(readiness),
             policy: Some(policy),
             relay_configured: false,
+            relay_status: None,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,

@@ -36,7 +36,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(scanner).toBeInViewport({ ratio: 1 });
       await gallery.capture('connection-action', 'CLIENT/SYNTHETIC · 좁은 화면/확대에서 촬영 버튼 접근');
     }
-    if (fixture.startsWith('desktop-') && !['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing', 'desktop-history'].includes(fixture)) {
+    if (fixture.startsWith('desktop-') && !fixture.startsWith('desktop-relay-') && !['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing', 'desktop-history'].includes(fixture)) {
       const purpose = page.getByRole('heading', { level: 1, name: 'PC 승인을 휴대폰에서', exact: true });
       await expect(purpose).toBeVisible();
       if (!selected.rootTextSizePercent) await expect(purpose).toBeInViewport({ ratio: 1 });
@@ -144,6 +144,46 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture.startsWith('desktop-')) await expect(page.locator('button[data-pairing-scanner="open"]')).toHaveCount(0);
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
+    if (fixture.startsWith('desktop-relay-')) {
+      const card = page.getByRole('region', { name: 'PC 내장 중계', exact: true });
+      const status = card.getByRole('status');
+      const expected: Record<string, string> = {
+        'desktop-relay-stopped': '내장 중계 중지됨 · 수신 대기하지 않아요.',
+        'desktop-relay-listening': '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인해 주세요.',
+        'desktop-relay-waiting': '내장 중계가 네트워크를 기다리고 있어요.',
+        'desktop-relay-unknown': '중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.',
+        'desktop-relay-external': '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.',
+      };
+      await expect(status).toHaveText(expected[fixture]!);
+      await status.scrollIntoViewIfNeeded();
+      await expect(status).toBeInViewport({ ratio: 1 });
+      if (fixture === 'desktop-relay-listening') await expect(status).toHaveClass(/is-success/u);
+      else await expect(status).not.toHaveClass(/is-success/u);
+      const selectedMode = ['desktop-relay-stopped', 'desktop-relay-listening', 'desktop-relay-waiting'].includes(fixture);
+      const choice = card.getByRole('button', { name: selectedMode ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용', exact: true });
+      if (selectedMode || fixture === 'desktop-relay-unknown') await expect(choice).toBeDisabled();
+      else await expect(choice).toBeEnabled();
+      await gallery.capture('relay-observation', 'CLIENT/SYNTHETIC · 중계 설정과 실제 수신 상태 구분');
+      if (fixture === 'desktop-relay-stopped') {
+        const next = card.getByRole('button', { name: 'PC 상태 열기', exact: true });
+        await next.scrollIntoViewIfNeeded();
+        await expect(next).toBeInViewport({ ratio: 1 });
+        await gallery.capture('relay-next-step', 'CLIENT/SYNTHETIC · 중지 상태의 다음 단계');
+        await next.click();
+        await expect(page.getByRole('button', { name: '휴대폰 승인 켜기', exact: true })).toBeEnabled();
+      }
+    }
+    if (fixture === 'desktop-start-failed') {
+      const error = page.getByRole('alert');
+      await expect(error).toHaveText('작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.');
+      await page.getByRole('button', { name: '다시 확인', exact: true }).click();
+      await expect(error).toBeVisible();
+      const retry = page.getByRole('button', { name: '휴대폰 승인 켜기', exact: true });
+      await retry.scrollIntoViewIfNeeded();
+      await expect(retry).toBeEnabled();
+      await expect(retry).toBeInViewport({ ratio: 1 });
+      await gallery.capture('start-failure-retry', 'CLIENT/SYNTHETIC · 조회 후에도 남는 실패 안내와 다시 시작');
+    }
     if (fixture === 'desktop-taskbar-available' || fixture === 'desktop-taskbar-unavailable') {
       await page.getByRole('heading', { name: '작업 표시줄에서 바로 열기' }).scrollIntoViewIfNeeded();
       await gallery.capture('taskbar-suggestion', 'CLIENT/SYNTHETIC · 설치 선택 안내, 실제 Windows 고정 아님');
