@@ -201,7 +201,8 @@ namespace UacCiMedium {
         [DllImport("userenv.dll", SetLastError = true)]
         private static extern bool DestroyEnvironmentBlock(IntPtr environment);
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags,
+        private static extern bool CreateProcessWithLogonW(string user, string domain,
+            IntPtr password, uint logonFlags,
             string application, StringBuilder commandLine, uint creationFlags,
             IntPtr environment, string directory, ref StartupInfo startup,
             out ProcessInformation information);
@@ -219,8 +220,9 @@ namespace UacCiMedium {
                 if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
                     throw Error("LogonUserW(owned standard account)");
                 // LOGON_WITH_PROFILE loads this account's real profile. This
-                // fixed inert cmd process NEVER resumes; its original handle
-                // stays owned so that profile remains loaded for the GUI.
+                // fixed inert cmd stays suspended during normal GUI runs so
+                // the profile remains loaded. InspectOnly resumes this exact
+                // probe once and requires its bounded successful exit.
                 string probe = Path.Combine(Environment.GetFolderPath(
                     Environment.SpecialFolder.System), "cmd.exe");
                 ProcessInformation information = CreateSuspended(probe,
@@ -276,17 +278,16 @@ namespace UacCiMedium {
             IntPtr environment) {
             StartupInfo startup = new StartupInfo();
             startup.cb = (uint)Marshal.SizeOf(typeof(StartupInfo));
-            // Documented WithToken inheritance grants this genuine account
-            // access to the caller's ordinary desktop, never the secure one.
+            // Inherit the caller's ordinary desktop, never the secure one.
             // No manual desktop ACL or UAC policy modification is performed.
             startup.lpDesktop = null;
             startup.dwFlags = 1; // STARTF_USESHOWWINDOW.
             startup.wShowWindow = 0; // SW_HIDE.
             ProcessInformation information;
-            if (!CreateProcessWithTokenW(logonToken, 1,
+            if (!CreateProcessWithLogonW(userName, Environment.MachineName, password, 1,
                 application, new StringBuilder(commandLine), 0x404, environment,
                 Path.GetDirectoryName(application), ref startup, out information))
-                throw Error("CreateProcessWithTokenW(owned standard account)");
+                throw Error("CreateProcessWithLogonW(owned standard account)");
             return information;
         }
 
