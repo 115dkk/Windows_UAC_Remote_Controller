@@ -131,12 +131,8 @@ fn remove_device_intent(device_id: &str) -> Result<ServiceControlIntent, Platfor
     for (output, pair) in bytes.iter_mut().zip(device_id.as_bytes().chunks_exact(2)) {
         *output = digit(pair[0])? * 16 + digit(pair[1])?;
     }
-    let mut wire = Vec::with_capacity(22);
-    wire.extend_from_slice(b"UCMG");
-    wire.extend_from_slice(&[1, 2]);
-    wire.extend_from_slice(&bytes);
     let windows_service_host::management_protocol::ManagementRequest::RemoveDevice { device } =
-        windows_service_host::management_protocol::decode_request(&wire)
+        windows_service_host::management_protocol::ManagementRequest::remove_device(bytes)
             .map_err(|_| PlatformError::ControlFailed)?
     else {
         return Err(PlatformError::ControlFailed);
@@ -217,5 +213,57 @@ fn control_error(error: ServiceError) -> PlatformError {
         | ServiceError::UnsafePermissions
         | ServiceError::ConfigurationConflict => PlatformError::HelperUnavailable,
         _ => PlatformError::ControlFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_service_host::management_protocol::{
+        ManagementRequest, decode_request, encode_request,
+    };
+
+    #[test]
+    fn lowercase_device_identifier_builds_typed_intent_and_round_trips() {
+        for text in [
+            "0123456789abcdef0123456789abcdef",
+            "00000000000000000000000000000001",
+            "ffffffffffffffffffffffffffffffff",
+        ] {
+            let ServiceControlIntent::RemoveDevice(device) = remove_device_intent(text).unwrap()
+            else {
+                panic!("device identifier must produce only device removal");
+            };
+            assert_eq!(device_hex(device.as_bytes()), text);
+            let request = ManagementRequest::remove_device(*device.as_bytes()).unwrap();
+            assert_eq!(
+                decode_request(&encode_request(&request).unwrap()),
+                Ok(request)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_device_identifiers_fail_before_mutation_intent_exists() {
+        // WindowsPlatformAdapter::remove_device resolves this fallible pure
+        // intent before completed_mutation can launch any elevated helper.
+        // These tests never call native mutation or request elevation.
+        let non_ascii = "\u{e9}".repeat(16);
+        for text in [
+            "",
+            "00000000000000000000000000000000",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "g123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            " 123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcde\n",
+            non_ascii.as_str(),
+        ] {
+            assert!(matches!(
+                remove_device_intent(text),
+                Err(PlatformError::ControlFailed)
+            ));
+        }
     }
 }

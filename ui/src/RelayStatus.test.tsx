@@ -101,8 +101,30 @@ describe('Windows relay observation and service recovery', () => {
     render(<DevicesPanel snapshot={snapshot} disabled={condition === 'busy'} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
     const select = screen.getByRole('button', { name: '이 PC의 내장 중계 사용' });
     expect(select).toBeDisabled();
-    expect(screen.getByRole('textbox', { name: ko.relayAddress })).toBeDisabled();
+    const address = screen.getByRole('textbox', { name: ko.relayAddress });
+    expect(address).toBeEnabled();
+    fireEvent.change(address, { target: { value: '203.0.113.10:443' } });
+    expect(address).toHaveValue('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     fireEvent.click(select);
+    expect(onSetRelay).not.toHaveBeenCalled();
+  });
+
+  it('keeps a writable relay draft through management failure and recovery without submitting it', () => {
+    const unavailable = qaCase('desktop-relay-unknown').snapshot;
+    const onSetRelay = vi.fn();
+    const view = render(<DevicesPanel snapshot={unavailable} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    const address = screen.getByRole('textbox', { name: ko.relayAddress });
+    expect(address).toBeEnabled();
+    fireEvent.change(address, { target: { value: '203.0.113.10:443' } });
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(onSetRelay).not.toHaveBeenCalled();
+    const ready = qaCase('desktop-relay-listening').snapshot;
+    view.rerender(<DevicesPanel snapshot={ready} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    expect(address).toHaveValue('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
     expect(onSetRelay).not.toHaveBeenCalled();
   });
 

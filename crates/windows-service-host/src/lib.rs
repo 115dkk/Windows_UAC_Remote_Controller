@@ -17,6 +17,12 @@ mod build_policy {
 }
 mod contract;
 mod diagnostic;
+#[cfg(all(
+    windows,
+    target_pointer_width = "64",
+    feature = "lab-client-diagnostics"
+))]
+mod lab_client_notes;
 pub mod management_protocol;
 /// Disposable lab builds only: the SCM exit code drops HRESULTs, so the lab
 /// keeps the failure text next to the activity journal for the evidence upload.
@@ -208,6 +214,22 @@ fn management_client_error_at(_stage: &'static str, _error: PairingClientError) 
     // command arguments, keys or arbitrary OS text into diagnostics.
     #[cfg(feature = "lab-software-identity")]
     lab::record_note(&format!("management client {_stage}: {_error}"));
+    #[cfg(feature = "lab-client-diagnostics")]
+    {
+        use lab_client_notes::Stage;
+        let point = match _stage {
+            "connect" => Some(Stage::ExchangeConnect),
+            "begin_write" => Some(Stage::ExchangeBeginWrite),
+            "poll_write" => Some(Stage::ExchangePollWrite),
+            "begin_read" => Some(Stage::ExchangeBeginRead),
+            "poll_read" => Some(Stage::ExchangePollRead),
+            "cleanup" => Some(Stage::ExchangeCleanup),
+            _ => None,
+        };
+        if let Some(point) = point {
+            lab_client_notes::client::<()>(point, &Err(_error), false);
+        }
+    }
     ServiceError::ManagementRefused
 }
 
@@ -218,6 +240,8 @@ fn management_exchange(
     use std::time::{Duration, Instant};
 
     const POLL_DELAY: Duration = Duration::from_millis(10);
+    #[cfg(feature = "lab-client-diagnostics")]
+    let _diagnostic_scope = lab_client_notes::begin();
     let wire = management_protocol::encode_request(&request)
         .map_err(|_| ServiceError::InvalidArguments)?;
     let start = Instant::now();
@@ -228,6 +252,8 @@ fn management_exchange(
         client
             .begin_write(&wire)
             .map_err(|error| management_client_error_at("begin_write", error))?;
+        #[cfg(feature = "lab-client-diagnostics")]
+        lab_client_notes::success(lab_client_notes::Stage::ExchangeBeginWrite);
         loop {
             match client
                 .poll()
@@ -241,6 +267,8 @@ fn management_exchange(
         client
             .begin_read()
             .map_err(|error| management_client_error_at("begin_read", error))?;
+        #[cfg(feature = "lab-client-diagnostics")]
+        lab_client_notes::success(lab_client_notes::Stage::ExchangeBeginRead);
         loop {
             match client
                 .poll()
@@ -248,8 +276,17 @@ fn management_exchange(
             {
                 PairingClientProgress::Pending => std::thread::sleep(POLL_DELAY),
                 PairingClientProgress::Read(bytes) => {
-                    return management_protocol::decode_response(&bytes)
-                        .map_err(|_| ServiceError::ManagementRefused);
+                    let response = management_protocol::decode_response(&bytes);
+                    #[cfg(feature = "lab-client-diagnostics")]
+                    lab_client_notes::client(
+                        lab_client_notes::Stage::ExchangeDecode,
+                        &response
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|_| PairingClientError::InvalidMessage),
+                        true,
+                    );
+                    return response.map_err(|_| ServiceError::ManagementRefused);
                 }
                 _ => return Err(ServiceError::ManagementRefused),
             }
@@ -264,6 +301,10 @@ fn management_exchange(
             Err(error) => break Err(management_client_error_at("cleanup", error)),
         }
     };
+    #[cfg(feature = "lab-client-diagnostics")]
+    if cleanup.is_ok() {
+        lab_client_notes::success(lab_client_notes::Stage::ExchangeCleanup);
+    }
     match (exchange, cleanup) {
         (Ok(response), Ok(())) => Ok(response),
         (Err(error), Ok(())) => Err(error),

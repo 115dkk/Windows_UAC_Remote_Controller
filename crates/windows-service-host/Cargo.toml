@@ -12,6 +12,9 @@ description = "Fixed-identity Windows SCM lifecycle host with protected-installa
 # Forwarded lab-only identity provider (ADR 0027). Release packaging rejects a
 # service binary that carries the lab profile marker; never enable it to ship.
 lab-software-identity = ["windows-identity/lab-software-identity"]
+# Fixed-stage client observations in disposable GUI lab builds only. The same
+# package-rejected startup marker is present; never enable this feature to ship.
+lab-client-diagnostics = []
 test-attestation-anchors = ["android-attestation/test-attestation-anchors"]
 
 [dependencies]

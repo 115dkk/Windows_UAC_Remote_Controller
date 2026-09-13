@@ -164,6 +164,15 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       if (selectedMode || fixture === 'desktop-relay-unknown') await expect(choice).toBeDisabled();
       else await expect(choice).toBeEnabled();
       await gallery.capture('relay-observation', 'CLIENT/SYNTHETIC · 중계 설정과 실제 수신 상태 구분');
+      if (fixture === 'desktop-relay-unknown') {
+        const address = page.getByRole('textbox', { name: '중계 서버 주소', exact: true });
+        await expect(address).toBeEnabled();
+        await address.fill('203.0.113.10:443');
+        await expect(address).toHaveValue('203.0.113.10:443');
+        await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+        await address.scrollIntoViewIfNeeded();
+        await gallery.capture('relay-draft', 'CLIENT/SYNTHETIC · 상태 미확인 중 주소 작성, 저장은 대기');
+      }
       if (fixture === 'desktop-relay-stopped') {
         const next = card.getByRole('button', { name: 'PC 상태 열기', exact: true });
         await next.scrollIntoViewIfNeeded();

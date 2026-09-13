@@ -34,7 +34,7 @@ windows-service-host = { path = "../crates/windows-service-host" }
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 # Disposable native CI diagnostics only; never enable in client packaging.
-lab-startup-notes = []
+lab-startup-notes = ["windows-service-host/lab-client-diagnostics"]
 
 [lints]
 workspace = true

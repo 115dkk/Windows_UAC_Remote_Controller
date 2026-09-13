@@ -161,6 +161,45 @@ pub enum PairingClientError {
 type Error = PairingClientError;
 type Stage = PairingClientStage;
 
+// Observe exactly one result without changing its value or fallback behavior.
+// Production builds compile out the sink and retain the original expression.
+macro_rules! observe_client {
+    ($stage:ident, $result:expr) => {
+        observe_client!($stage, $result, false)
+    };
+    ($stage:ident, $result:expr, $success:expr) => {{
+        #[cfg(feature = "lab-client-diagnostics")]
+        {
+            let result = $result;
+            crate::lab_client_notes::client(
+                crate::lab_client_notes::Stage::$stage,
+                &result,
+                $success,
+            );
+            result
+        }
+        #[cfg(not(feature = "lab-client-diagnostics"))]
+        {
+            $result
+        }
+    }};
+}
+
+macro_rules! observe_peer {
+    ($stage:ident, $result:expr) => {{
+        #[cfg(feature = "lab-client-diagnostics")]
+        {
+            let result = $result;
+            crate::lab_client_notes::peer(crate::lab_client_notes::Stage::$stage, &result);
+            result
+        }
+        #[cfg(not(feature = "lab-client-diagnostics"))]
+        {
+            $result
+        }
+    }};
+}
+
 /// Written is a completed pipe write, not a grant or enrollment result.
 pub enum PairingClientProgress {
     Pending,
@@ -260,15 +299,23 @@ struct OwnIdentity {
 }
 impl OwnIdentity {
     fn observed_management_role() -> Result<PairingPeerRole, Error> {
-        let starter = Self::observe(PairingPeerRole::Starter);
+        let starter = observe_client!(
+            StarterIdentity,
+            Self::observe(PairingPeerRole::Starter),
+            true
+        );
         if starter.is_ok() {
             return Ok(PairingPeerRole::Starter);
         }
-        Self::observe(PairingPeerRole::Helper).map(|_| PairingPeerRole::Helper)
+        observe_client!(HelperIdentity, Self::observe(PairingPeerRole::Helper), true)
+            .map(|_| PairingPeerRole::Helper)
     }
 
     fn observe(role: PairingPeerRole) -> Result<Self, Error> {
-        reject_thread_impersonation().map_err(Error::Service)?;
+        observe_client!(
+            OwnImpersonation,
+            reject_thread_impersonation().map_err(Error::Service)
+        )?;
         // SAFETY: documented current-process/thread observations. The process
         // pseudo-handle is borrowed only and is never adopted/closed.
         let (process, pid, thread) = unsafe {
@@ -280,19 +327,24 @@ impl OwnIdentity {
         };
         let mut session = 0;
         // SAFETY: actual current PID only, initialized fixed scalar output.
-        unsafe { ProcessIdToSessionId(pid, &mut session) }
-            .map_err(|e| native_error(Stage::QueryOwnIdentity, e))?;
-        let token = TokenFacts::observe(process)
+        observe_client!(
+            OwnSessionId,
+            unsafe { ProcessIdToSessionId(pid, &mut session) }
+                .map_err(|e| native_error(Stage::QueryOwnIdentity, e))
+        )?;
+        let token = observe_peer!(OwnToken, TokenFacts::observe(process))
             .map_err(|error| peer_error_at(Stage::QueryOwnIdentity, error))?;
-        token
-            .require(role, session)
+        observe_peer!(OwnTokenRequirement, token.require(role, session))
             .map_err(|error| peer_error_at(Stage::QueryOwnIdentity, error))?;
-        let created = process_identity(process, pid)
+        let created = observe_peer!(OwnProcessIdentity, process_identity(process, pid))
             .map_err(|error| peer_error_at(Stage::QueryOwnIdentity, error))?;
-        let epoch = SessionEpoch::observe(session)
+        let epoch = observe_peer!(OwnSessionEpoch, SessionEpoch::observe(session))
             .map_err(|error| peer_error_at(Stage::QueryOwnIdentity, error))?;
-        reject_thread_impersonation().map_err(Error::Service)?;
-        cleanup_state()?;
+        observe_client!(
+            OwnImpersonation,
+            reject_thread_impersonation().map_err(Error::Service)
+        )?;
+        observe_client!(OwnCleanup, cleanup_state())?;
         Ok(Self {
             pid,
             created,
@@ -311,7 +363,7 @@ impl OwnIdentity {
             || current.token != self.token
             || current.epoch != self.epoch
         {
-            return Err(Error::Rejected);
+            return observe_client!(OwnRecheck, Err(Error::Rejected));
         }
         Ok(())
     }
@@ -349,40 +401,64 @@ struct Connection {
 impl Connection {
     fn recheck(&self) -> Result<(), Error> {
         cleanup_state()?;
-        self.own.recheck(self.role)?;
-        self.installation
-            .check_current_client_image(self.role)
-            .map_err(Error::Service)?;
-        native::recheck_pairing_service_for_client(
-            &self.service,
-            self.installation.service(),
-            self.pid,
-        )
-        .map_err(Error::Service)?;
-        verify_pipe_security(self.pipe.0, self.descriptor_role, &self.service_sid)?;
-        if pipe_identity(self.pipe.0)? != (self.pid, 0)
-            || process_identity(self.server.0, self.pid)
-                .map_err(|error| peer_error_at(Stage::QueryServer, error))?
+        observe_client!(FenceOwnIdentity, self.own.recheck(self.role))?;
+        observe_client!(
+            FenceClientImage,
+            self.installation
+                .check_current_client_image(self.role)
+                .map_err(Error::Service)
+        )?;
+        observe_client!(
+            FenceScm,
+            native::recheck_pairing_service_for_client(
+                &self.service,
+                self.installation.service(),
+                self.pid,
+            )
+            .map_err(Error::Service)
+        )?;
+        observe_client!(
+            FencePipeSecurity,
+            verify_pipe_security(self.pipe.0, self.descriptor_role, &self.service_sid)
+        )?;
+        if observe_client!(FenceServerIdentity, pipe_identity(self.pipe.0))? != (self.pid, 0)
+            || observe_peer!(
+                FenceServerIdentity,
+                process_identity(self.server.0, self.pid)
+            )
+            .map_err(|error| peer_error_at(Stage::QueryServer, error))?
                 != self.created
         {
-            return Err(Error::Rejected);
+            return observe_client!(FenceServerIdentity, Err(Error::Rejected));
         }
-        self.installation
-            .check_service_image(&process_image(self.server.0)?)
-            .map_err(Error::Service)?;
-        if pipe_identity(self.pipe.0)? != (self.pid, 0)
-            || process_identity(self.server.0, self.pid)
-                .map_err(|error| peer_error_at(Stage::QueryServer, error))?
+        observe_client!(
+            FenceServerImage,
+            self.installation
+                .check_service_image(&observe_client!(
+                    FenceServerImage,
+                    process_image(self.server.0)
+                )?)
+                .map_err(Error::Service)
+        )?;
+        if observe_client!(FenceServerIdentity, pipe_identity(self.pipe.0))? != (self.pid, 0)
+            || observe_peer!(
+                FenceServerIdentity,
+                process_identity(self.server.0, self.pid)
+            )
+            .map_err(|error| peer_error_at(Stage::QueryServer, error))?
                 != self.created
         {
-            return Err(Error::Rejected);
+            return observe_client!(FenceServerIdentity, Err(Error::Rejected));
         }
-        native::recheck_pairing_service_for_client(
-            &self.service,
-            self.installation.service(),
-            self.pid,
-        )
-        .map_err(Error::Service)?;
+        observe_client!(
+            FenceScm,
+            native::recheck_pairing_service_for_client(
+                &self.service,
+                self.installation.service(),
+                self.pid,
+            )
+            .map_err(Error::Service)
+        )?;
         reject_thread_impersonation().map_err(Error::Service)?;
         cleanup_state()
     }
@@ -416,53 +492,84 @@ impl PairingClient {
         deadline: Instant,
     ) -> Result<Self, Error> {
         let role = endpoint.role();
-        let mut budget = OriginalBudget::new(started_at, deadline, Instant::now())?;
-        let reservation = Reservation::acquire()?;
+        let mut budget = observe_client!(
+            ConnectBudget,
+            OriginalBudget::new(started_at, deadline, Instant::now())
+        )?;
+        let reservation = observe_client!(ConnectReservation, Reservation::acquire(), true)?;
         reject_thread_impersonation().map_err(Error::Service)?;
         // Current installed image admission happens BEFORE opening either pipe.
-        let installation = validate_pairing_client_installation(role).map_err(Error::Service)?;
-        let own = OwnIdentity::observe(role)?;
-        let (service, expected_pid) =
-            native::pairing_service_for_client(installation.service()).map_err(Error::Service)?;
-        let service_sid = OwnServiceSid::lookup().map_err(Error::Service)?.bytes();
+        let installation = observe_client!(
+            ConnectInstallation,
+            validate_pairing_client_installation(role).map_err(Error::Service),
+            true
+        )?;
+        let own = observe_client!(ConnectOwnIdentity, OwnIdentity::observe(role), true)?;
+        let (service, expected_pid) = observe_client!(
+            ConnectScm,
+            native::pairing_service_for_client(installation.service()).map_err(Error::Service),
+            true
+        )?;
+        let service_sid = observe_client!(
+            ConnectServiceSid,
+            OwnServiceSid::lookup().map_err(Error::Service),
+            true
+        )?
+        .bytes();
         let name = Wide::new(endpoint.name()).map_err(Error::Service)?;
-        budget.observe(Instant::now())?;
+        observe_client!(ConnectBudget, budget.observe(Instant::now()))?;
         own.recheck(role)?;
-        budget.observe(Instant::now())?;
+        observe_client!(ConnectBudget, budget.observe(Instant::now()))?;
         // SAFETY: fixed local endpoint, concrete non-create-instance rights,
         // OPEN_EXISTING, no inherited handle, explicit IDENTIFICATION SQOS.
         // Exactly one attempt; no WaitNamedPipe/reconnect/alternate endpoint.
-        let pipe = unsafe {
-            CreateFileW(
-                name.ptr(),
-                client_access(),
-                FILE_SHARE_MODE(0),
-                None,
-                OPEN_EXISTING,
-                client_flags(),
-                None,
-            )
-        }
-        .map_err(|e| native_error(Stage::Connect, e))?;
+        let pipe = observe_client!(
+            ConnectPipeOpen,
+            unsafe {
+                CreateFileW(
+                    name.ptr(),
+                    client_access(),
+                    FILE_SHARE_MODE(0),
+                    None,
+                    OPEN_EXISTING,
+                    client_flags(),
+                    None,
+                )
+            }
+            .map_err(|e| native_error(Stage::Connect, e)),
+            true
+        )?;
         let pipe = Handle::new(pipe)?;
-        verify_pipe_security(pipe.0, endpoint.descriptor_role(), &service_sid)?;
-        let (pid, session) = pipe_identity(pipe.0)?;
+        observe_client!(
+            ConnectPipeSecurity,
+            verify_pipe_security(pipe.0, endpoint.descriptor_role(), &service_sid),
+            true
+        )?;
+        let (pid, session) = observe_client!(ConnectPipeIdentity, pipe_identity(pipe.0), true)?;
         if pid != expected_pid || session != 0 {
-            return Err(Error::Rejected);
+            return observe_client!(ConnectPipeIdentity, Err(Error::Rejected));
         }
         // SAFETY: actual pipe PID matched to fixed SCM; query/synchronize only,
         // never TOKEN_QUERY, injection, termination or token duplication.
-        let server = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
-        }
-        .map_err(|e| native_error(Stage::QueryServer, e))?;
+        let server = observe_client!(
+            ConnectServerOpen,
+            unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    false,
+                    pid,
+                )
+            }
+            .map_err(|e| native_error(Stage::QueryServer, e)),
+            true
+        )?;
         let server = Handle::new(server)?;
-        let created = process_identity(server.0, pid)
-            .map_err(|error| peer_error_at(Stage::QueryServer, error))?;
+        let created = observe_client!(
+            ConnectServerIdentity,
+            process_identity(server.0, pid)
+                .map_err(|error| peer_error_at(Stage::QueryServer, error)),
+            true
+        )?;
         let connection = Connection {
             pipe,
             server,
@@ -486,12 +593,18 @@ impl PairingClient {
             drained: false,
             protocol_used: false,
         });
-        inner.fence()?;
+        observe_client!(ConnectFirstFence, inner.fence(), true)?;
         // SAFETY: our authenticated retained client handle only. This sets its
         // message read mode, not another object/ACL; no protocol bytes are read.
-        unsafe { SetNamedPipeHandleState(inner.pipe()?, Some(&PIPE_READMODE_MESSAGE), None, None) }
-            .map_err(|e| native_error(Stage::Connect, e))?;
-        inner.fence()?;
+        observe_client!(
+            ConnectReadMode,
+            unsafe {
+                SetNamedPipeHandleState(inner.pipe()?, Some(&PIPE_READMODE_MESSAGE), None, None)
+            }
+            .map_err(|e| native_error(Stage::Connect, e)),
+            true
+        )?;
+        observe_client!(ConnectFinalFence, inner.fence(), true)?;
         Ok(Self { inner: Some(inner) })
     }
     pub fn begin_read(&mut self) -> Result<(), Error> {

@@ -33,6 +33,8 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
       || snapshot.service.state === 'stopped'
       || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
   const relayDisabled = disabled || snapshot.platform !== 'windows' || !relayOwnerAvailable;
+  const relaySaveHint = relayOwnerAvailable ? null
+    : snapshot.service?.controlHint === 'needs_installer' ? ko.pairingPcInstallFirst : ko.pairingPcCheck;
   const embeddedSelected = snapshot.relayStatus?.mode === 'embedded';
   async function saveRelay() {
     if (relayDisabled || submitLock.current || !address.trim()) return;
@@ -81,15 +83,16 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
     </section>
     <section className="relay-advanced" aria-label={tr('외부 중계 서버')}><h2>{tr('고급 설정: 외부 중계 서버')}</h2>
     <form className="policy-form" onSubmit={submit} aria-label={ko.relayAddress}>
-    <fieldset className="surface form-section" disabled={relayDisabled || submitting}>
+    <fieldset className="surface form-section" disabled={submitting}>
       <legend><label htmlFor={`${id}-relay`}>{ko.relayAddress}</label></legend>
       <input id={`${id}-relay`} dir="ltr" type="text" value={address} autoComplete="off" spellCheck={false}
-        aria-describedby={`${id}-relay-hint ${id}-relay-status`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
+        aria-describedby={`${id}-relay-hint ${id}-relay-status${relaySaveHint ? ` ${id}-relay-availability` : ''}`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
       <p id={`${id}-relay-hint`} className="supporting-text">{ko.relayAddressHint}</p>
       <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayStatus
         ? tr('외부 중계 서버 주소를 저장하면 내장 중계 대신 사용해요.')
         : snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
       <div className="collection-actions"><button type="submit" className="button primary" disabled={relayDisabled || submitting || !address.trim()}>{submitting ? ko.saving : ko.save}</button></div>
+      {relaySaveHint && <p id={`${id}-relay-availability`} className="supporting-text">{relaySaveHint}</p>}
     </fieldset>
   </form></section></>;
   const pc = snapshot.platform === 'windows';

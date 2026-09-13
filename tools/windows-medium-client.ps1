@@ -713,6 +713,67 @@ namespace UacCiMedium {
 }
 '@
 
+function Write-OwnedManagementObservation {
+    param([string]$OwnedProfileDirectory)
+    $observation = [ordered]@{ status = 'Unknown'; reason = 'Unavailable'; events = @() }
+    try {
+        $source = Join-Path $OwnedProfileDirectory 'management-client.txt'
+        if (-not [IO.File]::Exists($source)) { throw 'Missing fixed diagnostic file' }
+        $attributes = [IO.File]::GetAttributes($source)
+        if (($attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -ne 0) { throw 'Unsupported diagnostic file' }
+        $stream = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $buffer = New-Object byte[] 8193
+            $count = 0
+            while ($count -lt $buffer.Length) {
+                $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+                if ($read -eq 0) { break }
+                $count += $read
+            }
+        } finally { $stream.Dispose() }
+        if ($count -gt 8192) { throw 'Diagnostic byte bound' }
+        $text = ([Text.UTF8Encoding]::new($false, $true)).GetString($buffer, 0, $count)
+        $lines = @($text -split '\r?\n')
+        if ($lines.Count -gt 1 -and $lines[-1] -eq '') { $lines = @($lines[0..($lines.Count - 2)]) }
+        if ($lines.Count -lt 2 -or $lines.Count -gt 64 -or $lines[0] -cne 'uac-ci-startup-notes-do-not-ship') { throw 'Diagnostic envelope' }
+        $stages = @('exchange_start','starter_identity','helper_identity','own_impersonation','own_session_id',
+            'own_token','own_token_requirement','own_process_identity','own_session_epoch','own_cleanup','own_recheck',
+            'connect_budget','connect_reservation','connect_installation','connect_own_identity','connect_scm',
+            'connect_service_sid','connect_pipe_open','connect_pipe_security','connect_pipe_identity',
+            'connect_server_open','connect_server_identity','connect_first_fence','connect_read_mode','connect_final_fence',
+            'fence_own_identity','fence_client_image','fence_scm','fence_pipe_security','fence_server_identity','fence_server_image',
+            'exchange_connect','exchange_begin_write','exchange_poll_write','exchange_begin_read','exchange_poll_read','exchange_decode','exchange_cleanup')
+        $categories = @('ok','busy','closed','invalid_phase','invalid_message','invalid_deadline','deadline_elapsed',
+            'cancelled','end_of_stream','rejected','malformed','cleanup_unconfirmed','native','service_windows',
+            'service_configuration','service_untrusted_installation','service_unsafe_path','service_unsafe_permissions',
+            'service_elevation_required','service_not_installed','service_unexpected_state','service_other')
+        $events = @()
+        foreach ($line in $lines[1..($lines.Count - 1)]) {
+            if ($line -cnotmatch '^(?<stage>[a-z_]+) (?<category>[a-z_]+) (?<code>-?[0-9]{1,10})$') { throw 'Diagnostic row' }
+            if ($stages -cnotcontains $Matches.stage -or $categories -cnotcontains $Matches.category) { throw 'Diagnostic token' }
+            $code = [long]$Matches.code
+            if ($code -lt -2147483648 -or $code -gt 4294967295) { throw 'Diagnostic code bound' }
+            $events += [ordered]@{ stage = $Matches.stage; category = $Matches.category; code = $code }
+        }
+        $observation.status = 'Observed'
+        $observation.reason = 'WhitelistedDiagnostics'
+        $observation.events = $events
+    } catch {
+        # Never echo raw file contents, paths or exception messages.
+        $observation.status = 'Unknown'
+        $observation.reason = 'ReadOrFormatUnavailable'
+        $observation.events = @()
+    }
+    $json = $observation | ConvertTo-Json -Depth 5
+    Write-Output $json
+    $path = Join-Path $env:LAB_EVIDENCE 'management-client-observation.json'
+    $destination = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $bytes = ([Text.UTF8Encoding]::new($false)).GetBytes($json + "`n")
+        $destination.Write($bytes, 0, $bytes.Length)
+    } finally { $destination.Dispose() }
+}
+
 function Write-OwnedStartupObservation {
     param([string]$OwnedProfileDirectory)
     $observation = [ordered]@{ status = 'Unknown'; reason = 'Unavailable'; stages = @() }
@@ -868,6 +929,8 @@ try {
             if (-not $InspectOnly -and $launcher.ClientPid -ne 0) {
                 try { Write-OwnedStartupObservation -OwnedProfileDirectory $profileDirectory }
                 catch { Write-Output 'Owned startup observation artifact unavailable; progress remains unknown.' }
+                try { Write-OwnedManagementObservation -OwnedProfileDirectory $profileDirectory }
+                catch { Write-Output 'Owned management observation artifact unavailable; progress remains unknown.' }
                 try {
                     $diagnostics = $launcher.DiagnoseOwnedGui() | ConvertTo-Json -Depth 5
                     # Contains fixed flags/classifications/counts only. No raw

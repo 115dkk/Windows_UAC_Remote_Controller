@@ -25,6 +25,16 @@ pub enum ManagementRequest {
     UseEmbeddedRelay,
 }
 
+impl ManagementRequest {
+    /// Validates a device identifier without constructing a transport frame.
+    /// This creates only a request value; mutation still requires the native
+    /// elevated management path and its independent authorization checks.
+    pub fn remove_device(bytes: [u8; 16]) -> Result<Self, ManagementCodecError> {
+        let device = DeviceId::from_bytes(bytes).map_err(|_| ManagementCodecError::Malformed)?;
+        Ok(Self::RemoveDevice { device })
+    }
+}
+
 impl fmt::Debug for ManagementRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ManagementRequest(redacted)")
@@ -442,6 +452,29 @@ mod tests {
 
     fn device(value: u8) -> DeviceId {
         DeviceId::from_bytes([value; 16]).unwrap()
+    }
+
+    #[test]
+    fn typed_device_removal_validates_identity_and_uses_current_codec() {
+        assert_eq!(
+            ManagementRequest::remove_device([0; 16]),
+            Err(ManagementCodecError::Malformed)
+        );
+        for bytes in [
+            [1; 16],
+            [0xff; 16],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        ] {
+            let request = ManagementRequest::remove_device(bytes).unwrap();
+            let ManagementRequest::RemoveDevice { device } = request else {
+                panic!("typed constructor must create only device removal");
+            };
+            assert_eq!(device.as_bytes(), &bytes);
+            assert_eq!(
+                decode_request(&encode_request(&request).unwrap()),
+                Ok(request)
+            );
+        }
     }
 
     #[test]
