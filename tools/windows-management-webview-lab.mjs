@@ -19,7 +19,7 @@ assert.equal(launch.token.integrityRid, 8192);
 assert.equal(launch.token.elevation, 0);
 assert.ok(['Default', 'Limited'].includes(launch.token.elevationType));
 for (const name of ['adminEnabled', 'isSystem', 'isAppContainer', 'uiAccess']) assert.equal(launch.token[name], false);
-assert.equal(launch.token.sessionInteractive, true);
+assert.equal(launch.token.sessionNonzero, true);
 const profile = resolve(launch.profileDirectory);
 assert.ok(profile.startsWith(resolve(process.env.RUNNER_TEMP) + '\\'));
 assert.ok(!profile.startsWith(evidence + '\\'));
@@ -111,7 +111,7 @@ try {
   confirmService();
   writeFileSync(resolve(evidence, 'management-gui-proof.json'), JSON.stringify({
     commit: process.env.GITHUB_SHA, readOnly: true, actualGuiMedium: true,
-    snapshots, refreshes, rejectedClients: rejected, originalServicePid: original.pid,
+    successfulSnapshotChecks: snapshots, refreshes, rejectedClients: rejected, originalServicePid: original.pid,
     originalServicePidRetained: true,
     actualRelayListenerRetained: true, debuggerLoopbackAndOwned: true,
     scope: 'Real product GuiMedium reads/rejected-image clients; not CliElevated/UAC consent/phone authentication',

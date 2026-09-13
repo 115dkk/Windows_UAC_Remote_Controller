@@ -29,7 +29,7 @@ namespace UacCiMedium {
         public int elevation;
         public string elevationType;
         public bool adminEnabled;
-        public bool sessionInteractive;
+        public bool sessionNonzero;
         public bool isSystem;
         public bool isAppContainer;
         public bool uiAccess;
@@ -85,6 +85,8 @@ namespace UacCiMedium {
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
+        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool TerminateProcess(IntPtr handle, uint code);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr handle);
@@ -107,8 +109,7 @@ namespace UacCiMedium {
         [DllImport("userenv.dll", SetLastError = true)]
         private static extern bool DestroyEnvironmentBlock(IntPtr environment);
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CreateProcessWithLogonW(string user, string domain,
-            IntPtr password, uint logonFlags,
+        private static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags,
             string application, StringBuilder commandLine, uint creationFlags,
             IntPtr environment, string directory, ref StartupInfo startup,
             out ProcessInformation information);
@@ -123,6 +124,8 @@ namespace UacCiMedium {
         public Launcher() {
             try {
                 CreateStandardAccount();
+                if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
+                    throw Error("LogonUserW(owned standard account)");
                 // LOGON_WITH_PROFILE loads this account's real profile. This
                 // fixed inert cmd process NEVER resumes; its original handle
                 // stays owned so that profile remains loaded for the GUI.
@@ -133,8 +136,6 @@ namespace UacCiMedium {
                 profileProcess = information.hProcess;
                 profileThread = information.hThread;
                 Facts = InspectProcess(profileProcess);
-                if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
-                    throw Error("LogonUserW(owned standard account)");
             } catch {
                 Dispose();
                 throw;
@@ -183,14 +184,17 @@ namespace UacCiMedium {
             IntPtr environment) {
             StartupInfo startup = new StartupInfo();
             startup.cb = (uint)Marshal.SizeOf(typeof(StartupInfo));
-            startup.lpDesktop = @"winsta0\default";
+            // Documented WithToken inheritance grants this genuine account
+            // access to the caller's ordinary desktop, never the secure one.
+            // No manual desktop ACL or UAC policy modification is performed.
+            startup.lpDesktop = null;
             startup.dwFlags = 1; // STARTF_USESHOWWINDOW.
             startup.wShowWindow = 0; // SW_HIDE.
             ProcessInformation information;
-            if (!CreateProcessWithLogonW(userName, Environment.MachineName, password, 1,
+            if (!CreateProcessWithTokenW(logonToken, 1,
                 application, new StringBuilder(commandLine), 0x404, environment,
                 Path.GetDirectoryName(application), ref startup, out information))
-                throw Error("CreateProcessWithLogonW(owned standard account)");
+                throw Error("CreateProcessWithTokenW(owned standard account)");
             return information;
         }
 
@@ -273,7 +277,7 @@ namespace UacCiMedium {
             int elevationType = Scalar(token, 18);
             facts.elevationType = elevationType == 1 ? "Default" :
                 elevationType == 2 ? "Full" : elevationType == 3 ? "Limited" : "Unknown";
-            facts.sessionInteractive = Scalar(token, 12) > 0;
+            facts.sessionNonzero = Scalar(token, 12) > 0;
             facts.isAppContainer = Scalar(token, 29) != 0;
             facts.uiAccess = Scalar(token, 26) != 0;
             using (Information value = new Information(token, 25)) {
@@ -303,13 +307,13 @@ namespace UacCiMedium {
             Require(facts.tokenType == "Primary" && facts.integrityRid == 8192 &&
                 facts.elevation == 0 &&
                 (facts.elevationType == "Default" || facts.elevationType == "Limited") &&
-                !facts.adminEnabled && facts.sessionInteractive && !facts.isSystem &&
+                !facts.adminEnabled && facts.sessionNonzero && !facts.isSystem &&
                 !facts.isAppContainer && !facts.uiAccess,
                 String.Format("Standard child token does not satisfy GuiMedium: type={0}, integrityRid={1}, " +
-                    "elevation={2}, elevationType={3}, adminEnabled={4}, sessionInteractive={5}, " +
+                    "elevation={2}, elevationType={3}, adminEnabled={4}, sessionNonzero={5}, " +
                     "isSystem={6}, isAppContainer={7}, uiAccess={8}", facts.tokenType,
                     facts.integrityRid, facts.elevation, facts.elevationType, facts.adminEnabled,
-                    facts.sessionInteractive, facts.isSystem, facts.isAppContainer, facts.uiAccess));
+                    facts.sessionNonzero, facts.isSystem, facts.isAppContainer, facts.uiAccess));
         }
 
         public void RequireMedium() { Verify(Facts); }
@@ -367,6 +371,13 @@ namespace UacCiMedium {
                 Verify(Facts);
                 if (ResumeThread(thread) == UInt32.MaxValue) throw Error("ResumeThread(owned child)");
             } finally { Marshal.FreeHGlobal(environment); }
+        }
+
+        public uint OwnedGuiExitCode() {
+            if (process == IntPtr.Zero) return 0;
+            uint code;
+            if (!GetExitCodeProcess(process, out code)) throw Error("GetExitCodeProcess(owned GUI)");
+            return code;
         }
 
         public void Dispose() {
@@ -467,7 +478,10 @@ try {
     $nodeExit = $LASTEXITCODE
     if ($null -eq $nodeExit) { throw 'Node did not supply an exit code.' }
 } finally {
-    if ($null -ne $launcher) { $launcher.Dispose() }
+    if ($null -ne $launcher) {
+        try { Write-Output ("Owned GUI exit code before cleanup: {0}" -f $launcher.OwnedGuiExitCode()) }
+        finally { $launcher.Dispose() }
+    }
     # Parent WEBVIEW2 variables were never mutated: the native explicit child
     # environment is separately allocated/freed, so original values remain.
 }
@@ -478,6 +492,13 @@ if (-not $InspectOnly -and $nodeExit -eq 0) {
     $serviceAfterClose = Get-CimInstance Win32_Service -Filter "Name='UacRemoteController'"
     if ($serviceAfterClose.State -ne 'Running' -or $serviceAfterClose.ProcessId -ne $proof.originalServicePid) {
         throw 'Closing the owned GUI changed the original service lifetime.'
+    }
+    $listenersAfterClose = @(Get-NetTCPConnection -State Listen)
+    if ($listenersAfterClose | Where-Object LocalPort -eq 19225) {
+        throw 'Owned WebView debugger listener remained after GUI cleanup.'
+    }
+    if (-not ($listenersAfterClose | Where-Object { $_.LocalPort -eq 7443 -and $_.OwningProcess -eq $proof.originalServicePid })) {
+        throw 'Original relay listener disappeared after GUI cleanup.'
     }
     $proof | Add-Member -NotePropertyName appClosedServiceRetained -NotePropertyValue $true
     $proof | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $proofPath -Encoding UTF8
