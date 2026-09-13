@@ -84,7 +84,7 @@ jobs:
           # enum names; never prompt text) to the product data directory. Release builds never enable it.
           cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-prompt-probe --bin uac-prompt-probe --features lab-diagnostics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --release --target x86_64-pc-windows-msvc -p controller-app --bin controller-app --features custom-protocol
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p controller-app --bin controller-app --features custom-protocol,lab-startup-notes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $service = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/uac-service.exe"
           $bytes = [IO.File]::ReadAllBytes($service)

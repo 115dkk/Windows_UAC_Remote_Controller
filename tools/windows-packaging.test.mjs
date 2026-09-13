@@ -173,9 +173,11 @@ test('lab-profile binaries are refused for every packaged executable', () => {
   for (const name of leaves) {
     const bytes = name === 'controller-app.exe' ? mainPe() : pe();
     assert.doesNotThrow(() => expectedPayload(name, bytes));
-    const lab = Buffer.from(bytes);
-    lab.write('lab-software-ksp-do-not-ship', 800, 'ascii');
-    assert.throws(() => expectedPayload(name, lab), /lab-profile/u);
+    for (const marker of ['lab-software-ksp-do-not-ship', 'uac-ci-startup-notes-do-not-ship']) {
+      const lab = Buffer.from(bytes);
+      lab.write(marker, 800, 'ascii');
+      assert.throws(() => expectedPayload(name, lab), /lab-profile/u);
+    }
   }
 });
 

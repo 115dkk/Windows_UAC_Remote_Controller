@@ -5,6 +5,8 @@ mod admission;
 #[cfg(target_os = "android")]
 mod android_window;
 mod commands;
+#[cfg(all(windows, feature = "lab-startup-notes"))]
+mod lab_startup;
 mod language;
 mod lifecycle_policy;
 mod mobile;
@@ -13,6 +15,13 @@ mod taskbar;
 #[cfg(not(target_os = "android"))]
 use controller_runtime::{AppIssue, AppPrivateDirectory, AppRuntime, Platform, PlatformAdapter};
 use tauri::Manager;
+
+macro_rules! lab_startup_note {
+    ($stage:literal) => {
+        #[cfg(all(windows, feature = "lab-startup-notes"))]
+        lab_startup::note($stage);
+    };
+}
 
 #[cfg(not(target_os = "android"))]
 fn native_platform() -> Platform {
@@ -59,19 +68,26 @@ fn local_navigation(url: &tauri::Url) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(mobile::init())
+    lab_startup_note!("run_enter");
+    let builder = tauri::Builder::default().plugin(mobile::init());
+    lab_startup_note!("builder_ready");
+    let app = builder
         .setup(|app| {
+            lab_startup_note!("setup_enter");
             // Shell integration is optional. A failure disables the taskbar
             // request, not the approval app; this is never called by the service.
+            lab_startup_note!("appid_begin");
             #[cfg(windows)]
             let _ = windows_service_host::initialize_desktop_shell_identity();
+            lab_startup_note!("appid_end");
             // A failed runtime is kept as an explicit error, not replaced by
             // successful default state. The UI can render the real failure.
+            lab_startup_note!("runtime_begin");
             #[cfg(not(target_os = "android"))]
             app.manage(commands::ControllerState::new(initialize_runtime(
                 app.handle(),
             )));
+            lab_startup_note!("runtime_end");
             // Android's Application owns the only durable Rust policy store.
             // Never open the old AppRuntime/policy writer from an Activity.
             #[cfg(target_os = "android")]
@@ -81,6 +97,7 @@ pub fn run() {
             }
             #[cfg(not(target_os = "android"))]
             {
+                lab_startup_note!("window_begin");
                 let config = app
                     .config()
                     .app
@@ -90,7 +107,9 @@ pub fn run() {
                 tauri::WebviewWindowBuilder::from_config(app, config)?
                     .on_navigation(local_navigation)
                     .build()?;
+                lab_startup_note!("window_end");
             }
+            lab_startup_note!("setup_end");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -113,7 +132,9 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("native application host could not run");
+    lab_startup_note!("build_end");
 
+    lab_startup_note!("event_loop_enter");
     app.run(|_app, event| {
         #[cfg(windows)]
         if matches!(&event, tauri::RunEvent::Exit) {

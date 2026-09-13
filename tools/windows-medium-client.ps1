@@ -50,6 +50,11 @@ namespace UacCiMedium {
         public string primaryThreadState;
         public string primaryDesktop;
         public string primaryDesktopType;
+        public string primaryDesktopFailureApi;
+        public int primaryDesktopWin32Error;
+        public string primaryDesktopTypeFailureApi;
+        public int primaryDesktopTypeWin32Error;
+        public uint? resumePreviousCount;
         public bool modulesEnumerated;
         public bool modulesTruncated;
         public bool webView2Loader;
@@ -80,6 +85,7 @@ namespace UacCiMedium {
         private const int PasswordCharacters = 36;
         public TokenFacts Facts { get; private set; }
         public uint ClientPid { get; private set; }
+        public uint? ResumePreviousCount { get; private set; }
         private static readonly string Application = @"C:\Program Files\" +
             "\uD734\uB300\uD3F0 \uC2B9\uC778" + @"\controller-app.exe";
 
@@ -455,7 +461,12 @@ namespace UacCiMedium {
                 ClientPid = information.dwProcessId;
                 Facts = InspectProcess(process);
                 Verify(Facts);
-                if (ResumeThread(thread) == UInt32.MaxValue) throw Error("ResumeThread(owned child)");
+                uint previousCount = ResumeThread(thread);
+                int resumeError = previousCount == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
+                ResumePreviousCount = previousCount;
+                if (previousCount == UInt32.MaxValue)
+                    throw new Win32Exception(resumeError, "ResumeThread(owned child)");
+                Require(previousCount == 1, "Owned GUI initial suspend count was not exactly one");
             } finally { Marshal.FreeHGlobal(environment); }
         }
 
@@ -492,11 +503,22 @@ namespace UacCiMedium {
             if (name.IndexOf("wry", StringComparison.OrdinalIgnoreCase) >= 0) return "WryWindow";
             return String.IsNullOrEmpty(name) ? "Unavailable" : "Other";
         }
-        private static string DesktopFact(IntPtr desktop, int kind) {
+        private static string DesktopFact(IntPtr desktop, string desktopFailureApi,
+            int desktopError, int kind, out string failureApi, out int win32Error) {
+            failureApi = null;
+            win32Error = 0;
+            if (desktop == IntPtr.Zero) {
+                failureApi = desktopFailureApi;
+                win32Error = desktopError;
+                return "Unavailable";
+            }
             StringBuilder value = new StringBuilder(256);
             uint needed;
-            if (desktop == IntPtr.Zero || !GetUserObjectInformationW(desktop, kind, value, 512, out needed))
+            if (!GetUserObjectInformationW(desktop, kind, value, 512, out needed)) {
+                win32Error = Marshal.GetLastWin32Error();
+                failureApi = kind == 2 ? "GetUserObjectInformationW(NAME)" : "GetUserObjectInformationW(TYPE)";
                 return "Unavailable";
+            }
             string text = value.ToString();
             if (kind == 2) return text.Equals("Default", StringComparison.OrdinalIgnoreCase) ? "Default" : "Other";
             return text.Equals("Desktop", StringComparison.OrdinalIgnoreCase) ? "Desktop" : "Other";
@@ -510,13 +532,22 @@ namespace UacCiMedium {
             OwnedGuiDiagnostics facts = new OwnedGuiDiagnostics();
             facts.clientPid = ownedPid;
             facts.exitCode = OwnedGuiExitCode();
+            facts.resumePreviousCount = ResumePreviousCount;
             uint state = WaitForSingleObject(thread, 0);
             facts.primaryThreadState = state == 258 ? "Live" : state == 0 ? "Terminated" : "Unavailable";
             uint primaryThread = GetThreadId(thread);
+            int desktopError = primaryThread == 0 ? Marshal.GetLastWin32Error() : 0;
+            string desktopFailureApi = primaryThread == 0 ? "GetThreadId" : null;
             IntPtr desktop = primaryThread == 0 ? IntPtr.Zero : GetThreadDesktop(primaryThread);
+            if (primaryThread != 0 && desktop == IntPtr.Zero) {
+                desktopError = Marshal.GetLastWin32Error();
+                desktopFailureApi = "GetThreadDesktop";
+            }
             // GetThreadDesktop returns a borrowed handle; it must not be closed.
-            facts.primaryDesktop = DesktopFact(desktop, 2);
-            facts.primaryDesktopType = DesktopFact(desktop, 3);
+            facts.primaryDesktop = DesktopFact(desktop, desktopFailureApi, desktopError, 2,
+                out facts.primaryDesktopFailureApi, out facts.primaryDesktopWin32Error);
+            facts.primaryDesktopType = DesktopFact(desktop, desktopFailureApi, desktopError, 3,
+                out facts.primaryDesktopTypeFailureApi, out facts.primaryDesktopTypeWin32Error);
 
             IntPtr[] modules = new IntPtr[1024];
             uint needed;
@@ -663,6 +694,83 @@ namespace UacCiMedium {
 }
 '@
 
+function Write-OwnedStartupObservation {
+    param([string]$OwnedProfileDirectory)
+    $observation = [ordered]@{ status = 'Unknown'; reason = 'Unavailable'; stages = @() }
+    $sanitized = $null
+    try {
+        $source = Join-Path $OwnedProfileDirectory 'controller-startup.txt'
+        if ([IO.File]::Exists($source)) {
+            $attributes = [IO.File]::GetAttributes($source)
+            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                ($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                $observation.reason = 'UnsupportedFile'
+            } else {
+                $stream = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                try {
+                    # Read at most bound+1 bytes, including any concurrent append.
+                    $buffer = New-Object byte[] 4097
+                    $count = 0
+                    while ($count -lt $buffer.Length) {
+                        $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+                        if ($read -eq 0) { break }
+                        $count += $read
+                    }
+                } finally { $stream.Dispose() }
+                if ($count -gt 4096) {
+                    $observation.reason = 'Oversized'
+                } else {
+                    $text = ([Text.UTF8Encoding]::new($false, $true)).GetString($buffer, 0, $count)
+                    $lines = @($text -split '\r?\n')
+                    if ($lines.Count -gt 1 -and $lines[$lines.Count - 1] -eq '') {
+                        $lines = @($lines[0..($lines.Count - 2)])
+                    }
+                    $marker = 'uac-ci-startup-notes-do-not-ship'
+                    $allowed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                    foreach ($stage in @('run_enter', 'builder_ready', 'setup_enter', 'appid_begin',
+                        'appid_end', 'runtime_begin', 'runtime_end', 'window_begin', 'window_end',
+                        'setup_end', 'build_end', 'event_loop_enter')) {
+                        [void]$allowed.Add($stage)
+                    }
+                    $valid = $lines.Count -ge 1 -and $lines.Count -le 32 -and $lines[0] -ceq $marker
+                    $stages = @()
+                    for ($index = 1; $valid -and $index -lt $lines.Count; $index++) {
+                        if (-not $allowed.Contains($lines[$index])) { $valid = $false }
+                        else { $stages += $lines[$index] }
+                    }
+                    if ($valid -and $stages.Count -gt 0) {
+                        $observation.status = 'Observed'
+                        $observation.reason = 'WhitelistedStages'
+                        $observation.stages = $stages
+                        # Construct output from recognized tokens, not raw bytes.
+                        $sanitized = (@($marker) + $stages) -join "`n"
+                    } elseif ($valid) { $observation.reason = 'EmptyStages' }
+                    else { $observation.reason = 'UnrecognizedFormat' }
+                }
+            }
+        }
+    } catch {
+        # Missing/inaccessible path, invalid encoding and native read failures
+        # are unknown startup progress, never proof that run_enter was absent.
+        $observation.status = 'Unknown'
+        $observation.reason = 'ReadUnavailable'
+        $observation.stages = @()
+        $sanitized = $null
+    }
+    $json = $observation | ConvertTo-Json -Depth 4
+    Write-Output $json
+    $outputs = @(@{ Name = 'controller-startup-observation.json'; Text = $json })
+    if ($null -ne $sanitized) { $outputs += @{ Name = 'controller-startup.txt'; Text = $sanitized } }
+    foreach ($output in $outputs) {
+        $path = Join-Path $env:LAB_EVIDENCE $output.Name
+        $destination = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        try {
+            $bytes = ([Text.UTF8Encoding]::new($false)).GetBytes($output.Text + "`n")
+            $destination.Write($bytes, 0, $bytes.Length)
+        } finally { $destination.Dispose() }
+    }
+}
+
 $launcher = $null
 $nodeExit = 1
 try {
@@ -717,6 +825,7 @@ try {
         clientPid = $launcher.ClientPid
         debugPort = 19225
         profileDirectory = $profileDirectory
+        resumePreviousCount = $launcher.ResumePreviousCount
         token = $launcher.Facts
     } | ConvertTo-Json -Depth 4
     $receiptPath = Join-Path $evidenceRoot 'medium-client.json'
@@ -734,6 +843,8 @@ try {
         try {
             Write-Output ("Owned GUI exit code before cleanup: {0}" -f $launcher.OwnedGuiExitCode())
             if (-not $InspectOnly -and $launcher.ClientPid -ne 0) {
+                try { Write-OwnedStartupObservation -OwnedProfileDirectory $profileDirectory }
+                catch { Write-Output 'Owned startup observation artifact unavailable; progress remains unknown.' }
                 try {
                     $diagnostics = $launcher.DiagnoseOwnedGui() | ConvertTo-Json -Depth 5
                     # Contains fixed flags/classifications/counts only. No raw
