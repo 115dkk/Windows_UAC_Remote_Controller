@@ -18,6 +18,8 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 
 namespace UacCiMedium {
@@ -36,7 +38,10 @@ namespace UacCiMedium {
     // Only this owner's original child handles may be stopped/closed. No
     // process lookup, external PID adoption, service control or token mutation.
     public sealed class Launcher : IDisposable {
-        private IntPtr sourceToken, level, reducedToken, process, thread;
+        private IntPtr logonToken, password, process, thread, profileProcess, profileThread;
+        private string userName;
+        private bool accountCreated;
+        private const int PasswordCharacters = 36;
         public TokenFacts Facts { get; private set; }
         public uint ClientPid { get; private set; }
         private static readonly string Application = @"C:\Program Files\" +
@@ -56,7 +61,25 @@ namespace UacCiMedium {
             public IntPtr hProcess, hThread;
             public uint dwProcessId, dwThreadId;
         }
-        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct UserInfo1 {
+            public string name;
+            public IntPtr password;
+            public uint passwordAge, privilege;
+            public string homeDirectory, comment;
+            public uint flags;
+            public string scriptPath;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct LocalGroupMember3 { public string domainAndName; }
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint NetUserAdd(string server, uint level,
+            ref UserInfo1 information, out uint parameterError);
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint NetUserDel(string server, string user);
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint NetLocalGroupAddMembers(string server, string group,
+            uint level, ref LocalGroupMember3 member, uint count);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr handle);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -71,13 +94,9 @@ namespace UacCiMedium {
         private static extern bool GetTokenInformation(IntPtr token, int kind,
             IntPtr information, uint length, out uint returned);
         [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool SaferCreateLevel(uint scope, uint levelId,
-            uint flags, out IntPtr level, IntPtr reserved);
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool SaferComputeTokenFromLevel(IntPtr level,
-            IntPtr input, out IntPtr output, uint flags, IntPtr reserved);
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool SaferCloseLevel(IntPtr level);
+        private static extern bool LogonUserW([MarshalAs(UnmanagedType.LPWStr)] string user,
+            [MarshalAs(UnmanagedType.LPWStr)] string domain, IntPtr password,
+            uint logonType, uint provider, out IntPtr token);
         [DllImport("advapi32.dll")]
         private static extern bool IsValidSid(IntPtr sid);
         [DllImport("advapi32.dll")]
@@ -88,7 +107,8 @@ namespace UacCiMedium {
         [DllImport("userenv.dll", SetLastError = true)]
         private static extern bool DestroyEnvironmentBlock(IntPtr environment);
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags,
+        private static extern bool CreateProcessWithLogonW(string user, string domain,
+            IntPtr password, uint logonFlags,
             string application, StringBuilder commandLine, uint creationFlags,
             IntPtr environment, string directory, ref StartupInfo startup,
             out ProcessInformation information);
@@ -102,20 +122,93 @@ namespace UacCiMedium {
 
         public Launcher() {
             try {
-                // QUERY | DUPLICATE | ASSIGN_PRIMARY; no privilege adjustment.
-                if (!OpenProcessToken(GetCurrentProcess(), 0x000B, out sourceToken))
-                    throw Error("OpenProcessToken(current)");
-                // SAFER_SCOPEID_MACHINE, NORMALUSER, SAFER_LEVEL_OPEN.
-                if (!SaferCreateLevel(1, 0x20000, 1, out level, IntPtr.Zero))
-                    throw Error("SaferCreateLevel(NORMALUSER)");
-                if (!SaferComputeTokenFromLevel(level, sourceToken,
-                    out reducedToken, 0, IntPtr.Zero))
-                    throw Error("SaferComputeTokenFromLevel(NORMALUSER)");
-                Require(reducedToken != IntPtr.Zero, "SAFER returned no token");
-                Facts = Inspect(reducedToken);
+                CreateStandardAccount();
+                // LOGON_WITH_PROFILE loads this account's real profile. This
+                // fixed inert cmd process NEVER resumes; its original handle
+                // stays owned so that profile remains loaded for the GUI.
+                string probe = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.System), "cmd.exe");
+                ProcessInformation information = CreateSuspended(probe,
+                    "\"" + probe + "\" /d /c exit 0", IntPtr.Zero);
+                profileProcess = information.hProcess;
+                profileThread = information.hThread;
+                Facts = InspectProcess(profileProcess);
+                if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
+                    throw Error("LogonUserW(owned standard account)");
             } catch {
                 Dispose();
                 throw;
+            }
+        }
+
+        private void CreateStandardAccount() {
+            userName = "uacm" + Guid.NewGuid().ToString("N").Substring(0, 12);
+            password = Marshal.AllocHGlobal((PasswordCharacters + 1) * 2);
+            byte[] randomness = new byte[PasswordCharacters - 4];
+            try {
+                using (RandomNumberGenerator random = RandomNumberGenerator.Create())
+                    random.GetBytes(randomness);
+                const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                const string prefix = "aA1!";
+                for (int index = 0; index < PasswordCharacters; index++) {
+                    char character = index < 4 ? prefix[index] : alphabet[randomness[index - 4] & 63];
+                    Marshal.WriteInt16(password, index * 2, (short)character);
+                }
+                Marshal.WriteInt16(password, PasswordCharacters * 2, 0);
+            } finally { Array.Clear(randomness, 0, randomness.Length); }
+            UserInfo1 user = new UserInfo1();
+            user.name = userName;
+            user.password = password;
+            user.privilege = 1; // USER_PRIV_USER, never administrator.
+            user.comment = "Ephemeral hosted CI read-only controller client";
+            user.flags = 0x201; // UF_SCRIPT | UF_NORMAL_ACCOUNT.
+            uint parameterError;
+            uint status = NetUserAdd(null, 1, ref user, out parameterError);
+            if (status != 0) throw new InvalidOperationException(
+                "NetUserAdd(owned standard account) status=" + status + " field=" + parameterError);
+            accountCreated = true;
+            // Resolve the built-in Users name through its fixed SID to avoid
+            // localized group-name assumptions. No Administrators addition.
+            string qualified = ((NTAccount)new SecurityIdentifier("S-1-5-32-545").Translate(
+                typeof(NTAccount))).Value;
+            string users = qualified.Substring(qualified.LastIndexOf('\\') + 1);
+            LocalGroupMember3 member = new LocalGroupMember3();
+            member.domainAndName = Environment.MachineName + "\\" + userName;
+            status = NetLocalGroupAddMembers(null, users, 3, ref member, 1);
+            if (status != 0 && status != 1378) throw new InvalidOperationException(
+                "NetLocalGroupAddMembers(Users only) status=" + status);
+        }
+
+        private ProcessInformation CreateSuspended(string application, string commandLine,
+            IntPtr environment) {
+            StartupInfo startup = new StartupInfo();
+            startup.cb = (uint)Marshal.SizeOf(typeof(StartupInfo));
+            startup.lpDesktop = @"winsta0\default";
+            startup.dwFlags = 1; // STARTF_USESHOWWINDOW.
+            startup.wShowWindow = 0; // SW_HIDE.
+            ProcessInformation information;
+            if (!CreateProcessWithLogonW(userName, Environment.MachineName, password, 1,
+                application, new StringBuilder(commandLine), 0x404, environment,
+                Path.GetDirectoryName(application), ref startup, out information))
+                throw Error("CreateProcessWithLogonW(owned standard account)");
+            return information;
+        }
+
+        private static TokenFacts InspectProcess(IntPtr ownedProcess) {
+            IntPtr token;
+            if (!OpenProcessToken(ownedProcess, 8, out token))
+                throw Error("OpenProcessToken(owned child)");
+            try { return Inspect(token); }
+            finally { if (!CloseHandle(token)) throw Error("CloseHandle(child token)"); }
+        }
+
+        public byte[] AccountSid() {
+            using (Information value = new Information(logonToken, 1)) {
+                IntPtr sid = value.Sid(0);
+                int length = 8 + Marshal.ReadByte(sid, 1) * 4;
+                byte[] bytes = new byte[length];
+                Marshal.Copy(sid, bytes, 0, length);
+                return bytes;
             }
         }
 
@@ -212,7 +305,7 @@ namespace UacCiMedium {
                 (facts.elevationType == "Default" || facts.elevationType == "Limited") &&
                 !facts.adminEnabled && facts.sessionInteractive && !facts.isSystem &&
                 !facts.isAppContainer && !facts.uiAccess,
-                String.Format("Reduced token does not satisfy GuiMedium: type={0}, integrityRid={1}, " +
+                String.Format("Standard child token does not satisfy GuiMedium: type={0}, integrityRid={1}, " +
                     "elevation={2}, elevationType={3}, adminEnabled={4}, sessionInteractive={5}, " +
                     "isSystem={6}, isAppContainer={7}, uiAccess={8}", facts.tokenType,
                     facts.integrityRid, facts.elevation, facts.elevationType, facts.adminEnabled,
@@ -223,7 +316,7 @@ namespace UacCiMedium {
 
         private IntPtr ChildEnvironment(string profile) {
             IntPtr original;
-            if (!CreateEnvironmentBlock(out original, reducedToken, false))
+            if (!CreateEnvironmentBlock(out original, logonToken, false))
                 throw Error("CreateEnvironmentBlock");
             SortedDictionary<string, string> values =
                 new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -257,56 +350,52 @@ namespace UacCiMedium {
 
         public void Launch(string profile) {
             Verify(Facts);
-            Require(process == IntPtr.Zero && reducedToken != IntPtr.Zero,
+            Require(process == IntPtr.Zero && logonToken != IntPtr.Zero && profileProcess != IntPtr.Zero,
                 "Launcher can own only one child");
             Require(File.Exists(Application), "Fixed installed controller application missing");
             Require(Directory.Exists(profile), "Fresh child profile missing");
             IntPtr environment = ChildEnvironment(profile);
             try {
-                StartupInfo startup = new StartupInfo();
-                startup.cb = (uint)Marshal.SizeOf(typeof(StartupInfo));
-                startup.lpDesktop = @"winsta0\default";
-                startup.dwFlags = 1; // STARTF_USESHOWWINDOW.
-                startup.wShowWindow = 0; // SW_HIDE; no interactive user prompt.
-                ProcessInformation information;
                 // Explicit fixed lpApplicationName; no shell or arbitrary args.
                 // Suspend until the ACTUAL child's primary token is checked.
-                if (!CreateProcessWithTokenW(reducedToken, 0, Application,
-                    new StringBuilder("\"" + Application + "\""), 0x404,
-                    environment, Path.GetDirectoryName(Application), ref startup, out information))
-                    throw Error("CreateProcessWithTokenW");
+                ProcessInformation information = CreateSuspended(Application,
+                    "\"" + Application + "\"", environment);
                 process = information.hProcess;
                 thread = information.hThread;
                 ClientPid = information.dwProcessId;
-                IntPtr childToken;
-                if (!OpenProcessToken(process, 8, out childToken))
-                    throw Error("OpenProcessToken(owned child)");
-                try {
-                    Facts = Inspect(childToken);
-                    Verify(Facts);
-                } finally {
-                    if (!CloseHandle(childToken)) throw Error("CloseHandle(child token)");
-                }
+                Facts = InspectProcess(process);
+                Verify(Facts);
                 if (ResumeThread(thread) == UInt32.MaxValue) throw Error("ResumeThread(owned child)");
             } finally { Marshal.FreeHGlobal(environment); }
         }
 
         public void Dispose() {
             Exception failure = null;
-            if (process != IntPtr.Zero) {
-                uint state = WaitForSingleObject(process, 0);
+            foreach (IntPtr ownedProcess in new IntPtr[] { process, profileProcess }) {
+                if (ownedProcess == IntPtr.Zero) continue;
+                uint state = WaitForSingleObject(ownedProcess, 0);
                 if (state == 258) {
-                    if (!TerminateProcess(process, 193)) failure = Error("TerminateProcess(owned child)");
-                    if (WaitForSingleObject(process, 5000) != 0)
+                    if (!TerminateProcess(ownedProcess, 193)) failure = Error("TerminateProcess(owned child)");
+                    if (WaitForSingleObject(ownedProcess, 5000) != 0)
                         failure = new InvalidOperationException("Owned child termination unconfirmed");
                 } else if (state != 0) failure = Error("WaitForSingleObject(owned child)");
             }
-            foreach (IntPtr handle in new IntPtr[] { thread, process, reducedToken, sourceToken }) {
+            foreach (IntPtr handle in new IntPtr[] { thread, process, profileThread, profileProcess, logonToken }) {
                 if (handle != IntPtr.Zero && !CloseHandle(handle)) failure = Error("CloseHandle(owned)");
             }
-            thread = process = reducedToken = sourceToken = IntPtr.Zero;
-            if (level != IntPtr.Zero && !SaferCloseLevel(level)) failure = Error("SaferCloseLevel");
-            level = IntPtr.Zero;
+            thread = process = profileThread = profileProcess = logonToken = IntPtr.Zero;
+            if (accountCreated) {
+                uint status = NetUserDel(null, userName);
+                if (status != 0) failure = new InvalidOperationException(
+                    "NetUserDel(owned nonce account) status=" + status);
+                else accountCreated = false;
+            }
+            if (password != IntPtr.Zero) {
+                for (int index = 0; index <= PasswordCharacters; index++)
+                    Marshal.WriteInt16(password, index * 2, 0);
+                Marshal.FreeHGlobal(password);
+                password = IntPtr.Zero;
+            }
             if (failure != null) throw failure;
         }
     }
@@ -339,6 +428,26 @@ try {
         throw 'The fresh WebView profile must be outside uploaded evidence.'
     }
     [IO.Directory]::CreateDirectory($profileDirectory) | Out-Null
+    # This fresh standard account needs access only to its own WebView folder.
+    # Remove inherited entries; preserve SYSTEM/Admin recovery access. Never
+    # broaden RUNNER_TEMP, installed product, service state, or evidence ACLs.
+    $profileAcl = New-Object Security.AccessControl.DirectorySecurity
+    $profileAcl.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $clientSid = [Security.Principal.SecurityIdentifier]::new($launcher.AccountSid(), 0)
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $adminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    foreach ($entry in @(
+        @{ Sid = $clientSid; Rights = [Security.AccessControl.FileSystemRights]::Modify },
+        @{ Sid = $systemSid; Rights = [Security.AccessControl.FileSystemRights]::FullControl },
+        @{ Sid = $adminSid; Rights = [Security.AccessControl.FileSystemRights]::FullControl }
+    )) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new($entry.Sid, $entry.Rights, $inheritance, $propagation, $allow)
+        $profileAcl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $profileDirectory -AclObject $profileAcl
     # Kept only on this ephemeral hosted VM. Never upload or recursively delete.
     $launcher.Launch($profileDirectory)
     $receipt = [ordered]@{

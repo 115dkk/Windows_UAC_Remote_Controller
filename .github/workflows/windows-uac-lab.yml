@@ -4,7 +4,7 @@ name: Windows UAC lab (disposable runner)
 # throwaway GitHub-hosted Windows runner, never on a developer PC:
 #   1. build the service with the compile-time `lab-software-identity` feature
 #      (the runner has no TPM: probe run 34591263436),
-#   2. install and start the real service through its own fixed CLI,
+#   2. install all three real binaries and start the service through its fixed CLI,
 #   3. switch the runner's UAC admin consent policy to "prompt on the secure
 #      desktop", request elevation from a limited-token process so a real
 #      consent.exe prompt appears, and run the read-only `probe-once` diagnostic,
@@ -23,6 +23,10 @@ on:
       - 'crates/windows-identity/**'
       - 'crates/windows-prompt-probe/**'
       - 'crates/windows-observer/**'
+      - 'crates/controller-runtime/**'
+      - 'tools/windows-medium-client.ps1'
+      - 'tools/windows-management-webview-lab.mjs'
+      - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
 
 permissions:
