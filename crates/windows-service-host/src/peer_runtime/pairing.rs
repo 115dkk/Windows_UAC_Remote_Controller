@@ -1544,6 +1544,8 @@ impl ServicePairing {
     }
     fn retire(&mut self, failure: Option<Failure>, rearm: bool) {
         if let Some(error) = failure {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note(&format!("pairing retire: {error:?}"));
             self.first_failure.get_or_insert(error);
         }
         if let Some(protocol) = self.protocol.as_mut() {

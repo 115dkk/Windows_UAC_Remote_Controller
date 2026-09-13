@@ -3,6 +3,9 @@
 //! request data or authority. The launcher owns a fresh private WebView folder.
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
+mod pairing_offer;
+pub(crate) use pairing_offer::run as probe_pairing_offer;
+
 pub(crate) fn note(stage: &'static str) {
     let Some(directory) = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER") else {
         return;

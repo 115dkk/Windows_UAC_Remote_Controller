@@ -78,6 +78,13 @@ try {
     return targets.length;
   }, { timeout: 30000 }).toBe(1);
   const page = targets[0];
+  const offerFile = resolve(profile, 'pairing-offer.txt');
+  const offerStat = lstatSync(offerFile);
+  assert.ok(offerStat.isFile() && !offerStat.isSymbolicLink() && offerStat.size < 4096);
+  const offerProof = readFileSync(offerFile, 'utf8');
+  writeFileSync(resolve(evidence, 'pairing-offer.txt'), offerProof, { flag: 'wx' });
+  assert.match(offerProof, /starter_connected\r?\noffer_received_and_drained\r?\n$/,
+    'Actual installed medium client must receive the service Offer before UAC');
   await expect(page.locator('.desktop-shell')).toBeVisible({ timeout: 30000 });
   assert.ok(['UAC 원격 승인', 'UAC Remote Approval'].includes(await page.title()));
   async function snapshot() {

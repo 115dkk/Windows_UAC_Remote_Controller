@@ -456,6 +456,7 @@ namespace UacCiMedium {
             values["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] =
                 "--remote-debugging-port=19225 --remote-debugging-address=127.0.0.1";
             values["WEBVIEW2_USER_DATA_FOLDER"] = profile;
+            values["UAC_LAB_PAIRING_OFFER"] = "1";
             StringBuilder block = new StringBuilder();
             foreach (KeyValuePair<string, string> value in values)
                 block.Append(value.Key).Append('=').Append(value.Value).Append('\0');
