@@ -742,11 +742,14 @@ function Write-OwnedManagementObservation {
             'connect_service_sid','connect_pipe_open','connect_pipe_security','connect_pipe_identity',
             'connect_server_open','connect_server_identity','connect_first_fence','connect_read_mode','connect_final_fence',
             'fence_own_identity','fence_client_image','fence_scm','fence_pipe_security','fence_server_identity','fence_server_image',
-            'exchange_connect','exchange_begin_write','exchange_poll_write','exchange_begin_read','exchange_poll_read','exchange_decode','exchange_cleanup')
+            'exchange_connect','exchange_begin_write','exchange_poll_write','exchange_begin_read','exchange_poll_read','exchange_decode','exchange_cleanup',
+            'deny_vm_read','deny_vm_write','deny_vm_operation','deny_duplicate','deny_terminate','deny_create_thread',
+            'deny_create_process','deny_suspend','deny_set_information','deny_set_quota','deny_write_dacl','deny_write_owner',
+            'deny_read_control','deny_query_information','deny_composite','deny_token_query','deny_token_duplicate','deny_token_impersonate','deny_token_assign')
         $categories = @('ok','busy','closed','invalid_phase','invalid_message','invalid_deadline','deadline_elapsed',
             'cancelled','end_of_stream','rejected','malformed','cleanup_unconfirmed','native','service_windows',
             'service_configuration','service_untrusted_installation','service_unsafe_path','service_unsafe_permissions',
-            'service_elevation_required','service_not_installed','service_unexpected_state','service_other')
+            'service_elevation_required','service_not_installed','service_unexpected_state','service_other','access_denied','unexpected_grant')
         $events = @()
         foreach ($line in $lines[1..($lines.Count - 1)]) {
             if ($line -cnotmatch '^(?<stage>[a-z_]+) (?<category>[a-z_]+) (?<code>-?[0-9]{1,10})$') { throw 'Diagnostic row' }
@@ -956,6 +959,21 @@ try {
 if (-not $InspectOnly -and $nodeExit -eq 0) {
     $proofPath = Join-Path $env:LAB_EVIDENCE 'management-gui-proof.json'
     $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
+    $accessProof = Get-Content -LiteralPath (Join-Path $env:LAB_EVIDENCE 'management-client-observation.json') -Raw | ConvertFrom-Json
+    if ($accessProof.status -ne 'Observed') { throw 'Native observer access proof is unavailable.' }
+    if ($accessProof.events | Where-Object {
+        $_.category -ceq 'unexpected_grant' -or
+        ($_.stage.StartsWith('deny_', [StringComparison]::Ordinal) -and ($_.category -cne 'access_denied' -or $_.code -ne 5))
+    }) { throw 'Native observer proof contains a failed negative control.' }
+    foreach ($stage in @('deny_vm_read','deny_vm_write','deny_vm_operation','deny_duplicate','deny_terminate',
+        'deny_create_thread','deny_create_process','deny_suspend','deny_set_information','deny_set_quota',
+        'deny_write_dacl','deny_write_owner','deny_read_control','deny_query_information','deny_composite',
+        'deny_token_query','deny_token_duplicate','deny_token_impersonate','deny_token_assign')) {
+        if (-not ($accessProof.events | Where-Object { $_.stage -ceq $stage -and $_.category -ceq 'access_denied' -and $_.code -eq 5 })) {
+            throw "Native observer negative control missing: $stage"
+        }
+    }
+    $proof | Add-Member -NotePropertyName observerSensitiveAccessDenied -NotePropertyValue $true
     Start-Sleep -Seconds 2
     $serviceAfterClose = Get-CimInstance Win32_Service -Filter "Name='UacRemoteController'"
     if ($serviceAfterClose.State -ne 'Running' -or $serviceAfterClose.ProcessId -ne $proof.originalServicePid) {

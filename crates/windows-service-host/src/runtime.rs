@@ -176,6 +176,12 @@ fn run(
         .send(WorkerEvent::ScmRunningRequired(request))
         .map_err(|_| ServiceError::WorkerFailed)?;
     gate.wait(startup_began, || cancellation_requested(stop))?;
+    if cancellation_requested(stop) {
+        return Ok(());
+    }
+    // Establish this service-owned process's narrow observation contract only
+    // after original SCM Running/no-controls, before key opening and Ready.
+    ffi::provision_current_process_observer().map_err(|error| error.at_startup(7))?;
     // This private disposition is produced only here by the actual key API,
     // never supplied by a renderer, file, phone or caller freshness boolean.
     enum IdentityOrigin {

@@ -17,6 +17,8 @@ mod pairing_client;
 mod pairing_peer;
 #[cfg(target_pointer_width = "64")]
 pub(crate) mod probe_supervisor;
+#[cfg(target_pointer_width = "64")]
+mod process_observer;
 mod security;
 mod taskbar;
 mod trust_store;
@@ -29,6 +31,12 @@ pub use taskbar::{
 
 pub(crate) use elevation::request_elevated_control;
 pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_relay_firewall};
+#[cfg(target_pointer_width = "64")]
+pub(crate) use process_observer::provision_current_process_observer;
+#[cfg(not(target_pointer_width = "64"))]
+pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
+    Err(ServiceError::UnsupportedPlatform)
+}
 #[cfg(target_pointer_width = "64")]
 pub(crate) use pairing_client::run_pair_helper;
 #[cfg(target_pointer_width = "64")]

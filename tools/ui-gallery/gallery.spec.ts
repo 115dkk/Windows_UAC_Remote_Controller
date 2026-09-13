@@ -170,7 +170,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         await address.fill('203.0.113.10:443');
         await expect(address).toHaveValue('203.0.113.10:443');
         await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
-        await address.scrollIntoViewIfNeeded();
+        await page.getByRole('form', { name: '중계 서버 주소', exact: true }).scrollIntoViewIfNeeded();
+        await expect(page.getByRole('button', { name: '저장', exact: true })).toBeInViewport({ ratio: 1 });
         await gallery.capture('relay-draft', 'CLIENT/SYNTHETIC · 상태 미확인 중 주소 작성, 저장은 대기');
       }
       if (fixture === 'desktop-relay-stopped') {

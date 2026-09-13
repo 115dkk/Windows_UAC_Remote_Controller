@@ -81,6 +81,8 @@ const ADMINISTRATORS: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0
 const AUTHENTICATED_USERS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
 static RESERVED: AtomicBool = AtomicBool::new(false);
 static UNHEALTHY: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "lab-client-diagnostics")]
+static LAB_SENSITIVE_ACCESS_GRANTED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy)]
 enum ClientEndpoint {
     Starter,
@@ -398,6 +400,92 @@ struct Connection {
     service_sid: Vec<u8>,
     reservation: Option<Reservation>,
 }
+
+/// Disposable CI only. Test acquisition, never exercise an unexpected grant.
+/// The original server handle and fixed SCM/pipe identity remain authenticated.
+#[cfg(feature = "lab-client-diagnostics")]
+fn verify_observer_denials(connection: &Connection) -> Result<(), Error> {
+    if LAB_SENSITIVE_ACCESS_GRANTED.load(Ordering::Acquire) {
+        return Err(Error::Rejected);
+    }
+    use crate::lab_client_notes::{self as notes, Stage as Audit};
+    use windows::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        Security::{TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY},
+        System::Threading::{
+            OpenProcessToken, PROCESS_CREATE_PROCESS, PROCESS_CREATE_THREAD, PROCESS_DUP_HANDLE,
+            PROCESS_QUERY_INFORMATION, PROCESS_READ_CONTROL, PROCESS_SET_INFORMATION,
+            PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE, PROCESS_VM_OPERATION,
+            PROCESS_VM_READ, PROCESS_VM_WRITE, PROCESS_WRITE_DAC, PROCESS_WRITE_OWNER,
+        },
+    };
+
+    fn denied(point: Audit, result: windows::core::Result<HANDLE>) -> Result<(), Error> {
+        match result {
+            Err(error) if error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0) => {
+                notes::denied_access(point);
+                Ok(())
+            }
+            Err(error) => {
+                let error = native_error(Stage::QueryServer, error);
+                notes::client::<()>(point, &Err(error), false);
+                Err(error)
+            }
+            Ok(handle) => {
+                // No read/write/duplicate/termination/token operation follows.
+                // A later retry must never erase an observed unsafe grant,
+                // including when the bounded diagnostic transcript is full.
+                LAB_SENSITIVE_ACCESS_GRANTED.store(true, Ordering::Release);
+                drop(Handle::new(handle)?);
+                notes::unexpected_access(point);
+                Err(Error::Rejected)
+            }
+        }
+    }
+    for (point, access) in [
+        (Audit::DenyVmRead, PROCESS_VM_READ),
+        (Audit::DenyVmWrite, PROCESS_VM_WRITE),
+        (Audit::DenyVmOperation, PROCESS_VM_OPERATION),
+        (Audit::DenyDuplicate, PROCESS_DUP_HANDLE),
+        (Audit::DenyTerminate, PROCESS_TERMINATE),
+        (Audit::DenyCreateThread, PROCESS_CREATE_THREAD),
+        (Audit::DenyCreateProcess, PROCESS_CREATE_PROCESS),
+        (Audit::DenySuspend, PROCESS_SUSPEND_RESUME),
+        (Audit::DenySetInformation, PROCESS_SET_INFORMATION),
+        (Audit::DenySetQuota, PROCESS_SET_QUOTA),
+        (Audit::DenyWriteDacl, PROCESS_WRITE_DAC),
+        (Audit::DenyWriteOwner, PROCESS_WRITE_OWNER),
+        (Audit::DenyReadControl, PROCESS_READ_CONTROL),
+        (Audit::DenyQueryInformation, PROCESS_QUERY_INFORMATION),
+        (
+            Audit::DenyComposite,
+            PROCESS_QUERY_LIMITED_INFORMATION
+                | PROCESS_SYNCHRONIZE
+                | PROCESS_VM_READ
+                | PROCESS_DUP_HANDLE
+                | PROCESS_TERMINATE
+                | PROCESS_WRITE_DAC,
+        ),
+    ] {
+        // SAFETY: already verified fixed SCM/pipe server PID; acquisition only.
+        // All successful handles are closed without using the requested rights.
+        denied(point, unsafe { OpenProcess(access, false, connection.pid) })?;
+    }
+    for (point, access) in [
+        (Audit::DenyTokenQuery, TOKEN_QUERY),
+        (Audit::DenyTokenDuplicate, TOKEN_DUPLICATE),
+        (Audit::DenyTokenImpersonate, TOKEN_IMPERSONATE),
+        (Audit::DenyTokenAssign, TOKEN_ASSIGN_PRIMARY),
+    ] {
+        let mut token = HANDLE::default();
+        // SAFETY: retained observation-only server handle; initialized output.
+        // Unexpected token handles are only closed, never inspected or used.
+        let result =
+            unsafe { OpenProcessToken(connection.server.0, access, &mut token) }.map(|()| token);
+        denied(point, result)?;
+    }
+    cleanup_state()
+}
 impl Connection {
     fn recheck(&self) -> Result<(), Error> {
         cleanup_state()?;
@@ -605,6 +693,14 @@ impl PairingClient {
             true
         )?;
         observe_client!(ConnectFinalFence, inner.fence(), true)?;
+        #[cfg(feature = "lab-client-diagnostics")]
+        if matches!(
+            endpoint,
+            ClientEndpoint::Management(PairingPeerRole::Starter)
+        ) {
+            verify_observer_denials(inner.connection.as_ref().ok_or(Error::Closed)?)?;
+            inner.fence()?;
+        }
         Ok(Self { inner: Some(inner) })
     }
     pub fn begin_read(&mut self) -> Result<(), Error> {

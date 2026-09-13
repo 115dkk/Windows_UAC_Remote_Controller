@@ -34,6 +34,7 @@ export const galleryCases: readonly GalleryCase[] = [
   row('desktop-relay-listening-980', 'desktop-relay-listening', 980, 900),
   row('desktop-relay-waiting-dark-760', 'desktop-relay-waiting', 760, 740, 'overview', 'dark'),
   row('desktop-relay-unknown-forced-760', 'desktop-relay-unknown', 760, 740, 'overview', 'light', 'active'),
+  row('desktop-relay-unknown-760', 'desktop-relay-unknown', 760, 740, 'overview'),
   row('desktop-relay-external-760', 'desktop-relay-external', 760, 740),
   row('desktop-start-failed-760', 'desktop-start-failed', 760, 740),
   row('desktop-qr-ready-980', 'desktop-pairing-ready', 980, 740),

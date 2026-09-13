@@ -70,6 +70,25 @@ stages! {
     ExchangePollRead => "exchange_poll_read",
     ExchangeDecode => "exchange_decode",
     ExchangeCleanup => "exchange_cleanup",
+    DenyVmRead => "deny_vm_read",
+    DenyVmWrite => "deny_vm_write",
+    DenyVmOperation => "deny_vm_operation",
+    DenyDuplicate => "deny_duplicate",
+    DenyTerminate => "deny_terminate",
+    DenyCreateThread => "deny_create_thread",
+    DenyCreateProcess => "deny_create_process",
+    DenySuspend => "deny_suspend",
+    DenySetInformation => "deny_set_information",
+    DenySetQuota => "deny_set_quota",
+    DenyWriteDacl => "deny_write_dacl",
+    DenyWriteOwner => "deny_write_owner",
+    DenyReadControl => "deny_read_control",
+    DenyQueryInformation => "deny_query_information",
+    DenyComposite => "deny_composite",
+    DenyTokenQuery => "deny_token_query",
+    DenyTokenDuplicate => "deny_token_duplicate",
+    DenyTokenImpersonate => "deny_token_impersonate",
+    DenyTokenAssign => "deny_token_assign",
 }
 
 thread_local! { static ACTIVE: Cell<bool> = const { Cell::new(false) }; }
@@ -90,6 +109,14 @@ pub(crate) fn begin() -> Scope {
 
 pub(crate) fn success(stage: Stage) {
     record(stage, "ok", 0);
+}
+
+pub(crate) fn denied_access(stage: Stage) {
+    record(stage, "access_denied", 5);
+}
+
+pub(crate) fn unexpected_access(stage: Stage) {
+    record(stage, "unexpected_grant", 0);
 }
 
 struct Sink {
