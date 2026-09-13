@@ -22,7 +22,7 @@ describe('Windows relay observation and service recovery', () => {
     const snapshot = qaCase('desktop-relay-stopped').snapshot;
     const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onOpenStatus={vi.fn()} onSetRelay={vi.fn()} />);
     const relay = view.container.querySelector('.auxiliary-card')!;
-    expect(relay.textContent!.length).toBeGreaterThan(0);
+    expect(relay.textContent.length).toBeGreaterThan(0);
     if (locale !== 'ko') expect(relay.textContent).not.toMatch(/[가-힣]/u);
     expect(within(relay as HTMLElement).getByRole('status')).not.toHaveClass('is-success');
   });
@@ -34,8 +34,8 @@ describe('Windows relay observation and service recovery', () => {
     ['desktop-relay-unknown', '중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.'],
     ['desktop-relay-external', '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.'],
   ])('renders %s from observed runtime state', (fixture, message) => {
-    render(<RelayStatusLine snapshot={qaCase(fixture!).snapshot} />);
-    expect(screen.getByRole('status')).toHaveTextContent(message!);
+    render(<RelayStatusLine snapshot={qaCase(fixture).snapshot} />);
+    expect(screen.getByRole('status')).toHaveTextContent(message);
     expect(screen.getByRole('status').classList.contains('is-success')).toBe(fixture === 'desktop-relay-listening');
     expect(screen.getByRole('status').querySelector('.state-dot')).toHaveAttribute('aria-hidden', 'true');
   });
