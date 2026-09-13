@@ -35,6 +35,42 @@ namespace UacCiMedium {
         public bool uiAccess;
     }
 
+    public sealed class WindowFact {
+        public string windowClass;
+        public string textClassification;
+        public bool visible;
+        public bool enabled;
+        public bool child;
+        public bool textQueryAttempted;
+        public bool textQueryCompleted;
+    }
+    public sealed class OwnedGuiDiagnostics {
+        public uint clientPid;
+        public uint exitCode;
+        public string primaryThreadState;
+        public string primaryDesktop;
+        public string primaryDesktopType;
+        public bool modulesEnumerated;
+        public bool modulesTruncated;
+        public bool webView2Loader;
+        public bool embeddedBrowserWebView;
+        public bool user32;
+        public bool ole32;
+        public bool combase;
+        public bool dcomp;
+        public bool processSnapshotEnumerated;
+        public bool processSnapshotTruncated;
+        public bool descendantCountsAreSnapshotOnly = true;
+        public uint ownThreadCount;
+        public int directChildCount;
+        public int descendantCount;
+        public int webViewDescendantCount;
+        public bool windowsTruncated;
+        public bool currentDesktopWindowsEnumerated;
+        public bool primaryThreadWindowsEnumerated;
+        public List<WindowFact> windows = new List<WindowFact>();
+    }
+
     // Only this owner's original child handles may be stopped/closed. No
     // process lookup, external PID adoption, service control or token mutation.
     public sealed class Launcher : IDisposable {
@@ -72,6 +108,56 @@ namespace UacCiMedium {
         }
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct LocalGroupMember3 { public string domainAndName; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProcessEntry {
+            public uint size, usage, pid;
+            public UIntPtr defaultHeap;
+            public uint moduleId, threads, parentPid;
+            public int basePriority;
+            public uint flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string executable;
+        }
+        private delegate bool WindowVisitor(IntPtr window, IntPtr parameter);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint GetProcessId(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint GetThreadId(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+        [DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool EnumProcessModulesEx(IntPtr process,
+            [Out] IntPtr[] modules, uint bytes, out uint needed, uint filter);
+        [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetModuleBaseNameW(IntPtr process, IntPtr module,
+            StringBuilder name, uint characters);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool EnumWindows(WindowVisitor visitor, IntPtr parameter);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool EnumThreadWindows(uint threadId, WindowVisitor visitor, IntPtr parameter);
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr parent, WindowVisitor visitor, IntPtr parameter);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassNameW(IntPtr window, StringBuilder name, int characters);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int characters);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message,
+            UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowEnabled(IntPtr window);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr GetThreadDesktop(uint threadId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetUserObjectInformationW(IntPtr handle, int kind,
+            StringBuilder value, uint bytes, out uint needed);
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern uint NetUserAdd(string server, uint level,
             ref UserInfo1 information, out uint parameterError);
@@ -380,6 +466,170 @@ namespace UacCiMedium {
             return code;
         }
 
+        // Only fixed classifications leave this method. Caption/control text,
+        // module paths, process names and desktop names are never returned.
+        private static string ClassifyText(string text) {
+            if (String.IsNullOrEmpty(text)) return "Empty";
+            string value = text.ToLowerInvariant();
+            if (value.Contains("webview")) {
+                if (value.Contains("not found") || value.Contains("missing") ||
+                    value.Contains("not installed") || value.Contains("could not find") ||
+                    value.Contains("couldn't find")) return "WebViewMissing";
+                if (value.Contains("error") || value.Contains("failed") ||
+                    value.Contains("failure")) return "WebViewError";
+                return "WebViewMention";
+            }
+            if (text == "UAC \uC6D0\uACA9 \uC2B9\uC778" || text == "UAC Remote Approval")
+                return "ApplicationTitle";
+            return "OtherNonempty";
+        }
+        private static string ClassifyWindow(string name) {
+            if (name == "#32770") return "Dialog";
+            if (name == "Static" || name == "Button") return name;
+            if (name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) return "ChromeWidget";
+            if (name.StartsWith("Chrome_RenderWidgetHost", StringComparison.Ordinal)) return "ChromeRenderHost";
+            if (name.IndexOf("tao", StringComparison.OrdinalIgnoreCase) >= 0) return "TaoWindow";
+            if (name.IndexOf("wry", StringComparison.OrdinalIgnoreCase) >= 0) return "WryWindow";
+            return String.IsNullOrEmpty(name) ? "Unavailable" : "Other";
+        }
+        private static string DesktopFact(IntPtr desktop, int kind) {
+            StringBuilder value = new StringBuilder(256);
+            uint needed;
+            if (desktop == IntPtr.Zero || !GetUserObjectInformationW(desktop, kind, value, 512, out needed))
+                return "Unavailable";
+            string text = value.ToString();
+            if (kind == 2) return text.Equals("Default", StringComparison.OrdinalIgnoreCase) ? "Default" : "Other";
+            return text.Equals("Desktop", StringComparison.OrdinalIgnoreCase) ? "Desktop" : "Other";
+        }
+
+        public OwnedGuiDiagnostics DiagnoseOwnedGui() {
+            Require(process != IntPtr.Zero && thread != IntPtr.Zero,
+                "Diagnostics require original GUI handles");
+            uint ownedPid = GetProcessId(process);
+            Require(ownedPid != 0 && ownedPid == ClientPid, "Original GUI handle identity mismatch");
+            OwnedGuiDiagnostics facts = new OwnedGuiDiagnostics();
+            facts.clientPid = ownedPid;
+            facts.exitCode = OwnedGuiExitCode();
+            uint state = WaitForSingleObject(thread, 0);
+            facts.primaryThreadState = state == 258 ? "Live" : state == 0 ? "Terminated" : "Unavailable";
+            uint primaryThread = GetThreadId(thread);
+            IntPtr desktop = primaryThread == 0 ? IntPtr.Zero : GetThreadDesktop(primaryThread);
+            // GetThreadDesktop returns a borrowed handle; it must not be closed.
+            facts.primaryDesktop = DesktopFact(desktop, 2);
+            facts.primaryDesktopType = DesktopFact(desktop, 3);
+
+            IntPtr[] modules = new IntPtr[1024];
+            uint needed;
+            facts.modulesEnumerated = EnumProcessModulesEx(process, modules,
+                (uint)(modules.Length * IntPtr.Size), out needed, 3);
+            facts.modulesTruncated = needed > modules.Length * IntPtr.Size;
+            if (facts.modulesEnumerated) {
+                int count = Math.Min(modules.Length, (int)(needed / IntPtr.Size));
+                for (int index = 0; index < count; index++) {
+                    StringBuilder name = new StringBuilder(260);
+                    if (GetModuleBaseNameW(process, modules[index], name, 260) == 0) continue;
+                    switch (name.ToString().ToLowerInvariant()) {
+                        case "webview2loader.dll": facts.webView2Loader = true; break;
+                        case "embeddedbrowserwebview.dll":
+                        case "embedded_browser_webview.dll": facts.embeddedBrowserWebView = true; break;
+                        case "user32.dll": facts.user32 = true; break;
+                        case "ole32.dll": facts.ole32 = true; break;
+                        case "combase.dll": facts.combase = true; break;
+                        case "dcomp.dll": facts.dcomp = true; break;
+                    }
+                }
+            }
+
+            // System snapshot is filtered to own PID/ancestry before emitting
+            // counts. No descendant handle is opened/adopted or acted upon.
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            if (snapshot != new IntPtr(-1)) {
+                try {
+                    List<ProcessEntry> entries = new List<ProcessEntry>();
+                    ProcessEntry entry = new ProcessEntry();
+                    entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+                    bool more = Process32FirstW(snapshot, ref entry);
+                    facts.processSnapshotEnumerated = more;
+                    while (more && entries.Count < 8192) {
+                        entries.Add(entry);
+                        if (entry.pid == ownedPid) facts.ownThreadCount = entry.threads;
+                        if (entry.parentPid == ownedPid) facts.directChildCount++;
+                        more = Process32NextW(snapshot, ref entry);
+                    }
+                    facts.processSnapshotTruncated = more;
+                    HashSet<uint> descendants = new HashSet<uint>();
+                    descendants.Add(ownedPid);
+                    for (int depth = 0; depth < 32; depth++) {
+                        bool changed = false;
+                        foreach (ProcessEntry item in entries) {
+                            if (descendants.Contains(item.parentPid) && descendants.Add(item.pid)) {
+                                facts.descendantCount++;
+                                if (String.Equals(item.executable, "msedgewebview2.exe",
+                                    StringComparison.OrdinalIgnoreCase)) facts.webViewDescendantCount++;
+                                changed = true;
+                            }
+                        }
+                        if (!changed) break;
+                    }
+                } finally { if (!CloseHandle(snapshot)) throw Error("CloseHandle(diagnostic snapshot)"); }
+            }
+
+            HashSet<IntPtr> seen = new HashSet<IntPtr>();
+            Action<IntPtr, bool, bool> inspectWindow = delegate(IntPtr window, bool child, bool dialog) {
+                if (facts.windows.Count >= 128) { facts.windowsTruncated = true; return; }
+                uint windowPid;
+                GetWindowThreadProcessId(window, out windowPid);
+                if (windowPid != ownedPid || !seen.Add(window)) return;
+                StringBuilder name = new StringBuilder(128);
+                GetClassNameW(window, name, 128);
+                string windowClass = ClassifyWindow(name.ToString());
+                StringBuilder text = new StringBuilder(512);
+                bool textAttempted = false;
+                bool textCompleted = false;
+                if (child && dialog && windowClass == "Static") {
+                    textAttempted = true;
+                    UIntPtr result;
+                    // WM_GETTEXT only, no input/actions. Each read is bounded
+                    // to 25ms; at most 128 windows => 3.2s total send budget.
+                    textCompleted = SendMessageTimeoutW(window, 13, new UIntPtr(512), text,
+                        2, 25, out result) != IntPtr.Zero;
+                } else if (!child) {
+                    textAttempted = true;
+                    // A zero result is empty OR unavailable; retain unknown.
+                    textCompleted = GetWindowTextW(window, text, 512) > 0;
+                }
+                GetWindowThreadProcessId(window, out windowPid);
+                if (windowPid != ownedPid) return;
+                facts.windows.Add(new WindowFact {
+                    windowClass = windowClass,
+                    textClassification = ClassifyText(text.ToString()),
+                    visible = IsWindowVisible(window), enabled = IsWindowEnabled(window),
+                    child = child, textQueryAttempted = textAttempted,
+                    textQueryCompleted = textCompleted
+                });
+            };
+            WindowVisitor visitor = delegate(IntPtr window, IntPtr unused) {
+                if (facts.windows.Count >= 128) { facts.windowsTruncated = true; return false; }
+                uint windowPid;
+                GetWindowThreadProcessId(window, out windowPid);
+                if (windowPid != ownedPid) return true;
+                StringBuilder name = new StringBuilder(128);
+                GetClassNameW(window, name, 128);
+                bool dialog = name.ToString() == "#32770";
+                inspectWindow(window, false, dialog);
+                WindowVisitor childVisitor = delegate(IntPtr child, IntPtr ignored) {
+                    inspectWindow(child, true, dialog);
+                    return facts.windows.Count < 128;
+                };
+                EnumChildWindows(window, childVisitor, IntPtr.Zero);
+                return facts.windows.Count < 128;
+            };
+            facts.currentDesktopWindowsEnumerated = EnumWindows(visitor, IntPtr.Zero);
+            facts.primaryThreadWindowsEnumerated = primaryThread != 0 &&
+                EnumThreadWindows(primaryThread, visitor, IntPtr.Zero);
+            return facts;
+        }
+
         public void Dispose() {
             Exception failure = null;
             foreach (IntPtr ownedProcess in new IntPtr[] { process, profileProcess }) {
@@ -481,7 +731,26 @@ try {
     if ($null -eq $nodeExit) { throw 'Node did not supply an exit code.' }
 } finally {
     if ($null -ne $launcher) {
-        try { Write-Output ("Owned GUI exit code before cleanup: {0}" -f $launcher.OwnedGuiExitCode()) }
+        try {
+            Write-Output ("Owned GUI exit code before cleanup: {0}" -f $launcher.OwnedGuiExitCode())
+            if (-not $InspectOnly -and $launcher.ClientPid -ne 0) {
+                try {
+                    $diagnostics = $launcher.DiagnoseOwnedGui() | ConvertTo-Json -Depth 5
+                    # Contains fixed flags/classifications/counts only. No raw
+                    # titles, control text, paths, process/module names or SIDs.
+                    Write-Output $diagnostics
+                    $diagnosticPath = Join-Path $env:LAB_EVIDENCE 'owned-gui-diagnostics.json'
+                    $diagnosticStream = [IO.File]::Open($diagnosticPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+                    try {
+                        $diagnosticBytes = ([Text.UTF8Encoding]::new($false)).GetBytes($diagnostics + [Environment]::NewLine)
+                        $diagnosticStream.Write($diagnosticBytes, 0, $diagnosticBytes.Length)
+                    } finally { $diagnosticStream.Dispose() }
+                } catch {
+                    # Keep Node's failure and unconditional own-child cleanup.
+                    Write-Output ("Owned GUI diagnostic capture incomplete: {0}" -f $_.Exception.GetType().Name)
+                }
+            }
+        }
         finally { $launcher.Dispose() }
     }
     # Parent WEBVIEW2 variables were never mutated: the native explicit child
