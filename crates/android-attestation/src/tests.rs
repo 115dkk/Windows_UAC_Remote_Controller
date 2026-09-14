@@ -200,7 +200,7 @@ fn consumption_rechecks_current_release_policy_instead_of_the_old_configuration(
     let proof = verify(&fixture, &status).unwrap();
     let changed = VerificationPolicy::from_trusted_host(
         vec![[8; 32]],
-        3,
+        1_001,
         PlatformMinimums {
             os_version: 110000,
             os_patch: 202601,

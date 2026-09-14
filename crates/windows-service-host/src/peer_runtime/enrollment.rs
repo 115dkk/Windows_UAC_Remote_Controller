@@ -869,6 +869,47 @@ mod tests {
     /// a time keeps a freed port from being handed to a neighbouring test's PC.
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn live_ci_candidate_satisfies_actual_product_version_floor() {
+        let mut candidate = android_attestation::SyntheticRkp::new();
+        candidate.reissue_for_challenge([19; 32]).unwrap();
+        let chains = candidate
+            .chains
+            .each_ref()
+            .map(|chain| chain.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let evidence = CandidateEvidence::new(&chains[0], &chains[1], &chains[2]).unwrap();
+        let status = TrustedStatusSnapshot::from_test_response(br#"{"entries":{}}"#).unwrap();
+        for (minimum, accepted) in [
+            (crate::peer_runtime::MIN_ANDROID_APP_VERSION, true),
+            (crate::peer_runtime::MIN_ANDROID_APP_VERSION + 1, false),
+        ] {
+            let policy = VerificationPolicy::from_trusted_host(
+                vec![[8; 32]],
+                minimum,
+                android_attestation::PlatformMinimums {
+                    os_version: crate::peer_runtime::MIN_ANDROID_OS_VERSION,
+                    os_patch: crate::peer_runtime::MIN_ANDROID_PATCH,
+                    vendor_patch: None,
+                    boot_patch: None,
+                },
+            )
+            .unwrap();
+            let result = verify_key_bundle_with_test_anchors(
+                &evidence,
+                &candidate.expected,
+                &policy,
+                &status,
+                std::slice::from_ref(&candidate.anchor),
+            );
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(VerificationError::AppIdentity)));
+            }
+        }
+    }
+
     struct Fixture {
         inputs: EnrollmentInputs,
         worker: crate::tls_signer::ServiceTlsSigningWorker<'static>,

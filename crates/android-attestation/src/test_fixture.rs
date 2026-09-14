@@ -160,7 +160,7 @@ impl SyntheticRkp {
             .expect("synthetic distinct role keys");
         let policy = VerificationPolicy::from_trusted_host(
             vec![SIGNER_DIGEST],
-            2,
+            1_000,
             PlatformMinimums {
                 os_version: 110000,
                 os_patch: 202601,
@@ -267,7 +267,9 @@ impl SyntheticRkp {
     }
 
     fn description_for_challenge(role: KeyRole, challenge: [u8; 32]) -> Vec<u8> {
-        let package = sequence([octets(b"dev.dkk115.uacremote"), uint(2)]);
+        // Match the product's minimum Android versionCode. This is still only
+        // a software-signed claim under an explicit, non-shipping test root.
+        let package = sequence([octets(b"dev.dkk115.uacremote"), uint(1_000)]);
         let app = sequence([set([package]), set([octets(&SIGNER_DIGEST)])]);
         let software = sequence([explicit(709, &octets(&app))]);
         let auth = match role {

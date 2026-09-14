@@ -268,7 +268,7 @@ fn driver(
 async fn next_frame(driver: &mut SocketDriver) -> Result<Vec<u8>> {
     tokio::time::timeout(STEP_LIMIT, async {
         loop {
-            match driver.next_event().await.map_err(|_| "transport_failed")? {
+            match driver.next_event().await.map_err(transport_failure)? {
                 SocketEvent::Frame(frame) => return Ok(frame.into_bytes()),
                 SocketEvent::Ready | SocketEvent::OutboundDrained => (),
                 SocketEvent::PeerClosed | SocketEvent::LocallyClosed => return Err("peer_closed"),
@@ -277,6 +277,25 @@ async fn next_frame(driver: &mut SocketDriver) -> Result<Vec<u8>> {
     })
     .await
     .map_err(|_| "frame_timeout")?
+}
+
+// Closed, payload-free labels only. Keep native peer rejection distinguishable
+// from a local timeout without exporting certificates, QR data or raw errors.
+fn transport_failure(error: framed_transport::SocketError) -> &'static str {
+    use framed_transport::{SocketError, TransportError};
+    use secure_channel::ChannelError;
+    match error {
+        SocketError::Io => "transport_io_failed",
+        SocketError::Transport(TransportError::Channel(channel)) => match channel {
+            ChannelError::TlsRejected => "transport_tls_rejected",
+            ChannelError::NegotiationRejected => "transport_negotiation_rejected",
+            ChannelError::ReadinessRejected => "transport_readiness_rejected",
+            ChannelError::HandshakeExpired => "transport_handshake_expired",
+            ChannelError::Truncated => "transport_truncated",
+            _ => "transport_channel_failed",
+        },
+        _ => "transport_failed",
+    }
 }
 
 fn queue(driver: &mut SocketDriver, bytes: &[u8]) -> Result<()> {
