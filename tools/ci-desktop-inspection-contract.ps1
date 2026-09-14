@@ -60,6 +60,6 @@ try {
     $stream.Write($bytes, 0, $bytes.Length)
 } finally { $stream.Dispose() }
 Write-Output $sanitized
-if ($run.ExitCode -ne 0 -or $summary.fixtureCompleted -ne $true -or $summary.positiveControl -ne $true -or @($summary.cases).Count -ne 10) {
+if ($run.ExitCode -ne 0 -or $summary.fixtureCompleted -ne $true -or $summary.positiveControl -ne $true -or @($summary.cases).Count -ne 16) {
     throw 'Native contract fixture incomplete or all-access positive control failed.'
 }
