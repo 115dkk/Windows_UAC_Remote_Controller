@@ -26,6 +26,7 @@ use windows::Win32::{
         StationsAndDesktops::{GetProcessWindowStation, GetThreadDesktop, UOI_NAME},
         Threading::{GetCurrentProcess, GetCurrentThread, GetCurrentThreadId},
     },
+    UI::WindowsAndMessaging::{MSG, PM_NOREMOVE, PeekMessageW, WM_USER},
 };
 
 static INVOKED: AtomicBool = AtomicBool::new(false);
@@ -110,6 +111,34 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
         .map_err(mapped)?;
     native_renderer::verify_descriptor(native_thread, native_renderer::Profile::Thread, &sid)
         .map_err(mapped)?;
+    native_renderer::verify_descriptor(HANDLE(desktop.0), native_renderer::Profile::Desktop, &sid)
+        .map_err(mapped)?;
+    native_renderer::check_station(HANDLE(station.0)).map_err(mapped)?;
+    if native_renderer::object_text(HANDLE(desktop.0), UOI_NAME).map_err(mapped)?
+        != native_renderer::display_name(invocation)
+    {
+        return Err(Error::Protocol);
+    }
+    // Station/desktop queries do not establish message-queue readiness. The
+    // service inspects this original thread before allowing its first window;
+    // initialize the windowless thread only after its private desktop and exact
+    // descriptors are verified. Windows documents this PeekMessage pattern as
+    // forcing queue creation; a false return means no matching message, not an
+    // initialization failure. Native cross-process inspection remains mandatory.
+    let mut message = MSG::default();
+    native_renderer::check_setup_cutoff(cutoff).map_err(mapped)?;
+    // SAFETY: initialized fixed MSG output on this original windowless thread.
+    // No app window or hook has been installed; PM_NOREMOVE retains queued
+    // messages. No posting, input injection or desktop/thread reassignment.
+    let _ = unsafe { PeekMessageW(&mut message, None, WM_USER, WM_USER, PM_NOREMOVE) };
+    client.inner_mut().fence()?;
+    native_renderer::check_setup_cutoff(cutoff).map_err(mapped)?;
+    // SAFETY: refresh the actual borrowed associations after GUI initialization;
+    // never export a stale pre-initialization desktop/station value.
+    let desktop = unsafe { GetThreadDesktop(thread_id) }
+        .map_err(|error| mapped(native_renderer::native(2, error)))?;
+    let station = unsafe { GetProcessWindowStation() }
+        .map_err(|error| mapped(native_renderer::native(2, error)))?;
     native_renderer::verify_descriptor(HANDLE(desktop.0), native_renderer::Profile::Desktop, &sid)
         .map_err(mapped)?;
     native_renderer::check_station(HANDLE(station.0)).map_err(mapped)?;

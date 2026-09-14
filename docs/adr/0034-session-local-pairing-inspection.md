@@ -58,6 +58,15 @@ every check. No name-only identity, thread/desktop switch, ACL or privilege
 change is accepted. USER-side opening is a compatibility hypothesis pending CI,
 not proof that all GetThreadDesktop calls succeed.
 
+The explicit open passed natively at1a8bdf8, but stage29 remained. Renderer
+bootstrap now initializes its windowless original thread's message queue after
+the initial protected-desktop checks, using the documented PeekMessage/WM_USER/
+PM_NOREMOVE pattern, then refreshes and revalidates actual desktop/station before
+export. Station/desktop queries alone are not explicit GUI-queue initialization.
+No window, queued-message removal, input injection or authority is created by
+this readiness step; independent native thread association still gates the QR.
+Resolution of stage29 remains subject to actual CI.
+
 The existing failing installed-app QR/pairing/signed-denial CI is the native
 regression test. Closed frame/command tests cover malformed and crossed inputs;
 quality, Clippy and Rust Analyzer run on CI. Physical Android hardware identity,

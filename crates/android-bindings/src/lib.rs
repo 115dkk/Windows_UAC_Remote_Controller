@@ -21,6 +21,7 @@ mod local_keys;
 mod native_clock;
 mod pairing;
 mod request_projection;
+mod startup_diagnostics;
 mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
@@ -466,8 +467,11 @@ impl MobileController {
             if path.is_empty() || path.len() > 4096 {
                 return Err(BridgeError::InvalidObservation);
             }
-            let directory = NativePrivateDirectory::from_native_app_data(&path)
-                .map_err(|_| BridgeError::StorageUnavailable)?;
+            let directory =
+                NativePrivateDirectory::from_native_app_data(&path).map_err(|error| {
+                    startup_diagnostics::storage(startup_diagnostics::Stage::Directory, error);
+                    BridgeError::StorageUnavailable
+                })?;
             let (boot, clock) = map_clock(platform.clock()?)?;
             let initial = match mode {
                 OpenMode::Application => {
@@ -505,6 +509,14 @@ impl MobileController {
                 )
             };
             let (owner, update) = created.map_err(|error| {
+                startup_diagnostics::durable(
+                    if fresh {
+                        startup_diagnostics::Stage::CreateFresh
+                    } else {
+                        startup_diagnostics::Stage::OpenExisting
+                    },
+                    error.cause(),
+                );
                 if let Some(cause) = preflight_error {
                     return cause;
                 }

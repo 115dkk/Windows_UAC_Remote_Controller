@@ -9,6 +9,7 @@ use std::{
 use notification_policy::NotificationPolicy;
 use phone_state_store::{INTENT_FILE_NAME, LOCK_FILE_NAME, SNAPSHOT_FILE_NAME, STAGING_FILE_NAME};
 
+use crate::startup_diagnostics::{self, BootstrapFailure};
 use crate::{BridgeError, NativePlatform};
 
 pub(crate) const MARKER: &str = "native-owner.started";
@@ -31,12 +32,12 @@ pub(crate) fn prepare(
     let mut existing = false;
     for (index, entry) in fs::read_dir(path).map_err(storage)?.enumerate() {
         if index >= 5 {
-            return Err(BridgeError::StorageUnavailable);
+            return Err(rejected(BootstrapFailure::TooManyEntries));
         }
         let entry = entry.map_err(storage)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            return Err(BridgeError::StorageUnavailable);
+            return Err(rejected(BootstrapFailure::NonUnicodeEntry));
         };
         match name {
             MARKER => {
@@ -46,19 +47,19 @@ pub(crate) fn prepare(
             SNAPSHOT_FILE_NAME | LOCK_FILE_NAME | STAGING_FILE_NAME | INTENT_FILE_NAME => {
                 existing = true
             }
-            _ => return Err(BridgeError::StorageUnavailable),
+            _ => return Err(rejected(BootstrapFailure::UnknownEntry)),
         }
     }
     if existing {
         return Ok(InitialState::Existing);
     }
     if platform.has_device_keys()? {
-        return Err(BridgeError::StorageUnavailable);
+        return Err(rejected(BootstrapFailure::ExistingKeys));
     }
     let policy = match platform.legacy_policy_document()? {
         Some(document) => {
             controller_runtime::decode_notification_policy_document(document.as_bytes())
-                .map_err(|_| BridgeError::StorageUnavailable)?
+                .map_err(|_| rejected(BootstrapFailure::LegacyPolicy))?
         }
         None => NotificationPolicy::default(),
     };
@@ -89,7 +90,7 @@ fn verify_marker(path: &Path) -> Result<(), BridgeError> {
     let metadata = fs::symlink_metadata(path).map_err(storage)?;
     regular(&metadata)?;
     if metadata.len() != MAGIC.len() as u64 {
-        return Err(BridgeError::StorageUnavailable);
+        return Err(rejected(BootstrapFailure::MarkerLength));
     }
     let file = options(false).open(path).map_err(storage)?;
     regular(&file.metadata().map_err(storage)?)?;
@@ -98,7 +99,7 @@ fn verify_marker(path: &Path) -> Result<(), BridgeError> {
         .read_to_end(&mut bytes)
         .map_err(storage)?;
     if bytes != MAGIC {
-        return Err(BridgeError::StorageUnavailable);
+        return Err(rejected(BootstrapFailure::MarkerContents));
     }
     Ok(())
 }
@@ -123,27 +124,32 @@ fn options(write: bool) -> OpenOptions {
 
 fn regular(metadata: &fs::Metadata) -> Result<(), BridgeError> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(BridgeError::StorageUnavailable);
+        return Err(rejected(BootstrapFailure::UnsafeFile));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() != 1 {
-            return Err(BridgeError::StorageUnavailable);
+            return Err(rejected(BootstrapFailure::LinkCount));
         }
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 {
-            return Err(BridgeError::StorageUnavailable);
+            return Err(rejected(BootstrapFailure::ReparsePoint));
         }
     }
     Ok(())
 }
 
-fn storage(_: impl std::fmt::Debug) -> BridgeError {
+fn rejected(failure: BootstrapFailure) -> BridgeError {
+    startup_diagnostics::bootstrap(failure);
     BridgeError::StorageUnavailable
+}
+
+fn storage(error: std::io::Error) -> BridgeError {
+    rejected(BootstrapFailure::Io(error.kind()))
 }
 
 #[cfg(test)]
