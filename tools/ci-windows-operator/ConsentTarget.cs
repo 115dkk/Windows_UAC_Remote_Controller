@@ -26,6 +26,17 @@ internal static class ConsentTarget
             text == "자세한 내용 표시" || text == "자세한 내용 표시(&M)";
     }
 
+    internal static bool IsExpandedLocation(string automationId, string text)
+    {
+        // Observed native consent detail field, not a FileDescription/name match.
+        // Caller must additionally authenticate its native provider/ancestry.
+        if (automationId != "ExpandedTextLine" || String.IsNullOrEmpty(text) || text.Length > 2048) return false;
+        foreach (string prefix in new[] { "Program location:", "프로그램 위치:" })
+            if (text.StartsWith(prefix, StringComparison.Ordinal) &&
+                IsInstalledLocation(text.Substring(prefix.Length).Trim(' ', '\r', '\n'))) return true;
+        return false;
+    }
+
     internal static bool IsInstalledLocation(string text)
     {
         if (String.IsNullOrEmpty(text) || text.Length > 2048) return false;

@@ -206,7 +206,11 @@ internal static class ProtectedUi
                             string label = current.Name ?? "";
                             Program.Require(label.Length <= 2048, "consent_label_oversized");
                             string trimmed = label.Trim(' ');
-                            conflictingPath |= ConsentTarget.HasConflictingPath(trimmed);
+                            // The OS's expanded location field includes its label
+                            // in one Text element. Only its authenticated fixed
+                            // provider field may carry the exact expected path.
+                            conflictingPath |= ConsentTarget.HasConflictingPath(trimmed) &&
+                                !HasExpandedLocationField(element, consent.Id);
                             if (current.ControlType == ControlType.Text && !current.IsOffscreen) nativeText.Add(element);
                             if ((current.ControlType == ControlType.Button || current.ControlType == ControlType.Hyperlink) &&
                                 current.IsEnabled && !current.IsOffscreen && ConsentTarget.IsDetailsAction(trimmed)) details.Add(element);
@@ -239,7 +243,8 @@ internal static class ProtectedUi
                             // expansion populates the field. Never invoke it twice.
                         }
                         // No basename or arbitrary FileDescription can bind a target.
-                        // Require a separate native location-label/value field pair.
+                        // Require the native label/value pair or the authenticated
+                        // fixed ExpandedTextLine field observed after expansion.
                         bool boundLocation = HasNativeLocationField(nativeText, consent.Id);
                         if (!boundLocation)
                         {
@@ -294,6 +299,7 @@ internal static class ProtectedUi
         int bindings = 0;
         foreach (var label in elements)
         {
+            if (HasExpandedLocationField(label, consentPid)) { bindings++; continue; }
             string labelText = label.Current.Name ?? "";
             if (!ConsentTarget.IsLocationLabel(labelText)) continue;
             string labelId = AuthenticatedRuntimeId(label, consentPid);
@@ -315,6 +321,18 @@ internal static class ProtectedUi
             bindings++;
         }
         return bindings == 1;
+    }
+
+    private static bool HasExpandedLocationField(AutomationElement element, int consentPid)
+    {
+        if (!detailsExpanded) return false;
+        var current = element.Current;
+        if (current.ControlType != ControlType.Text || current.IsOffscreen ||
+            !ConsentTarget.IsExpandedLocation(current.AutomationId ?? "", current.Name ?? "")) return false;
+        var parent = TreeWalker.RawViewWalker.GetParent(element);
+        string id = AuthenticatedRuntimeId(element, consentPid);
+        string parentId = parent == null ? null : AuthenticatedRuntimeId(parent, consentPid);
+        return id != null && parentId != null && id != parentId;
     }
 
     private static string AuthenticatedRuntimeId(AutomationElement element, int consentPid)

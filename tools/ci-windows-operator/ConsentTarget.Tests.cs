@@ -31,6 +31,13 @@ internal static class ConsentTargetTests
             if (ConsentTarget.HasConflictingPath(label)) return 5;
         foreach (string path in new[] { @"C:\other\program.exe", "C:other", "Program location: C:other", @"\\host\other\program.exe" })
             if (!ConsentTarget.HasConflictingPath(path)) return 6;
+        foreach (string prefix in new[] { "Program location: ", "Program location:\r\n", "프로그램 위치: " })
+            if (!ConsentTarget.IsExpandedLocation("ExpandedTextLine", prefix + "\"" + image + "\" pair " + nonce)) return 7;
+        foreach (string id in new[] { "AppName", "FileDescription", "", "ExpandedTextLine.evil" })
+            if (ConsentTarget.IsExpandedLocation(id, "Program location: " + image)) return 8;
+        foreach (string value in new[] { image, "Program location: uac-service.exe", @"Program location: C:\Temp\uac-service.exe",
+            "Program location: " + image + " extra", "Program location: " + image + "\u202e", "Program location" + image })
+            if (ConsentTarget.IsExpandedLocation("ExpandedTextLine", value)) return 9;
         Console.WriteLine("Pure consent target recognizer fixtures passed; native UI remains unverified.");
         return 0;
     }
