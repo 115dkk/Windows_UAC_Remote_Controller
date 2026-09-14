@@ -18,30 +18,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'codex/native-runtime']
-    paths:
-      - '.github/workflows/windows-uac-lab.yml'
-      - 'crates/windows-service-host/**'
-      - 'crates/windows-identity/**'
-      - 'crates/windows-prompt-probe/**'
-      - 'crates/windows-observer/**'
-      - 'crates/controller-runtime/**'
-      - 'tools/windows-medium-client.ps1'
-      - 'tools/windows-webview-runtime-lab.ps1'
-      - 'tools/windows-management-webview-lab.mjs'
-      - 'tools/windows-pairing-webview-lab.mjs'
-      - 'tools/read-pairing-events.ps1'
-      - 'tools/windows-full-pairing-lab.mjs'
-      - 'tools/prepare-pairing-e2e.ps1'
-      - 'tools/ci-desktop-inspection-contract.*'
-      - 'tools/ci-e2e-request.cs'
-      - 'tools/ci-phone-fixture/**'
-      - 'tools/ci-windows-operator/**'
-      - 'tools/ci-private-child*'
-      - 'tools/ci-fixture-diagnostics*'
-      - 'tools/windows-ci-powershell*'
-      - 'tools/ci-operator-process*'
-      - 'tools/windows-embedded-relay-lab.ps1'
-      - 'Cargo.lock'
+    # Release requires native proof for the exact tagged SHA, including commits
+    # that change only Android/shared code or packaging. Path-filtered evidence
+    # from a previous commit cannot satisfy that publication gate.
 
 permissions:
   contents: read

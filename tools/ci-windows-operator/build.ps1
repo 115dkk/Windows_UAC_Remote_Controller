@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# CI compilation only. This script never launches the operator or grants UAC.
+# CI compilation plus public-pixel OCR canary. Never launches the operator or grants UAC.
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
@@ -38,3 +38,11 @@ $localPipeSources = @($sources) + (Join-Path $PSScriptRoot 'LocalPipe.Tests.cs')
 & $compiler /nologo /target:exe /main:LocalPipeTests /platform:x64 /optimize+ /warnaserror+ /utf8output /codepage:65001 "/out:$localPipeDestination" "/resource:$font,UACSans-Bold.ttf" "/resource:$vocabulary,CiDiagnosticVocabulary.json" "/reference:$framework\System.Drawing.dll" "/reference:$framework\System.Web.Extensions.dll" "/reference:$wpf\UIAutomationClient.dll" "/reference:$wpf\UIAutomationTypes.dll" "/reference:$wpf\WindowsBase.dll" $localPipeSources
 if ($LASTEXITCODE -ne 0) { throw "CI local pipe regression compilation failed ($LASTEXITCODE)." }
 Write-Output $localPipeDestination
+$digitDestination = Join-Path $output 'uac-ci-digit-pixels-tests.exe'
+$digitSources = @($sources) + (Join-Path $PSScriptRoot 'DigitPixelsTests.cs')
+$regularFont = Join-Path $repo 'assets/fonts/native/UACSans-Regular.ttf'
+& $compiler /nologo /target:exe /main:DigitPixelsTests /platform:x64 /optimize+ /warnaserror+ /utf8output /codepage:65001 "/out:$digitDestination" "/resource:$font,UACSans-Bold.ttf" "/resource:$regularFont,UACSans-Regular.ttf" "/resource:$vocabulary,CiDiagnosticVocabulary.json" "/reference:$framework\System.Drawing.dll" "/reference:$framework\System.Web.Extensions.dll" "/reference:$wpf\UIAutomationClient.dll" "/reference:$wpf\UIAutomationTypes.dll" "/reference:$wpf\WindowsBase.dll" $digitSources
+if ($LASTEXITCODE -ne 0) { throw "CI digit pixel canary compilation failed ($LASTEXITCODE)." }
+Write-Output $digitDestination
+& $digitDestination
+if ($LASTEXITCODE -ne 0) { throw "CI public GDI digit canary failed ($LASTEXITCODE)." }

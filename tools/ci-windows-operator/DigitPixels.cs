@@ -44,7 +44,9 @@ internal static class DigitPixels
                     if (error < best) { runnerUp = best; best = error; winner = digit; }
                     else if (error < runnerUp) runnerUp = error;
                 }
-                Program.Require(winner >= 0 && best <= 0.12 && runnerUp - best >= 0.03, "ocr_ambiguous");
+                Program.Require(winner >= 0, "ocr_no_matching_glyph");
+                Program.Require(best <= 0.12, "ocr_glyph_difference");
+                Program.Require(runnerUp - best >= 0.03, "ocr_not_unique");
                 digits.Append((char)('0' + winner));
             }
             return digits.ToString();
