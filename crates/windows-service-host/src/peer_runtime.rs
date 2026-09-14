@@ -847,7 +847,7 @@ impl<'key> ServiceSession<'key> {
                     crate::ApplyOutcome::Refused(reason) => {
                         // The fixed journal outcome carries no reason, and the
                         // disposable lab is where a refusal has to be readable.
-                        #[cfg(feature = "lab-software-identity")]
+                        #[cfg(all(windows, feature = "lab-software-identity"))]
                         crate::lab::record_note(&format!("prompt apply refused: {reason:?}"));
                         let _ = reason;
                         prompt::PromptResult::FailedRejected

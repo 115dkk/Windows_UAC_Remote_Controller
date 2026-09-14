@@ -236,7 +236,7 @@ pub(super) fn map_content(
     // synthetic request. The harness asserts on the program name and the
     // location, so the mapped fields and the labels they come from have to be
     // readable. Release packaging rejects any binary carrying a lab marker.
-    #[cfg(feature = "lab-software-identity")]
+    #[cfg(all(windows, feature = "lab-software-identity"))]
     {
         crate::lab::record_note(&format!(
             "prompt content: program_name={program_name:?} path={path:?} labels={}",
