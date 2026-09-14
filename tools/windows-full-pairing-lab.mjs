@@ -2,7 +2,7 @@
 // Actual Windows pixels -> independent phone -> enrollment -> real UAC denial.
 // All pixel/QR/comparison traffic stays in private process pipes, not artifacts.
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 import { expect } from '@playwright/test';
 import { PrivateChild } from './ci-private-child.mjs';
 import { operatorStartupDiagnostic } from './ci-fixture-diagnostics.mjs';
+import { OperatorProcess } from './ci-operator-process.mjs';
 
 const lab = 'C:\\ProgramData\\UacRemoteCiE2e';
 const service = 'C:\\Program Files\\휴대폰 승인\\uac-service.exe';
@@ -20,8 +21,8 @@ function privateChild(exe, env = process.env) {
 
 export async function proveFullPairing({ page, ps, evidence, confirmService, clientPid }) {
   if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Hosted Windows only');
-  let phone, bridge;
-  let stage = 'prepare';
+  let phone, bridge, operator;
+  let stage = 'prepare-interface';
   const proof = { commit: process.env.GITHUB_SHA, identity: 'software_ci_fixture', passed: false,
     physicalPhone: false, hardwareAttestation: false, checks: [] };
   function publishControl(name, bytes) {
@@ -35,23 +36,31 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
   try {
     const ip = ps("$s=[Net.Sockets.UdpClient]::new();try{$s.Connect('192.0.2.1',9);$s.Client.LocalEndPoint.Address.ToString()}finally{$s.Dispose()}").trim();
     assert.ok(Object.values(networkInterfaces()).flat().some(value => value?.address === ip && !value.internal), 'Relay must belong to this runner');
+    stage = 'prepare-phone';
     phone = privateChild(resolve(process.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release/ci-phone-fixture.exe'), { ...process.env, WUAC_CI_PHONE_FIXTURE: '1' });
     const prepared = await phone.request({ command: 'prepare', expected_relay_ip: ip }, 'prepared');
     assert.ok(prepared.app_signer_sha256 === '08'.repeat(32), 'Fixture signer mismatch');
     const ca = Buffer.from(prepared.root_der_base64, 'base64');
     assert.ok(ca.length > 100 && ca.length <= 8192);
+    stage = 'prepare-root';
     publishControl('phone-root.der', ca);
+    stage = 'prepare-bridge';
     bridge = privateChild(`${lab}\\uac-ci-pipe-bridge.exe`);
+    stage = 'prepare-session';
     const session = Number(ps(`(Get-Process -Id ${clientPid}).SessionId`).trim());
     assert.ok(Number.isInteger(session) && session > 0);
+    stage = 'prepare-control';
     const metadata = { marker: 'uac-ci-e2e-do-not-ship', runNonce: randomBytes(16).toString('hex'),
       githubRunId: process.env.GITHUB_RUN_ID, githubRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
       createdUtc: new Date().toISOString(), sessionId: session, clientPid: bridge.child.pid,
       serviceSha256: hash(readFileSync(service)), githubActions: 'true', runnerEnvironment: 'github-hosted' };
     publishControl('control.json', JSON.stringify(metadata));
-    execFileSync(`${lab}\\PsExec64.exe`, ['-accepteula', '-nobanner', '-s', '-i', String(session), '-d', `${lab}\\uac-ci-windows-operator.exe`], { windowsHide: true, timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+    stage = 'prepare-operator';
+    operator = new OperatorProcess(spawn(`${lab}\\PsExec64.exe`,
+      ['-accepteula', '-nobanner', '-s', '-i', String(session), `${lab}\\uac-ci-windows-operator.exe`],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+    await operator.guardStartup(() => bridge.request({ command: 'arm' }, 'ready'));
     stage = 'initial-consent';
-    await bridge.request({ command: 'arm' }, 'ready');
     await page.locator('.navigation-item').nth(1).click();
     const qr = page.locator('.pairing-entry button.primary[aria-describedby$="-qr-purpose"]');
     await expect(qr).toBeEnabled({ timeout: 15000 });
@@ -75,6 +84,9 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     proof.checks.push('both-actual-comparison-confirmations-and-signed-enrollment');
     await bridge.request({ command: 'finish' }, 'done');
     await bridge.complete();
+    stage = 'operator-completion';
+    await operator.complete();
+    proof.checks.push('operator-launcher-drained-zero-exit');
     stage = 'service-registration';
     await expect.poll(async () => {
       try { return await page.evaluate(async () => {
@@ -106,9 +118,12 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     const diagnostic = phone?.diagnostic ?? operatorStartupDiagnostic() ?? bridge?.diagnostic;
     if (diagnostic) proof.failure = diagnostic;
     proof.failedStage = stage;
+    proof.operatorProcess = operator?.snapshot() ?? null;
     throw new Error(`Native pairing e2e failed at ${stage}`);
   } finally {
     phone?.abort(); bridge?.abort();
+    await operator?.abort();
+    if (!proof.wirePassed && operator) proof.operatorProcess = operator.snapshot();
     writeFileSync(resolve(evidence, 'pairing-e2e-proof.json'), JSON.stringify(proof, null, 2), { flag: 'wx' });
   }
 }

@@ -38,6 +38,7 @@ on:
       - 'tools/ci-private-child*'
       - 'tools/ci-fixture-diagnostics*'
       - 'tools/windows-ci-powershell*'
+      - 'tools/ci-operator-process*'
       - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
 
@@ -94,7 +95,16 @@ jobs:
         shell: powershell
         run: ./tools/prepare-pairing-e2e.ps1 -CompileOnly
       - name: Check private fixture lifecycle and closed diagnostics
-        run: node --test tools/ci-private-child.test.mjs tools/ci-fixture-diagnostics.test.mjs tools/windows-ci-powershell.test.mjs
+        run: node --test tools/ci-private-child.test.mjs tools/ci-fixture-diagnostics.test.mjs tools/windows-ci-powershell.test.mjs tools/ci-operator-process.test.mjs
+      - name: Restore compilation inputs for the lab profile only
+        id: lab-compile-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        timeout-minutes: 5
+        with:
+          path: target/uac-lab-build
+          key: ${{ runner.os }}-uac-lab-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-uac-lab-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
       - name: Build the lab service (software KSP) and the prompt helper with lab notes
         shell: pwsh
         run: |
@@ -113,6 +123,16 @@ jobs:
           $text = [Text.Encoding]::ASCII.GetString($bytes)
           if ($text -notmatch 'lab-software-ksp-do-not-ship') { throw 'The lab build does not carry the lab identity marker; refusing to install a production-profile service in the lab.' }
           Write-Output 'Lab identity marker present.'
+      - name: Retain compiled dependencies before the fresh native experiment
+        if: steps.lab-compile-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        timeout-minutes: 5
+        with:
+          # No ProgramData, profiles, operator metadata, QR pixels, generated
+          # keys or native evidence. Cargo always checks this exact checkout;
+          # every native experiment still starts fresh and must pass in full.
+          path: target/uac-lab-build
+          key: ${{ steps.lab-compile-cache.outputs.cache-primary-key }}
       - name: Install the protected product directory and both executables
         # Windows PowerShell 5.1 (.NET Framework) has the security-descriptor-at-creation overloads.
         shell: powershell
