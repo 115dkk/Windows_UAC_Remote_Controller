@@ -3,6 +3,15 @@
 //! The Session0 parent independently retains the original renderer identity and
 //! all policy/image/token checks; this owner retains the actual USER objects.
 use super::*;
+use windows::Win32::{
+    Foundation::{ERROR_INVALID_DATA, HWND, LPARAM, SetLastError},
+    System::StationsAndDesktops::EnumDesktopWindows,
+    UI::{
+        Input::KeyboardAndMouse::IsWindowEnabled,
+        WindowsAndMessaging::{GetClassNameW, GetWindowThreadProcessId, IsWindow, IsWindowVisible},
+    },
+};
+use windows::core::BOOL;
 use windows_prompt_probe::pairing_inspection::{Binding, Failure, Inspector};
 
 #[derive(Default)]
@@ -118,14 +127,9 @@ impl Inspector for NativeInspector {
                 &mut bound.station,
             )
             .map_err(|error| object_stage(26, error))?;
-            // Windows CI returned stage29 despite valid kernel duplicates and
-            // descriptors. Establish an explicit USER-side open as well; native
-            // CI must qualify whether this resolves that association lookup.
-            // Open ONLY the already retained/verified private object's name in
-            // this process's WinSta0, with the service-only association rights
-            // qualified by native contract f418c3e. The initial duplicate stays
-            // limited; the High creator/renderer never receives this capability.
-            // Object equality is mandatory; the name is never identity evidence.
+            // Independent read-only open in this process's actual WinSta0.
+            // Equality with the retained duplicate proves station membership;
+            // matching names alone never establish object identity.
             let desktop = bound.desktop.as_ref().ok_or(Error::InvalidPhase)?;
             if !matches!(desktop.kind, ObjectKind::Desktop)
                 || object_text(desktop.raw, UOI_NAME)? != display_name(invocation)
@@ -143,14 +147,14 @@ impl Inspector for NativeInspector {
                 .collect();
             bound.identity()?;
             // SAFETY: fixed generated name, same-session current WinSta0, exact
-            // noninherited service-only association mask. No desktop switch,
+            // noninherited inspection mask. No desktop switch,
             // thread assignment, object creation, ACL or privilege mutation.
             let opened = unsafe {
                 windows::Win32::System::StationsAndDesktops::OpenDesktopW(
                     windows::core::PCWSTR(name.as_ptr()),
                     windows::Win32::System::StationsAndDesktops::DESKTOP_CONTROL_FLAGS(0),
                     false,
-                    DESKTOP_ASSOCIATION,
+                    DESKTOP_INSPECT,
                 )
             }
             .map_err(|error| native(30, error))?;
@@ -201,6 +205,7 @@ impl Bound {
         check_cutoff(self.binding.cutoff)?;
         if process_identity(self.process.raw(), self.binding.process)? != self.binding.created
             || thread_creation(self.thread.raw())? != self.binding.thread_created
+            || unsafe { WaitForSingleObject(self.thread.raw(), 0) } != WAIT_TIMEOUT
             // SAFETY: exact retained initial-thread query handle.
             || unsafe { GetProcessIdOfThread(self.thread.raw()) } != self.binding.process
             || TokenFacts::observe(self.process.raw())? != self.token
@@ -232,15 +237,101 @@ impl Bound {
             return Err(Error::Rejected);
         }
         check_station(station.raw).map_err(|error| object_stage(28, error))?;
-        // SAFETY: same-session retained original thread; borrowed assigned
-        // desktop compared to independently duplicated object, never closed.
-        let assigned =
-            unsafe { GetThreadDesktop(self.binding.thread) }.map_err(|e| native(29, e))?;
-        if !unsafe { CompareObjectHandles(HANDLE(assigned.0), desktop.raw) }.as_bool() {
-            return Err(Error::Rejected);
-        }
+        self.window_membership(desktop.raw)?;
         self.identity()
     }
+
+    fn window_owner(&self, window: HWND) -> Result<(), Error> {
+        let mut process = 0;
+        // SAFETY: a candidate only, queried rather than dereferenced. Kernel
+        // owner facts must match the retained live original process and thread.
+        if !unsafe { IsWindow(Some(window)) }.as_bool()
+            || unsafe { IsWindowVisible(window) }.as_bool()
+            || unsafe { IsWindowEnabled(window) }.as_bool()
+            || unsafe { GetWindowThreadProcessId(window, Some(&mut process)) }
+                != self.binding.thread
+            || process != self.binding.process
+        {
+            return Err(Error::Rejected);
+        }
+        let mut class = [0_u16; 64];
+        let length = unsafe { GetClassNameW(window, &mut class) };
+        if length <= 0 || length as usize >= class.len() {
+            return Err(native(32, WinError::from_thread()));
+        }
+        if String::from_utf16(&class[..length as usize]).map_err(|_| Error::Malformed)?
+            != crate::ffi::pairing_client::renderer_witness::CLASS_NAME
+        {
+            return Err(Error::Rejected);
+        }
+        Ok(())
+    }
+    fn window_membership(&self, desktop: HANDLE) -> Result<(), Error> {
+        let value = usize::try_from(self.binding.window).map_err(|_| Error::Malformed)?;
+        if value == 0 || value == usize::MAX {
+            return Err(Error::Malformed);
+        }
+        let window = HWND(value as *mut _);
+        self.window_owner(window)?;
+        let mut scan = Scan {
+            window,
+            process: self.binding.process,
+            thread: self.binding.thread,
+            count: 0,
+            seen: false,
+            failed: false,
+        };
+        // SAFETY: retained independently verified desktop, fixed synchronous
+        // callback, stack context lives for the COMPLETE enumeration. The
+        // callback never allocates, panics, pumps messages or retains pointers.
+        unsafe {
+            EnumDesktopWindows(
+                Some(HDESK(desktop.0)),
+                Some(visit_window),
+                LPARAM(ptr::from_mut(&mut scan) as isize),
+            )
+        }
+        .map_err(|error| native(32, error))?;
+        if scan.failed || !scan.seen {
+            return Err(Error::Rejected);
+        }
+        self.window_owner(window)
+    }
+}
+
+struct Scan {
+    window: HWND,
+    process: u32,
+    thread: u32,
+    count: usize,
+    seen: bool,
+    failed: bool,
+}
+unsafe extern "system" fn visit_window(window: HWND, parameter: LPARAM) -> BOOL {
+    if parameter.0 == 0 {
+        unsafe { SetLastError(ERROR_INVALID_DATA) };
+        return false.into();
+    }
+    // SAFETY: only window_membership passes its exclusive live stack context.
+    let scan = unsafe { &mut *(parameter.0 as *mut Scan) };
+    if scan.count >= 512 {
+        scan.failed = true;
+    } else {
+        scan.count += 1;
+        if window == scan.window {
+            let mut process = 0;
+            let thread = unsafe { GetWindowThreadProcessId(window, Some(&mut process)) };
+            if scan.seen || process != scan.process || thread != scan.thread {
+                scan.failed = true;
+            }
+            scan.seen = true;
+        }
+    }
+    if scan.failed {
+        unsafe { SetLastError(ERROR_INVALID_DATA) };
+        return false.into();
+    }
+    true.into()
 }
 impl Drop for NativeInspector {
     fn drop(&mut self) {

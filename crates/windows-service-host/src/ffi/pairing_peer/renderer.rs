@@ -29,9 +29,8 @@ use windows::{
         System::{
             Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
             StationsAndDesktops::{
-                CloseDesktop, CloseWindowStation, GetThreadDesktop, GetUserObjectInformationW,
-                HDESK, HWINSTA, UOI_FLAGS, UOI_NAME, UOI_TYPE, USER_OBJECT_INFORMATION_INDEX,
-                USEROBJECTFLAGS,
+                CloseDesktop, CloseWindowStation, GetUserObjectInformationW, HDESK, HWINSTA,
+                UOI_FLAGS, UOI_NAME, UOI_TYPE, USER_OBJECT_INFORMATION_INDEX, USEROBJECTFLAGS,
             },
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, GetProcessIdOfThread, GetThreadTimes,
@@ -64,12 +63,6 @@ pub(in crate::ffi) const THREAD_RIGHTS: u32 =
     THREAD_QUERY_LIMITED_INFORMATION.0 | THREAD_SYNCHRONIZE.0 | READ_CONTROL.0;
 pub(in crate::ffi) const DESKTOP_RIGHTS: u32 = 0x0002_0183;
 const DESKTOP_INSPECT: u32 = 0x0002_0081;
-// Native contract f418c3e: GetThreadDesktop rejects the limited duplicate even
-// when its descriptor allows full access. A separate full-access USER open of
-// the SAME independently verified object makes the original-TID lookup work.
-// This capability belongs only to SYSTEM/our service SID; the High renderer and
-// older High creator retain DESKTOP_RIGHTS and no ACL/owner/delete/hook access.
-const DESKTOP_ASSOCIATION: u32 = 0x000f_01ff;
 // check_station reads only UOI_TYPE/NAME/FLAGS. The startup station handle need
 // not carry READ_CONTROL; requesting it during duplication needlessly widens
 // the source access requirement without supporting any performed validation.
@@ -254,7 +247,7 @@ fn profile_rights(profile: Profile) -> (u32, u32) {
     match profile {
         Profile::Process => (PROCESS_RIGHTS, PROCESS_RIGHTS),
         Profile::Thread => (THREAD_RIGHTS, THREAD_RIGHTS),
-        Profile::Desktop => (DESKTOP_RIGHTS, DESKTOP_ASSOCIATION),
+        Profile::Desktop => (DESKTOP_RIGHTS, DESKTOP_INSPECT),
     }
 }
 struct Descriptor(PSECURITY_DESCRIPTOR);
@@ -603,6 +596,7 @@ impl RendererRegistration {
                 pending: invocation.pending().bytes(),
                 display: invocation.display().bytes(),
                 cutoff,
+                window: objects.window,
             };
             let session = inner.session.as_ref().ok_or(Error::InvalidPhase)?.id;
             *inner.inspector.get_mut() = Some(pairing_inspector::Owner::bind(binding, session)?);
@@ -654,6 +648,7 @@ impl Inner {
             let process = self.process.as_ref().ok_or(Error::InvalidPhase)?.raw();
             let thread = self.thread.as_ref().ok_or(Error::InvalidPhase)?.raw();
             if process_identity(process, metadata.pid)? != metadata.created || thread_creation(thread)? != self.thread_created
+                || unsafe { WaitForSingleObject(thread, 0) } != WAIT_TIMEOUT
                 // SAFETY: exact retained initial-thread query handle.
                 || unsafe { GetProcessIdOfThread(thread) } != metadata.pid
             {
@@ -792,12 +787,13 @@ impl Drop for RendererRegistration {
 mod tests {
     use super::*;
     #[test]
-    fn association_capability_is_service_only_in_the_actual_descriptor_profile() {
-        assert_eq!(profile_rights(Profile::Desktop), (0x20183, 0xf01ff));
+    fn native_witness_keeps_original_limited_descriptor_profiles() {
+        assert_eq!(profile_rights(Profile::Desktop), (0x20183, 0x20081));
         assert_eq!(DESKTOP_INSPECT, 0x20081);
         assert_eq!(profile_rights(Profile::Process), (0x121040, 0x121040));
         assert_eq!(profile_rights(Profile::Thread), (0x120800, 0x120800));
         assert_eq!(DESKTOP_RIGHTS & 0xd0000, 0); // No delete/DACL/owner to BA.
+        assert_eq!(DESKTOP_INSPECT & 0xd0000, 0); // None needed by SYSTEM inspector.
         assert_eq!(DESKTOP_RIGHTS & 0x38, 0); // No hook/journal to BA.
     }
     #[test]

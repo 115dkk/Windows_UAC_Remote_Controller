@@ -34,19 +34,33 @@ cutoff. It exposes no key, credential, QR content, execution or input operation.
 Subsequent Check/Close requests have strict increasing sequence numbers; wrong
 phases, duplicate Bind, stale/crossed replies, EOF/death and timeouts fail closed.
 
-The same native duplicate/type/name/exact-descriptor/station checks and actual
-GetThreadDesktop/CompareObjectHandles association remain mandatory. The child
-holds actual duplicated objects and original process/thread handles through the
-ceremony. Every former positive object recheck requests a fresh child check;
-the service authenticates the original inspector and its token/session around
-each reply. No one-shot success cache replaces these observations.
+The native duplicate/type/name/exact-descriptor/station checks remain mandatory.
+A read-only OpenDesktop in the inspector's WinSta0 must identify the SAME native
+object as the retained independent duplicate. The original renderer creates one
+invisible, disabled, empty fixed-class top-level witness on its already verified
+private desktop, before receiving any QR contents. The inspector uses complete
+bounded EnumDesktopWindows and GetWindowThreadProcessId observations to prove
+that exact HWND belongs to that desktop and the original retained live PID/TID.
+This replaces the incompatible foreign GetThreadDesktop operation; it is not a
+name-only or renderer-asserted desktop association. A thread cannot switch its
+desktop while it owns windows there (SetThreadDesktop's documented constraint).
+
+Every positive step repeats native membership/class/visibility/owner checks,
+bracketed by original process/thread liveness, creation/token/session checks.
+Unexpected witness destruction, visibility/enabling or loss permanently fails
+the renderer; it cannot recreate a witness in the same invocation. The witness
+is independent from visible QR UI: UI may close before CloseAck, but the witness
+stays alive through actual service EOF, then is destroyed on its original thread.
+Callbacks are bounded, nonallocating, nonpanicking and never dispatch user
+decisions. No QR content, input-desktop switch or visible window precedes binding.
+The new mandatory HWND uses exact revised private wire shapes (UCPH2/UPI2).
 
 The original ceremony cutoff is never extended. Separate short operation
 timeouts bound IPC waits; cleanup retains/cancels pending buffers, reaps only
 the newly service-created inspector and quarantines uncertain ownership. It
 never terminates the separately UAC-created renderer or changes Windows policy.
 
-## Validation
+## Historical GetThreadDesktop experiments (superseded)
 
 Native b90ed5f attempt2 passed duplicate/type/name/exact-descriptor/station
 checks in the session-local inspector, then failed GetThreadDesktop with
@@ -76,14 +90,27 @@ any of DELETE/WRITE_DAC/WRITE_OWNER from the otherwise full handle still failed
 in those tests. This is an observed Windows API requirement, not an assertion
 that our inspector performs these mutations.
 
-Grant DESKTOP_ALL_ACCESS (0xf01ff) only to SYSTEM and the exact service SID in
+An intermediate experiment granted DESKTOP_ALL_ACCESS (0xf01ff) only to SYSTEM and the exact service SID in
 the private desktop descriptor. The High renderer/creator BA mask stays0x20183,
 OW retains only READ_CONTROL, and process/thread/station masks do not change.
 The inspector retains its limited independent duplicate, then opens the already
 verified private object with the service-only association mask. Exact native
 object equality and actual original-thread lookup remain mandatory. No new
 input, desktop switch, descriptor setter or generic operation is exposed by the
-inspector. Actual SYSTEM production-profile pairing still requires full CI.
+inspector. This still failed in the actual product: the source renderer's
+desktop handle was deliberately limited. A later source20183 native control
+reproduced that failure even with full observer access and full descriptors.
+That intermediate capability expansion is REVERTED. SYSTEM/service SID and
+both inspector desktop handles again use0x20081; BA stays0x20183 and OWRC.
+The current independent window-membership proof does not need full desktop
+handles, broader process/thread access, SYSTEM UI or foreign-token duplication.
+
+## Validation
+
+The early native access-contract job retains the historical getter observations
+and separately requires hidden-window membership for every mask (including exact
+limited source/observer), with wrong PID, TID and desktop negative controls.
+It is explicitly a scratch-target API contract, not production creation isolation.
 
 The existing failing installed-app QR/pairing/signed-denial CI is the native
 regression test. Closed frame/command tests cover malformed and crossed inputs;

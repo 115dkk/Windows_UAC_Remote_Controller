@@ -10,7 +10,7 @@ use service_protocol::{
 use std::{fmt, str};
 
 const HEADER: &[u8; 4] = b"UCPH";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const SHORT_FRAME: usize = 40;
 const LAUNCH_FRAME: usize = 52;
 const RENDERER_PREFIX: usize = 72;
@@ -148,12 +148,14 @@ pub(crate) struct RendererObjects {
     pub(crate) thread: u32,
     pub(crate) desktop: u64,
     pub(crate) station: u64,
+    pub(crate) window: u64,
 }
 impl RendererObjects {
     fn valid(self) -> bool {
         self.thread != 0
             && ![0, u64::MAX].contains(&self.desktop)
             && ![0, u64::MAX].contains(&self.station)
+            && ![0, u64::MAX].contains(&self.window)
     }
 }
 macro_rules! renderer_debug {
@@ -454,6 +456,7 @@ impl Frame {
                 bytes.extend_from_slice(&objects.thread.to_le_bytes());
                 bytes.extend_from_slice(&objects.desktop.to_le_bytes());
                 bytes.extend_from_slice(&objects.station.to_le_bytes());
+                bytes.extend_from_slice(&objects.window.to_le_bytes());
             }
             Self::RendererInvitation { invocation, text } => {
                 PairingInvitation::from_qr_text(text.as_str()).map_err(|_| HandoffError::Frame)?;
@@ -489,7 +492,7 @@ impl Frame {
             SHORT_FRAME,
             LAUNCH_FRAME,
             80,
-            92,
+            100,
             96,
             INVITATION_MIN_FRAME,
             INVITATION_MAX_FRAME,
@@ -518,7 +521,7 @@ impl Frame {
             let invocation =
                 RendererInvocation::new(id, display).map_err(|_| HandoffError::Frame)?;
             match (bytes[5], bytes.len()) {
-                (11, 92) => {
+                (11, 100) => {
                     let objects = RendererObjects {
                         thread: u32::from_le_bytes(
                             bytes[72..76].try_into().map_err(|_| HandoffError::Frame)?,
@@ -528,6 +531,9 @@ impl Frame {
                         ),
                         station: u64::from_le_bytes(
                             bytes[84..92].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                        window: u64::from_le_bytes(
+                            bytes[92..100].try_into().map_err(|_| HandoffError::Frame)?,
                         ),
                     };
                     if !objects.valid() {
@@ -952,13 +958,17 @@ mod tests {
                     thread: 43,
                     desktop: 100,
                     station: 101,
+                    window: 102,
                 },
             },
         ];
         for frame in frames {
             let bytes = frame.encode().unwrap();
+            let mut old = bytes.clone();
+            old[4] = 1;
+            assert!(Frame::decode(&old).is_err());
             assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
-            assert!([80, 92, 96].contains(&bytes.len()));
+            assert!([80, 100, 96].contains(&bytes.len()));
             for length in 0..bytes.len() {
                 assert!(Frame::decode(&bytes[..length]).is_err());
             }
@@ -981,6 +991,24 @@ mod tests {
         let mut zero = Frame::RendererHello(request).encode().unwrap();
         zero[72..80].fill(0);
         assert!(Frame::decode(&zero).is_err());
+    }
+
+    #[test]
+    fn renderer_object_frame_requires_the_hidden_native_window_candidate() {
+        let frame = Frame::RendererObjects {
+            invocation: renderer_request().invocation,
+            objects: RendererObjects {
+                thread: 43,
+                desktop: 100,
+                station: 101,
+                window: 102,
+            },
+        };
+        let mut bytes = frame.encode().unwrap();
+        assert_eq!(bytes.len(), 100);
+        bytes[92..100].fill(0);
+        assert!(Frame::decode(&bytes).is_err());
+        assert!(Frame::decode(&bytes[..92]).is_err());
     }
     #[test]
     fn only_original_helper_can_claim_one_launch_and_exact_registration_resume() {

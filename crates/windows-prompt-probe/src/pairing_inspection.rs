@@ -3,7 +3,7 @@
 //! authorization, signing, arbitrary path or input operation exists here.
 use std::fmt;
 
-const MAGIC: &[u8; 4] = b"UPI1";
+const MAGIC: &[u8; 4] = b"UPI2";
 pub const MAX_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -17,6 +17,7 @@ pub struct Binding {
     pub pending: [u8; 32],
     pub display: [u8; 32],
     pub cutoff: u64,
+    pub window: u64,
 }
 impl fmt::Debug for Binding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,6 +34,8 @@ impl Binding {
             && self.station != 0
             && self.desktop != u64::MAX
             && self.station != u64::MAX
+            && self.window != 0
+            && self.window != u64::MAX
             && self.pending != [0; 32]
             && self.display != [0; 32]
             && self.pending != self.display
@@ -74,6 +77,7 @@ impl Request {
                 bytes.extend(value.pending);
                 bytes.extend(value.display);
                 bytes.extend(value.cutoff.to_be_bytes());
+                bytes.extend(value.window.to_be_bytes());
             }
             Self::Check(sequence) | Self::Close(sequence) if sequence != 0 => {
                 bytes.push(if matches!(self, Self::Check(_)) { 2 } else { 3 });
@@ -97,7 +101,7 @@ impl Request {
             ))
         };
         let value = match (bytes.get(4), bytes.len()) {
-            (Some(1), 117) => Self::Bind(Binding {
+            (Some(1), 125) => Self::Bind(Binding {
                 process: u32::from_be_bytes(bytes[5..9].try_into().map_err(|_| InvalidFrame)?),
                 created: u64_at(9)?,
                 thread: u32::from_be_bytes(bytes[17..21].try_into().map_err(|_| InvalidFrame)?),
@@ -107,6 +111,7 @@ impl Request {
                 pending: bytes[45..77].try_into().map_err(|_| InvalidFrame)?,
                 display: bytes[77..109].try_into().map_err(|_| InvalidFrame)?,
                 cutoff: u64_at(109)?,
+                window: u64_at(117)?,
             }),
             (Some(2), 13) => Self::Check(u64_at(5)?),
             (Some(3), 13) => Self::Close(u64_at(5)?),
@@ -180,6 +185,7 @@ mod tests {
             pending: [1; 32],
             display: [2; 32],
             cutoff: 7,
+            window: 8,
         };
         for request in [Request::Bind(binding), Request::Check(1), Request::Close(2)] {
             let bytes = request.encode().unwrap();
@@ -194,6 +200,17 @@ mod tests {
             assert!(Request::decode(&extra).is_err());
         }
         assert!(Request::Check(0).encode().is_err());
+        assert!(
+            Request::Bind(Binding {
+                window: 0,
+                ..binding
+            })
+            .encode()
+            .is_err()
+        );
+        let mut old = Request::Bind(binding).encode().unwrap();
+        old[..4].copy_from_slice(b"UPI1");
+        assert!(Request::decode(&old).is_err());
         assert!(
             Request::Bind(Binding {
                 display: binding.pending,

@@ -60,6 +60,9 @@ try {
     $stream.Write($bytes, 0, $bytes.Length)
 } finally { $stream.Dispose() }
 Write-Output $sanitized
-if ($run.ExitCode -ne 0 -or $summary.fixtureCompleted -ne $true -or $summary.positiveControl -ne $true -or @($summary.cases).Count -ne 33) {
+if ($run.ExitCode -ne 0 -or $summary.configuration -cne 'hidden_static_witness_v1' -or
+    $summary.fixtureCompleted -ne $true -or $summary.positiveControl -ne $true -or @($summary.cases).Count -ne 34 -or
+    @($summary.cases | Where-Object { $_.windowMembership -ne $true -or $_.wrongPidRejected -ne $true -or
+        $_.wrongTidRejected -ne $true -or $_.wrongDesktopRejected -ne $true }).Count -ne 0) {
     throw 'Native contract fixture incomplete or all-access positive control failed.'
 }

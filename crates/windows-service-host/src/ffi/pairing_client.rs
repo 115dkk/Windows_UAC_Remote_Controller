@@ -64,6 +64,7 @@ use crate::{ServiceError, native};
 mod helper_launch;
 mod renderer;
 mod renderer_ui;
+pub(in crate::ffi) mod renderer_witness;
 pub(crate) use helper_launch::run_pair_helper;
 pub use helper_launch::{PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress};
 pub(crate) use renderer::run_pair_renderer;

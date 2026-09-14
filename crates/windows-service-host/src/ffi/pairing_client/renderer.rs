@@ -8,6 +8,7 @@ use super::{
     helper_launch::{PairingLaunchError as Error, RendererTerminal},
     peer_error_at,
     renderer_ui::{RendererWindow, UiEvent},
+    renderer_witness::Witness,
 };
 use crate::{
     RendererInvocation,
@@ -48,6 +49,7 @@ struct Owner {
     client: Option<PairingClient>,
     terminal: Option<RendererTerminal>,
     window: Option<RendererWindow>,
+    witness: Option<Witness>,
     phase: Phase,
     invocation: RendererInvocation,
     objects: RendererObjects,
@@ -55,6 +57,8 @@ struct Owner {
     deadline: Instant,
     decision_sent: bool,
     cleanup_failed: bool,
+    peer_eof: bool,
+    cancelled: bool,
 }
 fn mapped(error: crate::PairingPeerError) -> Error {
     peer_error_at(Stage::QueryOwnIdentity, error).into()
@@ -147,10 +151,14 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
     {
         return Err(Error::Protocol);
     }
+    let witness = Witness::create().map_err(ui_error)?;
+    client.inner_mut().fence()?;
+    native_renderer::check_setup_cutoff(cutoff).map_err(mapped)?;
     let objects = RendererObjects {
         thread: thread_id,
         desktop: desktop.0 as usize as u64,
         station: station.0 as usize as u64,
+        window: witness.raw().map_err(ui_error)?,
     };
     crate::ffi::pairing_diagnostics::milestone(
         crate::ffi::pairing_diagnostics::Point::RendererObjectsReady,
@@ -159,6 +167,7 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
         client: Some(client),
         terminal: None,
         window: None,
+        witness: Some(witness),
         phase: Phase::HelloWrite,
         invocation,
         objects,
@@ -166,6 +175,8 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
         deadline,
         decision_sent: false,
         cleanup_failed: false,
+        peer_eof: false,
+        cancelled: false,
     };
     let outcome = (|| {
         let hello = Frame::RendererHello(
@@ -204,6 +215,7 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
 }
 impl Owner {
     fn client_mut(&mut self) -> Result<&mut PairingClient, Error> {
+        self.budget()?;
         self.client.as_mut().ok_or(Error::InvalidPhase)
     }
     fn budget(&self) -> Result<(), Error> {
@@ -217,6 +229,11 @@ impl Owner {
         ) {
             native_renderer::check_setup_cutoff(self.cutoff).map_err(mapped)?;
         }
+        self.witness
+            .as_ref()
+            .ok_or(Error::InvalidPhase)?
+            .check()
+            .map_err(ui_error)?;
         Ok(())
     }
     fn step(&mut self) -> Result<bool, Error> {
@@ -224,8 +241,14 @@ impl Owner {
         let event = if let Some(window) = self.window.as_mut() {
             window.pump().map_err(ui_error)?
         } else {
+            self.witness
+                .as_mut()
+                .ok_or(Error::InvalidPhase)?
+                .pump()
+                .map_err(ui_error)?;
             None
         };
+        self.budget()?;
         if let Some(event) = event {
             let confirmed = match event {
                 UiEvent::Confirmed => true,
@@ -246,6 +269,7 @@ impl Owner {
             let terminal = self.terminal.as_mut().ok_or(Error::InvalidPhase)?;
             if terminal.poll()? {
                 terminal.finish()?;
+                self.peer_eof = true;
                 return Ok(true);
             }
             return Ok(false);
@@ -393,6 +417,7 @@ impl Owner {
         Ok(())
     }
     fn cancel(&mut self) {
+        self.cancelled = true;
         if self.close_window().is_err() {
             self.cleanup_failed = true;
         }
@@ -405,14 +430,27 @@ impl Owner {
     }
     fn drain(&mut self) -> Result<bool, Error> {
         self.close_window()?;
-        if let Some(client) = self.client.as_mut() {
-            return client.drain().map_err(Into::into);
+        let drained = if let Some(client) = self.client.as_mut() {
+            client.drain().map_err(Error::from)?
+        } else {
+            self.terminal.as_mut().ok_or(Error::InvalidPhase)?.drain()?
+        };
+        // Normal success reaches here only after RendererTerminal::finish
+        // confirmed the actual service EOF. Cancellation first retires I/O.
+        if drained && !self.peer_eof && !self.cancelled {
+            return Err(Error::InvalidPhase);
         }
-        self.terminal.as_mut().ok_or(Error::InvalidPhase)?.drain()
+        if drained && let Some(mut witness) = self.witness.take() {
+            witness.close().map_err(|_| Error::CleanupUnconfirmed)?;
+        }
+        Ok(drained)
     }
 }
 impl Drop for Owner {
     fn drop(&mut self) {
+        if !self.peer_eof {
+            self.cancel();
+        }
         if self.close_window().is_err() {
             self.cleanup_failed = true;
         }

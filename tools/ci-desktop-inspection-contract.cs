@@ -56,6 +56,7 @@ internal static class DesktopContract
         new Profile("all_standard_minimum_specific", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xf0081),
         new Profile("source_renderer_mask_full_observer", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, false, 0x20183),
         new Profile("source_renderer_mask_all_policies", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, false, 0x20183),
+        new Profile("source_renderer_mask_limited_observer", ProcessBase, ThreadBase, 0x20183, InspectBase, InspectBase, InspectBase, false, 0x20183),
         new Profile("own_scratch_all_access", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0xf01ff)
     };
     sealed class Profile
@@ -97,28 +98,31 @@ internal static class DesktopContract
     }
     sealed class Metadata
     {
-        internal uint Pid, Tid; internal ulong Created, ThreadCreated, Desktop;
+        internal uint Pid, Tid; internal ulong Created, ThreadCreated, Desktop, Window;
         internal string Name;
-        internal string Encode() { return String.Join("|", new string[] { "target", U(Pid), U(Created), U(Tid), U(ThreadCreated), U(Desktop), Name }); }
+        internal string Encode() { return String.Join("|", new string[] { "target", U(Pid), U(Created), U(Tid), U(ThreadCreated), U(Desktop), Name, U(Window) }); }
         internal static Metadata Parse(string line)
         {
             string[] p = line.Split('|');
-            if (p.Length != 7 || p[0] != "target" || !ValidName(p[6], NamePrefix)) throw new Fault("metadata", 0);
+            if (p.Length != 8 || p[0] != "target" || !ValidName(p[6], NamePrefix)) throw new Fault("metadata", 0);
             Metadata m = new Metadata(); m.Pid = checked((uint)Number(p[1])); m.Created = Number(p[2]);
-            m.Tid = checked((uint)Number(p[3])); m.ThreadCreated = Number(p[4]); m.Desktop = Number(p[5]); m.Name = p[6];
-            if (m.Pid == 0 || m.Tid == 0 || m.Created == 0 || m.ThreadCreated < m.Created || m.Desktop == 0 || m.Desktop > Int64.MaxValue) throw new Fault("metadata", 0);
+            m.Tid = checked((uint)Number(p[3])); m.ThreadCreated = Number(p[4]); m.Desktop = Number(p[5]); m.Name = p[6]; m.Window = Number(p[7]);
+            if (m.Pid == 0 || m.Tid == 0 || m.Created == 0 || m.ThreadCreated < m.Created || m.Desktop == 0 || m.Desktop > Int64.MaxValue || m.Window == 0 || m.Window > Int64.MaxValue) throw new Fault("metadata", 0);
             return m;
         }
     }
     sealed class Result
     {
         internal string Name, Stage = "not_run"; internal bool Completed, Got, Equal, OpenGot, OpenEqual, Clean;
+        internal bool WindowMembership, WrongPidRejected, WrongTidRejected, WrongDesktopRejected;
         internal int Error, OpenError;
-        internal string Wire() { return String.Join("|", new string[] { "result", B(Completed), B(Got), B(Equal), Error.ToString(CultureInfo.InvariantCulture), B(OpenGot), B(OpenEqual), OpenError.ToString(CultureInfo.InvariantCulture) }); }
+        internal bool MembershipControls { get { return WindowMembership && WrongPidRejected && WrongTidRejected && WrongDesktopRejected; } }
+        internal string Wire() { return String.Join("|", new string[] { "result", B(Completed), B(Got), B(Equal), Error.ToString(CultureInfo.InvariantCulture), B(OpenGot), B(OpenEqual), OpenError.ToString(CultureInfo.InvariantCulture), B(WindowMembership), B(WrongPidRejected), B(WrongTidRejected), B(WrongDesktopRejected) }); }
         internal void Parse(string wire)
         {
-            string[] p = wire.Split('|'); if (p.Length != 8 || p[0] != "result") throw new Fault("reply", 0);
+            string[] p = wire.Split('|'); if (p.Length != 12 || p[0] != "result") throw new Fault("reply", 0);
             Completed = Bit(p[1]); Got = Bit(p[2]); Equal = Bit(p[3]); Error = Integer(p[4]); OpenGot = Bit(p[5]); OpenEqual = Bit(p[6]); OpenError = Integer(p[7]);
+            WindowMembership = Bit(p[8]); WrongPidRejected = Bit(p[9]); WrongTidRejected = Bit(p[10]); WrongDesktopRejected = Bit(p[11]);
             if (!Completed || (Equal && !Got) || (OpenEqual && !OpenGot) || (Got && Error != 0) || (OpenGot && OpenError != 0)) throw new Fault("reply", 0);
             Stage = "observed";
         }
@@ -127,7 +131,9 @@ internal static class DesktopContract
             return "{\"case\":\"" + Name + "\",\"stage\":\"" + Stage + "\",\"completed\":" + J(Completed) +
                 ",\"getThreadDesktop\":" + J(Got) + ",\"sameObject\":" + J(Equal) + ",\"error\":" + Error +
                 ",\"afterExplicitOpen\":" + J(OpenGot) + ",\"afterOpenSameObject\":" + J(OpenEqual) +
-                ",\"afterOpenError\":" + OpenError + ",\"cleanup\":" + J(Clean) + "}";
+                ",\"afterOpenError\":" + OpenError + ",\"windowMembership\":" + J(WindowMembership) +
+                ",\"wrongPidRejected\":" + J(WrongPidRejected) + ",\"wrongTidRejected\":" + J(WrongTidRejected) +
+                ",\"wrongDesktopRejected\":" + J(WrongDesktopRejected) + ",\"cleanup\":" + J(Clean) + "}";
         }
     }
     static int Main(string[] args)
@@ -160,11 +166,11 @@ internal static class DesktopContract
         foreach (Profile profile in Profiles)
         {
             Result result = RunCase(profile); results.Add(result);
-            complete &= result.Completed && result.Clean;
-            if (profile.Name == "own_scratch_all_access") positive = result.Completed && result.Clean && result.Got && result.Equal && result.OpenGot && result.OpenEqual;
+            complete &= result.Completed && result.Clean && result.MembershipControls;
+            if (profile.Name == "own_scratch_all_access") positive = result.Completed && result.Clean && result.MembershipControls && result.Got && result.Equal && result.OpenGot && result.OpenEqual;
         }
         List<string> json = new List<string>(); foreach (Result result in results) json.Add(result.Json());
-        Console.WriteLine("{\"fixtureCompleted\":" + J(complete) + ",\"positiveControl\":" + J(positive) + ",\"cases\":[" + String.Join(",", json.ToArray()) + "]}");
+        Console.WriteLine("{\"configuration\":\"hidden_static_witness_v1\",\"fixtureCompleted\":" + J(complete) + ",\"positiveControl\":" + J(positive) + ",\"cases\":[" + String.Join(",", json.ToArray()) + "]}");
         return complete && positive && !CloseFailed ? 0 : 1;
     }
     static Result RunCase(Profile profile)
@@ -215,9 +221,10 @@ internal static class DesktopContract
                 N.SA sa = new N.SA(); sa.Length = Marshal.SizeOf(typeof(N.SA)); sa.Descriptor = initial.Value;
                 using (Handle desktop = new Handle(N.CreateDesktopW(name, null, IntPtr.Zero, 0, profile.SourceDesktopAccess, ref sa), true))
                 {
+                    IntPtr witness = IntPtr.Zero;
                     try
                     {
-                        // Scratch target thread only; no input-desktop switch or window.
+                        // Scratch target thread only; no input-desktop switch.
                         Need(N.SetThreadDesktop(desktop.Value), "own_thread_desktop");
                         N.MSG message = new N.MSG(); N.PeekMessageW(out message, IntPtr.Zero, 0x400, 0x400, 0);
                         using (Descriptor d = new Descriptor(profile.DesktopBa, profile.DesktopSy))
@@ -230,13 +237,27 @@ internal static class DesktopContract
                             SetOwn(N.GetCurrentProcess(), 6, p); SetOwn(N.GetCurrentThread(), 6, t);
                             Verify(desktop.Value, 7, d); Verify(N.GetCurrentProcess(), 6, p); Verify(N.GetCurrentThread(), 6, t);
                         }
+                        // One empty disabled, hidden, TOP-LEVEL system STATIC on
+                        // this original scratch thread. No WS_VISIBLE/WS_CHILD,
+                        // message-only parent, ShowWindow, posting or UI input.
+                        witness = N.CreateWindowExW(0, "STATIC", "", 0x88000000, 0, 0, 1, 1,
+                            IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                        if (witness == IntPtr.Zero) throw new Fault("witness_create", Marshal.GetLastWin32Error());
+                        uint windowPid; uint windowTid = N.GetWindowThreadProcessId(witness, out windowPid);
+                        if (windowPid != N.GetCurrentProcessId() || windowTid != tid || N.IsWindowVisible(witness) || N.GetAncestor(witness, 2) != witness)
+                            throw new Fault("witness_identity", 0);
                         IntPtr actual = N.GetThreadDesktop(tid);
                         if (actual == IntPtr.Zero || !N.CompareObjectHandles(actual, desktop.Value)) throw new Fault("own_association", Marshal.GetLastWin32Error());
                         Metadata metadata = new Metadata(); metadata.Pid = N.GetCurrentProcessId(); metadata.Created = Creation(N.GetCurrentProcess(), false);
-                        metadata.Tid = tid; metadata.ThreadCreated = Creation(N.GetCurrentThread(), true); metadata.Desktop = checked((ulong)actual.ToInt64()); metadata.Name = name;
+                        metadata.Tid = tid; metadata.ThreadCreated = Creation(N.GetCurrentThread(), true); metadata.Desktop = checked((ulong)actual.ToInt64()); metadata.Name = name; metadata.Window = checked((ulong)witness.ToInt64());
                         Write(pipe, metadata.Encode()); if (Read(pipe) != "close") throw new Fault("phase", 0);
                     }
-                    finally { if (!N.SetThreadDesktop(old)) CloseFailed = true; }
+                    finally {
+                        // Destroy only this thread's owned witness BEFORE any
+                        // attempt to restore its original desktop association.
+                        if (witness != IntPtr.Zero && !N.DestroyWindow(witness)) CloseFailed = true;
+                        if (!N.SetThreadDesktop(old)) CloseFailed = true;
+                    }
                 }
             }
             }
@@ -269,6 +290,7 @@ internal static class DesktopContract
                     if (ObjectText(desktop.Value, 3) != "Desktop" || ObjectText(desktop.Value, 2) != m.Name) throw new Fault("desktop_identity", 0);
                     Verify(desktop.Value, 7, d);
                     Result result = new Result(); result.Name = profile.Name;
+                    CheckMembershipControls(result, desktop.Value, process.Value, thread.Value, m);
                     N.SetLastError(0); IntPtr actual = N.GetThreadDesktop(m.Tid); int error = Marshal.GetLastWin32Error();
                     result.Got = actual != IntPtr.Zero; result.Error = result.Got ? 0 : error;
                     result.Equal = result.Got && N.CompareObjectHandles(actual, desktop.Value);
@@ -295,6 +317,63 @@ internal static class DesktopContract
             catch { ReportFailure(pipe, new Fault("fixture_failure", 0)); return 2; }
         }
         return CloseFailed ? 1 : 0;
+    }
+    static void CheckMembershipControls(Result result, IntPtr desktop, IntPtr process, IntPtr thread, Metadata m)
+    {
+        CheckWitnessTarget(process, thread, m);
+        IntPtr window = new IntPtr(checked((long)m.Window));
+        if (N.IsWindowVisible(window) || N.GetAncestor(window, 2) != window) throw new Fault("witness_identity", 0);
+        StringBuilder className = new StringBuilder(64);
+        int length = N.GetClassNameW(window, className, className.Capacity);
+        if (length <= 0 || length >= className.Capacity || !String.Equals(className.ToString(), "STATIC", StringComparison.OrdinalIgnoreCase))
+            throw new Fault("witness_identity", 0);
+        uint wrongPid = N.GetCurrentProcessId(), wrongTid = N.GetCurrentThreadId();
+        if (wrongPid == m.Pid || wrongTid == m.Tid) throw new Fault("witness_negative_setup", 0);
+        IntPtr wrongDesktop = N.GetThreadDesktop(wrongTid); // Borrowed inspector Default.
+        if (wrongDesktop == IntPtr.Zero || !String.Equals(ObjectText(wrongDesktop, 2), "Default", StringComparison.OrdinalIgnoreCase) ||
+            N.CompareObjectHandles(wrongDesktop, desktop)) throw new Fault("witness_negative_setup", 0);
+        result.WindowMembership = WindowMember(desktop, window, m.Pid, m.Tid);
+        // Negative results must be clean complete enumerations, not API errors.
+        result.WrongPidRejected = !WindowMember(desktop, window, wrongPid, m.Tid);
+        result.WrongTidRejected = !WindowMember(desktop, window, m.Pid, wrongTid);
+        result.WrongDesktopRejected = !WindowMember(wrongDesktop, window, m.Pid, m.Tid);
+        result.WindowMembership &= WindowMember(desktop, window, m.Pid, m.Tid);
+        CheckWitnessTarget(process, thread, m);
+    }
+    static void CheckWitnessTarget(IntPtr process, IntPtr thread, Metadata m)
+    {
+        CheckProcess(process, m.Pid, m.Created);
+        if (N.WaitForSingleObject(thread, 0) != 258 || N.GetProcessIdOfThread(thread) != m.Pid || Creation(thread, true) != m.ThreadCreated)
+            throw new Fault("thread_identity", 0);
+    }
+    static bool WindowMember(IntPtr desktop, IntPtr window, uint expectedPid, uint expectedTid)
+    {
+        Budget(1);
+        uint beforePid; uint beforeTid = N.GetWindowThreadProcessId(window, out beforePid);
+        if (beforeTid == 0 || beforePid == 0) throw new Fault("witness_identity", 0);
+        int count = 0, seen = 0; bool matched = false, callbackFailed = false;
+        N.EnumWindow callback = delegate(IntPtr candidate, IntPtr unused) {
+            try {
+                Budget(1);
+                if (++count > 512) { callbackFailed = true; return false; }
+                if (candidate == window) {
+                    seen++;
+                    uint pid; uint tid = N.GetWindowThreadProcessId(candidate, out pid);
+                    if (tid == 0 || pid == 0) { callbackFailed = true; return false; }
+                    matched = pid == expectedPid && tid == expectedTid;
+                }
+                return true; // Always complete; finding a candidate is not an early-success stop.
+            } catch { callbackFailed = true; return false; } // No managed exception crosses native callback.
+        };
+        N.SetLastError(0);
+        bool complete = N.EnumDesktopWindows(desktop, callback, IntPtr.Zero);
+        int error = Marshal.GetLastWin32Error();
+        GC.KeepAlive(callback);
+        if (!complete || callbackFailed || seen > 1) throw new Fault("witness_enumeration", error);
+        uint afterPid; uint afterTid = N.GetWindowThreadProcessId(window, out afterPid);
+        if (afterTid == 0 || afterPid == 0 || afterPid != beforePid || afterTid != beforeTid) throw new Fault("witness_identity", 0);
+        Budget(1);
+        return seen == 1 && matched && beforePid == expectedPid && beforeTid == expectedTid;
     }
     static void SetOwn(IntPtr handle, uint kind, Descriptor descriptor)
     {
@@ -406,6 +485,8 @@ internal static class DesktopContract
             case "creation": case "session": case "object": case "number":
             case "boolean": case "frame": case "read_timeout": case "write_timeout":
             case "deadline": case "fixture_failure": return true;
+            case "witness_create": case "witness_identity": case "witness_enumeration":
+            case "witness_negative_setup": return true;
             default: return false;
         }
     }
@@ -461,6 +542,9 @@ internal static class DesktopContract
 
     static class N
     {
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal delegate bool EnumWindow(IntPtr window, IntPtr parameter);
         [StructLayout(LayoutKind.Sequential)] internal struct SA { internal int Length; internal IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] internal bool Inherit; }
         [StructLayout(LayoutKind.Sequential)] internal struct POINT { internal int X, Y; }
         [StructLayout(LayoutKind.Sequential)] internal struct MSG { internal IntPtr Window; internal uint Message; internal UIntPtr WParam; internal IntPtr LParam; internal uint Time; internal POINT Point; internal uint Private; }
@@ -508,5 +592,12 @@ internal static class DesktopContract
         [DllImport("user32.dll", SetLastError=true)] internal static extern IntPtr GetProcessWindowStation();
         [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] internal static extern bool GetUserObjectInformationW(IntPtr handle, int index, StringBuilder text, uint length, out uint needed);
         [DllImport("user32.dll", SetLastError=true)] internal static extern bool PeekMessageW(out MSG message, IntPtr window, uint min, uint max, uint remove);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] internal static extern IntPtr CreateWindowExW(uint extended, string className, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+        [DllImport("user32.dll", SetLastError=true)] internal static extern bool DestroyWindow(IntPtr window);
+        [DllImport("user32.dll", SetLastError=true)] internal static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll", SetLastError=true)] internal static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll", SetLastError=true)] internal static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] internal static extern int GetClassNameW(IntPtr window, StringBuilder name, int length);
+        [DllImport("user32.dll", SetLastError=true)] internal static extern bool EnumDesktopWindows(IntPtr desktop, EnumWindow callback, IntPtr parameter);
     }
 }
