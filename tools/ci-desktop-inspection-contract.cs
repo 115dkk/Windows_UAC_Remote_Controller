@@ -53,6 +53,7 @@ internal static class DesktopContract
         new Profile("desktop_inspect_plus_write_owner", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xa0081),
         new Profile("limited_dup_then_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff),
         new Profile("limited_dup_retire_after_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, true),
+        new Profile("all_standard_minimum_specific", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xf0081),
         new Profile("own_scratch_all_access", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0xf01ff)
     };
     sealed class Profile

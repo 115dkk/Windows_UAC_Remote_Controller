@@ -67,6 +67,24 @@ No window, queued-message removal, input injection or authority is created by
 this readiness step; independent native thread association still gates the QR.
 Resolution of stage29 remains subject to actual CI.
 
+The f418c3e controlled native access matrix isolated the missing capability:
+with unchanged process/thread access, GetThreadDesktop failed on limited desktop
+handles even under full descriptors; a separate full-access OpenDesktop handle
+to the independently duplicated/verified SAME object made the original-thread
+lookup succeed. Keeping the initial limited duplicate was compatible. Removing
+any of DELETE/WRITE_DAC/WRITE_OWNER from the otherwise full handle still failed
+in those tests. This is an observed Windows API requirement, not an assertion
+that our inspector performs these mutations.
+
+Grant DESKTOP_ALL_ACCESS (0xf01ff) only to SYSTEM and the exact service SID in
+the private desktop descriptor. The High renderer/creator BA mask stays0x20183,
+OW retains only READ_CONTROL, and process/thread/station masks do not change.
+The inspector retains its limited independent duplicate, then opens the already
+verified private object with the service-only association mask. Exact native
+object equality and actual original-thread lookup remain mandatory. No new
+input, desktop switch, descriptor setter or generic operation is exposed by the
+inspector. Actual SYSTEM production-profile pairing still requires full CI.
+
 The existing failing installed-app QR/pairing/signed-denial CI is the native
 regression test. Closed frame/command tests cover malformed and crossed inputs;
 quality, Clippy and Rust Analyzer run on CI. Physical Android hardware identity,

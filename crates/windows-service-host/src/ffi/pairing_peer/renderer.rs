@@ -64,6 +64,12 @@ pub(in crate::ffi) const THREAD_RIGHTS: u32 =
     THREAD_QUERY_LIMITED_INFORMATION.0 | THREAD_SYNCHRONIZE.0 | READ_CONTROL.0;
 pub(in crate::ffi) const DESKTOP_RIGHTS: u32 = 0x0002_0183;
 const DESKTOP_INSPECT: u32 = 0x0002_0081;
+// Native contract f418c3e: GetThreadDesktop rejects the limited duplicate even
+// when its descriptor allows full access. A separate full-access USER open of
+// the SAME independently verified object makes the original-TID lookup work.
+// This capability belongs only to SYSTEM/our service SID; the High renderer and
+// older High creator retain DESKTOP_RIGHTS and no ACL/owner/delete/hook access.
+const DESKTOP_ASSOCIATION: u32 = 0x000f_01ff;
 // check_station reads only UOI_TYPE/NAME/FLAGS. The startup station handle need
 // not carry READ_CONTROL; requesting it during duplication needlessly widens
 // the source access requirement without supporting any performed validation.
@@ -239,14 +245,17 @@ pub(in crate::ffi) fn descriptor(
             u32::from_le_bytes(word.try_into().map_err(|_| Error::Malformed)?)
         ));
     }
-    let (admin, service) = match profile {
-        Profile::Process => (PROCESS_RIGHTS, PROCESS_RIGHTS),
-        Profile::Thread => (THREAD_RIGHTS, THREAD_RIGHTS),
-        Profile::Desktop => (DESKTOP_RIGHTS, DESKTOP_INSPECT),
-    };
+    let (admin, service) = profile_rights(profile);
     SecurityDescriptor::from_sddl(&format!(
         "O:BAG:BAD:P(A;;0x{service:08x};;;SY)(A;;0x{admin:08x};;;BA)(A;;0x{service:08x};;;{principal})(A;;RC;;;OW)"
     )).map_err(Error::Service)
+}
+fn profile_rights(profile: Profile) -> (u32, u32) {
+    match profile {
+        Profile::Process => (PROCESS_RIGHTS, PROCESS_RIGHTS),
+        Profile::Thread => (THREAD_RIGHTS, THREAD_RIGHTS),
+        Profile::Desktop => (DESKTOP_RIGHTS, DESKTOP_ASSOCIATION),
+    }
 }
 struct Descriptor(PSECURITY_DESCRIPTOR);
 impl Drop for Descriptor {
@@ -782,6 +791,15 @@ impl Drop for RendererRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn association_capability_is_service_only_in_the_actual_descriptor_profile() {
+        assert_eq!(profile_rights(Profile::Desktop), (0x20183, 0xf01ff));
+        assert_eq!(DESKTOP_INSPECT, 0x20081);
+        assert_eq!(profile_rights(Profile::Process), (0x121040, 0x121040));
+        assert_eq!(profile_rights(Profile::Thread), (0x120800, 0x120800));
+        assert_eq!(DESKTOP_RIGHTS & 0xd0000, 0); // No delete/DACL/owner to BA.
+        assert_eq!(DESKTOP_RIGHTS & 0x38, 0); // No hook/journal to BA.
+    }
     #[test]
     fn station_inspection_does_not_request_unused_security_access() {
         assert_eq!(STATION_INSPECT, 0x0000_0002);

@@ -122,7 +122,9 @@ impl Inspector for NativeInspector {
             // descriptors. Establish an explicit USER-side open as well; native
             // CI must qualify whether this resolves that association lookup.
             // Open ONLY the already retained/verified private object's name in
-            // this process's WinSta0, with the same limited inspection rights.
+            // this process's WinSta0, with the service-only association rights
+            // qualified by native contract f418c3e. The initial duplicate stays
+            // limited; the High creator/renderer never receives this capability.
             // Object equality is mandatory; the name is never identity evidence.
             let desktop = bound.desktop.as_ref().ok_or(Error::InvalidPhase)?;
             if !matches!(desktop.kind, ObjectKind::Desktop)
@@ -141,14 +143,14 @@ impl Inspector for NativeInspector {
                 .collect();
             bound.identity()?;
             // SAFETY: fixed generated name, same-session current WinSta0, exact
-            // noninherited read/descriptor inspection mask. No desktop switch,
+            // noninherited service-only association mask. No desktop switch,
             // thread assignment, object creation, ACL or privilege mutation.
             let opened = unsafe {
                 windows::Win32::System::StationsAndDesktops::OpenDesktopW(
                     windows::core::PCWSTR(name.as_ptr()),
                     windows::Win32::System::StationsAndDesktops::DESKTOP_CONTROL_FLAGS(0),
                     false,
-                    DESKTOP_INSPECT,
+                    DESKTOP_ASSOCIATION,
                 )
             }
             .map_err(|error| native(30, error))?;
