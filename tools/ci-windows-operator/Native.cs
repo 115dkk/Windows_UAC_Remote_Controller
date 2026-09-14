@@ -45,6 +45,11 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] internal static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll", SetLastError = true)] internal static extern bool BitBlt(IntPtr target, int x, int y, int width, int height, IntPtr source, int sx, int sy, uint operation);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int width, int height);
+    [DllImport("gdi32.dll")] internal static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateSolidBrush(uint color);
+    [DllImport("user32.dll")] internal static extern int FillRect(IntPtr dc, ref Rect rect, IntPtr brush);
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr CreateFont(int height, int width, int escapement, int orientation, int weight, uint italic, uint underline, uint strike, uint charset, uint output, uint clip, uint quality, uint family, string face);
     [DllImport("gdi32.dll")] internal static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
     [DllImport("gdi32.dll")] internal static extern bool DeleteObject(IntPtr obj);

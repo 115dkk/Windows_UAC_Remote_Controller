@@ -136,23 +136,8 @@ internal static class DigitPixels
             var templates = new Glyph[10];
             for (int digit = 0; digit < 10; digit++)
             {
-                using (var bitmap = new Bitmap(192, 192, PixelFormat.Format32bppRgb))
+                using (var bitmap = TemplateBitmap(font, digit))
                 {
-                    using (var graphics = Graphics.FromImage(bitmap))
-                    {
-                        graphics.Clear(Color.White);
-                        IntPtr dc = graphics.GetHdc();
-                        IntPtr prior = Native.SelectObject(dc, font);
-                        try
-                        {
-                            Native.SetTextColor(dc, 0x00352C15); // renderer RGB #152c35
-                            Native.SetBkMode(dc, 1);
-                            var rect = new Native.Rect { Left = 0, Top = 0, Right = 192, Bottom = 192 };
-                            Program.Require(Native.DrawText(dc, digit.ToString(), 1, ref rect, 0x0001 | 0x0004 | 0x0020 | 0x0800) > 0,
-                                "template_draw_failed");
-                        }
-                        finally { Native.SelectObject(dc, prior); graphics.ReleaseHdc(dc); }
-                    }
                     var glyphs = Split(bitmap);
                     Program.Require(glyphs.Count == 1, "template_glyph_rejected");
                     templates[digit] = glyphs[0];
@@ -165,6 +150,61 @@ internal static class DigitPixels
             if (font != IntPtr.Zero) Native.DeleteObject(font);
             if (resource != IntPtr.Zero) Native.RemoveFontMemResourceEx(resource);
             pinned.Free();
+        }
+    }
+
+    private static bool Valid(IntPtr handle) { return handle != IntPtr.Zero && handle != new IntPtr(-1); }
+
+    private static Bitmap TemplateBitmap(IntPtr font, int digit)
+    {
+        // Match the product's compatible memory DC/bitmap rendering. Drawing
+        // text directly into a GDI+ GetHdc bitmap uses different rasterization,
+        // which the independent public-pixel canary rejects even at 96 DPI.
+        // The screen DC supplies format only; source pixels are our fixed digit.
+        IntPtr screen = IntPtr.Zero, dc = IntPtr.Zero, bitmap = IntPtr.Zero, brush = IntPtr.Zero;
+        IntPtr oldBitmap = IntPtr.Zero, oldFont = IntPtr.Zero;
+        Bitmap result = null;
+        try
+        {
+            screen = Native.GetDC(IntPtr.Zero);
+            Program.Require(Valid(screen), "template_draw_failed");
+            dc = Native.CreateCompatibleDC(screen);
+            Program.Require(Valid(dc), "template_draw_failed");
+            bitmap = Native.CreateCompatibleBitmap(screen, 192, 192);
+            Program.Require(Valid(bitmap), "template_draw_failed");
+            oldBitmap = Native.SelectObject(dc, bitmap);
+            Program.Require(Valid(oldBitmap), "template_draw_failed");
+            oldFont = Native.SelectObject(dc, font);
+            Program.Require(Valid(oldFont), "template_draw_failed");
+            brush = Native.CreateSolidBrush(0x00ffffff);
+            Program.Require(Valid(brush), "template_draw_failed");
+            var rect = new Native.Rect { Right = 192, Bottom = 192 };
+            Program.Require(Native.FillRect(dc, ref rect, brush) != 0, "template_draw_failed");
+            Native.SetTextColor(dc, 0x00352C15);
+            Native.SetBkMode(dc, 1);
+            Program.Require(Native.DrawText(dc, digit.ToString(), 1, ref rect, 0x0001 | 0x0004 | 0x0020 | 0x0800) > 0,
+                "template_draw_failed");
+            result = new Bitmap(192, 192, PixelFormat.Format32bppRgb);
+            using (var graphics = Graphics.FromImage(result))
+            {
+                IntPtr target = graphics.GetHdc();
+                try { Program.Require(Native.BitBlt(target, 0, 0, 192, 192, dc, 0, 0, 0x00cc0020), "template_draw_failed"); }
+                finally { graphics.ReleaseHdc(target); }
+            }
+            return result;
+        }
+        catch { if (result != null) result.Dispose(); throw; }
+        finally
+        {
+            bool cleaned = true;
+            if (Valid(oldFont)) cleaned &= Valid(Native.SelectObject(dc, oldFont));
+            if (Valid(oldBitmap)) cleaned &= Valid(Native.SelectObject(dc, oldBitmap));
+            if (brush != IntPtr.Zero) cleaned &= Native.DeleteObject(brush);
+            if (bitmap != IntPtr.Zero) cleaned &= Native.DeleteObject(bitmap);
+            if (dc != IntPtr.Zero) cleaned &= Native.DeleteDC(dc);
+            if (screen != IntPtr.Zero) cleaned &= Native.ReleaseDC(IntPtr.Zero, screen) != 0;
+            if (!cleaned && result != null) result.Dispose();
+            Program.Require(cleaned, "template_draw_failed");
         }
     }
 }
