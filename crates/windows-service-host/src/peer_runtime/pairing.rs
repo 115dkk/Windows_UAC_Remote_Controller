@@ -1251,7 +1251,13 @@ impl ServicePairing {
                             .pc_decision(decision)
                             .map_err(|_| Failure::Enrollment)?;
                     }
-                    if !self.commit_requested
+                    // A retired ceremony must not still authorize its registry
+                    // mutation. Cancellation only sets the worker's stop token,
+                    // so an event queued before the window expired, the policy
+                    // lease was lost or the native pair stopped matching can
+                    // still arrive here. Refuse it: the drain wipes the rest.
+                    if self.state == State::Active
+                        && !self.commit_requested
                         && self
                             .enrollment
                             .as_ref()
@@ -1863,6 +1869,20 @@ mod tests {
         assert!(!owner.wants_preparation_context());
         assert!(owner.preparation.is_some()); // Acceptance still reads it.
         owner.poll_shutdown(); // Pure fixture cleanup, no native factory or query.
+        assert_eq!(owner.remaining_owners(), 0);
+    }
+    #[test]
+    fn a_retired_ceremony_leaves_the_state_that_may_request_a_commit() {
+        // Cancelling the enrollment only sets its worker stop token, so an
+        // already queued readiness event can still reach the commit arm. That
+        // arm now requires Active, and this locks the precondition it relies
+        // on: no retirement reason leaves the owner in Active.
+        let mut owner = half_bound_active_owner();
+        assert_eq!(owner.state, State::Active);
+        owner.retire(Some(Failure::Window), true);
+        assert_ne!(owner.state, State::Active);
+        assert!(!owner.commit_requested);
+        owner.poll_shutdown();
         assert_eq!(owner.remaining_owners(), 0);
     }
     #[test]
