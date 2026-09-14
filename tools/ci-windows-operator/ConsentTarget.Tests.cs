@@ -24,6 +24,9 @@ internal static class ConsentTargetTests
             !ConsentTarget.HasConflictingPath("different.exe") ||
             ConsentTarget.IsLocationLabel("Program location: " + image) ||
             ConsentTarget.IsLocationLabel("uac-service.exe")) return 3;
+        if (ConsentTarget.IsAuxiliaryWindow(false, 0) || ConsentTarget.IsAuxiliaryWindow(false, 0x8) ||
+            !ConsentTarget.IsAuxiliaryWindow(true, 0) || !ConsentTarget.IsAuxiliaryWindow(false, 0x80) ||
+            !ConsentTarget.IsAuxiliaryWindow(false, 0x08000000) || !ConsentTarget.IsAuxiliaryWindow(false, 0x08000080)) return 4;
         Console.WriteLine("Pure consent target recognizer fixtures passed; native UI remains unverified.");
         return 0;
     }

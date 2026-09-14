@@ -145,6 +145,14 @@ pub enum PairingPeerStage {
     QueryUacPolicy,
     WatchUacPolicy,
     CloseUacPolicy,
+    // Append-only diagnostic distinctions. No access mask, admission rule or
+    // error outcome changes; retirement still logs only after invalidation.
+    OpenStarterProcess,
+    OpenHelperProcess,
+    OpenManagementProcess,
+    QueryProcessTimes,
+    QueryPeerImage,
+    QueryManagementImage,
 }
 
 /// Fixed categories/numeric codes only; native error strings and identity data
@@ -370,6 +378,10 @@ impl PairingServerEndpoint {
     pub fn authenticate_connected(self) -> Result<PairingPeer, PairingPeerError> {
         self.context.recheck()?;
         let (pid, session) = pipe_identity(self.pipe.raw())?;
+        let open_stage = match self.role {
+            PairingPeerRole::Starter => PairingPeerStage::OpenStarterProcess,
+            PairingPeerRole::Helper => PairingPeerStage::OpenHelperProcess,
+        };
         // SAFETY: OS-observed PID only; query/synchronize rights, not injection,
         // termination, duplication or token modification. Handle is retained.
         let process = unsafe {
@@ -379,8 +391,8 @@ impl PairingServerEndpoint {
                 pid,
             )
         }
-        .map_err(|e| native_error(PairingPeerStage::QueryProcess, e))?;
-        let process = Handle::new(process, PairingPeerStage::QueryProcess)?;
+        .map_err(|e| native_error(open_stage, e))?;
+        let process = Handle::new(process, open_stage)?;
         let created = process_identity(process.raw(), pid)?;
         check_image(&self, process.raw())?;
         let token = TokenFacts::observe(process.raw())?;
@@ -605,8 +617,8 @@ impl ManagementServerEndpoint {
                 pid,
             )
         }
-        .map_err(|error| native_error(PairingPeerStage::QueryProcess, error))?;
-        let process = Handle::new(process, PairingPeerStage::QueryProcess)?;
+        .map_err(|error| native_error(PairingPeerStage::OpenManagementProcess, error))?;
+        let process = Handle::new(process, PairingPeerStage::OpenManagementProcess)?;
         let created = process_identity(process.raw(), pid)?;
         let token = TokenFacts::observe(process.raw())?;
         let image = process_image(process.raw())?;
@@ -700,7 +712,7 @@ fn process_image(process: HANDLE) -> Result<PathBuf, PairingPeerError> {
             &mut length,
         )
     }
-    .map_err(|error| native_error(PairingPeerStage::QueryProcess, error))?;
+    .map_err(|error| native_error(PairingPeerStage::QueryManagementImage, error))?;
     let units = buffer
         .get(..length as usize)
         .filter(|value| !value.is_empty() && !value.contains(&0))
@@ -879,7 +891,7 @@ pub(super) fn process_identity(
     );
     // SAFETY: same live handle and initialized disjoint fixed-size outputs.
     unsafe { GetProcessTimes(process, &mut created, &mut exit, &mut kernel, &mut user) }
-        .map_err(|e| native_error(PairingPeerStage::QueryProcess, e))?;
+        .map_err(|e| native_error(PairingPeerStage::QueryProcessTimes, e))?;
     let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
     if created == 0 {
         return Err(PairingPeerError::Malformed);
@@ -898,7 +910,7 @@ fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), 
             &mut length,
         )
     }
-    .map_err(|e| native_error(PairingPeerStage::QueryProcess, e))?;
+    .map_err(|e| native_error(PairingPeerStage::QueryPeerImage, e))?;
     let units = buffer
         .get(..length as usize)
         .filter(|v| !v.is_empty() && !v.contains(&0))

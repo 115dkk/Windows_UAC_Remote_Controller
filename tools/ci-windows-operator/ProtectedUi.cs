@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -103,6 +104,20 @@ internal static class ProtectedUi
         return name.ToString();
     }
 
+    private static bool OrdinaryConsentWindow(IntPtr window)
+    {
+        // consent.exe also owns visible auxiliary windows. Follow the already
+        // qualified product probe's owner/TOOLWINDOW/NOACTIVATE filter, retaining
+        // the independent exact location/provider/Yes checks below.
+        Native.SetLastError(0);
+        IntPtr owner = Native.GetWindow(window, 4); // GW_OWNER
+        Program.Require(owner != IntPtr.Zero || Marshal.GetLastWin32Error() == 0, "window_class_unavailable");
+        Native.SetLastError(0);
+        IntPtr style = Native.GetWindowLongPtr(window, -20); // GWL_EXSTYLE
+        Program.Require(style != IntPtr.Zero || Marshal.GetLastWin32Error() == 0, "window_class_unavailable");
+        return !ConsentTarget.IsAuxiliaryWindow(owner != IntPtr.Zero, unchecked((uint)style.ToInt64()));
+    }
+
     internal static void ApprovePairingConsent()
     {
         Program.Require(!consentConsumed, "one_consent_only");
@@ -152,7 +167,7 @@ internal static class ProtectedUi
                         {
                             uint pid;
                             Native.GetWindowThreadProcessId(window, out pid);
-                            return pid == consent.Id;
+                            return pid == consent.Id && OrdinaryConsentWindow(window);
                         }).ToList();
                         if (owned.Count == 0)
                         {
@@ -249,6 +264,7 @@ internal static class ProtectedUi
                         Program.Deadline();
                         Program.Require(Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds, "deadline_elapsed");
                         StillInput(name);
+                        Program.Require(OrdinaryConsentWindow(owned[0]), "ambiguous_consent_windows");
                         consentConsumed = true; // Consumed before any potentially partial invoke.
                         ((InvokePattern)pattern).Invoke();
                         return true;

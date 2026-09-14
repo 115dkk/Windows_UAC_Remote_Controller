@@ -7,6 +7,13 @@ internal static class ConsentTarget
 {
     internal const string InstalledImage = @"C:\Program Files\휴대폰 승인\uac-service.exe";
 
+    // Same ordinary-window qualification as the product's native prompt probe.
+    // This only filters candidates; it never qualifies the executable or Yes.
+    internal static bool IsAuxiliaryWindow(bool hasOwner, uint extendedStyle)
+    {
+        return hasOwner || (extendedStyle & (0x00000080u | 0x08000000u)) != 0;
+    }
+
     internal static bool IsLocationLabel(string text)
     {
         return text == "Program location:" || text == "Program location" ||

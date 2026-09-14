@@ -32,6 +32,9 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] internal static extern bool IsWindowEnabled(IntPtr window);
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)] internal static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+    [DllImport("kernel32.dll")] internal static extern void SetLastError(uint error);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(IntPtr window, StringBuilder name, int length);
     [DllImport("user32.dll")] internal static extern bool GetClientRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr window, ref Point point);

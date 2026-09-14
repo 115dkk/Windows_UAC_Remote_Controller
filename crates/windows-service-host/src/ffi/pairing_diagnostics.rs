@@ -187,6 +187,26 @@ fn emit(point: Point, class: &'static str, stage: &str, code: u32) {
 mod tests {
     use super::*;
     #[test]
+    fn process_observation_stages_remain_closed_distinct_tokens() {
+        use crate::PairingPeerStage;
+        let stages = [
+            PairingPeerStage::OpenStarterProcess,
+            PairingPeerStage::OpenHelperProcess,
+            PairingPeerStage::OpenManagementProcess,
+            PairingPeerStage::QueryProcessTimes,
+            PairingPeerStage::QueryPeerImage,
+            PairingPeerStage::QueryManagementImage,
+        ];
+        let mut labels = std::collections::BTreeSet::new();
+        for stage in stages {
+            let label = format!("{stage:?}");
+            assert!(labels.insert(label.clone()));
+            let text =
+                record_text(Point::ServiceFailure, "peer-native", &label, 0x80070005).unwrap();
+            assert!(text.ends_with("code=80070005"));
+        }
+    }
+    #[test]
     fn diagnostic_budget_is_fixed_without_wrapping() {
         let counter = AtomicU32::new(0);
         for _ in 0..32 {
