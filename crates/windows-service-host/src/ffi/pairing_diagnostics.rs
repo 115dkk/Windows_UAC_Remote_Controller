@@ -196,6 +196,8 @@ mod tests {
             PairingPeerStage::QueryProcessTimes,
             PairingPeerStage::QueryPeerImage,
             PairingPeerStage::QueryManagementImage,
+            PairingPeerStage::QueryStarterImage,
+            PairingPeerStage::QueryHelperImage,
         ];
         let mut labels = std::collections::BTreeSet::new();
         for stage in stages {

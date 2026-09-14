@@ -18,6 +18,18 @@ internal static class ProtectedUi
     private const string RendererClass = "UacRemoteControllerPairingRenderer";
     private static bool consentConsumed;
     private static bool detailsExpanded;
+    private static volatile string[] lastTopologyLines;
+
+    // Publish one completed snapshot only. Callers cannot mutate the retained
+    // diagnostic array; none of these observations participate in admission.
+    internal static string[] LastTopologyLines
+    {
+        get
+        {
+            var snapshot = lastTopologyLines;
+            return snapshot == null ? null : (string[])snapshot.Clone();
+        }
+    }
 
     internal static List<Process> ConsentProcesses()
     {
@@ -334,8 +346,9 @@ internal static class ProtectedUi
     {
         // One failure-only topology record per text node: no text, path, command,
         // code, pixels or pending identifier. Runtime IDs are hashed.
-        Console.Error.WriteLine("CI consent topology summary: textNodes=" + elements.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        foreach (var element in elements)
+        var lines = new List<string>();
+        lines.Add("CI consent topology summary: textNodes=" + elements.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var element in elements.Take(32))
         {
             var current = element.Current;
             string text = current.Name ?? "";
@@ -344,6 +357,14 @@ internal static class ProtectedUi
             // Hex-like, long and arbitrary string-valued IDs are redacted.
             if (!Regex.IsMatch(automation, "\\A(?:[0-9]{1,5}|[A-Za-z_][A-Za-z_.-]{0,39})\\z")) automation = "redacted";
             bool expected = ConsentTarget.IsInstalledLocation(text);
+            bool combinedLocation = false;
+            foreach (string prefix in new[] { "Program location:", "Program location", "프로그램 위치:", "프로그램 위치" })
+                if (text.StartsWith(prefix, StringComparison.Ordinal) &&
+                    ConsentTarget.IsInstalledLocation(text.Substring(prefix.Length).Trim())) combinedLocation = true;
+            bool hasFormat = false;
+            for (int i = 0; i < text.Length; i++)
+                if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(text, i) ==
+                    System.Globalization.UnicodeCategory.Format) hasFormat = true;
             var next = TreeWalker.RawViewWalker.GetNextSibling(element);
             string nextType = "None";
             bool nextExpectedPath = false;
@@ -355,15 +376,22 @@ internal static class ProtectedUi
                     nextCurrent.ControlType == ControlType.Hyperlink ? "Hyperlink" : "Other";
                 nextExpectedPath = ConsentTarget.IsInstalledLocation(nextCurrent.Name ?? "");
             }
-            Console.Error.WriteLine("CI consent topology: type=Text id=" + automation +
+            lines.Add("CI consent topology: type=Text id=" + automation +
                 " node=" + RuntimeHash(element, consentPid) +
                 " parent=" + RuntimeHash(TreeWalker.RawViewWalker.GetParent(element), consentPid) +
                 " locationLabel=" + ConsentTarget.IsLocationLabel(text) +
+                " locationLabelTrimmed=" + ConsentTarget.IsLocationLabel(text.Trim()) +
+                " combinedLocation=" + combinedLocation +
+                " hasFormat=" + hasFormat +
                 " expectedPath=" + expected +
                 " closedPair=" + (expected && text.IndexOf(" pair ", StringComparison.Ordinal) >= 0) +
                 " conflictingPath=" + ConsentTarget.HasConflictingPath(text) +
                 " nextType=" + nextType + " nextExpectedPath=" + nextExpectedPath);
         }
+        lastTopologyLines = lines.ToArray();
+        // Stdio is supplementary; the failure envelope carries this snapshot
+        // over the existing private pipe even when PsExec does not relay stderr.
+        foreach (string line in lines) Console.Error.WriteLine(line);
     }
 
     // Return zero only while the invitation has not become the active desktop.

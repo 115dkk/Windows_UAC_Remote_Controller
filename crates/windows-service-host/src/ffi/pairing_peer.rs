@@ -153,6 +153,8 @@ pub enum PairingPeerStage {
     QueryProcessTimes,
     QueryPeerImage,
     QueryManagementImage,
+    QueryStarterImage,
+    QueryHelperImage,
 }
 
 /// Fixed categories/numeric codes only; native error strings and identity data
@@ -901,6 +903,10 @@ pub(super) fn process_identity(
 fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), PairingPeerError> {
     let mut buffer = [0u16; 1024];
     let mut length = buffer.len() as u32;
+    let image_stage = match endpoint.role {
+        PairingPeerRole::Starter => PairingPeerStage::QueryStarterImage,
+        PairingPeerRole::Helper => PairingPeerStage::QueryHelperImage,
+    };
     // SAFETY: retained process, DOS-name mode, initialized bounded output only.
     unsafe {
         QueryFullProcessImageNameW(
@@ -910,7 +916,7 @@ fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), 
             &mut length,
         )
     }
-    .map_err(|e| native_error(PairingPeerStage::QueryPeerImage, e))?;
+    .map_err(|e| native_error(image_stage, e))?;
     let units = buffer
         .get(..length as usize)
         .filter(|v| !v.is_empty() && !v.contains(&0))

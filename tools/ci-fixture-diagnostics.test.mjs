@@ -34,3 +34,20 @@ test('shared vocabulary is bounded, unique and fixed-token only', () => {
     assert.ok(values.every(value => /^[a-z][a-z0-9_]{0,63}$/.test(value)));
   }
 });
+
+test('private failure topology accepts only complete bounded operator structure', () => {
+  const header = 'CI consent topology summary: textNodes=1';
+  const row = 'CI consent topology: type=Text id=1024 node=0123456789ABCDEF parent=FEDCBA9876543210 locationLabel=False locationLabelTrimmed=False combinedLocation=True hasFormat=False expectedPath=False closedPair=False conflictingPath=True nextType=None nextExpectedPath=False';
+  const value = { status: 'failed', source: 'operator', stage: 'initial_consent', gate: 'conflicting_consent_path', topologyLines: [header, row] };
+  const result = fixtureDiagnostic(value);
+  assert.equal(result.topology.textNodes, 1);
+  assert.equal(result.topology.rows[0].combinedLocation, true);
+  assert.ok(!Object.hasOwn(result, 'topologyLines'));
+  for (const invalid of [
+    { ...value, source: 'bridge' }, { ...value, stage: 'startup' },
+    { ...value, topologyLines: [header] }, { ...value, topologyLines: [header, row + ' raw=secret'] },
+    { ...value, topologyLines: [header, row.replace('id=1024', 'id=private/path')] },
+    { ...value, topologyLines: [header + '\n' + row] }, { ...value, topologyLines: Array(34).fill(header) },
+    { ...value, topologyLines: ['CI consent topology summary: textNodes=257'] },
+  ]) assert.equal(fixtureDiagnostic(invalid), null);
+});

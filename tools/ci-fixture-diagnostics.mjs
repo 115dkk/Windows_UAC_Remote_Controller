@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // CI evidence is reconstructed from closed values, never copied from stderr.
 import { readFileSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
+import { projectConsentTopology } from './ci-operator-process.mjs';
 const vocabulary = JSON.parse(readFileSync(new URL('./ci-windows-operator/diagnostic-vocabulary.json', import.meta.url), 'utf8'));
 const exactKeys = (value, keys) => Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
@@ -11,9 +12,23 @@ export function fixtureDiagnostic(value) {
     return { source: 'phone', stage: 'fixture', reason: value.reason };
   }
   const stages = value.source === 'operator' ? vocabulary.operatorStages : value.source === 'bridge' ? vocabulary.bridgeStages : null;
-  if (!stages || !exactKeys(value, ['status', 'source', 'stage', 'gate']) || value.status !== 'failed' ||
+  const hasTopology = Object.hasOwn(value, 'topologyLines');
+  if (!stages || !exactKeys(value, ['status', 'source', 'stage', 'gate', ...(hasTopology ? ['topologyLines'] : [])]) || value.status !== 'failed' ||
       !stages.includes(value.stage) || !vocabulary.gates.includes(value.gate)) return null;
-  return { source: value.source, stage: value.stage, reason: value.gate };
+  const record = { source: value.source, stage: value.stage, reason: value.gate };
+  if (hasTopology) {
+    const lines = value.topologyLines;
+    if (value.source !== 'operator' || value.stage !== 'initial_consent' || !Array.isArray(lines) ||
+        lines.length < 1 || lines.length > 33 || lines.some(line => typeof line !== 'string' || line.length > 512 || /[\r\n]/.test(line)) ||
+        lines.reduce((sum, line) => sum + line.length, 0) > 16384) return null;
+    const topology = projectConsentTopology(lines.join('\n'));
+    if (topology.textNodes === null || lines[0] !== `CI consent topology summary: textNodes=${topology.textNodes}` ||
+        lines.length !== 1 + Math.min(topology.textNodes, 32) || topology.rows.length !== lines.length - 1 ||
+        topology.rows.some(row => !Object.hasOwn(row, 'locationLabelTrimmed') || !Object.hasOwn(row, 'combinedLocation') ||
+          !Object.hasOwn(row, 'hasFormat') || !Object.hasOwn(row, 'nextType'))) return null;
+    record.topology = topology;
+  }
+  return record;
 }
 
 export function operatorStartupDiagnostic() {

@@ -16,16 +16,19 @@ export function projectConsentTopology(text) {
   const id = '(redacted|[0-9]{1,5}|[A-Za-z_][A-Za-z_.-]{0,39})';
   const hash = '(none|unbound|[A-F0-9]{16})';
   const boolean = '(True|False)';
-  const pattern = new RegExp(`^CI consent topology: type=Text id=${id} node=${hash} parent=${hash} locationLabel=${boolean} expectedPath=${boolean} closedPair=${boolean} conflictingPath=${boolean}(?: nextType=(None|Text|Button|Hyperlink|Other) nextExpectedPath=${boolean})?$`);
+  const pattern = new RegExp(`^CI consent topology: type=Text id=${id} node=${hash} parent=${hash} locationLabel=${boolean}(?: locationLabelTrimmed=${boolean} combinedLocation=${boolean} hasFormat=${boolean})? expectedPath=${boolean} closedPair=${boolean} conflictingPath=${boolean}(?: nextType=(None|Text|Button|Hyperlink|Other) nextExpectedPath=${boolean})?$`);
   for (const line of text.split(/[\r\n]+/)) {
     const summary = /^CI consent topology summary: textNodes=(0|[1-9][0-9]{0,2})$/.exec(line);
     if (summary && Number(summary[1]) <= 256) { textNodes = Number(summary[1]); continue; }
     const match = pattern.exec(line);
     if (!match) continue;
     const row = { type: 'Text', id: match[1], node: match[2], parent: match[3],
-      locationLabel: match[4] === 'True', expectedPath: match[5] === 'True',
-      closedPair: match[6] === 'True', conflictingPath: match[7] === 'True' };
-    if (match[8]) { row.nextType = match[8]; row.nextExpectedPath = match[9] === 'True'; }
+      locationLabel: match[4] === 'True', expectedPath: match[8] === 'True',
+      closedPair: match[9] === 'True', conflictingPath: match[10] === 'True' };
+    if (match[5] !== undefined) {
+      row.locationLabelTrimmed = match[5] === 'True'; row.combinedLocation = match[6] === 'True'; row.hasFormat = match[7] === 'True';
+    }
+    if (match[11]) { row.nextType = match[11]; row.nextExpectedPath = match[12] === 'True'; }
     if (rows.length === 32) break;
     rows.push(row);
   }

@@ -8,12 +8,20 @@ using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 internal static class Diagnostics
 {
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 32768 };
     private static readonly Dictionary<string, HashSet<string>> Vocabulary = Load();
+    private static readonly Regex TopologyHeader = new Regex(@"\ACI consent topology summary: textNodes=(0|[1-9][0-9]{0,2})\z", RegexOptions.CultureInvariant);
+    private static readonly Regex TopologyRow = new Regex(
+        @"\ACI consent topology: type=Text id=(?:[0-9]{1,5}|[A-Za-z_][A-Za-z_.-]{0,39})" +
+        @" node=(?:none|unbound|[0-9A-F]{16}) parent=(?:none|unbound|[0-9A-F]{16})" +
+        @" locationLabel=(?:True|False) locationLabelTrimmed=(?:True|False) combinedLocation=(?:True|False) hasFormat=(?:True|False)" +
+        @" expectedPath=(?:True|False) closedPair=(?:True|False) conflictingPath=(?:True|False)" +
+        @" nextType=(?:None|Text|Button|Hyperlink|Other) nextExpectedPath=(?:True|False)\z", RegexOptions.CultureInvariant);
 
     private static Dictionary<string, HashSet<string>> Load()
     {
@@ -53,14 +61,57 @@ internal static class Diagnostics
     internal static bool TryValidate(Dictionary<string, object> value, string requiredSource, out object record)
     {
         record = null;
-        if (value == null || value.Count != 4) return false;
+        if (value == null || (value.Count != 4 && value.Count != 5)) return false;
         object status, source, stage, gate;
         if (!value.TryGetValue("status", out status) || !value.TryGetValue("source", out source) ||
             !value.TryGetValue("stage", out stage) || !value.TryGetValue("gate", out gate) ||
             !(status is string) || (string)status != "failed" || !(source is string) || (string)source != requiredSource ||
             !(stage is string) || !(gate is string)) return false;
-        try { record = Failure((string)source, (string)stage, (string)gate); return true; }
+        try
+        {
+            object failure = Failure((string)source, (string)stage, (string)gate);
+            if (value.Count == 4) { record = failure; return true; }
+            object supplied;
+            string[] topology;
+            if ((string)source != "operator" || (string)stage != "initial_consent" ||
+                !value.TryGetValue("topologyLines", out supplied) || !TryValidateTopology(supplied, out topology)) return false;
+            record = FailureWithTopology((string)source, (string)stage, (string)gate, topology);
+            return true;
+        }
         catch { return false; }
+    }
+
+    private static object FailureWithTopology(string source, string stage, string gate, string[] topology)
+    {
+        return new { status = "failed", source = source, stage = stage, gate = gate, topologyLines = topology };
+    }
+
+    private static bool TryValidateTopology(object supplied, out string[] topology)
+    {
+        topology = null;
+        // JSON arrays arrive as object[]. Requiring an array also rejects strings,
+        // dictionaries and arbitrary enumerable objects at this untrusted seam.
+        var input = supplied as object[];
+        if (input == null || input.Length < 1 || input.Length > 33) return false;
+        var canonical = new string[input.Length];
+        int total = 0;
+        for (int i = 0; i < input.Length; i++)
+        {
+            string line = input[i] as string;
+            if (line == null || line.Length > 512 || (total += line.Length) > 16384) return false;
+            if (i == 0)
+            {
+                var match = TopologyHeader.Match(line);
+                int count;
+                if (!match.Success || !Int32.TryParse(match.Groups[1].Value,
+                    System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out count) ||
+                    count > 256 || input.Length != 1 + Math.Min(count, 32)) return false;
+            }
+            else if (!TopologyRow.IsMatch(line)) return false;
+            canonical[i] = line;
+        }
+        topology = canonical;
+        return true;
     }
 
     internal static void TryWrite(TextWriter writer, string source, string stage, Exception error)
@@ -70,7 +121,12 @@ internal static class Diagnostics
         {
             var failure = error as Program.GateFailure;
             string gate = failure != null && Vocabulary["gates"].Contains(failure.Code) ? failure.Code : "unexpected_failure";
-            writer.Write(Json.Serialize(Failure(source, stage, gate)));
+            object record = Failure(source, stage, gate);
+            string[] topology;
+            if (source == "operator" && stage == "initial_consent" &&
+                TryValidateTopology(ProtectedUi.LastTopologyLines, out topology))
+                record = FailureWithTopology(source, stage, gate, topology);
+            writer.Write(Json.Serialize(record));
             writer.Write('\n');
             writer.Flush();
         }
