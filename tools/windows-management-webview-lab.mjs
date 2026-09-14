@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Real protected GuiMedium app + original WebView. No fake bridge or mutation.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { provePairingLaunch } from './windows-pairing-webview-lab.mjs';
 import { proveFullPairing } from './windows-full-pairing-lab.mjs';
+import { windowsPowerShell as ps } from './windows-ci-powershell.mjs';
 
 if (process.platform !== 'win32' || process.env.CI !== 'true' || process.env.GITHUB_ACTIONS !== 'true'
     || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Disposable hosted Windows only');
@@ -25,12 +25,6 @@ assert.equal(launch.token.sessionNonzero, true);
 const profile = resolve(launch.profileDirectory);
 assert.ok(profile.startsWith(resolve(process.env.RUNNER_TEMP) + '\\'));
 assert.ok(!profile.startsWith(evidence + '\\'));
-const shell = resolve(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
-function ps(script) {
-  return execFileSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
-    encoding: 'utf8', timeout: 15000, maxBuffer: 128 * 1024,
-  }).trim();
-}
 function serviceState() {
   return JSON.parse(ps("$ErrorActionPreference='Stop'; $s=Get-CimInstance Win32_Service -Filter \"Name='UacRemoteController'\"; $ports=@(Get-NetTCPConnection -State Listen -LocalPort 7443 -ErrorAction SilentlyContinue); @{state=$s.State;pid=[long]$s.ProcessId;listening=[bool]($ports|Where-Object OwningProcess -eq $s.ProcessId)}|ConvertTo-Json -Compress"));
 }

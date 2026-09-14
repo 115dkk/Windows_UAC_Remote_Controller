@@ -89,9 +89,6 @@ internal static class Program
                     var computer = new StringBuilder(256);
                     Require(Native.GetNamedPipeClientComputerName(pipe.SafePipeHandle, computer, (uint)computer.Capacity) &&
                         String.Equals(computer.ToString().TrimStart('\\'), Environment.MachineName, StringComparison.OrdinalIgnoreCase), "remote_pipe_rejected");
-                    bool admin = false;
-                    pipe.RunAsClient(() => admin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator));
-                    Require(admin, "elevated_client_required");
                     using (var reader = new StreamReader(pipe, new UTF8Encoding(false, true), false, 4096, true))
                     using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), 65536, true) { AutoFlush = true, NewLine = "\n" })
                     {
@@ -105,6 +102,16 @@ internal static class Program
                                 string command = Value(request, "command");
                                 if (command == "compare_confirm") Keys(request, "command", "code");
                                 else Keys(request, "command");
+                                // ImpersonateNamedPipeClient uses the last message read.
+                                // Establish that context with the bounded read above;
+                                // validate it before any command effect or positive reply.
+                                bool admin = false;
+                                pipe.RunAsClient(() =>
+                                {
+                                    using (var identity = WindowsIdentity.GetCurrent())
+                                        admin = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+                                });
+                                Require(admin, "elevated_client_required");
                                 if (phase == 0 && command == "arm")
                                 {
                                     Require(ProtectedUi.ConsentProcesses().Count == 0, "preexisting_consent");

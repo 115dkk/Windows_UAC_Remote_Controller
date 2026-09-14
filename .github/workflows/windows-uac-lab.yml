@@ -37,6 +37,7 @@ on:
       - 'tools/ci-windows-operator/**'
       - 'tools/ci-private-child*'
       - 'tools/ci-fixture-diagnostics*'
+      - 'tools/windows-ci-powershell*'
       - 'tools/windows-embedded-relay-lab.ps1'
       - 'Cargo.lock'
 
@@ -93,7 +94,7 @@ jobs:
         shell: powershell
         run: ./tools/prepare-pairing-e2e.ps1 -CompileOnly
       - name: Check private fixture lifecycle and closed diagnostics
-        run: node --test tools/ci-private-child.test.mjs tools/ci-fixture-diagnostics.test.mjs
+        run: node --test tools/ci-private-child.test.mjs tools/ci-fixture-diagnostics.test.mjs tools/windows-ci-powershell.test.mjs
       - name: Build the lab service (software KSP) and the prompt helper with lab notes
         shell: pwsh
         run: |
