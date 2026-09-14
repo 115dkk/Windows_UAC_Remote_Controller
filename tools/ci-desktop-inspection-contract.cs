@@ -293,6 +293,7 @@ internal static class DesktopContract
                     IntPtr readerOriginal = N.GetThreadDesktop(N.GetCurrentThreadId());
                     if (readerOriginal == IntPtr.Zero) throw new Fault("witness_reader_attach", Marshal.GetLastWin32Error());
                     Need(N.SetThreadDesktop(desktop.Value), "witness_reader_attach");
+                    if (!N.CompareObjectHandles(N.GetThreadDesktop(N.GetCurrentThreadId()), desktop.Value)) throw new Fault("witness_reader_attach", Marshal.GetLastWin32Error());
                     try {
                     Result result = new Result(); result.Name = profile.Name;
                     CheckMembershipControls(result, desktop.Value, process.Value, thread.Value, m, readerOriginal);

@@ -5,7 +5,10 @@
 use super::*;
 use windows::Win32::{
     Foundation::{ERROR_INVALID_DATA, HWND, LPARAM, SetLastError},
-    System::StationsAndDesktops::EnumDesktopWindows,
+    System::{
+        StationsAndDesktops::{EnumDesktopWindows, GetThreadDesktop, SetThreadDesktop},
+        Threading::GetCurrentThreadId,
+    },
     UI::{
         Input::KeyboardAndMouse::IsWindowEnabled,
         WindowsAndMessaging::{GetClassNameW, GetWindowThreadProcessId, IsWindow, IsWindowVisible},
@@ -31,6 +34,10 @@ struct Bound {
     station: Option<UserObject>,
     sid: Vec<u8>,
     invocation: RendererInvocation,
+    inspector_thread: u32,
+    original_desktop: Option<HDESK>,
+    restoration_required: bool,
+    restoration_attempted: bool,
 }
 fn failure(error: Error) -> Failure {
     match error {
@@ -108,6 +115,10 @@ impl Inspector for NativeInspector {
                 station: None,
                 sid,
                 invocation,
+                inspector_thread: unsafe { GetCurrentThreadId() },
+                original_desktop: None,
+                restoration_required: false,
+                restoration_attempted: false,
             });
             let bound = self.bound.as_mut().ok_or(Error::InvalidPhase)?;
             bound.identity()?;
@@ -162,6 +173,9 @@ impl Inspector for NativeInspector {
                 raw: HANDLE(opened.0),
                 kind: ObjectKind::Desktop,
             });
+            // Only the windowless SYSTEM inspector thread is associated. This
+            // does not show a window or change the user's input desktop.
+            bound.attach_context()?;
             bound.check()
         })();
         if result.is_err() {
@@ -185,6 +199,9 @@ impl Inspector for NativeInspector {
     }
     fn close(&mut self) -> Result<(), Failure> {
         if let Some(bound) = self.bound.as_mut() {
+            // No liveness/deadline prerequisites during cleanup. Never close a
+            // USER object while this inspector may still be attached to it.
+            bound.restore_context().map_err(failure)?;
             for object in [
                 &mut bound.desktop,
                 &mut bound.opened_desktop,
@@ -201,8 +218,73 @@ impl Inspector for NativeInspector {
     }
 }
 impl Bound {
+    fn attach_context(&mut self) -> Result<(), Error> {
+        self.identity()?;
+        if self.original_desktop.is_some()
+            || self.restoration_required
+            || unsafe { GetCurrentThreadId() } != self.inspector_thread
+        {
+            return Err(Error::InvalidPhase);
+        }
+        let desktop = self.desktop.as_ref().ok_or(Error::InvalidPhase)?.raw;
+        let opened = self.opened_desktop.as_ref().ok_or(Error::InvalidPhase)?.raw;
+        if !unsafe { CompareObjectHandles(desktop, opened) }.as_bool() {
+            return Err(Error::Rejected);
+        }
+        let original =
+            unsafe { GetThreadDesktop(self.inspector_thread) }.map_err(|e| native(33, e))?;
+        if !object_text(HANDLE(original.0), UOI_NAME)?.eq_ignore_ascii_case("Default") {
+            return Err(Error::Rejected);
+        }
+        self.original_desktop = Some(original); // borrowed, never closed
+        self.restoration_required = true; // set BEFORE even a failed attachment
+        // SAFETY: exact independently verified same-session WinSta0 object;
+        // current owned inspector thread has no windows/hooks or message pump.
+        unsafe { SetThreadDesktop(HDESK(opened.0)) }.map_err(|e| native(33, e))?;
+        self.check_context()
+    }
+    fn check_context(&self) -> Result<(), Error> {
+        if !self.restoration_required
+            || self.restoration_attempted
+            || unsafe { GetCurrentThreadId() } != self.inspector_thread
+        {
+            return Err(Error::InvalidPhase);
+        }
+        // This is a SELF association query, not the incompatible foreign-TID
+        // operation. It proves the metadata reads run in the intended context.
+        let actual =
+            unsafe { GetThreadDesktop(self.inspector_thread) }.map_err(|e| native(33, e))?;
+        let opened = self.opened_desktop.as_ref().ok_or(Error::InvalidPhase)?.raw;
+        if !unsafe { CompareObjectHandles(HANDLE(actual.0), opened) }.as_bool() {
+            return Err(Error::Rejected);
+        }
+        Ok(())
+    }
+    fn restore_context(&mut self) -> Result<(), Error> {
+        if !self.restoration_required {
+            return Ok(());
+        }
+        if self.restoration_attempted || unsafe { GetCurrentThreadId() } != self.inspector_thread {
+            return Err(Error::CleanupUnconfirmed);
+        }
+        self.restoration_attempted = true;
+        let original = self.original_desktop.ok_or(Error::CleanupUnconfirmed)?;
+        // SAFETY: restore only this same windowless thread's saved original
+        // borrowed association. Failure is latched; no retry or USER close.
+        unsafe { SetThreadDesktop(original) }.map_err(|e| native(33, e))?;
+        let actual =
+            unsafe { GetThreadDesktop(self.inspector_thread) }.map_err(|e| native(33, e))?;
+        if !unsafe { CompareObjectHandles(HANDLE(actual.0), HANDLE(original.0)) }.as_bool() {
+            return Err(Error::CleanupUnconfirmed);
+        }
+        self.restoration_required = false;
+        Ok(())
+    }
     fn identity(&self) -> Result<(), Error> {
         check_cutoff(self.binding.cutoff)?;
+        if self.restoration_required {
+            self.check_context()?;
+        }
         if process_identity(self.process.raw(), self.binding.process)? != self.binding.created
             || thread_creation(self.thread.raw())? != self.binding.thread_created
             || unsafe { WaitForSingleObject(self.thread.raw(), 0) } != WAIT_TIMEOUT

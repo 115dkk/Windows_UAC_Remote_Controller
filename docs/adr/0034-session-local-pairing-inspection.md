@@ -55,6 +55,24 @@ Callbacks are bounded, nonallocating, nonpanicking and never dispatch user
 decisions. No QR content, input-desktop switch or visible window precedes binding.
 The new mandatory HWND uses exact revised private wire shapes (UCPH2/UPI2).
 
+Windows window metadata calls are desktop-context-sensitive: the independent
+reader's GetAncestor initially returned1400 for the other desktop's valid HWND.
+The f457250 native cohort proved all34 membership/negative controls using the
+original limited handles after associating only the windowless inspector thread
+with the verified private desktop. The inspector therefore saves its own original
+Default desktop and TID, marks restoration required BEFORE SetThreadDesktop,
+then observes windows in that context without any window/hook/message pump,
+SendMessage, ShowWindow or SwitchDesktop. It rechecks its SELF association around
+each positive observation. Session0 never attaches to the interactive desktop.
+
+Cleanup confirms restoration of that same inspector thread BEFORE any owned
+USER-object close, regardless of renderer liveness or ceremony expiry. A failed
+restore is never retried or treated as detach; handles remain retained/quarantined
+until parent-owned child teardown. The saved original borrowed handle is not
+closed. This is observation-only code using existing0x20081 capabilities (which
+include WRITEOBJECTS as required by the API), not a claim that those OS rights
+are exclusively read-only.
+
 The original ceremony cutoff is never extended. Separate short operation
 timeouts bound IPC waits; cleanup retains/cancels pending buffers, reaps only
 the newly service-created inspector and quarantines uncertain ownership. It
