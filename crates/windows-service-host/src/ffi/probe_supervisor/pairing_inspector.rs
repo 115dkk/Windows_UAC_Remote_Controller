@@ -242,7 +242,16 @@ impl Owner {
         .map_err(mapped)?
         {}
         let code = exit_code(run.process().map_err(mapped)?).map_err(mapped)?;
-        let empty = run.job_empty().map_err(mapped)?;
+        // A signalled process object does not yet prove the job has released
+        // it: the accounting still counted the exited child on the first query.
+        // Give that disassociation the same bounded budget the forceful path
+        // uses, so a normal cleanup is not reported as an uncertain one.
+        let began = Instant::now();
+        let mut empty = run.job_empty().map_err(mapped)?;
+        while !empty && began.elapsed() < CLEANUP_BUDGET {
+            std::thread::sleep(Duration::from_millis(5));
+            empty = run.job_empty().map_err(mapped)?;
+        }
         if code != 0 || !empty {
             #[cfg(all(windows, feature = "lab-software-identity"))]
             crate::lab::record_note(&format!(
