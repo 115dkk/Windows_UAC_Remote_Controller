@@ -204,6 +204,43 @@ impl ValidatedPairingInstallation {
         self.check_image(reported, &self.controller, &self.controller_pin)
     }
 
+    pub(super) fn check_native_peer_image(
+        &self,
+        role: super::pairing_peer::PairingPeerRole,
+        reported: &[u16],
+    ) -> Result<(), ServiceError> {
+        use windows::Win32::Storage::FileSystem::VOLUME_NAME_NT;
+
+        let (expected, original) = match role {
+            super::pairing_peer::PairingPeerRole::Starter => {
+                (self.controller.as_path(), &self.controller_pin)
+            }
+            super::pairing_peer::PairingPeerRole::Helper => (self.service(), &self.service_pin),
+        };
+        // Keep the fixed DOS installation/ACL/file-identity gate on both sides
+        // of the native-name comparison, with all original ancestor pins alive.
+        // Neither the observed NT name nor a user drive mapping is ever opened.
+        self.check_image(expected, expected, original)?;
+        let mut normalized = [0u16; 32_768];
+        // SAFETY: the already-owned fixed binary pin remains alive throughout;
+        // initialized bounded output, normalized NT volume name only. No process
+        // path translation, impersonation, privilege change or fallback occurs.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                original.0,
+                &mut normalized,
+                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_NT.0),
+            )
+        } as usize;
+        if length == 0 || length >= normalized.len() {
+            return Err(ServiceError::UnsafePath);
+        }
+        if !same_native_image_path(reported, &normalized[..length])? {
+            return Err(ServiceError::UntrustedInstallation);
+        }
+        self.check_image(expected, expected, original)
+    }
+
     pub(super) fn check_current_client_image(
         &self,
         role: super::pairing_peer::PairingPeerRole,
@@ -293,6 +330,27 @@ fn same_path(a: &Path, b: &Path) -> Result<bool, ServiceError> {
     policy::checked_dos_path(a)?;
     policy::checked_dos_path(b)?;
     Ok(a.eq_ignore_ascii_case(b))
+}
+
+#[cfg(target_pointer_width = "64")]
+fn same_native_image_path(a: &[u16], b: &[u16]) -> Result<bool, ServiceError> {
+    fn decode(units: &[u16]) -> Result<String, ServiceError> {
+        if units.is_empty() || units.len() >= 32_768 || units.contains(&0) {
+            return Err(ServiceError::UnsafePath);
+        }
+        let path = String::from_utf16(units).map_err(|_| ServiceError::UnsafePath)?;
+        // Only native device names from the process query and fixed file pin.
+        // Do not normalize aliases, separators, components or Unicode case.
+        if !path
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\Device\"))
+            || path.len() == 8
+        {
+            return Err(ServiceError::UnsafePath);
+        }
+        Ok(path)
+    }
+    Ok(decode(a)?.eq_ignore_ascii_case(&decode(b)?))
 }
 
 pub(super) fn pin_ancestors(
@@ -608,6 +666,74 @@ mod tests {
     use windows::Win32::Storage::FileSystem::{
         DELETE, FILE_APPEND_DATA, FILE_SHARE_DELETE, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
     };
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn native_image_comparison_is_exact_except_ascii_case() {
+        let wide = |value: &str| value.encode_utf16().collect::<Vec<_>>();
+        let expected = wide(r"\Device\HarddiskVolume3\Program Files\앱\controller-app.exe");
+        assert!(
+            same_native_image_path(
+                &wide(r"\device\HARDDISKVOLUME3\PROGRAM FILES\앱\CONTROLLER-APP.EXE"),
+                &expected,
+            )
+            .unwrap()
+        );
+        for candidate in [
+            r"\Device\HarddiskVolume4\Program Files\앱\controller-app.exe",
+            r"\Device\HarddiskVolume3\Program Files\앱\service.exe",
+            r"\Device\HarddiskVolume3\Program Files\앱\controller-app.exe.extra",
+            r"\Device\HarddiskVolume3\Program Files\앱\controller-app.exe\child",
+            r"\Device\HarddiskVolume3\Program Files\앱\..\앱\controller-app.exe",
+            r"\Device\HarddiskVolume3/Program Files/앱/controller-app.exe",
+        ] {
+            assert!(!same_native_image_path(&wide(candidate), &expected).unwrap());
+        }
+        assert!(
+            !same_native_image_path(
+                &wide(r"\Device\HarddiskVolume3\Ä\controller-app.exe"),
+                &wide(r"\Device\HarddiskVolume3\ä\controller-app.exe"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn native_image_comparison_rejects_malformed_or_non_native_names() {
+        let expected: Vec<_> = r"\Device\HarddiskVolume3\controller-app.exe"
+            .encode_utf16()
+            .collect();
+        let mut invalid = vec![vec![], vec![0], vec![0xd800], vec![b'A' as u16; 32_768]];
+        for path in [
+            r"C:\Program Files\controller-app.exe",
+            r"\\?\C:\Program Files\controller-app.exe",
+            r"\??\C:\Program Files\controller-app.exe",
+            r"\\server\share\controller-app.exe",
+            r"Device\HarddiskVolume3\controller-app.exe",
+            r"\Device\",
+        ] {
+            invalid.push(path.encode_utf16().collect());
+        }
+        let mut embedded_nul = expected.clone();
+        embedded_nul.insert(12, 0);
+        invalid.push(embedded_nul);
+        let mut trailing_nul = expected.clone();
+        trailing_nul.push(0);
+        invalid.push(trailing_nul);
+        let mut unpaired_surrogate = expected.clone();
+        unpaired_surrogate.push(0xdfff);
+        invalid.push(unpaired_surrogate);
+        let mut boundary = expected.clone();
+        boundary.resize(32_767, b'a' as u16);
+        assert!(same_native_image_path(&boundary, &boundary).unwrap());
+        boundary.push(b'a' as u16);
+        invalid.push(boundary);
+        for value in invalid {
+            assert!(same_native_image_path(&value, &expected).is_err());
+            assert!(same_native_image_path(&expected, &value).is_err());
+        }
+    }
 
     #[test]
     fn pins_request_real_read_access_without_mutation_or_delete_sharing() {

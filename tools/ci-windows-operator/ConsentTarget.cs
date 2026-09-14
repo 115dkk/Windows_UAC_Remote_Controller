@@ -45,6 +45,9 @@ internal static class ConsentTarget
         // The ordinary title basename is permitted as nonbinding display text.
         // It can never satisfy the separate Program location field requirement.
         if (String.Equals(text.Trim(' '), "uac-service.exe", StringComparison.OrdinalIgnoreCase)) return false;
-        return Regex.IsMatch(text, @"[A-Za-z]:|\\|\.exe\b", RegexOptions.IgnoreCase);
+        // A label such as "Publisher:" is not a drive path: the final r:
+        // is inside a word. Drive letters begin a separate token. The exact
+        // native program-location binding remains mandatory independently.
+        return Regex.IsMatch(text, @"(?<![\p{L}\p{N}_])[A-Za-z]:|\\|\.exe\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 }

@@ -47,8 +47,8 @@ use windows::{
             },
             Threading::{
                 GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_FORMAT,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
-                WaitForSingleObject,
+                PROCESS_NAME_NATIVE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                QueryFullProcessImageNameW, WaitForSingleObject,
             },
         },
     },
@@ -901,17 +901,21 @@ pub(super) fn process_identity(
     Ok(created)
 }
 fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), PairingPeerError> {
-    let mut buffer = [0u16; 1024];
+    let mut buffer = [0u16; 32_768];
     let mut length = buffer.len() as u32;
     let image_stage = match endpoint.role {
         PairingPeerRole::Starter => PairingPeerStage::QueryStarterImage,
         PairingPeerRole::Helper => PairingPeerStage::QueryHelperImage,
     };
-    // SAFETY: retained process, DOS-name mode, initialized bounded output only.
+    // Fresh native image verification avoids DOS-name translation. This is a
+    // remediation hypothesis for the consent-visible QueryStarterImage denial,
+    // not an established explanation of the underlying access-denied cause.
+    // SAFETY: same retained query-only process handle, initialized bounded output
+    // only. No rights changes, cached success or DOS-query fallback on failure.
     unsafe {
         QueryFullProcessImageNameW(
             process,
-            PROCESS_NAME_FORMAT(0),
+            PROCESS_NAME_NATIVE,
             PWSTR(buffer.as_mut_ptr()),
             &mut length,
         )
@@ -919,14 +923,13 @@ fn check_image(endpoint: &PairingServerEndpoint, process: HANDLE) -> Result<(), 
     .map_err(|e| native_error(image_stage, e))?;
     let units = buffer
         .get(..length as usize)
-        .filter(|v| !v.is_empty() && !v.contains(&0))
+        .filter(|v| !v.is_empty() && v.len() < buffer.len() && !v.contains(&0))
         .ok_or(PairingPeerError::Malformed)?;
-    let image = PathBuf::from(String::from_utf16(units).map_err(|_| PairingPeerError::Malformed)?);
-    match endpoint.role {
-        PairingPeerRole::Starter => endpoint.context.installation.check_controller_image(&image),
-        PairingPeerRole::Helper => endpoint.context.installation.check_service_image(&image),
-    }
-    .map_err(PairingPeerError::Service)
+    endpoint
+        .context
+        .installation
+        .check_native_peer_image(endpoint.role, units)
+        .map_err(PairingPeerError::Service)
 }
 
 #[derive(Eq, PartialEq)]

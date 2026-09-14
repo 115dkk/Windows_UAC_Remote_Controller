@@ -27,6 +27,10 @@ internal static class ConsentTargetTests
         if (ConsentTarget.IsAuxiliaryWindow(false, 0) || ConsentTarget.IsAuxiliaryWindow(false, 0x8) ||
             !ConsentTarget.IsAuxiliaryWindow(true, 0) || !ConsentTarget.IsAuxiliaryWindow(false, 0x80) ||
             !ConsentTarget.IsAuxiliaryWindow(false, 0x08000000) || !ConsentTarget.IsAuxiliaryWindow(false, 0x08000080)) return 4;
+        foreach (string label in new[] { "Publisher:", "Publisher: Unknown", "File origin: Hard drive on this computer", "Program location:", "Verified publisher:" })
+            if (ConsentTarget.HasConflictingPath(label)) return 5;
+        foreach (string path in new[] { @"C:\other\program.exe", "C:other", "Program location: C:other", @"\\host\other\program.exe" })
+            if (!ConsentTarget.HasConflictingPath(path)) return 6;
         Console.WriteLine("Pure consent target recognizer fixtures passed; native UI remains unverified.");
         return 0;
     }
