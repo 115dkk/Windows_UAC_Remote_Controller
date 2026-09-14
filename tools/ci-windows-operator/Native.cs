@@ -9,6 +9,12 @@ internal static class Native
 {
     [StructLayout(LayoutKind.Sequential)] internal struct Rect { internal int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] internal struct Point { internal int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] internal struct SecurityAttributes
+    {
+        internal uint Length;
+        internal IntPtr Descriptor;
+        internal int InheritHandle; // Win32 BOOL; always zero at the call site.
+    }
     internal delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
@@ -46,7 +52,11 @@ internal static class Native
     [DllImport("gdi32.dll")] internal static extern bool RemoveFontMemResourceEx(IntPtr font);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern bool GetNamedPipeClientComputerName(SafePipeHandle pipe, StringBuilder name, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern SafePipeHandle CreateNamedPipe(string name, uint openMode, uint pipeMode,
+        uint maxInstances, uint outputSize, uint inputSize, uint defaultTimeout, ref SecurityAttributes attributes);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetHandleInformation(SafePipeHandle handle, out uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetNamedPipeInfo(SafePipeHandle pipe, out uint flags, out uint outputSize, out uint inputSize, out uint maxInstances);
     [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool GetTokenInformation(IntPtr token, int information, IntPtr output, uint size, out uint needed);
 }

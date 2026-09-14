@@ -79,16 +79,12 @@ internal static class Program
                 security.SetOwner(SystemSid);
                 security.AddAccessRule(new PipeAccessRule(SystemSid, PipeAccessRights.FullControl, AccessControlType.Allow));
                 security.AddAccessRule(new PipeAccessRule(AdminSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
-                using (var pipe = new NamedPipeServerStream("UacRemoteCiE2e." + nonce, PipeDirection.InOut, 1,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 65536, security))
+                using (var pipe = LocalPipe.Create(nonce, security))
                 {
                     Stage = "pipe_wait";
                     pipe.WaitForConnection();
                     uint actualPid;
                     Require(Native.GetNamedPipeClientProcessId(pipe.SafePipeHandle, out actualPid) && actualPid == clientPid, "pipe_client_rejected");
-                    var computer = new StringBuilder(256);
-                    Require(Native.GetNamedPipeClientComputerName(pipe.SafePipeHandle, computer, (uint)computer.Capacity) &&
-                        String.Equals(computer.ToString().TrimStart('\\'), Environment.MachineName, StringComparison.OrdinalIgnoreCase), "remote_pipe_rejected");
                     using (var reader = new StreamReader(pipe, new UTF8Encoding(false, true), false, 4096, true))
                     using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), 65536, true) { AutoFlush = true, NewLine = "\n" })
                     {

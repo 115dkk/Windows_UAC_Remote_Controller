@@ -10,6 +10,8 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ($LASTEXITCODE -ne 0) { throw 'Consent target negative controls failed' }
 & (Join-Path $repo 'target/ci-windows-operator/uac-ci-diagnostics-tests.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Closed diagnostic negative controls failed' }
+& (Join-Path $repo 'target/ci-windows-operator/uac-ci-local-pipe-tests.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Native local-only pipe regression failed' }
 $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $requestSource = Join-Path $PSScriptRoot 'ci-e2e-request.cs'
 $requesterOutput = Join-Path $repo 'target/ci-windows-operator/uac-ci-requester.exe'

@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $framework = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
 $wpf = Join-Path $framework 'WPF'
-$sources = @('Program.cs', 'Native.cs', 'ProtectedUi.cs', 'DigitPixels.cs', 'PipeBridge.cs', 'ConsentTarget.cs', 'Diagnostics.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+$sources = @('Program.cs', 'Native.cs', 'ProtectedUi.cs', 'DigitPixels.cs', 'PipeBridge.cs', 'ConsentTarget.cs', 'Diagnostics.cs', 'LocalPipe.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
 $font = Join-Path $repo 'assets/fonts/native/UACSans-Bold.ttf'
 $vocabulary = Join-Path $PSScriptRoot 'diagnostic-vocabulary.json'
 $destination = Join-Path $output 'uac-ci-windows-operator.exe'
@@ -33,3 +33,8 @@ $diagnosticSources = @($sources) + (Join-Path $PSScriptRoot 'Diagnostics.Tests.c
 & $compiler /nologo /target:exe /main:DiagnosticsTests /platform:x64 /optimize+ /warnaserror+ /utf8output /codepage:65001 "/out:$diagnosticDestination" "/resource:$font,UACSans-Bold.ttf" "/resource:$vocabulary,CiDiagnosticVocabulary.json" "/reference:$framework\System.Drawing.dll" "/reference:$framework\System.Web.Extensions.dll" "/reference:$wpf\UIAutomationClient.dll" "/reference:$wpf\UIAutomationTypes.dll" "/reference:$wpf\WindowsBase.dll" $diagnosticSources
 if ($LASTEXITCODE -ne 0) { throw "CI diagnostic fixture compilation failed ($LASTEXITCODE)." }
 Write-Output $diagnosticDestination
+$localPipeDestination = Join-Path $output 'uac-ci-local-pipe-tests.exe'
+$localPipeSources = @($sources) + (Join-Path $PSScriptRoot 'LocalPipe.Tests.cs')
+& $compiler /nologo /target:exe /main:LocalPipeTests /platform:x64 /optimize+ /warnaserror+ /utf8output /codepage:65001 "/out:$localPipeDestination" "/resource:$font,UACSans-Bold.ttf" "/resource:$vocabulary,CiDiagnosticVocabulary.json" "/reference:$framework\System.Drawing.dll" "/reference:$framework\System.Web.Extensions.dll" "/reference:$wpf\UIAutomationClient.dll" "/reference:$wpf\UIAutomationTypes.dll" "/reference:$wpf\WindowsBase.dll" $localPipeSources
+if ($LASTEXITCODE -ne 0) { throw "CI local pipe regression compilation failed ($LASTEXITCODE)." }
+Write-Output $localPipeDestination

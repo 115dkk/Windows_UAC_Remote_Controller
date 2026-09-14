@@ -56,6 +56,29 @@ endings are explicitly LF, including .NET writers. Responses are bounded to
 12 MiB per line, requests to 4 KiB. Pipe ACL is SY/BA. Exactly one connection is accepted. The
 300-second lifetime watchdog terminates blocked UIA and pipe operations too.
 
+Locality is enforced at creation by native `CreateNamedPipeW` with
+`PIPE_REJECT_REMOTE_CLIENTS` (`0x8`). The fixed namespace is still
+`\\.\pipe\UacRemoteCiE2e.<nonce>`, with duplex/overlapped/first-instance flags,
+byte mode, blocking wait semantics and one instance. The existing exact SY/BA
+`PipeSecurity` descriptor is copied to temporary unmanaged memory for the
+synchronous create call, with noninheritable `SECURITY_ATTRIBUTES`, then freed.
+The returned owning `SafePipeHandle` is adopted once by `NamedPipeServerStream`;
+failure cleanup disposes it if adoption did not succeed. No hostname comparison,
+remote-capable retry or relaxed ACL is used. Kernel client PID and post-read
+impersonation/admin checks remain required before command effects.
+
+The CI build also emits `uac-ci-local-pipe-tests.exe`. ROOT runs it as the elevated
+hosted CI runner; it creates only a unique disposable transport pipe, not UAC,
+the operator Main, any production service or additional process. In 30 seconds
+maximum it exercises real local `.` connection and fixed-byte round trip,
+both kernel peer PID queries, post-read explicit impersonation/admin admission,
+byte mode, noninheritance, exact DACL, one-instance rejection, invalid nonce
+rejection and adopted-handle disposal. The fixture uses BA owner when created by
+CI Admin (SYSTEM when already SYSTEM), retaining the identical SY/BA DACL without
+requesting another privilege. This local regression is not a remote-SMB attack
+test and not evidence that the later UAC/QR/enrollment flow passed; remote
+rejection is the mandatory native creation flag, with no fallback.
+
 Terminal failure responses use exactly `status`, `source`, `stage`, `gate` with
 `status=failed` and closed values from embedded `diagnostic-vocabulary.json`.
 The bridge reconstructs only validated operator failures on its private stdout;
