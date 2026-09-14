@@ -224,13 +224,24 @@ pub(super) fn map_content(
     if details.len() > MAX_DETAILS_BYTES {
         return Err(PromptContentMappingError::FieldTooLong);
     }
-    // Disposable lab builds only, and only for the synthetic CI request: the
-    // harness asserts on these two fields, so a mismatch has to be readable.
+    // Disposable lab builds only, where the only prompt is the harness's own
+    // synthetic request. The harness asserts on the program name and the
+    // location, so the mapped fields and the labels they come from have to be
+    // readable. Release packaging rejects any binary carrying a lab marker.
     #[cfg(feature = "lab-software-identity")]
-    crate::lab::record_note(&format!(
-        "prompt content: program_name={program_name:?} path={path:?} labels={}",
-        mapped_labels.len()
-    ));
+    {
+        crate::lab::record_note(&format!(
+            "prompt content: program_name={program_name:?} path={path:?} labels={}",
+            mapped_labels.len()
+        ));
+        for (index, label) in observation.labels().iter().enumerate() {
+            crate::lab::record_note(&format!(
+                "prompt label {index}: kind={:?} text={:?}",
+                label.kind(),
+                replace_controls(label.text())
+            ));
+        }
+    }
     RequestContent::new(&program_name, path, &details)
         .map(Arc::new)
         .map_err(|_| PromptContentMappingError::InvalidContent)
