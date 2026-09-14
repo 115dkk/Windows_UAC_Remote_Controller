@@ -543,7 +543,11 @@ pub(super) struct ServicePairing {
     enrollment_failed: bool,
     enrollment_terminal: bool,
     enrollment_reported: bool,
+    /// Whether a commit is pending now. A failed enrollment reopens it.
     commit_requested: bool,
+    /// Whether this ceremony ever authorized its one registry mutation. Only a
+    /// new ceremony clears it, because a durable row cannot become unwritten.
+    commit_authorized: bool,
     committed_device: Option<DeviceId>,
     renderer_attempted: bool,
     next_side: ServiceSide,
@@ -582,6 +586,7 @@ impl ServicePairing {
             enrollment_terminal: false,
             enrollment_reported: false,
             commit_requested: false,
+            commit_authorized: false,
             committed_device: None,
             renderer_attempted: false,
             next_side: ServiceSide::Starter,
@@ -636,6 +641,7 @@ impl ServicePairing {
             || self.enrollment_terminal
             || self.enrollment_reported
             || self.commit_requested
+            || self.commit_authorized
             || self.committed_device.is_some()
             || self.renderer_attempted
         {
@@ -1022,8 +1028,9 @@ impl ServicePairing {
             // original. Re-checking equality afterwards would retire the
             // ceremony for succeeding. Every gate before the commit request
             // still runs, and the prepared material stays readable for the
-            // acceptance that this same ceremony signs.
-            && !self.commit_requested
+            // acceptance that this same ceremony signs. A later enrollment
+            // failure must not reopen this: the row is already durable.
+            && !self.commit_authorized
             && !crate::entry::stop_requested()
             && self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound)
             && self.both_idle()
@@ -1265,6 +1272,7 @@ impl ServicePairing {
                     {
                         let (relay, route) = self.enrollment_route.ok_or(Failure::Protocol)?;
                         self.commit_requested = true;
+                        self.commit_authorized = true;
                         return Ok(Some(CeremonyAction::Commit { relay, route }));
                     }
                 }
@@ -1654,6 +1662,7 @@ impl ServicePairing {
         self.enrollment_terminal = false;
         self.enrollment_reported = false;
         self.commit_requested = false;
+        self.commit_authorized = false;
         self.committed_device = None;
         self.renderer_attempted = false;
         self.generation = None;
@@ -1866,8 +1875,15 @@ mod tests {
             .unwrap();
         assert!(owner.wants_preparation_context());
         owner.commit_requested = true; // Scheduling only; not a commit authority.
+        owner.commit_authorized = true;
         assert!(!owner.wants_preparation_context());
         assert!(owner.preparation.is_some()); // Acceptance still reads it.
+        // A later enrollment failure reopens the pending-commit gate, but the
+        // durable row cannot become unwritten, so maintenance stays off.
+        owner.fail_enrollment(Failure::Enrollment);
+        assert!(!owner.commit_requested);
+        assert!(owner.commit_authorized);
+        assert!(!owner.wants_preparation_context());
         owner.poll_shutdown(); // Pure fixture cleanup, no native factory or query.
         assert_eq!(owner.remaining_owners(), 0);
     }
