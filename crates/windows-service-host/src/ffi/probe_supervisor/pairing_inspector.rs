@@ -195,6 +195,13 @@ impl Owner {
             || crate::entry::stop_requested()
             || renderer::check_cutoff(self.cutoff).is_err()
         {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note(&format!(
+                "inspector abort: failed={} stop={} cutoff_elapsed={}",
+                self.failed,
+                crate::entry::stop_requested(),
+                renderer::check_cutoff(self.cutoff).is_err()
+            ));
             return self.abort_cleanup();
         }
         let result = self.close_inner();
@@ -220,6 +227,8 @@ impl Owner {
             .map_err(mapped)?,
         );
         if !matches!(self.await_operation()?, Completed::Eof) {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note("inspector cleanup: close reply was not end of stream");
             return Err(crate::PairingPeerError::Malformed);
         }
         let run = self
@@ -232,13 +241,19 @@ impl Owner {
         )
         .map_err(mapped)?
         {}
-        if exit_code(run.process().map_err(mapped)?).map_err(mapped)? != 0
-            || !run.job_empty().map_err(mapped)?
-        {
+        let code = exit_code(run.process().map_err(mapped)?).map_err(mapped)?;
+        let empty = run.job_empty().map_err(mapped)?;
+        if code != 0 || !empty {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note(&format!(
+                "inspector cleanup: exit={code:#010x} job_empty={empty}"
+            ));
             return Err(crate::PairingPeerError::CleanupUnconfirmed);
         }
         self.run = None;
         if CLOSE_FAILURE.load(Ordering::Acquire) != 0 {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note("inspector cleanup: a latched handle close failure remains");
             return Err(crate::PairingPeerError::CleanupUnconfirmed);
         }
         self.closed = true;
@@ -249,10 +264,14 @@ impl Owner {
         if let Some(run) = self.run.as_mut()
             && !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true))
         {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note("inspector abort: the budgeted cleanup stayed unconfirmed");
             return Err(crate::PairingPeerError::CleanupUnconfirmed);
         }
         self.run = None;
         if CLOSE_FAILURE.load(Ordering::Acquire) != 0 {
+            #[cfg(all(windows, feature = "lab-software-identity"))]
+            crate::lab::record_note("inspector abort: a latched handle close failure remains");
             return Err(crate::PairingPeerError::CleanupUnconfirmed);
         }
         self.closed = true;

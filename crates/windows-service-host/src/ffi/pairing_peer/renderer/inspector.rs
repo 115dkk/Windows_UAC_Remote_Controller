@@ -201,7 +201,11 @@ impl Inspector for NativeInspector {
         if let Some(bound) = self.bound.as_mut() {
             // No liveness/deadline prerequisites during cleanup. Never close a
             // USER object while this inspector may still be attached to it.
-            bound.restore_context().map_err(failure)?;
+            if let Err(error) = bound.restore_context() {
+                #[cfg(feature = "lab-software-identity")]
+                crate::lab::record_note(&format!("inspector child restore: {error:?}"));
+                return Err(failure(error));
+            }
             for object in [
                 &mut bound.desktop,
                 &mut bound.opened_desktop,
@@ -210,11 +214,20 @@ impl Inspector for NativeInspector {
             .into_iter()
             .flatten()
             {
-                object.close().map_err(failure)?;
+                if let Err(error) = object.close() {
+                    #[cfg(feature = "lab-software-identity")]
+                    crate::lab::record_note(&format!("inspector child object: {error:?}"));
+                    return Err(failure(error));
+                }
             }
         }
         self.bound = None;
-        cleanup_state().map_err(failure)
+        let state = cleanup_state();
+        #[cfg(feature = "lab-software-identity")]
+        if let Err(error) = state {
+            crate::lab::record_note(&format!("inspector child state: {error:?}"));
+        }
+        state.map_err(failure)
     }
 }
 impl Bound {
