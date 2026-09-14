@@ -61,7 +61,10 @@ pub(in crate::ffi) const THREAD_RIGHTS: u32 =
     THREAD_QUERY_LIMITED_INFORMATION.0 | THREAD_SYNCHRONIZE.0 | READ_CONTROL.0;
 pub(in crate::ffi) const DESKTOP_RIGHTS: u32 = 0x0002_0183;
 const DESKTOP_INSPECT: u32 = 0x0002_0081;
-const STATION_INSPECT: u32 = 0x0002_0002;
+// check_station reads only UOI_TYPE/NAME/FLAGS. The startup station handle need
+// not carry READ_CONTROL; requesting it during duplication needlessly widens
+// the source access requirement without supporting any performed validation.
+const STATION_INSPECT: u32 = 0x0000_0002;
 const MAX_DESCRIPTOR: usize = 65_536;
 const GROUP_OWNER: u32 = 8;
 pub(in crate::ffi) const CUTOFF_ENV: &str = "UAC_REMOTE_RENDERER_CUTOFF_QPC";
@@ -587,12 +590,14 @@ impl RendererRegistration {
                 process,
                 objects.desktop,
                 DESKTOP_INSPECT,
+                5,
                 &mut inner.desktop,
             )?;
             duplicate_object(
                 process,
                 objects.station,
                 STATION_INSPECT,
+                21,
                 &mut inner.station,
             )?;
             let desktop = inner.desktop.as_ref().ok_or(Error::InvalidPhase)?;
@@ -750,6 +755,7 @@ fn duplicate_object(
     process: HANDLE,
     value: u64,
     access: u32,
+    stage: u8,
     slot: &mut Option<UserObject>,
 ) -> Result<(), Error> {
     let value = usize::try_from(value).map_err(|_| Error::Malformed)?;
@@ -770,7 +776,7 @@ fn duplicate_object(
             DUPLICATE_HANDLE_OPTIONS(0),
         )
     }
-    .map_err(|error| native(5, error))?;
+    .map_err(|error| native(stage, error))?;
     *slot = Some(UserObject {
         raw: duplicate,
         kind: ObjectKind::Unknown,
@@ -809,6 +815,12 @@ impl Drop for RendererRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn station_inspection_does_not_request_unused_security_access() {
+        assert_eq!(STATION_INSPECT, 0x0000_0002);
+        assert_eq!(STATION_INSPECT & READ_CONTROL.0, 0);
+        assert_eq!(DESKTOP_INSPECT & READ_CONTROL.0, READ_CONTROL.0);
+    }
     #[test]
     fn qpc_mapping_reserves_real_ticks_and_never_rounds_a_duration_up() {
         assert_eq!(
