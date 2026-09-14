@@ -95,68 +95,75 @@ internal static class Program
                     using (var reader = new StreamReader(pipe, new UTF8Encoding(false, true), false, 4096, true))
                     using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), 65536, true) { AutoFlush = true, NewLine = "\n" })
                     {
-                        int phase = 0;
-                        Stage = "arm_wait";
-                        while (true)
+                        try
                         {
-                            var request = Object(ReadLine(reader), 4096);
-                            string command = Value(request, "command");
-                            if (command == "compare_confirm") Keys(request, "command", "code");
-                            else Keys(request, "command");
-                            if (phase == 0 && command == "arm")
+                            int phase = 0;
+                            Stage = "arm_wait";
+                            while (true)
                             {
-                                Require(ProtectedUi.ConsentProcesses().Count == 0, "preexisting_consent");
-                                ArmedUtc = DateTime.UtcNow;
-                                phase = 1;
-                                Stage = "capture_command_wait";
-                                Reply(writer, new { status = "ready" });
+                                var request = Object(ReadLine(reader), 4096);
+                                string command = Value(request, "command");
+                                if (command == "compare_confirm") Keys(request, "command", "code");
+                                else Keys(request, "command");
+                                if (phase == 0 && command == "arm")
+                                {
+                                    Require(ProtectedUi.ConsentProcesses().Count == 0, "preexisting_consent");
+                                    ArmedUtc = DateTime.UtcNow;
+                                    phase = 1;
+                                    Stage = "capture_command_wait";
+                                    Reply(writer, new { status = "ready" });
+                                }
+                                else if (phase == 1 && command == "capture_qr")
+                                {
+                                    Stage = "initial_consent";
+                                    ProtectedUi.ApprovePairingConsent();
+                                    Stage = "qr_capture";
+                                    string png = ProtectedUi.CaptureQr();
+                                    phase = 2;
+                                    Stage = "comparison_command_wait";
+                                    Reply(writer, new { status = "qr_pixels", pngBase64 = png, rendererPid = RendererPid });
+                                    png = null;
+                                }
+                                else if (phase == 2 && command == "read_comparison")
+                                {
+                                    Stage = "comparison_capture";
+                                    string code = ProtectedUi.ReadComparison();
+                                    phase = 3;
+                                    Stage = "confirmation_command_wait";
+                                    Reply(writer, new { status = "comparison_pixels", code = code });
+                                    code = null;
+                                }
+                                else if (phase == 3 && command == "compare_confirm")
+                                {
+                                    string expected = Value(request, "code");
+                                    Require(Regex.IsMatch(expected, "\\A[0-9]{6}\\z"), "comparison_input_rejected");
+                                    Stage = "comparison_confirm";
+                                    ProtectedUi.ConfirmComparison(expected);
+                                    phase = 4;
+                                    Stage = "finish_wait";
+                                    Reply(writer, new { status = "confirmed" });
+                                }
+                                else if (phase == 4 && command == "finish")
+                                {
+                                    Reply(writer, new { status = "done" });
+                                    return 0;
+                                }
+                                else throw new InvalidOperationException("command_phase_rejected");
                             }
-                            else if (phase == 1 && command == "capture_qr")
-                            {
-                                Stage = "initial_consent";
-                                ProtectedUi.ApprovePairingConsent();
-                                Stage = "qr_capture";
-                                string png = ProtectedUi.CaptureQr();
-                                phase = 2;
-                                Stage = "comparison_command_wait";
-                                Reply(writer, new { status = "qr_pixels", pngBase64 = png, rendererPid = RendererPid });
-                                png = null;
-                            }
-                            else if (phase == 2 && command == "read_comparison")
-                            {
-                                Stage = "comparison_capture";
-                                string code = ProtectedUi.ReadComparison();
-                                phase = 3;
-                                Stage = "confirmation_command_wait";
-                                Reply(writer, new { status = "comparison_pixels", code = code });
-                                code = null;
-                            }
-                            else if (phase == 3 && command == "compare_confirm")
-                            {
-                                string expected = Value(request, "code");
-                                Require(Regex.IsMatch(expected, "\\A[0-9]{6}\\z"), "comparison_input_rejected");
-                                Stage = "comparison_confirm";
-                                ProtectedUi.ConfirmComparison(expected);
-                                phase = 4;
-                                Stage = "finish_wait";
-                                Reply(writer, new { status = "confirmed" });
-                            }
-                            else if (phase == 4 && command == "finish")
-                            {
-                                Reply(writer, new { status = "done" });
-                                return 0;
-                            }
-                            else throw new InvalidOperationException("command_phase_rejected");
+                        }
+                        catch (Exception error)
+                        {
+                            // Peer identity is already validated; report before writer disposal.
+                            Diagnostics.TryWrite(writer, "operator", Stage, error);
+                            return 1;
                         }
                     }
                 }
             }
             catch (Exception error)
             {
-                // Never print exception messages, UI text, image bytes, JSON or codes.
-                var gate = error as GateFailure;
-                Console.Error.WriteLine("CI Windows operator failed closed at fixed stage: " + Stage +
-                    (gate == null ? "" : "; gate=" + gate.Code));
+                // Postconnection failures return above, before writer disposal.
+                Diagnostics.TryWriteStartup(Stage, error);
                 return 1;
             }
         }

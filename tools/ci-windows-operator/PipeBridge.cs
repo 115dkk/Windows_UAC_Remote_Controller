@@ -100,6 +100,13 @@ internal static class PipeBridge
                                 requestLine = null;
                                 string responseLine = BoundedLine(reader, 12 * 1024 * 1024);
                                 var response = Program.Object(responseLine, 12 * 1024 * 1024);
+                                if (Program.Value(response, "status") == "failed")
+                                {
+                                    object diagnostic;
+                                    Program.Require(Diagnostics.TryValidate(response, "operator", out diagnostic), "response_order_rejected");
+                                    output.WriteLine(Program.Json.Serialize(diagnostic));
+                                    return 1;
+                                }
                                 Program.Require(Program.Value(response, "status") == statuses[phase], "response_order_rejected");
                                 if (phase == 1)
                                 {
@@ -124,8 +131,8 @@ internal static class PipeBridge
             }
             catch (Exception error)
             {
-                var gate = error as Program.GateFailure;
-                Console.Error.WriteLine("CI pipe bridge failed at fixed stage: " + stage + (gate == null ? "" : "; gate=" + gate.Code));
+                if (Console.IsOutputRedirected)
+                    Diagnostics.TryWrite(Console.Out, "bridge", stage, error);
                 return 1;
             }
         }

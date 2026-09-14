@@ -8,49 +8,14 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { expect } from '@playwright/test';
+import { PrivateChild } from './ci-private-child.mjs';
+import { operatorStartupDiagnostic } from './ci-fixture-diagnostics.mjs';
 
 const lab = 'C:\\ProgramData\\UacRemoteCiE2e';
 const service = 'C:\\Program Files\\휴대폰 승인\\uac-service.exe';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-class PrivateChild {
-  constructor(exe, env = process.env) {
-    this.child = spawn(exe, [], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    this.queue = []; this.waiters = []; this.buffer = ''; this.failure = null;
-    this.child.stdout.setEncoding('utf8');
-    this.child.stdout.on('data', chunk => {
-      this.buffer += chunk;
-      if (Buffer.byteLength(this.buffer) > 12 * 1024 * 1024) { this.fail(); return; }
-      let end;
-      while ((end = this.buffer.indexOf('\n')) >= 0) {
-        const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
-        let value; try { value = JSON.parse(line); } catch { this.fail(); return; }
-        if (value.state === 'failed' || value.status === 'failed') { this.fail(); return; }
-        const waiter = this.waiters.shift();
-        if (waiter) waiter.resolve(value);
-        else if (this.queue.length < 16) this.queue.push(value);
-        else { this.fail(); return; }
-      }
-    });
-    // Children deliberately expose fixed stage/reason text only, never traffic.
-    this.child.stderr.on('data', data => {
-      const text = data.toString('utf8');
-      if (text.length < 512 && /^[A-Za-z0-9 :_.\-\r\n]+$/.test(text)) process.stderr.write(text);
-    });
-    this.child.on('error', () => this.fail());
-    this.child.on('exit', code => { this.exited = true; this.code = code; if (code !== 0 || this.waiters.length) this.fail(); });
-  }
-  fail() { this.failure = new Error('Private CI fixture failed'); for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure); }
-  next() {
-    if (this.queue.length) return Promise.resolve(this.queue.shift());
-    if (this.failure || this.exited) return Promise.reject(this.failure ?? new Error('Fixture closed'));
-    return new Promise((resolveValue, rejectValue) => {
-      const timer = setTimeout(() => rejectValue(new Error('Private fixture response timeout')), 120000);
-      this.waiters.push({ resolve: value => { clearTimeout(timer); resolveValue(value); }, reject: error => { clearTimeout(timer); rejectValue(error); } });
-    });
-  }
-  send(value) { this.child.stdin.write(`${JSON.stringify(value)}\n`); }
-  async request(value, state) { this.send(value); const reply = await this.next(); assert.ok((reply.state ?? reply.status) === state, 'Unexpected fixture protocol stage'); return reply; }
-  close() { this.child.stdin.end(); if (!this.exited) this.child.kill(); }
+function privateChild(exe, env = process.env) {
+  return new PrivateChild(spawn(exe, [], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
 }
 
 export async function proveFullPairing({ page, ps, evidence, confirmService, clientPid }) {
@@ -70,13 +35,13 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
   try {
     const ip = ps("$s=[Net.Sockets.UdpClient]::new();try{$s.Connect('192.0.2.1',9);$s.Client.LocalEndPoint.Address.ToString()}finally{$s.Dispose()}").trim();
     assert.ok(Object.values(networkInterfaces()).flat().some(value => value?.address === ip && !value.internal), 'Relay must belong to this runner');
-    phone = new PrivateChild(resolve(process.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release/ci-phone-fixture.exe'), { ...process.env, WUAC_CI_PHONE_FIXTURE: '1' });
+    phone = privateChild(resolve(process.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release/ci-phone-fixture.exe'), { ...process.env, WUAC_CI_PHONE_FIXTURE: '1' });
     const prepared = await phone.request({ command: 'prepare', expected_relay_ip: ip }, 'prepared');
     assert.ok(prepared.app_signer_sha256 === '08'.repeat(32), 'Fixture signer mismatch');
     const ca = Buffer.from(prepared.root_der_base64, 'base64');
     assert.ok(ca.length > 100 && ca.length <= 8192);
     publishControl('phone-root.der', ca);
-    bridge = new PrivateChild(`${lab}\\uac-ci-pipe-bridge.exe`);
+    bridge = privateChild(`${lab}\\uac-ci-pipe-bridge.exe`);
     const session = Number(ps(`(Get-Process -Id ${clientPid}).SessionId`).trim());
     assert.ok(Number.isInteger(session) && session > 0);
     const metadata = { marker: 'uac-ci-e2e-do-not-ship', runNonce: randomBytes(16).toString('hex'),
@@ -94,7 +59,7 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     stage = 'qr-pixels';
     const pixels = await bridge.request({ command: 'capture_qr' }, 'qr_pixels');
     assert.ok(typeof pixels.pngBase64 === 'string' && pixels.pngBase64.length < 12 * 1024 * 1024);
-    phone.send({ command: 'enroll_pixels', png_base64: pixels.pngBase64 });
+    await phone.send({ command: 'enroll_pixels', png_base64: pixels.pngBase64 });
     pixels.pngBase64 = null;
     const comparisonReady = await phone.next();
     assert.ok(comparisonReady.state === 'awaiting_comparison', 'Actual pixels did not start verified enrollment');
@@ -109,6 +74,7 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     assert.ok(acceptance.state === 'enrollment_accepted', 'Signed enrollment acceptance missing');
     proof.checks.push('both-actual-comparison-confirmations-and-signed-enrollment');
     await bridge.request({ command: 'finish' }, 'done');
+    await bridge.complete();
     stage = 'service-registration';
     await expect.poll(async () => {
       try { return await page.evaluate(async () => {
@@ -119,7 +85,7 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     confirmService();
     proof.checks.push('actual-service-registry-row-matches-fixture');
     stage = 'request-roundtrip';
-    phone.send({ command: 'deny_next', expected_program_name: 'UacCiHarmlessRequest',
+    await phone.send({ command: 'deny_next', expected_program_name: 'UacCiHarmlessRequest',
       expected_path: 'C:\\Program Files\\휴대폰 승인\\uac-ci-request.exe' });
     assert.ok((await phone.next()).state === 'session_ready', 'Pinned session not ready');
     // Only a nonsecret trigger is made readable to the owned medium requester.
@@ -130,15 +96,19 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     const result = await phone.next();
     assert.ok(result.state === 'pc_resolution' && result.outcome === 'denied' && result.request_id === request.request_id && result.content_digest === request.content_digest, 'PC did not verify/resolve the same denial');
     assert.ok((await phone.next()).state === 'completed');
+    await phone.complete();
     proof.requestId = request.request_id; proof.contentDigest = request.content_digest;
     proof.checks.push('genuine-uac-request-and-matching-signed-denied-resolution');
     assert.ok(!existsSync(`${lab}\\unexpected-execution.txt`), 'Target must not execute');
     confirmService();
     proof.wirePassed = true; // Parent still must observe actual Windows cancellation/exit.
   } catch {
+    const diagnostic = phone?.diagnostic ?? operatorStartupDiagnostic() ?? bridge?.diagnostic;
+    if (diagnostic) proof.failure = diagnostic;
+    proof.failedStage = stage;
     throw new Error(`Native pairing e2e failed at ${stage}`);
   } finally {
-    phone?.close(); bridge?.close();
+    phone?.abort(); bridge?.abort();
     writeFileSync(resolve(evidence, 'pairing-e2e-proof.json'), JSON.stringify(proof, null, 2), { flag: 'wx' });
   }
 }

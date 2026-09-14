@@ -1,7 +1,24 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Only on a disposable CI VM; no UAC approval is performed by this preparation.
+[CmdletBinding()]
+param([switch]$CompileOnly)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted CI required' }
+$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+& (Join-Path $PSScriptRoot 'ci-windows-operator/build.ps1')
+& (Join-Path $repo 'target/ci-windows-operator/uac-ci-consent-target-tests.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Consent target negative controls failed' }
+& (Join-Path $repo 'target/ci-windows-operator/uac-ci-diagnostics-tests.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Closed diagnostic negative controls failed' }
+$csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$requestSource = Join-Path $PSScriptRoot 'ci-e2e-request.cs'
+$requesterOutput = Join-Path $repo 'target/ci-windows-operator/uac-ci-requester.exe'
+$requestOutput = Join-Path $repo 'target/ci-windows-operator/uac-ci-request.exe'
+& $csc /nologo /target:exe /platform:x64 /codepage:65001 /warnaserror+ /optimize+ "/out:$requesterOutput" $requestSource
+if ($LASTEXITCODE -ne 0) { throw 'Requester compilation failed' }
+& $csc /nologo /target:exe /platform:x64 /codepage:65001 /warnaserror+ /optimize+ /define:REQUEST_TARGET "/out:$requestOutput" $requestSource
+if ($LASTEXITCODE -ne 0) { throw 'Target compilation failed' }
+if ($CompileOnly) { return }
 $root = 'C:\ProgramData\UacRemoteCiE2e'
 if (Test-Path -LiteralPath $root) { throw 'CI fixture directory already exists' }
 $admin = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
@@ -18,15 +35,7 @@ function CopyFixture([string]$source,[string]$destination,[bool]$userRead) {
     $stream = [IO.FileStream]::new($destination,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::None,(Security $false $userRead))
     try { $bytes = [IO.File]::ReadAllBytes($source); $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
 }
-./tools/ci-windows-operator/build.ps1
-& 'target/ci-windows-operator/uac-ci-consent-target-tests.exe'
-if ($LASTEXITCODE -ne 0) { throw 'Consent target negative controls failed' }
 foreach ($name in @('uac-ci-windows-operator.exe','uac-ci-pipe-bridge.exe')) { CopyFixture "target/ci-windows-operator/$name" (Join-Path $root $name) $false }
-$csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $csc /nologo /target:exe /platform:x64 /codepage:65001 /warnaserror+ /optimize+ /out:target/ci-windows-operator/uac-ci-requester.exe tools/ci-e2e-request.cs
-if ($LASTEXITCODE -ne 0) { throw 'Requester compilation failed' }
-& $csc /nologo /target:exe /platform:x64 /codepage:65001 /warnaserror+ /optimize+ /define:REQUEST_TARGET /out:target/ci-windows-operator/uac-ci-request.exe tools/ci-e2e-request.cs
-if ($LASTEXITCODE -ne 0) { throw 'Target compilation failed' }
 foreach ($name in @('uac-ci-requester.exe','uac-ci-request.exe')) { CopyFixture "target/ci-windows-operator/$name" (Join-Path $env:LAB_DIR $name) $true }
 $zip = Join-Path $env:RUNNER_TEMP 'uac-pstools.zip'
 $unpack = Join-Path $env:RUNNER_TEMP 'uac-pstools'

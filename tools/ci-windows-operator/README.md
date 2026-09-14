@@ -56,6 +56,19 @@ endings are explicitly LF, including .NET writers. Responses are bounded to
 12 MiB per line, requests to 4 KiB. Pipe ACL is SY/BA. Exactly one connection is accepted. The
 300-second lifetime watchdog terminates blocked UIA and pipe operations too.
 
+Terminal failure responses use exactly `status`, `source`, `stage`, `gate` with
+`status=failed` and closed values from embedded `diagnostic-vocabulary.json`.
+The bridge reconstructs only validated operator failures on its private stdout;
+its own failures use the same form. No arbitrary stderr is published. ROOT's
+Node reader records only the normalized fixed classifications in the proof file.
+Before an authenticated pipe writer exists, the operator may write one <=512-byte
+`operator-startup-failure.json` in the existing fresh protected CI directory, with
+a SY/BA-only descriptor at creation. The reader accepts only operator startup or
+pipe-wait classifications. This best-effort record cannot change admission or
+turn a missing response into success; it contains no exception text or payload.
+The parent requires drained zero-exit phone and bridge completion after their
+final expected replies; forced termination is failure cleanup, never proof.
+
 ## Closed protocol (UTF-8 JSON lines)
 
 Each command has only the listed keys, one line <=4 KiB, no carriage return.
