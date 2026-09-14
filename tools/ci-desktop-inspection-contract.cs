@@ -45,14 +45,23 @@ internal static class DesktopContract
         new Profile("desktop_renderer_enum_handle", ProcessBase, ThreadBase, 0x201c3, 0x201c3, 0x201c3),
         new Profile("all_acl_renderer_desktop_handle", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0x20183),
         new Profile("desktop_all_specific_handle", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0x201ff),
+        new Profile("desktop_full_minus_delete", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xe01ff),
+        new Profile("desktop_full_minus_write_dac", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xb01ff),
+        new Profile("desktop_full_minus_write_owner", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0x701ff),
+        new Profile("desktop_inspect_plus_delete", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0x30081),
+        new Profile("desktop_inspect_plus_write_dac", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0x60081),
+        new Profile("desktop_inspect_plus_write_owner", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xa0081),
+        new Profile("limited_dup_then_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff),
+        new Profile("limited_dup_retire_after_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, true),
         new Profile("own_scratch_all_access", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0xf01ff)
     };
     sealed class Profile
     {
         internal readonly string Name;
-        internal readonly uint Process, Thread, DesktopBa, DesktopSy, DesktopOpen;
-        internal Profile(string name, uint process, uint thread, uint ba, uint sy, uint open)
-        { Name = name; Process = process; Thread = thread; DesktopBa = ba; DesktopSy = sy; DesktopOpen = open; }
+        internal readonly uint Process, Thread, DesktopBa, DesktopSy, DesktopOpen, DesktopExplicitOpen;
+        internal readonly bool RetireDuplicate;
+        internal Profile(string name, uint process, uint thread, uint ba, uint sy, uint open, uint? explicitOpen = null, bool retireDuplicate = false)
+        { Name = name; Process = process; Thread = thread; DesktopBa = ba; DesktopSy = sy; DesktopOpen = open; DesktopExplicitOpen = explicitOpen ?? open; RetireDuplicate = retireDuplicate; }
     }
     sealed class Fault : Exception
     {
@@ -258,13 +267,16 @@ internal static class DesktopContract
                     result.Got = actual != IntPtr.Zero; result.Error = result.Got ? 0 : error;
                     result.Equal = result.Got && N.CompareObjectHandles(actual, desktop.Value);
                     // Independent explicit-open comparison; neither failure is promoted.
-                    using (Handle opened = new Handle(N.OpenDesktopW(m.Name, 0, false, profile.DesktopOpen), true))
+                    using (Handle opened = new Handle(N.OpenDesktopW(m.Name, 0, false, profile.DesktopExplicitOpen), true))
                     {
                         if (!N.CompareObjectHandles(opened.Value, desktop.Value)) throw new Fault("opened_identity", 0);
                         Verify(opened.Value, 7, d);
+                        // Own scratch duplicate only. The independently opened
+                        // handle already matched it and pins that same object.
+                        if (profile.RetireDuplicate) { desktop.Dispose(); if (CloseFailed) throw new Fault("handle", 0); }
                         N.SetLastError(0); IntPtr after = N.GetThreadDesktop(m.Tid); int afterError = Marshal.GetLastWin32Error();
                         result.OpenGot = after != IntPtr.Zero; result.OpenError = result.OpenGot ? 0 : afterError;
-                        result.OpenEqual = result.OpenGot && N.CompareObjectHandles(after, desktop.Value);
+                        result.OpenEqual = result.OpenGot && N.CompareObjectHandles(after, opened.Value);
                         // actual/after are borrowed thread associations; never CloseDesktop.
                         CheckProcess(process.Value, m.Pid, m.Created);
                         if (N.GetProcessIdOfThread(thread.Value) != m.Pid || Creation(thread.Value, true) != m.ThreadCreated) throw new Fault("thread_identity", 0);
