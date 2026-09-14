@@ -182,20 +182,28 @@ pub(super) fn map_content(
     report: &ProbeReport,
 ) -> Result<Arc<RequestContent>, PromptContentMappingError> {
     let observation = report.content();
-    // The caption followed by the first two Text labels names the program. A
+    // The caption followed by the first two naming Text labels names the
+    // program. A dialog that repeats its own title as a text element, or that
+    // draws its shield from a private-use icon font, names nothing: skipping
+    // those keeps the two places that carry the request and the program. A
     // label that would push the name over its byte bound is left out whole;
     // the labels themselves are never cut, and every label stays in details.
-    let mut program_name = replace_controls(observation.caption());
+    let caption = replace_controls(observation.caption());
+    let mut program_name = caption.clone();
+    let mut considered = 0_u8;
     for label in observation
         .labels()
         .iter()
         .filter(|label| label.kind() == LabelKind::Text)
-        .take(2)
     {
+        if considered == 2 {
+            break;
+        }
         let part = replace_controls(label.text());
-        if part.is_empty() {
+        if !names_program(&part, &caption) {
             continue;
         }
+        considered += 1;
         let separator = if program_name.is_empty() {
             ""
         } else {
@@ -258,6 +266,22 @@ fn replace_controls(value: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Whether a text label can carry the program's identity at all. A label that
+/// repeats the window title says only what the title already said, and one
+/// drawn entirely from an icon font carries no readable name. Both appear in
+/// the current Windows consent dialog ahead of the program it is asking about.
+fn names_program(part: &str, caption: &str) -> bool {
+    let trimmed = part.trim();
+    !trimmed.is_empty()
+        && trimmed != caption.trim()
+        && trimmed.chars().any(|character| !is_private_use(character))
+}
+
+fn is_private_use(character: char) -> bool {
+    matches!(character,
+        '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}' | '\u{100000}'..='\u{10fffd}')
 }
 
 fn is_path(value: &str) -> bool {
@@ -333,6 +357,33 @@ mod tests {
             mapped.details(),
             "First text\n\\\\server\\tool.exe\nC:\\later.exe\nYes"
         );
+    }
+
+    #[test]
+    fn a_repeated_title_and_an_icon_glyph_never_take_the_naming_places() {
+        // The shape the current Windows consent dialog presents: its own title
+        // as a text element, then the shield glyph, and only then the question
+        // and the program. Both leading labels used to fill the two naming
+        // places, so the phone was told the dialog's name instead of the app's.
+        let value = report(
+            "User Account Control",
+            &[
+                ("User Account Control", LabelKind::Text),
+                ("Close", LabelKind::Button),
+                ("\u{e8bb}", LabelKind::Text),
+                ("Do you want to allow this app?", LabelKind::Text),
+                ("uac-ci-request.exe", LabelKind::Text),
+                ("Publisher: Unknown", LabelKind::Text),
+                ("Yes", LabelKind::Button),
+            ],
+        );
+        let mapped = map_content(&value).unwrap();
+        assert_eq!(
+            mapped.program_name(),
+            "User Account Control · Do you want to allow this app? · uac-ci-request.exe"
+        );
+        assert!(mapped.details().contains("uac-ci-request.exe"));
+        assert_eq!(mapped.path(), ""); // A collapsed dialog shows no location.
     }
 
     #[test]

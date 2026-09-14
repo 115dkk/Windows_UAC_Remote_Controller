@@ -14,7 +14,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, STEP_LIMIT, close, connect, driver, emit, hex, next_frame, queue};
 
-const CI_PROGRAM_MARKER: &str = "UacCiHarmlessRequest";
+/// What Windows actually shows for this unsigned fixture: the consent dialog
+/// names an unsigned program by its file name, not by its file description.
+const CI_PROGRAM_MARKER: &str = "uac-ci-request.exe";
 
 pub(super) async fn deny_next(
     invitation: &PairingInvitation,

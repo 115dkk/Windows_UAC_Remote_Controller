@@ -115,7 +115,10 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     confirmService();
     proof.checks.push('actual-service-registry-row-matches-fixture');
     stage = 'request-roundtrip';
-    await phone.send({ command: 'deny_next', expected_program_name: 'UacCiHarmlessRequest',
+    // Windows names an unsigned program by its file name in the consent
+    // dialog, and a collapsed dialog shows no location, so the fixture falls
+    // back to requiring that name inside the actual observed details.
+    await phone.send({ command: 'deny_next', expected_program_name: 'uac-ci-request.exe',
       expected_path: 'C:\\Program Files\\휴대폰 승인\\uac-ci-request.exe' });
     assert.ok((await phone.next()).state === 'session_ready', 'Pinned session not ready');
     // Only a nonsecret trigger is made readable to the owned medium requester.

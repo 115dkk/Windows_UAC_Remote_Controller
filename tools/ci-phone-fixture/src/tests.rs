@@ -106,7 +106,7 @@ fn binding_for(content: &RequestContent) -> RequestBinding {
 #[test]
 fn deny_command_accepts_omitted_optional_details_hash() {
     let command = parse(
-        br#"{"command":"deny_next","expected_program_name":"UacCiHarmlessRequest","expected_path":"C:/ci-fixture.exe"}
+        br#"{"command":"deny_next","expected_program_name":"uac-ci-request.exe","expected_path":"C:/ci-fixture.exe"}
 "#,
     );
     assert!(matches!(
@@ -120,15 +120,15 @@ fn deny_command_accepts_omitted_optional_details_hash() {
 
 #[test]
 fn ci_marker_requires_exact_visible_path_or_marker_in_collapsed_details() {
-    const MARKER: &str = "UacCiHarmlessRequest";
+    const MARKER: &str = "uac-ci-request.exe";
     const PATH: &str = "C:/ci-fixture.exe";
     for (name, path, details, accepted) in [
-        ("권한 요청 UacCiHarmlessRequest 앱", PATH, "publisher", true),
-        ("권한 요청", PATH, "application: UacCiHarmlessRequest", true),
+        ("권한 요청 uac-ci-request.exe 앱", PATH, "publisher", true),
+        ("권한 요청", PATH, "application: uac-ci-request.exe", true),
         ("다른 프로그램", PATH, "publisher", false),
         (MARKER, "C:/wrong.exe", MARKER, false),
         (MARKER, "", "publisher only", false),
-        ("권한 요청", "", "application: UacCiHarmlessRequest", true),
+        ("권한 요청", "", "application: uac-ci-request.exe", true),
     ] {
         let content = RequestContent::new(name, path, details).unwrap();
         assert_eq!(
@@ -145,7 +145,7 @@ fn ci_marker_requires_exact_visible_path_or_marker_in_collapsed_details() {
 fn optional_details_hash_never_replaces_full_binding_digest_check() {
     use sha2::{Digest, Sha256};
 
-    const MARKER: &str = "UacCiHarmlessRequest";
+    const MARKER: &str = "uac-ci-request.exe";
     const PATH: &str = "C:/ci-fixture.exe";
     let original = RequestContent::new(MARKER, PATH, "publisher").unwrap();
     let binding = binding_for(&original);
@@ -176,7 +176,7 @@ fn pc_wire_rejects_tampered_content_even_with_a_valid_test_pc_signature() {
         PcPublicKey::from_sec1_bytes(signer.verifying_key().to_encoded_point(false).as_bytes())
             .unwrap();
     let content =
-        RequestContent::new("UacCiHarmlessRequest", "C:/ci-fixture.exe", "publisher").unwrap();
+        RequestContent::new("uac-ci-request.exe", "C:/ci-fixture.exe", "publisher").unwrap();
     let binding = binding_for(&content);
     let unsigned = UnsignedPcEvent::new(PcEvent::Opened {
         binding,
@@ -192,7 +192,7 @@ fn pc_wire_rejects_tampered_content_even_with_a_valid_test_pc_signature() {
         .to_wire();
     VerifiedPcEvent::from_wire(&wire, binding.pc(), &public).unwrap();
 
-    let marker = b"UacCiHarmlessRequest";
+    let marker = b"uac-ci-request.exe";
     let wire_index = wire
         .windows(marker.len())
         .position(|bytes| bytes == marker)
