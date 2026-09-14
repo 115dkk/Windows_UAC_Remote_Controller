@@ -18,6 +18,24 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 function privateChild(exe, env = process.env) {
   return new PrivateChild(spawn(exe, [], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
 }
+// Shape-only client view for a failed stage: closed vocabulary words and counts.
+// Never a device id, key, QR payload, comparison digit or free-text message.
+async function clientShape(page) {
+  try {
+    return await page.evaluate(async () => {
+      const closed = value => (typeof value === 'string' && /^[a-z_]{1,32}$/.test(value) ? value : null);
+      const snapshot = await window.__TAURI_INTERNALS__.invoke('app_snapshot');
+      return {
+        serviceState: closed(snapshot.service?.state ?? null),
+        devicesAvailability: closed(snapshot.dataAvailability?.devices ?? null),
+        deviceCount: Array.isArray(snapshot.devices) ? snapshot.devices.length : null,
+        pairingPhase: closed(snapshot.pairing?.phase ?? null),
+        pairingFailure: closed(snapshot.pairing?.failure ?? null),
+        issueCode: closed(snapshot.issue?.code ?? null),
+      };
+    });
+  } catch { return null; }
+}
 
 export async function proveFullPairing({ page, ps, evidence, confirmService, clientPid }) {
   if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Hosted Windows only');
@@ -118,6 +136,9 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     const diagnostic = phone?.diagnostic ?? operatorStartupDiagnostic() ?? bridge?.diagnostic;
     if (diagnostic) proof.failure = diagnostic;
     proof.failedStage = stage;
+    // Distinguishes a service that never registered the device from a client
+    // that cannot yet read management while its pairing worker is still live.
+    proof.clientView = await clientShape(page);
     proof.operatorProcess = operator?.snapshot() ?? null;
     throw new Error(`Native pairing e2e failed at ${stage}`);
   } finally {
