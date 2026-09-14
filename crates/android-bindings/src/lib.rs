@@ -1005,6 +1005,33 @@ mod tests {
         test(&controller, &platform);
     }
 
+    #[test]
+    fn skipped_empty_maintenance_retains_native_floor_for_next_mutation() {
+        with_model(|controller, platform| {
+            let path =
+                std::path::Path::new(&platform.path).join(phone_state_store::SNAPSHOT_FILE_NAME);
+            let before = std::fs::read(&path).unwrap();
+            platform.clock.lock().unwrap().monotonic_nanos = 2_000_000_000;
+            let _ = controller.maintain_native_requests().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                controller.native_floor_nanos.load(Ordering::Acquire),
+                2_000_000_000
+            );
+            platform.clock.lock().unwrap().monotonic_nanos = 1_000_000_000;
+            assert_eq!(
+                controller.save_notification_policy(
+                    serde_json::to_string(&NotificationPolicy::default()).unwrap(),
+                ),
+                Err(BridgeError::InvalidObservation),
+            );
+            assert_eq!(
+                controller.notification_policy_json(),
+                Err(BridgeError::Closed)
+            );
+        });
+    }
+
     fn approval_selection() -> NativeRequestSelection {
         NativeRequestSelection {
             pc: vec![1; 32],

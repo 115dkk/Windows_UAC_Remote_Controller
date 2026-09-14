@@ -152,13 +152,21 @@ impl MobileController {
         };
         let update = self.with_inbox(|owner| {
             owner
-                .poll(clock)
+                // read_clock above has already advanced the independent native
+                // floor, including when empty maintenance does not mutate state.
+                .poll_maintenance(self.boot, clock)
                 .map_err(|_| BridgeError::StorageUnavailable)
         })?;
-        self.dispatch_effects(
-            update.update().effects().to_vec(),
-            update.update().fault().is_some(),
-        )?;
+        let (effects, faulted) = update.map_or_else(
+            || (Vec::new(), false),
+            |update| {
+                (
+                    update.update().effects().to_vec(),
+                    update.update().fault().is_some(),
+                )
+            },
+        );
+        self.dispatch_effects(effects, faulted)?;
         refresh.extend(
             self.projections
                 .lock()

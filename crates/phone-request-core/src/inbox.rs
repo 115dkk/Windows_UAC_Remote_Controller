@@ -1238,7 +1238,11 @@ fn recovery_lease(policy: &NotificationPolicy, clock: InboxClock, expiry: u64) -
     expiry
 }
 
-fn recovery_clock_continuous(previous_nanos: u64, previous: LocalTime, clock: InboxClock) -> bool {
+pub(crate) fn recovery_clock_continuous(
+    previous_nanos: u64,
+    previous: LocalTime,
+    clock: InboxClock,
+) -> bool {
     const WEEK: u64 = 7 * 1440;
     const MINUTE_NANOS: u64 = 60_000_000_000;
     let Some(elapsed) = clock.nanos.checked_sub(previous_nanos) else {

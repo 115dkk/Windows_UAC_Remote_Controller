@@ -151,6 +151,121 @@ fn fresh_owner(temp: &tempfile::TempDir, policy: NotificationPolicy) -> DurableI
 }
 
 #[test]
+fn unpaired_empty_maintenance_does_not_poll_or_advance_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    let before = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap();
+    for (millis, minute) in [(1_000, 600), (60_000, 601), (120_000, 602)] {
+        assert!(
+            owner
+                .poll_maintenance(boot(), clock(millis, minute))
+                .unwrap()
+                .is_none()
+        );
+        let history = owner
+            .record_pending_outcomes(UnixMillis::new(1_000).unwrap())
+            .unwrap();
+        assert!(!history.receipt().changed());
+        assert_eq!(history.affected(), 0);
+        assert_eq!(
+            fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+            before
+        );
+        assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+        assert!(!temp.path().join(STAGING_FILE_NAME).exists());
+    }
+    // Ordinary poll remains a real durable clock transition.
+    let polled = owner.poll(clock(120_001, 602)).unwrap();
+    assert!(polled.receipt().changed());
+    assert_ne!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn maintenance_preserves_existing_intent_and_faults_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    let intent = temp.path().join(INTENT_FILE_NAME);
+    fs::write(&intent, b"SYNTHETIC_INTERRUPTED_INTENT").unwrap();
+    let error = owner.poll_maintenance(boot(), clock(1, 600)).unwrap_err();
+    assert_eq!(
+        error.cause(),
+        DurableFault::Storage(StoreError::RecoveryRequired)
+    );
+    assert_cleanup(error);
+    assert_eq!(fs::read(intent).unwrap(), b"SYNTHETIC_INTERRUPTED_INTENT");
+    assert!(owner.policy().is_err());
+}
+
+#[test]
+fn maintenance_rejects_changed_disk_and_same_boot_clock_regression() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    let _ = owner.poll(clock(1_000, 600)).unwrap();
+    let update = owner
+        .poll_maintenance(boot(), clock(999, 600))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        update.update().fault(),
+        Some(InboxFault::NativeClockRegressed)
+    );
+    drop(owner);
+
+    let other = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&other, NotificationPolicy::default());
+    fs::write(
+        other.path().join(SNAPSHOT_FILE_NAME),
+        b"SYNTHETIC_CORRUPTION",
+    )
+    .unwrap();
+    let failure = owner.poll_maintenance(boot(), clock(1, 600)).unwrap_err();
+    assert!(matches!(failure.cause(), DurableFault::Storage(_)));
+    assert_cleanup(failure);
+    assert!(owner.history().is_err());
+}
+
+#[test]
+fn maintenance_does_not_skip_local_discontinuity_or_retained_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    assert!(
+        owner
+            .poll_maintenance(boot(), clock(1, 660))
+            .unwrap()
+            .is_some()
+    );
+    let event = opened(90_001, 0, 1_000);
+    let _ = owner
+        .receive_opened(&event, &mut correlation(1, 0), clock(1, 660))
+        .unwrap();
+    assert!(
+        owner
+            .poll_maintenance(boot(), clock(2, 660))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_maintenance_and_history_succeed_when_new_directory_entries_are_forbidden() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh_owner(&temp, NotificationPolicy::default());
+    // Same-byte verification/fsync needs existing files, not directory writes.
+    // Restore permissions before assertions so a failure preserves test cleanup.
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let poll = owner.poll_maintenance(boot(), clock(60_000, 601));
+    let history = owner.record_pending_outcomes(UnixMillis::new(1_000).unwrap());
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(poll.unwrap().is_none());
+    assert!(!history.unwrap().receipt().changed());
+}
+
+#[test]
 fn pending_outcome_survives_reopen_until_commit_backed_acknowledgment() {
     let temp = tempfile::tempdir().unwrap();
     let mut owner = fresh_owner(&temp, NotificationPolicy::default());

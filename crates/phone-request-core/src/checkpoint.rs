@@ -95,6 +95,20 @@ impl fmt::Debug for InboxCheckpoint {
     }
 }
 impl InboxCheckpoint {
+    /// Read-only maintenance eligibility, never a clock observation or intake
+    /// permission. The native caller must independently retain its current clock
+    /// floor across skipped observations. No checkpoint field is advanced here.
+    pub fn can_skip_empty_poll(&self, boot: PhoneBootId, clock: InboxClock) -> bool {
+        self.phone_boot == boot
+            && self.is_policy_only()
+            && match (self.last_phone_nanos, self.last_local) {
+                (Some(previous), Some(local)) => {
+                    crate::inbox::recovery_clock_continuous(previous, local, clock)
+                }
+                _ => false,
+            }
+    }
+
     /// Staging compatibility predicate only, not authentication or readiness.
     pub fn is_policy_only(&self) -> bool {
         self.retained.is_empty()
@@ -251,5 +265,49 @@ impl PhoneInbox {
         let update = inbox.begin(clock);
         let update = inbox.finish(update);
         Ok((inbox, update))
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use notification_policy::{ClockReading, MonotonicTime, Weekday};
+
+    fn clock(nanos: u64, minute: u16) -> InboxClock {
+        InboxClock::new(
+            ClockReading::new(
+                MonotonicTime::from_millis(nanos / 1_000_000),
+                LocalTime::new(Weekday::Monday, minute).unwrap(),
+            ),
+            nanos,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn idle_eligibility_preserves_boot_clock_and_empty_state_boundaries() {
+        let boot = PhoneBootId::from_native_boot_count(7).unwrap();
+        let mut inbox = PhoneInbox::with_phone_boot(
+            NotificationPolicy::default(),
+            CapacityLimits::default(),
+            boot,
+        );
+        let _ = inbox.poll(clock(1_000_000_000, 600));
+        let checkpoint = inbox.checkpoint().unwrap();
+        assert!(checkpoint.can_skip_empty_poll(boot, clock(61_000_000_000, 601)));
+        assert!(!checkpoint.can_skip_empty_poll(boot, clock(999_999_999, 600)));
+        assert!(!checkpoint.can_skip_empty_poll(boot, clock(1_000_000_001, 660)));
+        assert!(!checkpoint.can_skip_empty_poll(
+            PhoneBootId::from_native_boot_count(8).unwrap(),
+            clock(61_000_000_000, 601),
+        ));
+        let mut guarded = checkpoint.clone();
+        guarded.quarantine = Some(90_000_000_000);
+        assert!(!guarded.can_skip_empty_poll(boot, clock(61_000_000_000, 601)));
+        let mut faulted = checkpoint.clone();
+        faulted.fault = Some(InboxFault::NativeClockRegressed);
+        assert!(!faulted.can_skip_empty_poll(boot, clock(61_000_000_000, 601)));
+        // Eligibility is a pure observation and does not move the saved floor.
+        assert_eq!(checkpoint.last_phone_nanos, Some(1_000_000_000));
     }
 }

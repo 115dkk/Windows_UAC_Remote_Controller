@@ -676,6 +676,25 @@ impl DurableInbox {
         &mut self,
         recorded_at: UnixMillis,
     ) -> Result<CommittedHistoryMutation, DurableFailure> {
+        self.ensure_healthy().map_err(DurableFailure::new)?;
+        // There is neither an ACK nor retention mutation in this strictly empty
+        // unpaired state. Verify/sync the exact unchanged checkpoint without an
+        // intent. Nonempty history (including pruning) keeps its transaction.
+        if self.local_keys.is_empty()
+            && self.peer_associations.is_empty()
+            && self.history.records().is_empty()
+            && self
+                .inbox
+                .checkpoint()
+                .is_ok_and(|checkpoint| checkpoint.is_policy_only())
+        {
+            return self
+                .synchronize_idle_checkpoint()
+                .map(|receipt| CommittedHistoryMutation {
+                    receipt,
+                    affected: 0,
+                });
+        }
         let (receipt, affected) = self.transition_owner(|inbox, history| {
             // The queue is already bounded/committed by this same sole owner.
             // Snapshot consistency forbids recorded/pending overlap, including
@@ -783,6 +802,68 @@ impl DurableInbox {
     pub fn poll(&mut self, clock: InboxClock) -> Result<CommittedUpdate, DurableFailure> {
         let (receipt, update) = self.transition(|inbox| inbox.poll(clock))?;
         Ok(CommittedUpdate { receipt, update })
+    }
+
+    /// Maintenance only. None means an exact empty checkpoint was verified and
+    /// synchronized, not that poll ran or the supplied clock was persisted.
+    /// The native caller must retain its own monotonic floor on EVERY clock
+    /// observation (including skips and subsequent intake). This API supplies no
+    /// effects, accepted input or clock-update receipt on that branch. Ordinary
+    /// poll, intake, restore and all nonempty states retain the intent barrier.
+    pub fn poll_maintenance(
+        &mut self,
+        boot: PhoneBootId,
+        clock: InboxClock,
+    ) -> Result<Option<CommittedUpdate>, DurableFailure> {
+        self.ensure_healthy().map_err(DurableFailure::new)?;
+        let checkpoint = self
+            .inbox
+            .checkpoint()
+            .map_err(|error| self.fail_maintenance(DurableFault::Checkpoint(error)))?;
+        if checkpoint.phone_boot() != boot {
+            return Err(self.fail_maintenance(DurableFault::Checkpoint(
+                phone_request_core::InboxCheckpointError::InvalidBoot,
+            )));
+        }
+        if self.local_keys.is_empty()
+            && self.peer_associations.is_empty()
+            && self.history.records().is_empty()
+            && checkpoint.can_skip_empty_poll(boot, clock)
+        {
+            self.synchronize_idle_checkpoint()?;
+            Ok(None)
+        } else {
+            self.poll(clock).map(Some)
+        }
+    }
+
+    fn synchronize_idle_checkpoint(&mut self) -> Result<CommitReceipt, DurableFailure> {
+        self.ensure_healthy().map_err(DurableFailure::new)?;
+        let result = (|| {
+            let bytes = encode(
+                &self.inbox,
+                &self.history,
+                &self.local_keys,
+                &self.peer_associations,
+            )?;
+            // Equality is checked BEFORE the convenience commit. Thus it can
+            // only reach sync_unchanged, never reserve/replace or erase intent.
+            if self.store.snapshot().map_err(DurableFault::Storage)? != bytes {
+                return Err(DurableFault::Storage(
+                    phone_state_store::StoreError::ExternalChange,
+                ));
+            }
+            let receipt = self.store.commit(&bytes).map_err(DurableFault::Storage)?;
+            self.required_durability.check(receipt)
+        })();
+        result.map_err(|cause| self.fail_maintenance(cause))
+    }
+
+    fn fail_maintenance(&mut self, cause: DurableFault) -> DurableFailure {
+        self.fault = Some(cause);
+        self.liveness.invalidate_all();
+        self.pairing_reservations.invalidate_all();
+        stop_unowned(&mut self.inbox, cause)
     }
 
     pub fn update_policy(

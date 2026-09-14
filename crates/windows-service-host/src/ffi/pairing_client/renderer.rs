@@ -278,6 +278,10 @@ impl Owner {
         self.budget()?;
         match (self.phase, progress) {
             (_, PairingClientProgress::Pending) => (),
+            // The comparison frame has been consumed; no pipe operation is
+            // pending until the local decision. poll still fences the exact
+            // service/own identities and original deadline on every iteration.
+            (Phase::Comparison, PairingClientProgress::Idle) => (),
             (Phase::HelloWrite, PairingClientProgress::Written) => {
                 let frame = Frame::RendererObjects {
                     invocation: self.invocation,
