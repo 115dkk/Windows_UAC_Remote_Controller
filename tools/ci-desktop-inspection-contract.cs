@@ -290,8 +290,12 @@ internal static class DesktopContract
                 {
                     if (ObjectText(desktop.Value, 3) != "Desktop" || ObjectText(desktop.Value, 2) != m.Name) throw new Fault("desktop_identity", 0);
                     Verify(desktop.Value, 7, d);
+                    IntPtr readerOriginal = N.GetThreadDesktop(N.GetCurrentThreadId());
+                    if (readerOriginal == IntPtr.Zero) throw new Fault("witness_reader_attach", Marshal.GetLastWin32Error());
+                    Need(N.SetThreadDesktop(desktop.Value), "witness_reader_attach");
+                    try {
                     Result result = new Result(); result.Name = profile.Name;
-                    CheckMembershipControls(result, desktop.Value, process.Value, thread.Value, m);
+                    CheckMembershipControls(result, desktop.Value, process.Value, thread.Value, m, readerOriginal);
                     N.SetLastError(0); IntPtr actual = N.GetThreadDesktop(m.Tid); int error = Marshal.GetLastWin32Error();
                     result.Got = actual != IntPtr.Zero; result.Error = result.Got ? 0 : error;
                     result.Equal = result.Got && N.CompareObjectHandles(actual, desktop.Value);
@@ -302,7 +306,11 @@ internal static class DesktopContract
                         Verify(opened.Value, 7, d);
                         // Own scratch duplicate only. The independently opened
                         // handle already matched it and pins that same object.
-                        if (profile.RetireDuplicate) { desktop.Dispose(); if (CloseFailed) throw new Fault("handle", 0); }
+                        if (profile.RetireDuplicate) {
+                            Need(N.SetThreadDesktop(readerOriginal), "witness_reader_restore");
+                            desktop.Dispose(); if (CloseFailed) throw new Fault("handle", 0);
+                            Need(N.SetThreadDesktop(opened.Value), "witness_reader_attach");
+                        }
                         N.SetLastError(0); IntPtr after = N.GetThreadDesktop(m.Tid); int afterError = Marshal.GetLastWin32Error();
                         result.OpenGot = after != IntPtr.Zero; result.OpenError = result.OpenGot ? 0 : afterError;
                         result.OpenEqual = result.OpenGot && N.CompareObjectHandles(after, opened.Value);
@@ -311,6 +319,7 @@ internal static class DesktopContract
                         if (N.GetProcessIdOfThread(thread.Value) != m.Pid || Creation(thread.Value, true) != m.ThreadCreated) throw new Fault("thread_identity", 0);
                         result.Completed = true; Write(pipe, result.Wire());
                     }
+                    } finally { if (!N.SetThreadDesktop(readerOriginal)) CloseFailed = true; }
                 }
             }
             }
@@ -319,7 +328,7 @@ internal static class DesktopContract
         }
         return CloseFailed ? 1 : 0;
     }
-    static void CheckMembershipControls(Result result, IntPtr desktop, IntPtr process, IntPtr thread, Metadata m)
+    static void CheckMembershipControls(Result result, IntPtr desktop, IntPtr process, IntPtr thread, Metadata m, IntPtr wrongDesktop)
     {
         CheckWitnessTarget(process, thread, m);
         IntPtr window = new IntPtr(checked((long)m.Window));
@@ -331,7 +340,7 @@ internal static class DesktopContract
             throw new Fault("witness_reader_class", Marshal.GetLastWin32Error());
         uint wrongPid = N.GetCurrentProcessId(), wrongTid = N.GetCurrentThreadId();
         if (wrongPid == m.Pid || wrongTid == m.Tid) throw new Fault("witness_negative_setup", 0);
-        IntPtr wrongDesktop = N.GetThreadDesktop(wrongTid); // Borrowed inspector Default.
+        // Borrowed original inspector Default, captured before read-only attach.
         if (wrongDesktop == IntPtr.Zero || !String.Equals(ObjectText(wrongDesktop, 2), "Default", StringComparison.OrdinalIgnoreCase) ||
             N.CompareObjectHandles(wrongDesktop, desktop)) throw new Fault("witness_negative_setup", 0);
         result.WindowMembership = WindowMember(desktop, window, m.Pid, m.Tid);
@@ -492,6 +501,7 @@ internal static class DesktopContract
             case "witness_target_owner": case "witness_target_visible": case "witness_target_root":
             case "witness_reader_visible": case "witness_reader_root": case "witness_reader_class":
             case "witness_reader_owner": return true;
+            case "witness_reader_attach": case "witness_reader_restore": return true;
             default: return false;
         }
     }
