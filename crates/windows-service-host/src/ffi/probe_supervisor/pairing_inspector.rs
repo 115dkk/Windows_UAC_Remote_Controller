@@ -246,10 +246,10 @@ impl Owner {
         Ok(())
     }
     fn abort_cleanup(&mut self) -> Result<(), crate::PairingPeerError> {
-        if let Some(run) = self.run.as_mut() {
-            if !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true)) {
-                return Err(crate::PairingPeerError::CleanupUnconfirmed);
-            }
+        if let Some(run) = self.run.as_mut()
+            && !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true))
+        {
+            return Err(crate::PairingPeerError::CleanupUnconfirmed);
         }
         self.run = None;
         if CLOSE_FAILURE.load(Ordering::Acquire) != 0 {
@@ -277,14 +277,14 @@ impl Drop for Owner {
         if self.closed {
             return;
         }
-        if let Some(mut run) = self.run.take() {
-            if !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true)) {
-                run.job.close();
-                run.job_closed = true;
-                mem::forget(run);
-                crate::ffi::pairing_peer::quarantine_boundary();
-                return;
-            }
+        if let Some(mut run) = self.run.take()
+            && !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true))
+        {
+            run.job.close();
+            run.job_closed = true;
+            mem::forget(run);
+            crate::ffi::pairing_peer::quarantine_boundary();
+            return;
         }
         if CLOSE_FAILURE.load(Ordering::Acquire) != 0 {
             crate::ffi::pairing_peer::quarantine_boundary();

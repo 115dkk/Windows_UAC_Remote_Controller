@@ -702,12 +702,12 @@ impl Inner {
                 _ => return Err(native(9, WinError::from_thread())),
             }
         }
-        if let Some(inspector) = self.inspector.get_mut().as_mut() {
-            if let Err(error) = inspector.close() {
-                self.cleanup_failure = Some(error);
-                BOUNDARY_HEALTH.quarantine();
-                return Err(error);
-            }
+        if let Some(inspector) = self.inspector.get_mut().as_mut()
+            && let Err(error) = inspector.close()
+        {
+            self.cleanup_failure = Some(error);
+            BOUNDARY_HEALTH.quarantine();
+            return Err(error);
         }
         *self.inspector.get_mut() = None;
         drop(self.thread.take());

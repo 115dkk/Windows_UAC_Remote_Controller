@@ -34,6 +34,14 @@ fn failure(error: Error) -> Failure {
         },
     }
 }
+fn object_stage(stage: u8, error: Error) -> Error {
+    match error {
+        Error::Service(ServiceError::RendererNative { stage: 2, hresult }) => {
+            Error::Service(ServiceError::RendererNative { stage, hresult })
+        }
+        _ => error,
+    }
+}
 impl Inspector for NativeInspector {
     fn bind(&mut self, binding: Binding) -> Result<(), Failure> {
         let result = (|| {
@@ -51,7 +59,8 @@ impl Inspector for NativeInspector {
             };
             let own = TokenFacts::observe(own)?;
             let session = SessionEpoch::observe(own.session)?;
-            check_station(HANDLE(station.map_err(|e| native(2, e))?.0))?;
+            check_station(HANDLE(station.map_err(|e| native(24, e))?.0))
+                .map_err(|error| object_stage(24, error))?;
             let invocation = RendererInvocation::new(
                 crate::PendingElevationId::from_bytes(binding.pending).map_err(Error::Service)?,
                 crate::PendingElevationId::from_bytes(binding.display).map_err(Error::Service)?,
@@ -97,14 +106,16 @@ impl Inspector for NativeInspector {
                 DESKTOP_INSPECT,
                 5,
                 &mut bound.desktop,
-            )?;
+            )
+            .map_err(|error| object_stage(25, error))?;
             duplicate_object(
                 bound.process.raw(),
                 binding.station,
                 STATION_INSPECT,
                 21,
                 &mut bound.station,
-            )?;
+            )
+            .map_err(|error| object_stage(26, error))?;
             bound.check()
         })();
         if result.is_err() {
@@ -162,16 +173,17 @@ impl Bound {
         let station = self.station.as_ref().ok_or(Error::InvalidPhase)?;
         if !matches!(desktop.kind, ObjectKind::Desktop)
             || !matches!(station.kind, ObjectKind::Station)
-            || object_text(desktop.raw, UOI_NAME)? != display_name(self.invocation)
+            || object_text(desktop.raw, UOI_NAME).map_err(|error| object_stage(27, error))?
+                != display_name(self.invocation)
         {
             return Err(Error::Rejected);
         }
         verify_descriptor(desktop.raw, Profile::Desktop, &self.sid)?;
-        check_station(station.raw)?;
+        check_station(station.raw).map_err(|error| object_stage(28, error))?;
         // SAFETY: same-session retained original thread; borrowed assigned
         // desktop compared to independently duplicated object, never closed.
         let assigned =
-            unsafe { GetThreadDesktop(self.binding.thread) }.map_err(|e| native(2, e))?;
+            unsafe { GetThreadDesktop(self.binding.thread) }.map_err(|e| native(29, e))?;
         if !unsafe { CompareObjectHandles(HANDLE(assigned.0), desktop.raw) }.as_bool() {
             return Err(Error::Rejected);
         }

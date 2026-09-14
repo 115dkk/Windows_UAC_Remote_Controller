@@ -379,7 +379,10 @@ export async function main(args = process.argv.slice(2)) {
       requireThat(!installed.split(/\r?\n/).includes(`package:${packageName}`), 'Initial run requires a fresh AVD; never clear/repair existing app data.');
     }
     for (const packageName of [PACKAGE, TEST_PACKAGE]) {
-      requireThat(/\bSuccess\s*$/.test(await mutate(['install', '-t', selected[packageName].path])), 'APK install was not confirmed.');
+      // Fresh API36 package-manager startup plus the real product APK exceeded
+      // the generic 30s mutation budget in CI34805229362. Bound installation
+      // separately; still require normal exit and the actual Success receipt.
+      requireThat(/\bSuccess\s*$/.test(await mutate(['install', '-t', selected[packageName].path], 120_000)), 'APK install was not confirmed.');
     }
     await mutate(['shell', 'pm', 'grant', PACKAGE, 'android.permission.POST_NOTIFICATIONS']);
     // Preserve the existing Korean native-shell assertions explicitly in CI.
@@ -453,7 +456,7 @@ export async function main(args = process.argv.slice(2)) {
     async function update(label, ready) {
       const before = await bootId();
       requireThat((await hashFile(selected[PACKAGE].path, MAX_APK)).sha256 === selected[PACKAGE].sha256, 'Update APK changed.');
-      requireThat(/\bSuccess\s*$/.test(await mutate(['install', '-r', '-t', selected[PACKAGE].path])), 'Same-source package replacement failed.');
+      requireThat(/\bSuccess\s*$/.test(await mutate(['install', '-r', '-t', selected[PACKAGE].path], 120_000)), 'Same-source package replacement failed.');
       await barrier(); requireThat(await bootId() === before, 'Package update crossed a reboot.');
       await observe(label, ready, true, before);
     }
