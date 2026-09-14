@@ -123,7 +123,11 @@ internal static class DigitPixelsTests
     private static void Reject(Bitmap pixels, int dpi, params string[] gates)
     {
         try { DigitPixels.Read(pixels, dpi); }
-        catch (Program.GateFailure failure) { Check(Array.IndexOf(gates, failure.Code) >= 0); return; }
+        catch (Program.GateFailure failure)
+        {
+            if (Array.IndexOf(gates, failure.Code) < 0) throw;
+            return;
+        }
         throw new InvalidOperationException();
     }
 
@@ -186,7 +190,9 @@ internal static class DigitPixelsTests
                     using (var pixels = Render("12345", dpi)) Reject(pixels, dpi, "ocr_six_glyphs_required");
                     using (var pixels = Render("1234567", dpi)) Reject(pixels, dpi, "ocr_six_glyphs_required");
                     stage = "nondigit_negative";
-                    using (var pixels = Render("WWWWWW", dpi))
+                        // Separate nondigit glyphs so this probes recognition,
+                        // not adjacent letters merging into fewer ink columns.
+                        using (var pixels = Render("W W W W W W", dpi))
                         Reject(pixels, dpi, "ocr_no_matching_glyph", "ocr_glyph_difference", "ocr_not_unique");
                     stage = "noise_negative";
                     using (var pixels = Render("012345", dpi))
