@@ -39,6 +39,12 @@ internal static class DesktopContract
         new Profile("process_thread_all", 0x1fffff, 0x1fffff, 0x20183, InspectBase, InspectBase),
         new Profile("process_desktop_all", 0x1fffff, ThreadBase, 0xf01ff, 0xf01ff, InspectBase),
         new Profile("thread_desktop_all", ProcessBase, 0x1fffff, 0xf01ff, 0xf01ff, InspectBase),
+        new Profile("all_acl_limited_desktop_handle", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, InspectBase),
+        new Profile("desktop_all_acl_and_handle", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xf01ff),
+        new Profile("desktop_renderer_handle", ProcessBase, ThreadBase, 0x20183, InspectBase, 0x20183),
+        new Profile("desktop_renderer_enum_handle", ProcessBase, ThreadBase, 0x201c3, 0x201c3, 0x201c3),
+        new Profile("all_acl_renderer_desktop_handle", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0x20183),
+        new Profile("desktop_all_specific_handle", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0x201ff),
         new Profile("own_scratch_all_access", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0xf01ff)
     };
     sealed class Profile
