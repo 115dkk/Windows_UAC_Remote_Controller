@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
-import { OperatorProcess } from './ci-operator-process.mjs';
+import { OperatorProcess, projectConsentTopology } from './ci-operator-process.mjs';
 
 function fixture(t, source, options = {}) {
   const child = spawn(process.execPath, ['-e', source], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -15,6 +15,34 @@ function fixture(t, source, options = {}) {
 
 const ready = owner => owner.guardStartup(async () => { await once(owner.child.stdout, 'data'); return 'authenticated-test-ready'; });
 
+const topologyLine = 'CI consent topology: type=Text id=1024 node=0123456789ABCDEF parent=FEDCBA9876543210 locationLabel=True expectedPath=False closedPair=False conflictingPath=False nextType=Text nextExpectedPath=True';
+
+test('projects only bounded structural consent fields', () => {
+  const result = projectConsentTopology('CI consent topology summary: textNodes=1\r\n' + topologyLine + '\r\n');
+  assert.equal(result.textNodes, 1);
+  assert.deepEqual(result.rows, [{ type: 'Text', id: '1024', node: '0123456789ABCDEF', parent: 'FEDCBA9876543210',
+    locationLabel: true, expectedPath: false, closedPair: false, conflictingPath: false, nextType: 'Text', nextExpectedPath: true }]);
+  for (const text of [topologyLine + ' raw=synthetic-secret', topologyLine.replace('id=1024', 'id=private/path'),
+    topologyLine.replace('nextType=Text', 'nextType=Secret'), 'synthetic-private-text']) {
+    assert.deepEqual(projectConsentTopology(text), { textNodes: null, rows: [] });
+  }
+  assert.equal(projectConsentTopology(Array(40).fill(topologyLine).join('\n')).rows.length, 32);
+  assert.deepEqual(projectConsentTopology('x'.repeat(32769)), { textNodes: null, rows: [] });
+});
+
+test('retains structural diagnostics from both launcher streams without raw output', async t => {
+  const owner = fixture(t, `process.stdout.write('synthetic-ready'); process.stdin.resume(); process.stdin.on('end', () => {
+    process.stdout.write(${JSON.stringify('\nCI consent topology summary: textNodes=1\n')});
+    process.stderr.write(${JSON.stringify(topologyLine + '\nsynthetic-private-never-export\n')});
+  });`);
+  await ready(owner);
+  owner.child.stdin.end();
+  await owner.complete();
+  assert.equal(owner.snapshot().consentTopology.rows.length, 1);
+  assert.equal(owner.snapshot().consentTopology.textNodes, 1);
+  assert.ok(!JSON.stringify(owner.snapshot()).includes('synthetic-private'));
+});
+
 test('keeps running during arm, drains private streams, and requires zero exit', async t => {
   const owner = fixture(t, `process.stdout.write('synthetic-ready'); process.stderr.write('synthetic-private-no-log');
     process.stdin.resume(); process.stdin.on('end', () => { process.stdout.write('synthetic-tail'); });`);
@@ -23,7 +51,8 @@ test('keeps running during arm, drains private streams, and requires zero exit',
   owner.child.stdin.end();
   await owner.complete();
   assert.deepEqual(owner.snapshot(), { closed: true, exitCode: 0, signal: 'none', spawnError: 'none', failure: 'none',
-    stderrClassification: 'unclassified', stderrTruncated: false });
+    stderrClassification: 'unclassified', stderrTruncated: false, stdoutTruncated: false,
+    consentTopology: { textNodes: null, rows: [] } });
 });
 
 test('zero launcher exit before bridge readiness is not startup success', async t => {

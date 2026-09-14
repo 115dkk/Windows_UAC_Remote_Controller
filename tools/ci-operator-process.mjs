@@ -7,10 +7,37 @@ const failureReasons = new Set(['stream_failed', 'spawn_failed', 'startup_exit',
   'invalid_startup', 'bridge_arm_failed', 'invalid_completion', 'completion_timeout', 'aborted']);
 const boundedExit = value => Number.isInteger(value) && value >= -2147483648 && value <= 4294967295 ? value : null;
 
+// Reconstruct only the native operator's bounded structural report. Never
+// publish UI names, locations, command arguments, comparison codes or pixels.
+export function projectConsentTopology(text) {
+  if (typeof text !== 'string' || text.length > 32768) return { textNodes: null, rows: [] };
+  let textNodes = null;
+  const rows = [];
+  const id = '(redacted|[0-9]{1,5}|[A-Za-z_][A-Za-z_.-]{0,39})';
+  const hash = '(none|unbound|[A-F0-9]{16})';
+  const boolean = '(True|False)';
+  const pattern = new RegExp(`^CI consent topology: type=Text id=${id} node=${hash} parent=${hash} locationLabel=${boolean} expectedPath=${boolean} closedPair=${boolean} conflictingPath=${boolean}(?: nextType=(None|Text|Button|Hyperlink|Other) nextExpectedPath=${boolean})?$`);
+  for (const line of text.split(/[\r\n]+/)) {
+    const summary = /^CI consent topology summary: textNodes=(0|[1-9][0-9]{0,2})$/.exec(line);
+    if (summary && Number(summary[1]) <= 256) { textNodes = Number(summary[1]); continue; }
+    const match = pattern.exec(line);
+    if (!match) continue;
+    const row = { type: 'Text', id: match[1], node: match[2], parent: match[3],
+      locationLabel: match[4] === 'True', expectedPath: match[5] === 'True',
+      closedPair: match[6] === 'True', conflictingPath: match[7] === 'True' };
+    if (match[8]) { row.nextType = match[8]; row.nextExpectedPath = match[9] === 'True'; }
+    if (rows.length === 32) break;
+    rows.push(row);
+  }
+  return { textNodes, rows };
+}
+
 export class OperatorProcess {
   #stderrBytes = Buffer.alloc(8192);
   #stderrLength = 0;
   #stderrFinalized = false;
+  #stdoutBytes = Buffer.alloc(8192);
+  #stdoutLength = 0;
   constructor(child, { startupTimeoutMs = 60000, wholeTimeoutMs = 300000, completionTimeoutMs = 10000, cleanupTimeoutMs = 2000 } = {}) {
     this.child = child;
     this.completionTimeoutMs = completionTimeoutMs;
@@ -18,11 +45,12 @@ export class OperatorProcess {
     this.closed = false; this.exitObserved = false; this.exitCode = null;
     this.signal = 'none'; this.spawnError = 'none'; this.failure = null;
     this.stderrClassification = 'unclassified'; this.stderrTruncated = false;
+    this.stdoutTruncated = false; this.consentTopology = { textNodes: null, rows: [] };
     this.startupComplete = false; this.startupClaimed = false; this.completionClaimed = false;
     this.waiters = new Set();
-    // Neither stream is a protocol. Stdout is discarded. At most 8 KiB of
-    // stderr is held privately for closed error classification, never exported.
-    child.stdout?.on('data', () => {});
+    // Neither stream is authority. At most 8 KiB of each is held privately for
+    // closed diagnostic projection; PsExec can forward child stderr on stdout.
+    child.stdout?.on('data', chunk => this.observeStdout(chunk));
     child.stdout?.on('error', () => this.fail('stream_failed'));
     child.stderr?.on('data', chunk => this.observeStderr(chunk));
     child.stderr?.on('error', () => this.fail('stream_failed'));
@@ -62,6 +90,20 @@ export class OperatorProcess {
     if (count !== chunk.length) this.stderrTruncated = true;
   }
 
+  observeStdout(chunk) {
+    if (this.#stderrFinalized || !Buffer.isBuffer(chunk)) return;
+    const count = Math.min(chunk.length, this.#stdoutBytes.length - this.#stdoutLength);
+    chunk.copy(this.#stdoutBytes, this.#stdoutLength, 0, count);
+    this.#stdoutLength += count;
+    if (count !== chunk.length) this.stdoutTruncated = true;
+  }
+
+  topology() {
+    if (this.#stderrFinalized) return { textNodes: this.consentTopology.textNodes, rows: this.consentTopology.rows.map(row => ({ ...row })) };
+    return projectConsentTopology(this.#stdoutBytes.subarray(0, this.#stdoutLength).toString('utf8') + '\n' +
+      this.#stderrBytes.subarray(0, this.#stderrLength).toString('utf8'));
+  }
+
   classifyStderr() {
     if (this.#stderrFinalized) return this.stderrClassification;
     const text = this.#stderrBytes.subarray(0, this.#stderrLength).toString('utf8').toLowerCase();
@@ -76,6 +118,8 @@ export class OperatorProcess {
   discardStderr() {
     if (this.#stderrFinalized) return;
     this.stderrClassification = this.classifyStderr();
+    this.consentTopology = this.topology();
+    this.#stdoutBytes.fill(0); this.#stdoutLength = 0;
     this.#stderrBytes.fill(0); this.#stderrLength = 0; this.#stderrFinalized = true;
   }
 
@@ -151,7 +195,8 @@ export class OperatorProcess {
   snapshot() {
     return { closed: this.closed, exitCode: this.exitCode, signal: this.signal,
       spawnError: this.spawnError, failure: this.failure?.reason ?? 'none',
-      stderrClassification: this.classifyStderr(), stderrTruncated: this.stderrTruncated };
+      stderrClassification: this.classifyStderr(), stderrTruncated: this.stderrTruncated,
+      stdoutTruncated: this.stdoutTruncated, consentTopology: this.topology() };
   }
 
   async abort() {

@@ -106,6 +106,9 @@ internal static class ProtectedUi
     internal static void ApprovePairingConsent()
     {
         Program.Require(!consentConsumed, "one_consent_only");
+        int latchedConsentPid = 0;
+        long latchedConsentCreation = 0;
+        long readinessUntilMilliseconds = 0;
         while (true)
         {
             Program.Deadline();
@@ -113,6 +116,7 @@ internal static class ProtectedUi
             try
             {
                 Program.Require(candidates.Count <= 1, "ambiguous_consent_processes");
+                Program.Require(latchedConsentPid == 0 || candidates.Count == 1, "consent_exited");
                 if (candidates.Count == 1)
                 {
                     var consent = candidates[0];
@@ -124,17 +128,38 @@ internal static class ProtectedUi
                     Program.Require(String.Equals(consentImage,
                         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\consent.exe"),
                         StringComparison.OrdinalIgnoreCase), "consent_image_rejected");
+                    if (latchedConsentPid == 0)
+                    {
+                        latchedConsentPid = consent.Id;
+                        latchedConsentCreation = consentCreation;
+                        // One monotonic readiness budget for this exact consent.
+                        // UIA retries and details expansion never extend it or the
+                        // original process deadline enforced by Program.Deadline.
+                        readinessUntilMilliseconds = Program.Lifetime.ElapsedMilliseconds + 10000;
+                    }
+                    Program.Require(consent.Id == latchedConsentPid && consentCreation == latchedConsentCreation,
+                        "consent_owner_changed");
                     bool clicked = OnInput((desktop, name) =>
                     {
                         // Credential UAC and UAC on Default are intentionally unsupported.
-                        if (!String.Equals(name, "Winlogon", StringComparison.OrdinalIgnoreCase)) return false;
+                        if (!String.Equals(name, "Winlogon", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds) return false;
+                            ReportLocationTopology(new List<AutomationElement>(), consent.Id);
+                            throw new Program.GateFailure("native_program_location_unbound");
+                        }
                         var owned = Windows(desktop).Where(window =>
                         {
                             uint pid;
                             Native.GetWindowThreadProcessId(window, out pid);
                             return pid == consent.Id;
                         }).ToList();
-                        if (owned.Count == 0) return false;
+                        if (owned.Count == 0)
+                        {
+                            if (Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds) return false;
+                            ReportLocationTopology(new List<AutomationElement>(), consent.Id);
+                            throw new Program.GateFailure("native_program_location_unbound");
+                        }
                         Program.Require(owned.Count == 1, "ambiguous_consent_windows");
                         var root = AutomationElement.FromHandle(owned[0]);
                         var queue = new Queue<AutomationElement>();
@@ -172,31 +197,58 @@ internal static class ProtectedUi
                         Program.Require(!conflictingPath, "conflicting_consent_path");
                         if (details.Count != 0)
                         {
-                            Program.Require(details.Count == 1 && !detailsExpanded, "ambiguous_details_action");
+                            Program.Require(details.Count == 1, "ambiguous_details_action");
                             Program.Require(AuthenticatedRuntimeId(details[0], consent.Id) != null, "details_provider_unbound");
-                            object detailsPattern;
-                            Program.Require(details[0].TryGetCurrentPattern(InvokePattern.Pattern, out detailsPattern), "details_not_invokable");
-                            StillInput(name);
-                            detailsExpanded = true;
-                            ((InvokePattern)detailsPattern).Invoke(); // View action only; no approval.
-                            return false; // Re-enumerate the actual expanded OS tree.
+                            if (!detailsExpanded && Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds)
+                            {
+                                object detailsPattern;
+                                Program.Require(details[0].TryGetCurrentPattern(InvokePattern.Pattern, out detailsPattern), "details_not_invokable");
+                                StillInput(name);
+                                detailsExpanded = true;
+                                ((InvokePattern)detailsPattern).Invoke(); // View action only; no approval.
+                                return false; // Re-enumerate the actual expanded OS tree.
+                            }
+                            // The native button may remain visible while its async
+                            // expansion populates the field. Never invoke it twice.
                         }
                         // No basename or arbitrary FileDescription can bind a target.
                         // Require a separate native location-label/value field pair.
                         bool boundLocation = HasNativeLocationField(nativeText, consent.Id);
-                        if (!boundLocation) ReportLocationTopology(nativeText, consent.Id);
-                        Program.Require(boundLocation, "native_program_location_unbound");
-                        if (yes.Count == 0) return false;
+                        if (!boundLocation)
+                        {
+                            if (Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds) return false;
+                            ReportLocationTopology(nativeText, consent.Id);
+                            throw new Program.GateFailure("native_program_location_unbound");
+                        }
+                        if (yes.Count == 0)
+                        {
+                            Program.Require(Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds, "native_yes_not_invokable");
+                            return false;
+                        }
                         Program.Require(yes.Count == 1, "ambiguous_yes_button");
                         Program.Require(AuthenticatedRuntimeId(yes[0], consent.Id) != null, "yes_provider_unbound");
                         Program.ValidateService();
+                        Program.Deadline();
+                        Program.Require(Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds, "deadline_elapsed");
                         StillInput(name);
                         Program.Require(!consent.HasExited, "consent_exited");
                         var fresh = ConsentProcesses();
-                        try { Program.Require(fresh.Count == 1 && fresh[0].Id == consent.Id, "consent_owner_changed"); }
+                        try
+                        {
+                            Program.Require(fresh.Count == 1 && fresh[0].Id == latchedConsentPid, "consent_owner_changed");
+                            string finalImage;
+                            long finalCreation;
+                            int finalSession;
+                            Program.ObserveProcess(latchedConsentPid, out finalImage, out finalCreation, out finalSession);
+                            Program.Require(finalCreation == latchedConsentCreation && finalSession == Program.Session &&
+                                String.Equals(finalImage, consentImage, StringComparison.OrdinalIgnoreCase), "consent_owner_changed");
+                        }
                         finally { foreach (var process in fresh) process.Dispose(); }
                         object pattern;
                         Program.Require(yes[0].TryGetCurrentPattern(InvokePattern.Pattern, out pattern), "native_yes_not_invokable");
+                        Program.Deadline();
+                        Program.Require(Program.Lifetime.ElapsedMilliseconds < readinessUntilMilliseconds, "deadline_elapsed");
+                        StillInput(name);
                         consentConsumed = true; // Consumed before any potentially partial invoke.
                         ((InvokePattern)pattern).Invoke();
                         return true;
@@ -266,6 +318,7 @@ internal static class ProtectedUi
     {
         // One failure-only topology record per text node: no text, path, command,
         // code, pixels or pending identifier. Runtime IDs are hashed.
+        Console.Error.WriteLine("CI consent topology summary: textNodes=" + elements.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
         foreach (var element in elements)
         {
             var current = element.Current;
@@ -275,13 +328,25 @@ internal static class ProtectedUi
             // Hex-like, long and arbitrary string-valued IDs are redacted.
             if (!Regex.IsMatch(automation, "\\A(?:[0-9]{1,5}|[A-Za-z_][A-Za-z_.-]{0,39})\\z")) automation = "redacted";
             bool expected = ConsentTarget.IsInstalledLocation(text);
+            var next = TreeWalker.RawViewWalker.GetNextSibling(element);
+            string nextType = "None";
+            bool nextExpectedPath = false;
+            if (next != null)
+            {
+                var nextCurrent = next.Current;
+                nextType = nextCurrent.ControlType == ControlType.Text ? "Text" :
+                    nextCurrent.ControlType == ControlType.Button ? "Button" :
+                    nextCurrent.ControlType == ControlType.Hyperlink ? "Hyperlink" : "Other";
+                nextExpectedPath = ConsentTarget.IsInstalledLocation(nextCurrent.Name ?? "");
+            }
             Console.Error.WriteLine("CI consent topology: type=Text id=" + automation +
                 " node=" + RuntimeHash(element, consentPid) +
                 " parent=" + RuntimeHash(TreeWalker.RawViewWalker.GetParent(element), consentPid) +
                 " locationLabel=" + ConsentTarget.IsLocationLabel(text) +
                 " expectedPath=" + expected +
                 " closedPair=" + (expected && text.IndexOf(" pair ", StringComparison.Ordinal) >= 0) +
-                " conflictingPath=" + ConsentTarget.HasConflictingPath(text));
+                " conflictingPath=" + ConsentTarget.HasConflictingPath(text) +
+                " nextType=" + nextType + " nextExpectedPath=" + nextExpectedPath);
         }
     }
 
