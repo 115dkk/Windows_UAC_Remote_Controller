@@ -54,15 +54,17 @@ internal static class DesktopContract
         new Profile("limited_dup_then_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff),
         new Profile("limited_dup_retire_after_full_open", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, true),
         new Profile("all_standard_minimum_specific", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, 0xf0081),
+        new Profile("source_renderer_mask_full_observer", ProcessBase, ThreadBase, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, false, 0x20183),
+        new Profile("source_renderer_mask_all_policies", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, InspectBase, 0xf01ff, false, 0x20183),
         new Profile("own_scratch_all_access", 0x1fffff, 0x1fffff, 0xf01ff, 0xf01ff, 0xf01ff)
     };
     sealed class Profile
     {
         internal readonly string Name;
-        internal readonly uint Process, Thread, DesktopBa, DesktopSy, DesktopOpen, DesktopExplicitOpen;
+        internal readonly uint Process, Thread, DesktopBa, DesktopSy, DesktopOpen, DesktopExplicitOpen, SourceDesktopAccess;
         internal readonly bool RetireDuplicate;
-        internal Profile(string name, uint process, uint thread, uint ba, uint sy, uint open, uint? explicitOpen = null, bool retireDuplicate = false)
-        { Name = name; Process = process; Thread = thread; DesktopBa = ba; DesktopSy = sy; DesktopOpen = open; DesktopExplicitOpen = explicitOpen ?? open; RetireDuplicate = retireDuplicate; }
+        internal Profile(string name, uint process, uint thread, uint ba, uint sy, uint open, uint? explicitOpen = null, bool retireDuplicate = false, uint sourceDesktopAccess = 0xf01ff)
+        { Name = name; Process = process; Thread = thread; DesktopBa = ba; DesktopSy = sy; DesktopOpen = open; DesktopExplicitOpen = explicitOpen ?? open; RetireDuplicate = retireDuplicate; SourceDesktopAccess = sourceDesktopAccess; }
     }
     sealed class Fault : Exception
     {
@@ -208,10 +210,10 @@ internal static class DesktopContract
             if (Read(pipe) != "start") throw new Fault("phase", 0);
             uint tid = N.GetCurrentThreadId(); IntPtr old = N.GetThreadDesktop(tid); if (old == IntPtr.Zero) throw new Fault("original_desktop", Marshal.GetLastWin32Error());
             string name = NamePrefix + Guid.NewGuid().ToString("N");
-            using (Descriptor initial = new Descriptor(0xf01ff, 0xf01ff))
+            using (Descriptor initial = profile.SourceDesktopAccess == 0xf01ff ? new Descriptor(0xf01ff, 0xf01ff) : new Descriptor(profile.DesktopBa, profile.DesktopSy))
             {
                 N.SA sa = new N.SA(); sa.Length = Marshal.SizeOf(typeof(N.SA)); sa.Descriptor = initial.Value;
-                using (Handle desktop = new Handle(N.CreateDesktopW(name, null, IntPtr.Zero, 0, 0xf01ff, ref sa), true))
+                using (Handle desktop = new Handle(N.CreateDesktopW(name, null, IntPtr.Zero, 0, profile.SourceDesktopAccess, ref sa), true))
                 {
                     try
                     {
@@ -222,7 +224,10 @@ internal static class DesktopContract
                         using (Descriptor p = new Descriptor(profile.Process, profile.Process))
                         using (Descriptor t = new Descriptor(profile.Thread, profile.Thread))
                         {
-                            SetOwn(desktop.Value, 7, d); SetOwn(N.GetCurrentProcess(), 6, p); SetOwn(N.GetCurrentThread(), 6, t);
+                            // A limited source cannot rewrite its desktop DACL;
+                            // its exact final descriptor was supplied at creation.
+                            if (profile.SourceDesktopAccess == 0xf01ff) SetOwn(desktop.Value, 7, d);
+                            SetOwn(N.GetCurrentProcess(), 6, p); SetOwn(N.GetCurrentThread(), 6, t);
                             Verify(desktop.Value, 7, d); Verify(N.GetCurrentProcess(), 6, p); Verify(N.GetCurrentThread(), 6, t);
                         }
                         IntPtr actual = N.GetThreadDesktop(tid);
