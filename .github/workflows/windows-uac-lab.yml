@@ -32,6 +32,7 @@ on:
       - 'tools/read-pairing-events.ps1'
       - 'tools/windows-full-pairing-lab.mjs'
       - 'tools/prepare-pairing-e2e.ps1'
+      - 'tools/ci-desktop-inspection-contract.*'
       - 'tools/ci-e2e-request.cs'
       - 'tools/ci-phone-fixture/**'
       - 'tools/ci-windows-operator/**'
@@ -50,8 +51,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  desktop-contract:
+    name: Native desktop inspection access contract
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Compare native access using only owned scratch processes and desktops
+        shell: pwsh
+        run: ./tools/ci-desktop-inspection-contract.ps1 -OutputDirectory target/desktop-inspection-contract
+      - name: Retain bounded access-contract observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: desktop-inspection-contract-${{ github.sha }}
+          path: |
+            target/desktop-inspection-contract/contract.json
+            target/desktop-inspection-contract/**/compile.*.txt
+          if-no-files-found: error
+          retention-days: 14
   lab:
     name: Native QR pairing and signed UAC denial (CI identities)
+    needs: desktop-contract
     runs-on: windows-2025
     timeout-minutes: 60
     env:
