@@ -317,6 +317,7 @@ internal static class DesktopContract
                         // actual/after are borrowed thread associations; never CloseDesktop.
                         CheckProcess(process.Value, m.Pid, m.Created);
                         if (N.GetProcessIdOfThread(thread.Value) != m.Pid || Creation(thread.Value, true) != m.ThreadCreated) throw new Fault("thread_identity", 0);
+                        if (profile.RetireDuplicate) Need(N.SetThreadDesktop(readerOriginal), "witness_reader_restore");
                         result.Completed = true; Write(pipe, result.Wire());
                     }
                     } finally { if (!N.SetThreadDesktop(readerOriginal)) CloseFailed = true; }
