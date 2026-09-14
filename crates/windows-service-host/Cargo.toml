@@ -17,7 +17,14 @@ lab-software-identity = ["windows-identity/lab-software-identity"]
 lab-client-diagnostics = []
 # Never shipped: full native integration with an explicitly synthetic phone CA.
 # Includes the package-rejected software KSP profile; no runtime trust switch.
-lab-e2e = ["lab-software-identity", "test-attestation-anchors"]
+lab-e2e = [
+    "lab-software-identity",
+    "test-attestation-anchors",
+    # The inspector child is this binary, and it runs with a minimal
+    # environment, so its helper-side notes go to the Windows temp file the
+    # prompt probe already owns. Never enable this feature to ship.
+    "windows-prompt-probe/lab-diagnostics",
+]
 test-attestation-anchors = ["android-attestation/test-attestation-anchors"]
 
 [dependencies]

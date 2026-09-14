@@ -372,6 +372,10 @@ jobs:
               Copy-Item -LiteralPath $_.FullName -Destination $destination -ErrorAction Continue
             }
           } else { Write-Output 'No product data directory.' | Set-Content -Path "$env:LAB_EVIDENCE/programdata-listing.txt" }
+          # The inspector child has no ProgramData, so its notes land here. Keep
+          # them even when an earlier step failed before the consent probe ran.
+          $helperNotes = Join-Path $env:windir 'Temp\uac-lab-helper.txt'
+          if (Test-Path -LiteralPath $helperNotes) { Copy-Item -LiteralPath $helperNotes -Destination "$env:LAB_EVIDENCE/lab-helper-collected.txt" -ErrorAction Continue }
           Get-WinEvent -LogName System -MaxEvents 300 -ErrorAction SilentlyContinue | Where-Object { $_.ProviderName -eq 'Service Control Manager' -or $_.Message -match 'UacRemoteController' } | Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/scm-events.txt"
           Get-WinEvent -LogName Application -MaxEvents 300 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'uac-|UacRemote|consent' } | Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/application-events.txt"
           $exe = Join-Path $env:LAB_DIR 'uac-service.exe'

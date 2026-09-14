@@ -225,8 +225,14 @@ pub(crate) fn run_pairing_inspector(
         outcome.and(finished)
     })();
     let closed = inspector.close();
-    if close.get() || closed.is_err() || cleanup.lock().unwrap_or_else(|p| p.into_inner()).is_some()
-    {
+    let handle_close_failed = close.get();
+    let uncertain = cleanup.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+    lab_note!(
+        "pairing inspector: served={} handle_close_failed={handle_close_failed} second_close_failed={} uncertain_cleanup={uncertain}",
+        result.is_ok(),
+        closed.is_err()
+    );
+    if handle_close_failed || closed.is_err() || uncertain {
         HelperExit::CleanupUnconfirmed
     } else if result.is_ok() {
         HelperExit::Observed
