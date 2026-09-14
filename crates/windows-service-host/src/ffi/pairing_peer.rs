@@ -201,6 +201,9 @@ fn native_error(stage: PairingPeerStage, error: WinError) -> PairingPeerError {
 pub(super) fn cleanup_state() -> Result<(), PairingPeerError> {
     BOUNDARY_HEALTH.check()
 }
+pub(super) fn quarantine_boundary() {
+    BOUNDARY_HEALTH.quarantine();
+}
 
 /// Positive service work uses the actual immediate stop latch, not merely the
 /// later SCM state. Cleanup deliberately does not call this gate. Only unit

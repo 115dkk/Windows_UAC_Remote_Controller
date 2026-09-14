@@ -19,7 +19,22 @@ pub use content::{
     MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS, MAX_RUNTIME_ID_VALUES, PromptContentError,
     PromptContentObservation, PromptLabel, prompt_text_from_utf16,
 };
+pub mod pairing_inspection;
 pub mod supervision;
+
+pub fn run_pairing_inspector(
+    mut inspector: impl pairing_inspection::Inspector,
+) -> supervision::HelperExit {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::pipe_client::run_pairing_inspector(&mut inspector)
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        let _ = &mut inspector;
+        supervision::HelperExit::Rejected
+    }
+}
 
 pub fn run_watch_helper() -> supervision::HelperExit {
     #[cfg(all(windows, target_pointer_width = "64"))]

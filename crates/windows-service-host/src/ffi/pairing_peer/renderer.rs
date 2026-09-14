@@ -3,12 +3,15 @@
 //! secret input, generic process selector or independently renewed attempt.
 
 use std::{
+    cell::RefCell,
     fmt, mem, ptr,
     rc::Rc,
     slice,
     sync::Mutex,
     time::{Duration, Instant},
 };
+pub(in crate::ffi) mod inspector;
+use crate::ffi::probe_supervisor::pairing_inspector;
 use windows::{
     Win32::{
         Foundation::{
@@ -449,9 +452,7 @@ struct Inner {
     metadata: Option<RendererProcess>,
     thread_created: u64,
     sid: Vec<u8>,
-    invocation: Option<RendererInvocation>,
-    desktop: Option<UserObject>,
-    station: Option<UserObject>,
+    inspector: RefCell<Option<pairing_inspector::Owner>>,
     claimed: bool,
     objects_claimed: bool,
     objects_bound: bool,
@@ -479,9 +480,7 @@ impl RendererRegistration {
                 metadata: None,
                 thread_created: 0,
                 sid: Vec::new(),
-                invocation: None,
-                desktop: None,
-                station: None,
+                inspector: RefCell::new(None),
                 claimed: false,
                 objects_claimed: false,
                 objects_bound: false,
@@ -572,6 +571,7 @@ impl RendererRegistration {
         pipe: &mut PairingPipe,
         invocation: RendererInvocation,
         objects: RendererObjects,
+        cutoff: u64,
     ) -> Result<(), Error> {
         self.check_connected(pipe)?;
         let inner = self.inner_mut();
@@ -580,46 +580,23 @@ impl RendererRegistration {
                 return Err(Error::InvalidPhase);
             }
             inner.objects_claimed = true;
-            inner.invocation = Some(invocation);
             let metadata = inner.metadata.ok_or(Error::InvalidPhase)?;
             if objects.thread != metadata.thread {
                 return Err(Error::Rejected);
             }
-            let process = inner.process.as_ref().ok_or(Error::InvalidPhase)?.raw();
-            duplicate_object(
-                process,
-                objects.desktop,
-                DESKTOP_INSPECT,
-                5,
-                &mut inner.desktop,
-            )?;
-            duplicate_object(
-                process,
-                objects.station,
-                STATION_INSPECT,
-                21,
-                &mut inner.station,
-            )?;
-            let desktop = inner.desktop.as_ref().ok_or(Error::InvalidPhase)?;
-            if !matches!(desktop.kind, ObjectKind::Desktop)
-                || object_text(desktop.raw, UOI_NAME)? != display_name(invocation)
-            {
-                return Err(Error::Rejected);
-            }
-            verify_descriptor(desktop.raw, Profile::Desktop, &inner.sid)?;
-            let station = inner.station.as_ref().ok_or(Error::InvalidPhase)?;
-            if !matches!(station.kind, ObjectKind::Station) {
-                return Err(Error::Rejected);
-            }
-            check_station(station.raw)?;
-            // SAFETY: retained actual initial thread. This returned desktop is
-            // borrowed, never closed; failure across sessions is not bypassed.
-            let assigned =
-                unsafe { GetThreadDesktop(metadata.thread) }.map_err(|error| native(2, error))?;
-            // SAFETY: actual assigned desktop and retained independently duplicated object.
-            if !unsafe { CompareObjectHandles(HANDLE(assigned.0), desktop.raw) }.as_bool() {
-                return Err(Error::Rejected);
-            }
+            let binding = windows_prompt_probe::pairing_inspection::Binding {
+                process: metadata.pid,
+                created: metadata.created,
+                thread: metadata.thread,
+                thread_created: inner.thread_created,
+                desktop: objects.desktop,
+                station: objects.station,
+                pending: invocation.pending().bytes(),
+                display: invocation.display().bytes(),
+                cutoff,
+            };
+            let session = inner.session.as_ref().ok_or(Error::InvalidPhase)?.id;
+            *inner.inspector.get_mut() = Some(pairing_inspector::Owner::bind(binding, session)?);
             inner.recheck()?;
             inner.objects_bound = true;
             Ok(())
@@ -692,21 +669,12 @@ impl Inner {
                 )
                 .map_err(Error::Service)?;
             if self.objects_bound {
-                let desktop = self.desktop.as_ref().ok_or(Error::InvalidPhase)?.raw;
-                if object_text(desktop, UOI_NAME)?
-                    != display_name(self.invocation.ok_or(Error::InvalidPhase)?)
-                {
-                    return Err(Error::Rejected);
-                }
-                verify_descriptor(desktop, Profile::Desktop, &self.sid)?;
-                check_station(self.station.as_ref().ok_or(Error::InvalidPhase)?.raw)?;
-                // SAFETY: the same retained initial thread; borrowed association,
-                // never a CloseDesktop/SetThreadDesktop capability for service use.
-                let assigned = unsafe { GetThreadDesktop(metadata.thread) }
-                    .map_err(|error| native(2, error))?;
-                if !unsafe { CompareObjectHandles(HANDLE(assigned.0), desktop) }.as_bool() {
-                    return Err(Error::Rejected);
-                }
+                self.inspector
+                    .try_borrow_mut()
+                    .map_err(|_| Error::InvalidPhase)?
+                    .as_mut()
+                    .ok_or(Error::InvalidPhase)?
+                    .check()?;
             }
             cleanup_state()
         })
@@ -734,15 +702,14 @@ impl Inner {
                 _ => return Err(native(9, WinError::from_thread())),
             }
         }
-        for object in [&mut self.desktop, &mut self.station].into_iter().flatten() {
-            if let Err(error) = object.close() {
+        if let Some(inspector) = self.inspector.get_mut().as_mut() {
+            if let Err(error) = inspector.close() {
                 self.cleanup_failure = Some(error);
                 BOUNDARY_HEALTH.quarantine();
                 return Err(error);
             }
         }
-        self.desktop = None;
-        self.station = None;
+        *self.inspector.get_mut() = None;
         drop(self.thread.take());
         drop(self.process.take());
         drop(self.context.take());

@@ -25,6 +25,7 @@ pub enum Command {
     RemoveDevice(approval_protocol::DeviceId),
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
+    PairInspector,
     Help,
 }
 
@@ -162,6 +163,7 @@ impl fmt::Debug for Command {
             Self::RemoveDevice(_) => "Command::RemoveDevice(redacted)",
             Self::Pair(_) => "Command::Pair(redacted)",
             Self::PairRenderer(_) => "Command::PairRenderer(redacted)",
+            Self::PairInspector => "Command::PairInspector",
             Self::Help => "Command::Help",
         })
     }
@@ -318,6 +320,7 @@ impl Command {
             return Err(ServiceError::InvalidArguments);
         }
         match first.as_ref().to_str() {
+            Some("pair-inspector") => Ok(Self::PairInspector),
             Some("relay-auto") => Ok(Self::EmbeddedRelay),
             Some("status") => Ok(Self::Status),
             Some("relay-status") => Ok(Self::RelayStatus),
@@ -735,6 +738,20 @@ pub(crate) fn continuing_pending_start(existing: Option<Instant>, now: Instant) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inspector_command_has_no_target_or_operation_arguments() {
+        assert_eq!(
+            super::Command::parse(["pair-inspector"]),
+            Ok(super::Command::PairInspector)
+        );
+        for arguments in [
+            vec!["pair-inspector", "42"],
+            vec!["pair-inspector", "check"],
+            vec!["pair-inspector", "1", "2"],
+        ] {
+            assert!(super::Command::parse(arguments).is_err());
+        }
+    }
     use super::*;
 
     #[test]

@@ -84,10 +84,16 @@ pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
 }
 
 pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
-    let token = run
-        .preflight
-        .token
-        .for_session(run.preflight.session.id, &run.preflight.sid_bytes)?;
+    run.inspection_budget()?;
+    let token = if run.inspection.is_some() {
+        run.preflight
+            .token
+            .for_inspection_session(run.preflight.session.id, &run.preflight.sid_bytes)?
+    } else {
+        run.preflight
+            .token
+            .for_session(run.preflight.session.id, &run.preflight.sid_bytes)?
+    };
     run.preflight.recheck()?;
     let descriptor = run
         .preflight
@@ -95,22 +101,36 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
         .probe_descriptor()
         .map_err(|_| Error::ServiceConfiguration)?;
     let attributes = attributes(descriptor.ptr().0);
-    let image = wide(run.preflight.pins.probe().as_os_str())?;
-    let mut command_line = if watch {
+    let executable = if run.inspection.is_some() {
+        run.preflight.pins.service()
+    } else {
+        run.preflight.pins.probe()
+    };
+    let image = wide(executable.as_os_str())?;
+    let mut command_line = if run.inspection.is_some() {
+        let mut line = crate::probe_supervisor::quoted_image_command_line(&image)?;
+        line.pop();
+        line.extend(" pair-inspector\0".encode_utf16());
+        line
+    } else if watch {
         crate::probe_supervisor::quoted_watch_command_line(&image)?
     } else {
         crate::probe_supervisor::quoted_image_command_line(&image)?
     };
     let directory = wide(
-        run.preflight
-            .pins
-            .probe()
+        executable
             .parent()
             .ok_or(Error::ProtectedHelperUnavailable)?
             .as_os_str(),
     )?;
     let environment = environment()?;
-    let mut desktop: Vec<u16> = "winsta0\\winlogon\0".encode_utf16().collect();
+    let mut desktop: Vec<u16> = if run.inspection.is_some() {
+        "winsta0\\default\0"
+    } else {
+        "winsta0\\winlogon\0"
+    }
+    .encode_utf16()
+    .collect();
     let startup = STARTUPINFOW {
         cb: mem::size_of::<STARTUPINFOW>() as u32,
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
@@ -120,9 +140,11 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     if !watch {
         run.budget()?;
     }
+    run.inspection_budget()?;
     // SAFETY: only our checked duplicate primary token and fixed pinned binary.
-    // Only quoted argv[0] for one-shot, or that token plus the fixed `watch`
-    // argument for watch mode. No caller argument or standard handle is accepted,
+    // Only quoted argv[0], fixed `watch`, or fixed `pair-inspector`. Inspector
+    // image/session/cutoff come from retained service ownership, not caller argv.
+    // No caller argument or standard handle is accepted,
     // and bInheritHandles=false (Windows
     // disallows cross-session inheritance). Trusted minimal Unicode environment,
     // pinned working directory and fixed desktop all outlive this call. Tcb was
@@ -203,12 +225,13 @@ pub(super) fn authenticate_child(run: &ActiveRun) -> Result<(), Error> {
         return Err(Error::PeerMismatch);
     }
     let actual = String::from_utf16(&image[..length as usize]).map_err(|_| Error::PeerMismatch)?;
-    let expected = run
-        .preflight
-        .pins
-        .probe()
-        .to_str()
-        .ok_or(Error::ProtectedHelperUnavailable)?;
+    let expected = (if run.inspection.is_some() {
+        run.preflight.pins.service()
+    } else {
+        run.preflight.pins.probe()
+    })
+    .to_str()
+    .ok_or(Error::ProtectedHelperUnavailable)?;
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(Error::PeerMismatch);
     }

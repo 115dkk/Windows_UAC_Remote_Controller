@@ -44,6 +44,20 @@ pub(crate) use pairing_client::run_pair_helper;
 #[cfg(target_pointer_width = "64")]
 pub(crate) use pairing_client::run_pair_renderer;
 #[cfg(target_pointer_width = "64")]
+pub(crate) fn run_pair_inspector() -> Result<(), crate::ServiceError> {
+    let inspector = pairing_peer::renderer::inspector::NativeInspector::default();
+    if windows_prompt_probe::run_pairing_inspector(inspector)
+        == windows_prompt_probe::supervision::HelperExit::Observed
+    {
+        Ok(())
+    } else {
+        Err(crate::ServiceError::RendererNative {
+            stage: 23,
+            hresult: 0x8007_000d_u32 as i32,
+        })
+    }
+}
+#[cfg(target_pointer_width = "64")]
 pub use pairing_client::{
     PairingClient, PairingClientError, PairingClientProgress, PairingClientStage,
     PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress,

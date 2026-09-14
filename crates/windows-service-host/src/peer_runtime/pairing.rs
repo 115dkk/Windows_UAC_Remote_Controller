@@ -334,8 +334,12 @@ impl RendererRun {
                 if invocation != self.request.invocation {
                     return Err(Failure::Protocol);
                 }
-                self.registration
-                    .bind_objects(&mut self.pipe, invocation, objects)?;
+                self.registration.bind_objects(
+                    &mut self.pipe,
+                    invocation,
+                    objects,
+                    self.request.cutoff,
+                )?;
                 if Instant::now() >= work_end {
                     return Err(Failure::Window);
                 }

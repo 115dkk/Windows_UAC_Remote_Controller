@@ -212,7 +212,86 @@ fn scoped_watch(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
     Ok(HelperExit::Observed)
 }
 
+pub(crate) fn run_pairing_inspector(
+    inspector: &mut impl crate::pairing_inspection::Inspector,
+) -> HelperExit {
+    let cleanup: CleanupLog = Arc::new(Mutex::new(None));
+    let close = Rc::new(Cell::new(false));
+    let result = (|| {
+        let (pipe, peer) = connect_authenticated_for(cleanup.clone(), &close, SERVICE_EXECUTABLE)?;
+        let mut channel = WatchChannel::new(pipe)?;
+        let outcome = inspect_loop(&mut channel, inspector, || peer.recheck(&cleanup));
+        let finished = channel.finish();
+        outcome.and(finished)
+    })();
+    let closed = inspector.close();
+    if close.get() || closed.is_err() || cleanup.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    {
+        HelperExit::CleanupUnconfirmed
+    } else if result.is_ok() {
+        HelperExit::Observed
+    } else {
+        HelperExit::Rejected
+    }
+}
+
+fn inspect_loop(
+    channel: &mut WatchChannel,
+    inspector: &mut impl crate::pairing_inspection::Inspector,
+    mut fence: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    use crate::pairing_inspection::{Reply, Request};
+    let began = std::time::Instant::now();
+    let mut sequence = 0_u64;
+    loop {
+        if began.elapsed() >= std::time::Duration::from_secs(300) {
+            return Err(());
+        }
+        fence()?;
+        let bytes = match channel.poll_read_raw()? {
+            RawRead::Pending => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            RawRead::Eof => return Err(()),
+            RawRead::Message(bytes) => bytes,
+        };
+        let request = Request::decode(&bytes).map_err(|_| ())?;
+        let (outcome, done) = match request {
+            Request::Bind(binding) if sequence == 0 => (inspector.bind(binding), false),
+            Request::Check(value) if sequence != 0 && value == sequence => {
+                (inspector.check(), false)
+            }
+            Request::Close(value) if sequence != 0 && value == sequence => {
+                (inspector.close(), true)
+            }
+            _ => return Err(()),
+        };
+        fence()?;
+        channel.write_raw(
+            &Reply {
+                sequence,
+                failure: outcome.err(),
+            }
+            .encode(),
+        )?;
+        outcome.map_err(|_| ())?;
+        if done {
+            return Ok(());
+        }
+        sequence = sequence.checked_add(1).ok_or(())?;
+    }
+}
+
 fn connect_authenticated(cleanup: &CleanupLog, close: &CloseLog) -> Result<(Kernel, Peer)> {
+    connect_authenticated_for(Arc::clone(cleanup), close, PROBE_EXECUTABLE)
+}
+fn connect_authenticated_for(
+    cleanup: CleanupLog,
+    close: &CloseLog,
+    executable: &str,
+) -> Result<(Kernel, Peer)> {
+    let cleanup = &cleanup;
     security::reject_impersonation(cleanup).map_err(|_| ())?;
     // SAFETY: borrowed current-process pseudo-handle and scalar ID, never closed.
     let (own, own_pid) = unsafe { (GetCurrentProcess(), GetCurrentProcessId()) };
@@ -220,7 +299,7 @@ fn connect_authenticated(cleanup: &CleanupLog, close: &CloseLog) -> Result<(Kern
     let session = security::process_identity(own, own_pid, None, cleanup).map_err(|_| ())?;
     let service_sid = service_sid()?;
     security::service_identity(own, own_pid, session, &service_sid, cleanup).map_err(|_| ())?;
-    let expected = expected_service()?;
+    let expected = expected_service_for(executable)?;
     let service = Scm::open(close)?;
     let expected_pid = service.verify(&expected)?;
     let name: Vec<u16> = format!("{PIPE_PREFIX}{own_pid}\0").encode_utf16().collect();
@@ -276,6 +355,11 @@ fn connect_authenticated(cleanup: &CleanupLog, close: &CloseLog) -> Result<(Kern
 pub(super) enum WatchRead {
     Pending,
     Message(ServiceMessage),
+    Eof,
+}
+enum RawRead {
+    Pending,
+    Message(Vec<u8>),
     Eof,
 }
 
@@ -352,8 +436,18 @@ impl WatchChannel {
     }
 
     pub(super) fn poll_read(&mut self) -> Result<WatchRead> {
+        match self.poll_read_raw()? {
+            RawRead::Pending => Ok(WatchRead::Pending),
+            RawRead::Eof => Ok(WatchRead::Eof),
+            RawRead::Message(bytes) => Ok(WatchRead::Message(
+                ServiceMessage::from_wire(&bytes).map_err(|_| ())?,
+            )),
+        }
+    }
+
+    fn poll_read_raw(&mut self) -> Result<RawRead> {
         if !self.in_flight {
-            return Ok(WatchRead::Eof);
+            return Ok(RawRead::Eof);
         }
         let mut count = 0;
         // SAFETY: exact retained pipe and stable pending OVERLAPPED, no waiting.
@@ -374,20 +468,20 @@ impl WatchChannel {
                 }
                 // SAFETY: successful completion ended kernel writes; count is bounded.
                 let message = &unsafe { &*self.read.get() }.bytes[..count];
-                let message = ServiceMessage::from_wire(message).map_err(|_| ())?;
+                let message = message.to_vec();
                 self.start_read()?;
-                Ok(WatchRead::Message(message))
+                Ok(RawRead::Message(message))
             }
             Err(error)
                 if error.code() == windows::core::HRESULT::from_win32(ERROR_IO_INCOMPLETE.0) =>
             {
-                Ok(WatchRead::Pending)
+                Ok(RawRead::Pending)
             }
             Err(error)
                 if error.code() == windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0) =>
             {
                 self.in_flight = false;
-                Ok(WatchRead::Eof)
+                Ok(RawRead::Eof)
             }
             Err(error)
                 if [ERROR_MORE_DATA.0, ERROR_OPERATION_ABORTED.0]
@@ -403,6 +497,13 @@ impl WatchChannel {
 
     pub(super) fn write(&mut self, message: &HelperMessage) -> Result<()> {
         let bytes = message.to_wire().map_err(|_| ())?;
+        self.write_raw(&bytes)
+    }
+
+    fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_WATCH_MESSAGE_BYTES {
+            return Err(());
+        }
         // SAFETY: private unnamed manual-reset event, noninheritable and clear.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(|_| ())?;
         let event = match Kernel::new(event, &self.pipe.close) {
@@ -418,7 +519,7 @@ impl WatchChannel {
                 hEvent: event.raw,
                 ..OVERLAPPED::default()
             },
-            bytes: bytes.into_boxed_slice(),
+            bytes: bytes.to_vec().into_boxed_slice(),
         }));
         // SAFETY: stable storage and event remain owned through terminal completion.
         let result = unsafe {
@@ -705,11 +806,14 @@ fn config_string(words: &[usize], length: usize, pointer: PWSTR) -> Result<Strin
     String::from_utf16(&units[..end]).map_err(|_| ())
 }
 fn expected_service() -> Result<PathBuf> {
+    expected_service_for(PROBE_EXECUTABLE)
+}
+fn expected_service_for(executable: &str) -> Result<PathBuf> {
     // OS current-image resolver, not argv/current-directory/environment. This is
     // a pairing check to the actual SCM service, not a standalone installation
     // ACL proof. The service supervisor holds protected directory/image pins.
     let own = std::env::current_exe().map_err(|_| ())?;
-    if own.file_name().and_then(|value| value.to_str()) != Some(PROBE_EXECUTABLE) {
+    if own.file_name().and_then(|value| value.to_str()) != Some(executable) {
         return Err(());
     }
     let directory = own.parent().ok_or(())?;

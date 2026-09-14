@@ -34,6 +34,9 @@ fn run() -> Result<(), ServiceError> {
     if let Command::PairRenderer(invocation) = command {
         return windows_service_host::run_pair_renderer(invocation);
     }
+    if command == Command::PairInspector {
+        return windows_service_host::run_pair_inspector();
+    }
     if command == Command::ProbeOnce {
         let accepted = windows_service_host::request_probe_once()?;
         let mut output = io::stdout().lock();
@@ -95,6 +98,7 @@ fn run() -> Result<(), ServiceError> {
         | Command::Help
         | Command::ProbeOnce
         | Command::Pair(_)
+        | Command::PairInspector
         | Command::PairRenderer(_) => {
             return Err(ServiceError::InvalidArguments);
         }

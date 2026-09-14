@@ -181,6 +181,18 @@ pub fn run_pair_helper(id: PendingElevationId) -> Result<(), ServiceError> {
     }
 }
 
+/// Fixed service-owned, authenticated nonvisual object inspector child.
+pub fn run_pair_inspector() -> Result<(), ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::run_pair_inspector()
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
 /// Fixed nonvisual renderer bootstrap only; no window, QR, grant or enrollment.
 pub fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), ServiceError> {
     #[cfg(all(windows, target_pointer_width = "64"))]

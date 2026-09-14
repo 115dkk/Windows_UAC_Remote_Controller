@@ -31,6 +31,7 @@ use windows_prompt_probe::supervision::{
 
 mod io;
 mod launch;
+pub(in crate::ffi) mod pairing_inspector;
 mod preflight;
 mod token;
 use io::{Completed, Kind, PendingIo};
@@ -537,6 +538,7 @@ impl Drop for WatchOwner {
 }
 
 struct ActiveRun {
+    inspection: Option<u64>,
     preflight: Preflight,
     job: Handle,
     job_closed: bool,
@@ -556,6 +558,7 @@ impl ActiveRun {
     fn prepare(preflight: Preflight) -> Result<Self, Error> {
         let job = launch::job(&preflight)?;
         Ok(Self {
+            inspection: None,
             preflight,
             job,
             job_closed: false,
@@ -588,6 +591,7 @@ impl ActiveRun {
         crate::probe_supervisor::wait_slice(self.began.elapsed())
     }
     fn launch_watch(&mut self) -> Result<(), Error> {
+        self.inspection_budget()?;
         self.preflight.recheck()?;
         launch::child(self, true)?;
         launch::assign_and_authenticate(self)?;
@@ -600,6 +604,7 @@ impl ActiveRun {
         self.preflight.recheck()?;
         // SAFETY: retained created child's sole suspended thread. Fixed job, pipe,
         // token and image checks completed before the exact watch argv is resumed.
+        self.inspection_budget()?;
         let previous =
             unsafe { ResumeThread(self.thread.as_ref().ok_or(Error::PeerMismatch)?.raw()) };
         if previous != 1 {
@@ -608,6 +613,16 @@ impl ActiveRun {
             } else {
                 Error::PeerMismatch
             });
+        }
+        Ok(())
+    }
+
+    fn inspection_budget(&self) -> Result<(), Error> {
+        if let Some(cutoff) = self.inspection {
+            crate::ffi::pairing_peer::service_positive(|| {
+                crate::ffi::pairing_peer::renderer::check_cutoff(cutoff)
+            })
+            .map_err(|_| Error::TimedOut)?;
         }
         Ok(())
     }

@@ -76,6 +76,23 @@ impl CurrentToken {
     }
 
     pub(super) fn for_session(&self, session: u32, service_sid: &[u8]) -> Result<Handle, Error> {
+        self.for_session_inner(session, service_sid, true)
+    }
+    pub(super) fn for_inspection_session(
+        &self,
+        session: u32,
+        service_sid: &[u8],
+    ) -> Result<Handle, Error> {
+        self.for_session_inner(session, service_sid, false)
+    }
+    fn for_session_inner(
+        &self,
+        session: u32,
+        service_sid: &[u8],
+        allow_lab_retry: bool,
+    ) -> Result<Handle, Error> {
+        #[cfg(not(feature = "lab-software-identity"))]
+        let _ = allow_lab_retry;
         if session == 0 {
             return Err(Error::NoInteractiveSession);
         }
@@ -121,7 +138,7 @@ impl CurrentToken {
         #[cfg(feature = "lab-software-identity")]
         let set = match set {
             Ok(()) => Ok(()),
-            Err(error) => {
+            Err(error) if allow_lab_retry => {
                 crate::lab::record_note(&format!(
                     "set_session {session} failed: {error:?}; tcb attributes {:?}; token session {:?}",
                     self.privilege_attributes(SE_TCB_NAME),
@@ -148,6 +165,7 @@ impl CurrentToken {
                     }
                 }
             }
+            Err(error) => Err(error),
         };
         set.map_err(|error| native(Stage::SetSession, error))?;
         if facts(duplicate.raw(), session, service_sid)? != self.facts {
