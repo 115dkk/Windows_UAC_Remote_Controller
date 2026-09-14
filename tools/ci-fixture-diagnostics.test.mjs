@@ -29,6 +29,8 @@ test('shared vocabulary is bounded, unique and fixed-token only', () => {
   for (const values of Object.values(vocabulary)) {
     assert.ok(values.length > 0 && values.length < 256);
     assert.equal(new Set(values).size, values.length);
-    assert.ok(values.every(value => /^[a-z][a-z_]{0,63}$/.test(value)));
+    // Fixed codec names such as invalid_png_base64 contain digits. Runtime
+    // admission still requires exact vocabulary membership, not this pattern.
+    assert.ok(values.every(value => /^[a-z][a-z0-9_]{0,63}$/.test(value)));
   }
 });
