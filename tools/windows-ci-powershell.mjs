@@ -11,6 +11,8 @@ export function windowsPowerShell(script) {
   // PowerShell must construct its own stock module path for .NET Framework.
   for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
   return execFileSync(shell, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop';${script}`], {
-    env, windowsHide: true, encoding: 'utf8', timeout: 15000, maxBuffer: 128 * 1024,
+    // Cold CIM/NetTCPIP module initialization exceeded15s on CI34807865655.
+    // This fixed CI subprocess budget is separate from product/consent cutoffs.
+    env, windowsHide: true, encoding: 'utf8', timeout: 45000, maxBuffer: 128 * 1024,
   }).trim();
 }

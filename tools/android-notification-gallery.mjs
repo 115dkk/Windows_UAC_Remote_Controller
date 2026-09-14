@@ -107,6 +107,10 @@ export function matchesNativeReceipt(value, selected, nonce) {
 }
 
 export function requireBroadcastBarrier(text) {
+  if (broadcastBarrierState(text) !== 'complete') throw new Error('Android did not finish the setup barriers.');
+}
+
+export function broadcastBarrierState(text) {
   if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 64 * 1024) {
     throw new Error('Missing bounded Android setup barrier output.');
   }
@@ -121,9 +125,12 @@ export function requireBroadcastBarrier(text) {
     if (stage === 1 && line === 'Test barrier passed') { stage = 2; continue; }
     if (stage === 2 && /^Waiting for application barriers, at \d+ of \d+\.\.\.$/u.test(line)) continue;
     if (stage === 2 && line === 'Finished application barriers!') { stage = 3; continue; }
+    if (stage === 2 && line === 'Gave up waiting for application barriers!') { stage = 4; continue; }
     throw new Error('Android did not confirm the exact setup barrier sequence.');
   }
-  if (stage !== 3) throw new Error('Android did not finish the setup barriers.');
+  if (stage === 3) return 'complete';
+  if (stage === 4) return 'application-timeout';
+  throw new Error('Android did not finish the setup barriers.');
 }
 
 async function main() {

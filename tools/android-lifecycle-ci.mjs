@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
 import { runProver as runBoundedProcess } from './prover-process.mjs';
-import { onlyIsolatedEmulator, requireBroadcastBarrier } from './android-notification-gallery.mjs';
+import { onlyIsolatedEmulator, requireBroadcastBarrier, broadcastBarrierState } from './android-notification-gallery.mjs';
 import { inspectApk } from './verify-android-apk.mjs';
 import { inspectBootManifest } from './verify-android-boot-manifest.mjs';
 import { SYNTHETIC_CI_PIN, FIRST_UNLOCK_PHASES, FIRST_UNLOCK_XML_LIMIT, MAX_LIFECYCLE_COMMANDS, extensionCommandLimits,
@@ -388,7 +388,17 @@ export async function main(args = process.argv.slice(2)) {
     // Preserve the existing Korean native-shell assertions explicitly in CI.
     await mutate(['shell', 'cmd', 'locale', 'set-app-locales', PACKAGE, '--user', '0', '--locales', 'ko-KR']);
     async function barrier() {
-      requireBroadcastBarrier(await read(['shell', 'am', 'wait-for-broadcast-barrier', '--flush-broadcast-loopers', '--flush-application-threads'], 60_000));
+      // Android's application barrier gives up after its own 30s wait while
+      // adb still exits0 (native CI34807865563:61/62 callbacks). Reobserve only
+      // this exact incomplete terminal once; both command transcripts remain.
+      // Unknown/error output and command failure still stop immediately.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const output = await read(['shell', 'am', 'wait-for-broadcast-barrier', '--flush-broadcast-loopers', '--flush-application-threads'], 60_000);
+        if (broadcastBarrierState(output) === 'complete' || attempt === 1) {
+          requireBroadcastBarrier(output);
+          return;
+        }
+      }
     }
     await barrier();
     async function phase(name) {

@@ -48,6 +48,16 @@ never terminates the separately UAC-created renderer or changes Windows policy.
 
 ## Validation
 
+Native b90ed5f attempt2 passed duplicate/type/name/exact-descriptor/station
+checks in the session-local inspector, then failed GetThreadDesktop with
+stage29/80070005. The inspector additionally opens the already retained private
+desktop through OpenDesktopW using its exact generated name and unchanged
+limited mask. It retains that typed handle and compares it to the independent
+duplicate before the original actual-thread GetThreadDesktop comparison on
+every check. No name-only identity, thread/desktop switch, ACL or privilege
+change is accepted. USER-side opening is a compatibility hypothesis pending CI,
+not proof that all GetThreadDesktop calls succeed.
+
 The existing failing installed-app QR/pairing/signed-denial CI is the native
 regression test. Closed frame/command tests cover malformed and crossed inputs;
 quality, Clippy and Rust Analyzer run on CI. Physical Android hardware identity,

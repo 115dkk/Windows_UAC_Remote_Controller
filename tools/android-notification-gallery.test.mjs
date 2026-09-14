@@ -4,7 +4,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { cases, statusCases, sharedRendererInputs, statusResourceExpectations, notificationActionsMatch,
   checkNotificationUi, checkStatusNativeReceipt, matchesNativeReceipt, matchesRendererSourceReceipt,
-  onlyIsolatedEmulator, requireBroadcastBarrier } from './android-notification-gallery.mjs';
+  onlyIsolatedEmulator, requireBroadcastBarrier, broadcastBarrierState } from './android-notification-gallery.mjs';
 
 test('native gallery rejects real, ambiguous, unauthorized and missing devices', () => {
   assert.equal(onlyIsolatedEmulator('List of devices attached\nemulator-5554\tdevice\n'), true);
@@ -30,6 +30,16 @@ test('same-case prior receipt cannot prove a fresh native launch', () => {
   }
 });
 const completedBarrier = ['Loopers drained!', 'Test barrier passed', 'Finished application barriers!'];
+test('native application-barrier timeout is incomplete, never a success receipt', () => {
+  const output = 'Loopers drained!\nTest barrier passed\nWaiting for application barriers, at 61 of 62...\nGave up waiting for application barriers!\n';
+  assert.equal(broadcastBarrierState(output), 'application-timeout');
+  assert.throws(() => requireBroadcastBarrier(output));
+  assert.equal(broadcastBarrierState(completedBarrier.join('\n')), 'complete');
+  for (const invalid of [output + 'Finished application barriers!\n', 'Gave up waiting for application barriers!',
+    output.replace('Test barrier passed\n', ''), output + 'Error: failure\n']) {
+    assert.throws(() => broadcastBarrierState(invalid));
+  }
+});
 test('cold launch requires all three actual ordered setup barrier completions', () => {
   assert.doesNotThrow(() => requireBroadcastBarrier(`${completedBarrier.join('\n')}\n`));
   assert.doesNotThrow(() => requireBroadcastBarrier('Waiting for 2 loopers to drain...\nLoopers drained!\nTest barrier failed due to synthetic-process queue\nTest barrier passed\nWaiting for application barriers, at 2 of 4...\nFinished application barriers!\n'));
