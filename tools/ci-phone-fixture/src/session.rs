@@ -174,12 +174,18 @@ pub(super) fn match_metadata(
     } else {
         content.path() == expected_path
     };
-    if !(content.program_name().contains(marker) || marker_in_details)
-        || !path_matches
-        || expected_details_sha256
-            .is_some_and(|hash| hex(&Sha256::digest(content.details().as_bytes())) != hash)
+    // Separate closed reasons: one shared token cannot say whether the program
+    // was not named, the location did not match, or the details changed.
+    if !(content.program_name().contains(marker) || marker_in_details) {
+        return Err("request_program_marker_missing");
+    }
+    if !path_matches {
+        return Err("request_path_mismatch");
+    }
+    if expected_details_sha256
+        .is_some_and(|hash| hex(&Sha256::digest(content.details().as_bytes())) != hash)
     {
-        return Err("request_metadata_mismatch");
+        return Err("request_details_digest_mismatch");
     }
     Ok(())
 }
