@@ -1017,6 +1017,13 @@ impl ServicePairing {
     pub(super) fn wants_preparation_context(&self) -> bool {
         self.state == State::Active
             && self.enabled
+            // This ceremony has already authorized exactly one registry
+            // mutation, so the live checkpoint must advance past the prepared
+            // original. Re-checking equality afterwards would retire the
+            // ceremony for succeeding. Every gate before the commit request
+            // still runs, and the prepared material stays readable for the
+            // acceptance that this same ceremony signs.
+            && !self.commit_requested
             && !crate::entry::stop_requested()
             && self.protocol.as_ref().is_some_and(ServiceHandoff::is_bound)
             && self.both_idle()
@@ -1803,8 +1810,9 @@ mod tests {
         assert!(owner.arm().is_err()); // Rejects before any native factory.
         assert_eq!(owner.next_generation, Some(1));
     }
-    #[test]
-    fn preparation_scheduling_requires_both_completed_bound_writes_and_idle_owners() {
+    /// One bound, idle, Active owner whose helper Bound write is still pending.
+    /// Fixtures only: no native endpoint, key, registry or consent authority.
+    fn half_bound_active_owner() -> ServicePairing {
         let id = PendingElevationId::from_bytes([1; 32]).unwrap();
         let mut protocol = ServiceHandoff::new(id);
         protocol.offer_written().unwrap();
@@ -1835,6 +1843,31 @@ mod tests {
             }
             *slot = Some(channel);
         }
+        owner
+    }
+    #[test]
+    fn requested_commit_ends_preparation_context_maintenance() {
+        // A committed enrollment advances the live registry checkpoint by
+        // exactly the row this ceremony authorized. Scheduling another equality
+        // check would retire the ceremony for succeeding, so the renderer never
+        // reports the outcome and the enrolled device is never announced.
+        let mut owner = half_bound_active_owner();
+        owner
+            .protocol
+            .as_mut()
+            .unwrap()
+            .bound_written(ServiceSide::Helper)
+            .unwrap();
+        assert!(owner.wants_preparation_context());
+        owner.commit_requested = true; // Scheduling only; not a commit authority.
+        assert!(!owner.wants_preparation_context());
+        assert!(owner.preparation.is_some()); // Acceptance still reads it.
+        owner.poll_shutdown(); // Pure fixture cleanup, no native factory or query.
+        assert_eq!(owner.remaining_owners(), 0);
+    }
+    #[test]
+    fn preparation_scheduling_requires_both_completed_bound_writes_and_idle_owners() {
+        let mut owner = half_bound_active_owner();
         assert!(!owner.wants_preparation_context());
         owner
             .protocol
