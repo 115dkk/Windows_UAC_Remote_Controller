@@ -844,7 +844,14 @@ impl<'key> ServiceSession<'key> {
                         DecisionPurpose::Deny => prompt::PromptResult::Denied,
                     },
                     crate::ApplyOutcome::StillPresent => prompt::PromptResult::FailedUnknown,
-                    crate::ApplyOutcome::Refused(_) => prompt::PromptResult::FailedRejected,
+                    crate::ApplyOutcome::Refused(reason) => {
+                        // The fixed journal outcome carries no reason, and the
+                        // disposable lab is where a refusal has to be readable.
+                        #[cfg(feature = "lab-software-identity")]
+                        crate::lab::record_note(&format!("prompt apply refused: {reason:?}"));
+                        let _ = reason;
+                        prompt::PromptResult::FailedRejected
+                    }
                 };
                 self.resolve_live_prompt(result, now)?;
                 Ok(prompt::PromptProgress::resolved(result))

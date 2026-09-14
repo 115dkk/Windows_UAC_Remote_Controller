@@ -38,7 +38,7 @@ pub fn select_action_target(
         .iter()
         .filter(|label| label.kind() == LabelKind::Button && label.enabled())
         .collect();
-    if buttons.len() != 2 {
+    if buttons.len() < 2 || buttons.len() > MAX_ENABLED_BUTTONS {
         return Err(ActionSelectionError::AmbiguousButtons);
     }
     let affirmative = buttons
@@ -66,6 +66,12 @@ pub fn select_action_target(
     })
 }
 
+/// The current consent dialog also exposes its title bar's close button, so a
+/// pair of choices is not the only thing an honest prompt presents. A button
+/// naming neither choice cannot be mistaken for one, and the requirement that
+/// exactly one button names each choice is what keeps the selection closed.
+/// The bound stays small so an unfamiliar prompt is refused rather than read.
+const MAX_ENABLED_BUTTONS: usize = 4;
 const AFFIRMATIVE_NAMES: [&str; 7] = ["예", "Yes", "&Yes", "허용", "Allow", "확인", "OK"];
 const NEGATIVE_NAMES: [&str; 8] = [
     "아니요",
@@ -159,9 +165,11 @@ mod tests {
             vec![label(1, "Yes", true)],
             vec![label(1, "Yes", true), label(2, "No", false)],
             vec![
-                label(1, "Yes", true),
-                label(2, "No", true),
-                label(3, "Cancel", true),
+                label(1, "Close", true),
+                label(2, "Yes", true),
+                label(3, "No", true),
+                label(4, "Help", true),
+                label(5, "More", true),
             ],
         ] {
             assert_eq!(
@@ -172,6 +180,25 @@ mod tests {
     }
 
     #[test]
+    fn window_chrome_beside_the_pair_still_selects_the_named_choice() {
+        // The shape the current consent dialog presents: a title bar close
+        // button that names neither choice, then the two that do.
+        let value = observation(vec![
+            label(1, "Close", true),
+            label(9, "Yes", true),
+            label(11, "No", true),
+        ]);
+        assert_eq!(
+            select_action_target(&value, PromptAction::Deny),
+            Ok(ActionTarget { ordinal: 11 })
+        );
+        assert_eq!(
+            select_action_target(&value, PromptAction::Approve),
+            Ok(ActionTarget { ordinal: 9 })
+        );
+    }
+
+    #[test]
     fn unknown_duplicate_or_cross_role_names_are_refused() {
         for labels in [
             vec![label(1, "Continue", true), label(2, "No", true)],
@@ -179,6 +206,12 @@ mod tests {
             vec![label(1, "Yes", true), label(2, "Allow", true)],
             vec![label(1, "No", true), label(2, "Cancel", true)],
             vec![label(1, "Y es", true), label(2, "No", true)],
+            // A third button that names a choice again leaves it unrecognized.
+            vec![
+                label(1, "Yes", true),
+                label(2, "No", true),
+                label(3, "Cancel", true),
+            ],
         ] {
             assert_eq!(
                 select_action_target(&observation(labels), PromptAction::Approve),
