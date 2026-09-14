@@ -830,7 +830,7 @@ impl DurableInbox {
             && self.history.records().is_empty()
             && checkpoint.can_skip_empty_poll(boot, clock)
         {
-            self.synchronize_idle_checkpoint()?;
+            let _unchanged_receipt = self.synchronize_idle_checkpoint()?;
             Ok(None)
         } else {
             self.poll(clock).map(Some)
