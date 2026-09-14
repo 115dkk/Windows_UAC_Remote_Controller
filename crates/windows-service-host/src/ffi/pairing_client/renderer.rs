@@ -124,7 +124,7 @@ pub(crate) fn run_pair_renderer(invocation: RendererInvocation) -> Result<(), Er
         return Err(Error::Protocol);
     }
     // Station/desktop queries do not establish message-queue readiness. The
-    // service inspects this original thread before allowing its first window;
+    // service inspects this original thread before allowing visible QR UI;
     // initialize the windowless thread only after its private desktop and exact
     // descriptors are verified. Windows documents this PeekMessage pattern as
     // forcing queue creation; a false return means no matching message, not an

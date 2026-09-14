@@ -244,8 +244,9 @@ internal static class DesktopContract
                             IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
                         if (witness == IntPtr.Zero) throw new Fault("witness_create", Marshal.GetLastWin32Error());
                         uint windowPid; uint windowTid = N.GetWindowThreadProcessId(witness, out windowPid);
-                        if (windowPid != N.GetCurrentProcessId() || windowTid != tid || N.IsWindowVisible(witness) || N.GetAncestor(witness, 2) != witness)
-                            throw new Fault("witness_identity", 0);
+                        if (windowPid != N.GetCurrentProcessId() || windowTid != tid) throw new Fault("witness_target_owner", Marshal.GetLastWin32Error());
+                        if (N.IsWindowVisible(witness)) throw new Fault("witness_target_visible", 0);
+                        if (N.GetAncestor(witness, 2) != witness) throw new Fault("witness_target_root", Marshal.GetLastWin32Error());
                         IntPtr actual = N.GetThreadDesktop(tid);
                         if (actual == IntPtr.Zero || !N.CompareObjectHandles(actual, desktop.Value)) throw new Fault("own_association", Marshal.GetLastWin32Error());
                         Metadata metadata = new Metadata(); metadata.Pid = N.GetCurrentProcessId(); metadata.Created = Creation(N.GetCurrentProcess(), false);
@@ -322,11 +323,12 @@ internal static class DesktopContract
     {
         CheckWitnessTarget(process, thread, m);
         IntPtr window = new IntPtr(checked((long)m.Window));
-        if (N.IsWindowVisible(window) || N.GetAncestor(window, 2) != window) throw new Fault("witness_identity", 0);
+        if (N.IsWindowVisible(window)) throw new Fault("witness_reader_visible", 0);
+        if (N.GetAncestor(window, 2) != window) throw new Fault("witness_reader_root", Marshal.GetLastWin32Error());
         StringBuilder className = new StringBuilder(64);
         int length = N.GetClassNameW(window, className, className.Capacity);
         if (length <= 0 || length >= className.Capacity || !String.Equals(className.ToString(), "STATIC", StringComparison.OrdinalIgnoreCase))
-            throw new Fault("witness_identity", 0);
+            throw new Fault("witness_reader_class", Marshal.GetLastWin32Error());
         uint wrongPid = N.GetCurrentProcessId(), wrongTid = N.GetCurrentThreadId();
         if (wrongPid == m.Pid || wrongTid == m.Tid) throw new Fault("witness_negative_setup", 0);
         IntPtr wrongDesktop = N.GetThreadDesktop(wrongTid); // Borrowed inspector Default.
@@ -350,7 +352,7 @@ internal static class DesktopContract
     {
         Budget(1);
         uint beforePid; uint beforeTid = N.GetWindowThreadProcessId(window, out beforePid);
-        if (beforeTid == 0 || beforePid == 0) throw new Fault("witness_identity", 0);
+        if (beforeTid == 0 || beforePid == 0) throw new Fault("witness_reader_owner", Marshal.GetLastWin32Error());
         int count = 0, seen = 0; bool matched = false, callbackFailed = false;
         N.EnumWindow callback = delegate(IntPtr candidate, IntPtr unused) {
             try {
@@ -487,6 +489,9 @@ internal static class DesktopContract
             case "deadline": case "fixture_failure": return true;
             case "witness_create": case "witness_identity": case "witness_enumeration":
             case "witness_negative_setup": return true;
+            case "witness_target_owner": case "witness_target_visible": case "witness_target_root":
+            case "witness_reader_visible": case "witness_reader_root": case "witness_reader_class":
+            case "witness_reader_owner": return true;
             default: return false;
         }
     }
