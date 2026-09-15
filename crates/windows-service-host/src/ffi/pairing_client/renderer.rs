@@ -250,11 +250,16 @@ impl Owner {
         };
         self.budget()?;
         if let Some(event) = event {
-            let confirmed = match event {
-                UiEvent::Confirmed => true,
-                UiEvent::Cancelled => false,
-            };
-            self.begin_decision(confirmed, false)?;
+            match (self.phase, event) {
+                (Phase::Comparison, UiEvent::Confirmed) => self.begin_decision(true, false)?,
+                (Phase::Comparison, UiEvent::Cancelled) => self.begin_decision(false, false)?,
+                // Leaving before any comparison exists decides nothing and
+                // grants nothing. Retire the attempt instead of answering a
+                // question the service has not asked.
+                (_, UiEvent::Cancelled) => return Err(Error::ClosedByUser),
+                // The window spends its own introduction; it never reaches here.
+                (_, UiEvent::Confirmed | UiEvent::Proceeded) => return Err(Error::Protocol),
+            }
         }
         if self.phase == Phase::Comparison
             && Instant::now()
@@ -324,8 +329,7 @@ impl Owner {
                         if self.phase == Phase::Bound && invocation == self.invocation =>
                     {
                         self.window = Some(
-                            RendererWindow::show_invitation(text.as_str(), self.deadline)
-                                .map_err(ui_error)?,
+                            RendererWindow::open(text.as_str(), self.deadline).map_err(ui_error)?,
                         );
                         crate::ffi::pairing_diagnostics::milestone(
                             crate::ffi::pairing_diagnostics::Point::WindowOpened,

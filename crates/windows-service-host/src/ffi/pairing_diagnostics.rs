@@ -79,6 +79,7 @@ pub(crate) fn launch_failure(point: Point, error: PairingLaunchError) {
         PairingLaunchError::UserCancelled => emit(point, "launch", "user-cancelled", 0),
         PairingLaunchError::LaunchUnconfirmed => emit(point, "launch", "unconfirmed", 0),
         PairingLaunchError::Cancelled => emit(point, "launch", "cancelled", 0),
+        PairingLaunchError::ClosedByUser => emit(point, "launch", "closed-by-user", 0),
         PairingLaunchError::CleanupUnconfirmed => emit(point, "launch", "cleanup", 0),
     }
 }

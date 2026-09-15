@@ -474,6 +474,45 @@ internal static class ProtectedUi
         catch { bitmap.Dispose(); throw; }
     }
 
+    // The pairing window opens on its introduction, not on the QR. Press that
+    // screen's own proceed control and wait for it to go, exactly as a person
+    // at the keyboard would, before any capture expects modules on screen.
+    internal static void DismissIntroduction()
+    {
+        while (true)
+        {
+            Program.Deadline();
+            bool pressed = OnInput((desktop, name) =>
+            {
+                IntPtr window = Renderer(desktop, name, true);
+                if (window == IntPtr.Zero) return false;
+                IntPtr start = Control(window, 1003, "start_control_rejected");
+                if (start == IntPtr.Zero) return false;
+                Program.Require(Native.GetDlgItem(window, 1001) == IntPtr.Zero, "introduction_already_changed");
+                StillInput(name);
+                IntPtr result;
+                // BM_CLICK goes to the actual fixed visible BUTTON, whose normal
+                // BN_CLICKED path is the sole product-side way past this screen.
+                Program.Require(Native.SendMessageTimeout(start, 0x00F5, IntPtr.Zero, IntPtr.Zero, 0x0002, 2000, out result) != IntPtr.Zero,
+                    "start_click_failed");
+                return true;
+            });
+            if (pressed) break;
+            Thread.Sleep(150);
+        }
+        while (true)
+        {
+            Program.Deadline();
+            bool gone = OnInput((desktop, name) =>
+            {
+                IntPtr window = Renderer(desktop, name, false);
+                return Native.GetDlgItem(window, 1003) == IntPtr.Zero;
+            });
+            if (gone) return;
+            Thread.Sleep(150);
+        }
+    }
+
     internal static string CaptureQr()
     {
         while (true)
@@ -483,6 +522,7 @@ internal static class ProtectedUi
             {
                 IntPtr window = Renderer(desktop, name, true);
                 if (window == IntPtr.Zero) return null;
+                Program.Require(Native.GetDlgItem(window, 1003) == IntPtr.Zero, "introduction_still_shown");
                 Program.Require(Native.GetDlgItem(window, 1001) == IntPtr.Zero, "invitation_already_changed");
                 using (var pixels = Capture(window, name))
                 using (var memory = new MemoryStream())
@@ -497,15 +537,20 @@ internal static class ProtectedUi
         }
     }
 
-    private static IntPtr ConfirmButton(IntPtr window)
+    private static IntPtr Control(IntPtr window, int id, string rejection)
     {
-        IntPtr button = Native.GetDlgItem(window, 1001);
+        IntPtr button = Native.GetDlgItem(window, id);
         if (button == IntPtr.Zero) return IntPtr.Zero;
         uint pid;
         Native.GetWindowThreadProcessId(button, out pid);
         Program.Require(pid == Program.RendererPid && Native.GetParent(button) == window &&
-            String.Equals(WindowClass(button), "Button", StringComparison.OrdinalIgnoreCase), "confirm_control_rejected");
+            String.Equals(WindowClass(button), "Button", StringComparison.OrdinalIgnoreCase), rejection);
         return Native.IsWindowVisible(button) && Native.IsWindowEnabled(button) ? button : IntPtr.Zero;
+    }
+
+    private static IntPtr ConfirmButton(IntPtr window)
+    {
+        return Control(window, 1001, "confirm_control_rejected");
     }
 
     internal static string ReadComparison()

@@ -120,6 +120,8 @@ internal static class Program
                                 {
                                     Stage = "initial_consent";
                                     ProtectedUi.ApprovePairingConsent();
+                                    Stage = "introduction";
+                                    ProtectedUi.DismissIntroduction();
                                     Stage = "qr_capture";
                                     string png = ProtectedUi.CaptureQr();
                                     phase = 2;

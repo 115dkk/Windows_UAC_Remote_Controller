@@ -17,11 +17,11 @@ use windows::{
         Graphics::Gdi::{
             AddFontMemResourceEx, BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
             CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
-            DEFAULT_CHARSET, DT_CENTER, DT_NOPREFIX, DT_RTLREADING, DT_SINGLELINE, DT_VCENTER,
-            DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_BOLD,
-            FW_NORMAL, FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS,
-            PAINTSTRUCT, RemoveFontMemResourceEx, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
-            TRANSPARENT,
+            DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RTLREADING,
+            DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+            FF_DONTCARE, FW_BOLD, FW_NORMAL, FillRect, GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ,
+            InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RemoveFontMemResourceEx,
+            RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
         System::{
             LibraryLoader::GetModuleHandleW,
@@ -52,9 +52,21 @@ use windows::{
 const CLASS_NAME: &str = "UacRemoteControllerPairingRenderer";
 const CONFIRM_ID: usize = 1001;
 const CANCEL_ID: usize = 1002;
+/// The introduction's proceed button is deliberately NOT `CONFIRM_ID`: that
+/// identifier means "the six digits match" and nothing else may ever wear it.
+const START_ID: usize = 1003;
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 1000;
 const QUIET_MODULES: usize = 4;
+/// A camera and the lab's screenshot decoder both read the module grid. Never
+/// paint one smaller than the size those two already read successfully.
+const MIN_MODULE_PX: i32 = 3;
+const INK: u32 = 0x152c35;
+const MUTED_INK: u32 = 0x536971;
+const FAINT_INK: u32 = 0x7b8f97;
+const ACCENT: u32 = 0x0b7285;
+const CAUTION_SURFACE: u32 = 0xfff4e0;
+const CAUTION_INK: u32 = 0x7a4f00;
 
 #[derive(Debug)]
 pub(super) enum Error {
@@ -72,14 +84,88 @@ impl From<WinError> for Error {
 pub(super) enum UiEvent {
     Confirmed,
     Cancelled,
+    /// The introduction was read and dismissed. Purely presentational: this
+    /// owner turns it into the QR screen and never reports it to the protocol.
+    Proceeded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Screen {
+    Introduction,
     Invitation,
     Comparison,
     Outcome(bool),
     Expired,
+}
+
+impl Screen {
+    /// The screens that accept a decision. Esc leaves from either one.
+    fn is_interactive(self) -> bool {
+        matches!(
+            self,
+            Self::Introduction | Self::Invitation | Self::Comparison
+        )
+    }
+}
+
+/// The card a screen paints inside. Control layout reads the same rectangle the
+/// painter does, so a button cannot land off the surface or over the code.
+fn card_rect(client: RECT, dpi: i32, screen: Screen) -> RECT {
+    let scale = |value: i32| value * dpi / 96;
+    let width = (client.right * 72 / 100).min(scale(760));
+    // The introduction is a notice and sizes to its own text. The QR screen
+    // needs a tall card so its footer still holds the way out on a short display.
+    let height = if screen == Screen::Introduction {
+        (client.bottom * 70 / 100).min(scale(560))
+    } else {
+        (client.bottom * 96 / 100).min(scale(900))
+    };
+    let left = (client.right - width) / 2;
+    let top = (client.bottom - height) / 2;
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// Where the QR sits and where the footer starts, derived together so neither
+/// can be moved without the other. The QR is measured first and the way out is
+/// anchored to the card, so a cramped display loses margin, never legibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InvitationLayout {
+    qr_top: i32,
+    qr_side: i32,
+    module_px: i32,
+    countdown_top: i32,
+    button_top: i32,
+    button_height: i32,
+}
+
+fn invitation_layout(card: RECT, dpi: i32, shorter: i32, modules: usize) -> InvitationLayout {
+    let scale = |value: i32| value * dpi / 96;
+    let quiet = (modules + QUIET_MODULES * 2) as i32;
+    let card_height = card.bottom - card.top;
+    let footer = scale(164);
+    // A short card gives up the breathing room under its copy before it gives
+    // up either the smallest readable code or the way out beneath it.
+    let header = scale(258)
+        .min(card_height - footer - MIN_MODULE_PX * quiet - scale(8))
+        .max(scale(238));
+    let band = (card_height - header - footer).max(1);
+    let target = (shorter * 38 / 100).min(band);
+    let module_px = (target / quiet.max(1)).max(MIN_MODULE_PX);
+    let qr_side = module_px * quiet;
+    let qr_top = card.top + header + (band - qr_side).max(0) / 2;
+    InvitationLayout {
+        qr_top,
+        qr_side,
+        module_px,
+        countdown_top: qr_top + qr_side + scale(14),
+        button_top: card.bottom - scale(118),
+        button_height: scale(56),
+    }
 }
 
 pub(super) struct RendererWindow {
@@ -88,6 +174,10 @@ pub(super) struct RendererWindow {
 
 struct WindowOwner {
     hwnd: HWND,
+    /// Each child control holds exactly one meaning for the whole run. `start`
+    /// only ever dismisses the introduction and `confirm` only ever answers the
+    /// comparison; neither is reused for the other screen's question.
+    start: HWND,
     confirm: HWND,
     cancel: HWND,
     original_desktop: Option<HDESK>,
@@ -96,6 +186,7 @@ struct WindowOwner {
     title_font: HFONT,
     body_font: HFONT,
     code_font: HFONT,
+    hint_font: HFONT,
     font_resources: Vec<HANDLE>,
     locale: Locale,
     background: HBRUSH,
@@ -122,6 +213,21 @@ impl WindowOwner {
         tr(self.locale, source)
     }
 
+    fn dpi(&self) -> i32 {
+        // SAFETY: the owned top-level window remains live for this owner.
+        unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32
+    }
+
+    fn card(&self, client: RECT, dpi: i32) -> RECT {
+        card_rect(client, dpi, self.screen)
+    }
+
+    fn invitation_layout(&self, card: RECT, dpi: i32) -> InvitationLayout {
+        // SAFETY: screen metric reads have no caller-owned pointers.
+        let shorter = unsafe { GetSystemMetrics(SM_CXSCREEN).min(GetSystemMetrics(SM_CYSCREEN)) };
+        invitation_layout(card, dpi, shorter, self.module_width)
+    }
+
     fn window_direction(&self) -> WINDOW_EX_STYLE {
         // Do not use WS_EX_LAYOUTRTL: it would also mirror QR pixel geometry.
         if self.locale.is_rtl() {
@@ -145,7 +251,9 @@ impl WindowOwner {
         let minutes = format!("{:02}", self.remaining_second / 60);
         let seconds = format!("{:02}", self.remaining_second % 60);
         let time = format!("\u{202a}{minutes}:{seconds}\u{202c}");
-        self.copy("남은 시간 {:02}:{:02}")
+        // Deliberately not "time remaining": the same fact stated as a harmless
+        // automatic close rather than as a deadline the reader is racing.
+        self.copy("{:02}:{:02} 뒤에 저절로 닫혀요")
             .replace("{:02}:{:02}", &time)
     }
 
@@ -197,6 +305,7 @@ impl WindowOwner {
         }
         let mut owner = Box::new(Self {
             hwnd: HWND::default(),
+            start: HWND::default(),
             confirm: HWND::default(),
             cancel: HWND::default(),
             original_desktop: None,
@@ -205,6 +314,7 @@ impl WindowOwner {
             title_font: HFONT::default(),
             body_font: HFONT::default(),
             code_font: HFONT::default(),
+            hint_font: HFONT::default(),
             font_resources: Vec::new(),
             // Cosmetic current-account preference only. The helper's admitted
             // account can differ from the starter's for alternate-admin UAC;
@@ -219,7 +329,9 @@ impl WindowOwner {
             module_width,
             deadline,
             remaining_second: remaining_seconds(deadline),
-            screen: Screen::Invitation,
+            // The QR is never the first thing the takeover shows. The reader
+            // gets told what this is, and how to leave, before it appears.
+            screen: Screen::Introduction,
             code: String::new(),
             event: None,
             paint_failed: false,
@@ -273,9 +385,12 @@ impl WindowOwner {
         self.body_font = font(dpi, 14, FW_NORMAL.0 as i32, font_face(self.locale))?;
         // Comparison digits are immutable ASCII and always use the Latin face.
         self.code_font = font(dpi, 40, FW_BOLD.0 as i32, "UAC Sans")?;
+        self.hint_font = font(dpi, 11, FW_NORMAL.0 as i32, font_face(self.locale))?;
         self.background = brush(0xf2f6f7)?;
         self.surface = brush(0xffffff)?;
         self.border = brush(0xd7e3e7)?;
+        // The way out exists before the desktop switches, not after it.
+        self.show_introduction_buttons()?;
         // SAFETY: current thread desktop is the launcher-assigned private desktop.
         let private = unsafe { GetThreadDesktop(GetCurrentThreadId())? };
         // SAFETY: window exists on private before it becomes the input desktop.
@@ -290,11 +405,26 @@ impl WindowOwner {
         self.repaint()
     }
 
+    /// Leaves the introduction for the QR itself. Local presentation only: no
+    /// frame is sent and the protocol phase is untouched by this transition.
+    fn show_qr(&mut self) -> Result<(), Error> {
+        if self.screen != Screen::Introduction {
+            return Err(Error::InvalidState);
+        }
+        self.hide_buttons()?;
+        self.screen = Screen::Invitation;
+        self.show_invitation_button()?;
+        self.repaint()
+    }
+
     pub(super) fn show_comparison(&mut self, code: &str) -> Result<(), Error> {
         if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(Error::InvalidState);
         }
         self.code = format!("{} {}", &code[..3], &code[3..]);
+        // The introduction's proceed button must never survive into a screen
+        // where a click means "the digits match"; replace the whole row.
+        self.hide_buttons()?;
         self.screen = Screen::Comparison;
         self.ensure_buttons()?;
         self.repaint()
@@ -325,15 +455,11 @@ impl WindowOwner {
         let mut message = MSG::default();
         // SAFETY: current-thread queue only; each removed message is translated and dispatched once.
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-            if self.screen == Screen::Comparison && message.message == WM_KEYDOWN {
-                if message.wParam.0 == usize::from(VK_RETURN.0) {
-                    self.event = Some(UiEvent::Confirmed);
-                    continue;
-                }
-                if message.wParam.0 == usize::from(VK_ESCAPE.0) {
-                    self.event = Some(UiEvent::Cancelled);
-                    continue;
-                }
+            if message.message == WM_KEYDOWN
+                && let Some(event) = self.key_decision(message.wParam.0)
+            {
+                self.event = Some(event);
+                continue;
             }
             // SAFETY: this message was removed from the current thread queue once.
             unsafe {
@@ -344,130 +470,194 @@ impl WindowOwner {
         if self.paint_failed {
             return Err(Error::InvalidState);
         }
+        // Reading the introduction is a local presentation step, so it is spent
+        // here and never reported as a decision to the pairing protocol.
+        if self.event == Some(UiEvent::Proceeded) {
+            self.event = None;
+            self.show_qr()?;
+        }
         Ok(self.event.take())
+    }
+
+    /// The only two keys this window reads, and only where they mean something.
+    /// Escape leaves from any screen that still offers a way out; Enter answers
+    /// whichever question that screen is asking, and asks none of its own.
+    fn key_decision(&self, key: usize) -> Option<UiEvent> {
+        if key == usize::from(VK_ESCAPE.0) && self.screen.is_interactive() {
+            return Some(UiEvent::Cancelled);
+        }
+        if key == usize::from(VK_RETURN.0) {
+            return match self.screen {
+                Screen::Introduction => Some(UiEvent::Proceeded),
+                Screen::Comparison => Some(UiEvent::Confirmed),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// Creates one fixed standard push button owned by this window. The label is
+    /// authored copy and the identifier is a compile-time constant; neither is
+    /// caller text, a path, a command or anything read from the pipe.
+    fn push_button(&self, label: &str, id: usize, default: bool) -> Result<HWND, Error> {
+        let class = wide("BUTTON");
+        let text = wide(label);
+        let style = if default {
+            BS_DEFPUSHBUTTON
+        } else {
+            BS_PUSHBUTTON
+        };
+        // SAFETY: fixed standard child control parented to the owned top-level window.
+        let button = unsafe {
+            CreateWindowExW(
+                self.window_direction(),
+                PCWSTR(class.as_ptr()),
+                PCWSTR(text.as_ptr()),
+                WS_CHILD
+                    | WS_VISIBLE
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
+                        (style | BS_MULTILINE) as u32,
+                    ),
+                0,
+                0,
+                1,
+                1,
+                Some(self.hwnd),
+                Some(HMENU(id as *mut _)),
+                Some(self.instance),
+                None,
+            )?
+        };
+        // The control borrows this owner's live font only; every button is
+        // destroyed before the HFONT and the memory-font resources are released.
+        // SAFETY: the newly created owned control and this owner's live font.
+        unsafe {
+            SendMessageW(
+                button,
+                WM_SETFONT,
+                Some(WPARAM(self.body_font.0 as usize)),
+                Some(LPARAM(1)),
+            );
+        }
+        Ok(button)
+    }
+
+    fn show_introduction_buttons(&mut self) -> Result<(), Error> {
+        if !self.start.0.is_null() {
+            return Ok(());
+        }
+        let start = self.push_button(self.copy("QR 코드 보기"), START_ID, true)?;
+        self.start = start;
+        let cancel = self.push_button(self.copy("취소"), CANCEL_ID, false)?;
+        self.cancel = cancel;
+        self.layout_buttons()
+    }
+
+    fn show_invitation_button(&mut self) -> Result<(), Error> {
+        if !self.cancel.0.is_null() {
+            return Ok(());
+        }
+        let cancel = self.push_button(self.copy("취소하고 돌아가기"), CANCEL_ID, false)?;
+        self.cancel = cancel;
+        self.layout_buttons()
     }
 
     fn ensure_buttons(&mut self) -> Result<(), Error> {
         if !self.confirm.0.is_null() {
             return Ok(());
         }
-        let button = wide("BUTTON");
-        let confirm = wide(self.copy("숫자가 같아요"));
-        let cancel = wide(self.copy("다릅니다, 취소"));
-        // SAFETY: fixed standard child controls parented to the owned top-level window.
-        unsafe {
-            self.confirm = CreateWindowExW(
-                self.window_direction(),
-                PCWSTR(button.as_ptr()),
-                PCWSTR(confirm.as_ptr()),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
-                        (BS_DEFPUSHBUTTON | BS_MULTILINE) as u32,
-                    ),
-                0,
-                0,
-                1,
-                1,
-                Some(self.hwnd),
-                Some(HMENU(CONFIRM_ID as *mut _)),
-                Some(self.instance),
-                None,
-            )?;
-            self.cancel = CreateWindowExW(
-                self.window_direction(),
-                PCWSTR(button.as_ptr()),
-                PCWSTR(cancel.as_ptr()),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
-                        (BS_PUSHBUTTON | BS_MULTILINE) as u32,
-                    ),
-                0,
-                0,
-                1,
-                1,
-                Some(self.hwnd),
-                Some(HMENU(CANCEL_ID as *mut _)),
-                Some(self.instance),
-                None,
-            )?;
-            // Both fixed child controls borrow this owner's live font only;
-            // windows are destroyed before the HFONT and memory-font resources.
-            SendMessageW(
-                self.confirm,
-                WM_SETFONT,
-                Some(WPARAM(self.body_font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-            SendMessageW(
-                self.cancel,
-                WM_SETFONT,
-                Some(WPARAM(self.body_font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-        }
+        let confirm = self.push_button(self.copy("숫자가 같아요"), CONFIRM_ID, true)?;
+        self.confirm = confirm;
+        let cancel = self.push_button(self.copy("다릅니다, 취소"), CANCEL_ID, false)?;
+        self.cancel = cancel;
         self.layout_buttons()
     }
 
-    fn layout_buttons(&self) -> Result<(), Error> {
-        if self.confirm.0.is_null() {
-            return Ok(());
-        }
-        let mut rect = RECT::default();
-        // SAFETY: owned valid top-level and child windows.
-        unsafe { GetClientRect(self.hwnd, &mut rect)? };
-        // SAFETY: the owned top-level window remains live while controls are laid out.
-        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
-        let scale = |value: i32| value * dpi / 96;
-        let button_width = scale(184);
-        let button_height = scale(60);
-        let gap = scale(16);
-        let left = (rect.right - button_width * 2 - gap) / 2;
-        let top = rect.bottom / 2 + scale(120);
-        let (confirm_left, cancel_left) = if self.locale.is_rtl() {
-            (left + button_width + gap, left)
-        } else {
-            (left, left + button_width + gap)
-        };
-        // SAFETY: both child controls and their parent remain live and thread-owned.
+    fn move_button(
+        &self,
+        button: HWND,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<(), Error> {
+        // SAFETY: the child control and its parent remain live and thread-owned.
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::MoveWindow(
-                self.confirm,
-                confirm_left,
-                top,
-                button_width,
-                button_height,
-                true,
-            )?;
-            windows::Win32::UI::WindowsAndMessaging::MoveWindow(
-                self.cancel,
-                cancel_left,
-                top,
-                button_width,
-                button_height,
-                true,
+                button, left, top, width, height, true,
             )?;
         }
         Ok(())
     }
 
+    fn layout_buttons(&self) -> Result<(), Error> {
+        let mut client = RECT::default();
+        // SAFETY: owned valid top-level window and initialized output.
+        unsafe { GetClientRect(self.hwnd, &mut client)? };
+        let dpi = self.dpi();
+        let scale = |value: i32| value * dpi / 96;
+        let card = self.card(client, dpi);
+        match self.screen {
+            // A single way out, anchored to the card's footer so it can never be
+            // laid over the modules the phone camera has to read.
+            Screen::Invitation => {
+                if self.cancel.0.is_null() {
+                    return Ok(());
+                }
+                let layout = self.invitation_layout(card, dpi);
+                let width = scale(300).min(card.right - card.left - scale(72)).max(1);
+                self.move_button(
+                    self.cancel,
+                    (client.right - width) / 2,
+                    layout.button_top,
+                    width,
+                    layout.button_height,
+                )
+            }
+            Screen::Introduction | Screen::Comparison => {
+                let introducing = self.screen == Screen::Introduction;
+                let primary = if introducing {
+                    self.start
+                } else {
+                    self.confirm
+                };
+                if primary.0.is_null() || self.cancel.0.is_null() {
+                    return Ok(());
+                }
+                let width = scale(184);
+                let height = scale(60);
+                let gap = scale(16);
+                let left = (client.right - width * 2 - gap) / 2;
+                let top = if introducing {
+                    card.bottom - scale(104)
+                } else {
+                    client.bottom / 2 + scale(120)
+                };
+                let (primary_left, cancel_left) = if self.locale.is_rtl() {
+                    (left + width + gap, left)
+                } else {
+                    (left, left + width + gap)
+                };
+                self.move_button(primary, primary_left, top, width, height)?;
+                self.move_button(self.cancel, cancel_left, top, width, height)
+            }
+            Screen::Outcome(_) | Screen::Expired => Ok(()),
+        }
+    }
+
     fn hide_buttons(&mut self) -> Result<(), Error> {
         let mut first = None;
-        // SAFETY: child HWNDs are either null or owned live controls.
-        unsafe {
-            if !self.confirm.0.is_null() {
-                if let Err(error) = DestroyWindow(self.confirm) {
+        for button in [&mut self.start, &mut self.confirm, &mut self.cancel] {
+            if button.0.is_null() {
+                continue;
+            }
+            // SAFETY: a non-null field here is an owned live control of this window.
+            unsafe {
+                if let Err(error) = DestroyWindow(*button) {
                     first.get_or_insert(Error::Native(error));
                 }
-                self.confirm = HWND::default();
             }
-            if !self.cancel.0.is_null() {
-                if let Err(error) = DestroyWindow(self.cancel) {
-                    first.get_or_insert(Error::Native(error));
-                }
-                self.cancel = HWND::default();
-            }
+            *button = HWND::default();
         }
         first.map_or(Ok(()), Err)
     }
@@ -538,19 +728,16 @@ impl WindowOwner {
             FillRect(dc, &client, self.background);
             SetBkMode(dc, TRANSPARENT);
         }
-        // SAFETY: the owned top-level window remains live during painting.
-        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
+        let dpi = self.dpi();
         let scale = |value: i32| value * dpi / 96;
-        let card_width = (client.right * 72 / 100).min(scale(760));
-        let card_height = (client.bottom * 82 / 100).min(scale(820));
-        let left = (client.right - card_width) / 2;
-        let top = (client.bottom - card_height) / 2;
-        let border = RECT {
-            left,
-            top,
-            right: left + card_width,
-            bottom: top + card_height,
-        };
+        let border = self.card(client, dpi);
+        let left = border.left;
+        let top = border.top;
+        let card_width = border.right - border.left;
+        let card_height = border.bottom - border.top;
+        // One signature, in one corner. A takeover that names itself is a
+        // program; the same mark repeated around the screen would be a seal.
+        self.draw_signature(dc, client, scale(28), scale(24), scale(36));
         // SAFETY: the memory DC and owned border brush are live for this paint.
         unsafe { FillRect(dc, &border, self.border) };
         let surface = RECT {
@@ -564,17 +751,24 @@ impl WindowOwner {
         draw_text(
             dc,
             self.title_font,
-            self.copy("UAC 원격 승인 · PC 연결"),
+            self.copy(if self.screen == Screen::Introduction {
+                "QR 연결 절차를 시작합니다."
+            } else {
+                "UAC 원격 승인 · PC 연결"
+            }),
             RECT {
                 left: left + scale(32),
                 top: top + scale(26),
                 right: left + card_width - scale(32),
                 bottom: top + scale(92),
             },
-            0x152c35,
+            INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         match self.screen {
+            Screen::Introduction => {
+                self.draw_introduction(dc, left, top, card_width, card_height, scale);
+            }
             Screen::Invitation => {
                 self.draw_invitation(dc, left, top, card_width, card_height, scale)?;
             }
@@ -603,6 +797,188 @@ impl WindowOwner {
         Ok(())
     }
 
+    /// The product mark and name, once, in the screen's leading top corner. The
+    /// mark is the app icon's two shapes redrawn with axis-aligned primitives;
+    /// no image, file or resource is loaded to paint it.
+    fn draw_signature(&self, dc: HDC, client: RECT, margin: i32, top: i32, size: i32) {
+        let Ok(accent) = brush(ACCENT) else {
+            return; // Decoration only: never fail a pairing screen over it.
+        };
+        let leading = if self.locale.is_rtl() {
+            client.right - margin - size
+        } else {
+            margin
+        };
+        let unit = |value: i32| leading + value * size / 40;
+        let row = |value: i32| top + value * size / 40;
+        // SAFETY: the memory DC, the temporary accent brush and this owner's
+        // live surface brush are all valid for the whole of this paint.
+        unsafe {
+            let previous_brush = SelectObject(dc, HGDIOBJ(accent.0));
+            // A stock pen is process-owned and must never be deleted here.
+            let previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+            let radius = size * 24 / 40;
+            let _ = RoundRect(dc, leading, top, leading + size, top + size, radius, radius);
+            SelectObject(dc, previous_pen);
+            SelectObject(dc, previous_brush);
+            // The monitor, its screen, its stand and the phone beside it.
+            FillRect(
+                dc,
+                &RECT {
+                    left: unit(7),
+                    top: row(9),
+                    right: unit(30),
+                    bottom: row(26),
+                },
+                self.surface,
+            );
+            FillRect(
+                dc,
+                &RECT {
+                    left: unit(10),
+                    top: row(12),
+                    right: unit(27),
+                    bottom: row(23),
+                },
+                accent,
+            );
+            FillRect(
+                dc,
+                &RECT {
+                    left: unit(12),
+                    top: row(29),
+                    right: unit(25),
+                    bottom: row(31),
+                },
+                self.surface,
+            );
+            FillRect(
+                dc,
+                &RECT {
+                    left: unit(23),
+                    top: row(17),
+                    right: unit(35),
+                    bottom: row(34),
+                },
+                self.surface,
+            );
+            FillRect(
+                dc,
+                &RECT {
+                    left: unit(25),
+                    top: row(19),
+                    right: unit(33),
+                    bottom: row(30),
+                },
+                accent,
+            );
+            // The temporary brush is no longer selected or borrowed.
+            let _ = DeleteObject(HGDIOBJ(accent.0));
+        }
+        let (text_left, text_right, alignment) = if self.locale.is_rtl() {
+            (
+                margin,
+                leading - size / 4,
+                windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
+            )
+        } else {
+            (leading + size + size / 4, client.right - margin, DT_LEFT)
+        };
+        draw_text(
+            dc,
+            self.body_font,
+            self.copy("UAC 원격 승인"),
+            RECT {
+                left: text_left,
+                top,
+                right: text_right,
+                bottom: top + size,
+            },
+            ACCENT,
+            alignment | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | self.text_direction(),
+        );
+    }
+
+    /// Says what the ceremony is, that it can be stopped, and what sharing this
+    /// code would hand over, before the code itself is ever shown.
+    fn draw_introduction(
+        &self,
+        dc: HDC,
+        left: i32,
+        top: i32,
+        card_width: i32,
+        card_height: i32,
+        scale: impl Fn(i32) -> i32,
+    ) {
+        draw_text(
+            dc,
+            self.body_font,
+            self.copy(
+                "QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.",
+            ),
+            RECT {
+                left: left + scale(44),
+                top: top + scale(104),
+                right: left + card_width - scale(44),
+                bottom: top + scale(190),
+            },
+            MUTED_INK,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+        );
+        draw_text(
+            dc,
+            self.body_font,
+            self.copy("ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다."),
+            RECT {
+                left: left + scale(44),
+                top: top + scale(198),
+                right: left + card_width - scale(44),
+                bottom: top + scale(240),
+            },
+            MUTED_INK,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+        );
+        let caution = RECT {
+            left: left + scale(44),
+            top: top + scale(262),
+            right: left + card_width - scale(44),
+            bottom: (top + scale(422))
+                .min(top + card_height - scale(136))
+                .max(top + scale(263)),
+        };
+        let Ok(surface) = brush(CAUTION_SURFACE) else {
+            return;
+        };
+        // SAFETY: the memory DC and the temporary caution brush are live here.
+        unsafe {
+            FillRect(dc, &caution, surface);
+            let _ = DeleteObject(HGDIOBJ(surface.0));
+        }
+        let warning = self.copy(
+            "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.",
+        );
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
+        let text_left = caution.left + scale(24);
+        let text_right = caution.right - scale(24);
+        // Centre the notice in its own band. Measuring it means a longer
+        // translation sits correctly instead of clinging to the top edge.
+        let height = measure_text(dc, self.body_font, warning, text_right - text_left, flags);
+        let slack = (caution.bottom - caution.top - scale(36) - height).max(0) / 2;
+        draw_text(
+            dc,
+            self.body_font,
+            warning,
+            RECT {
+                left: text_left,
+                top: caution.top + scale(20) + slack,
+                right: text_right,
+                bottom: caution.bottom - scale(16),
+            },
+            CAUTION_INK,
+            flags,
+        );
+    }
+
     fn draw_invitation(
         &self,
         dc: HDC,
@@ -620,19 +996,41 @@ impl WindowOwner {
                 left: left + scale(36),
                 top: top + scale(100),
                 right: left + card_width - scale(36),
-                bottom: top + scale(176),
+                bottom: top + scale(172),
             },
-            0x536971,
+            MUTED_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
-        // SAFETY: screen metric reads have no caller-owned pointers.
-        let shorter = unsafe { GetSystemMetrics(SM_CXSCREEN).min(GetSystemMetrics(SM_CYSCREEN)) };
-        let available_height = (card_height - scale(280)).max(1);
-        let target = (shorter * 38 / 100).min(available_height);
-        let module_px = (target / (self.module_width + QUIET_MODULES * 2) as i32).max(1);
-        let total = module_px * (self.module_width + QUIET_MODULES * 2) as i32;
+        draw_text(
+            dc,
+            self.hint_font,
+            self.copy("이 화면은 연결에만 쓰이고, 끝나면 저절로 사라집니다."),
+            RECT {
+                left: left + scale(36),
+                top: top + scale(176),
+                right: left + card_width - scale(36),
+                bottom: top + scale(212),
+            },
+            FAINT_INK,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+        );
+        let layout = self.invitation_layout(
+            RECT {
+                left,
+                top,
+                right: left + card_width,
+                bottom: top + card_height,
+            },
+            self.dpi(),
+        );
+        let InvitationLayout {
+            qr_top,
+            qr_side: total,
+            module_px,
+            countdown_top,
+            ..
+        } = layout;
         let qr_left = left + (card_width - total) / 2;
-        let qr_top = top + scale(190) + (available_height - total).max(0) / 2;
         let white = RECT {
             left: qr_left,
             top: qr_top,
@@ -641,7 +1039,7 @@ impl WindowOwner {
         };
         // SAFETY: the memory DC and owned white surface brush are live.
         unsafe { FillRect(dc, &white, self.surface) };
-        let dark = brush(0x152c35)?;
+        let dark = brush(INK)?;
         for (index, module) in self.modules.iter().enumerate() {
             if !module {
                 continue;
@@ -667,11 +1065,25 @@ impl WindowOwner {
             &self.remaining_copy(),
             RECT {
                 left: left + scale(24),
-                top: qr_top + total + scale(18),
+                top: countdown_top,
                 right: left + card_width - scale(24),
-                bottom: qr_top + total + scale(52),
+                bottom: countdown_top + scale(32),
             },
-            0x536971,
+            MUTED_INK,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | self.text_direction(),
+        );
+        // Under the cancel button, which layout_buttons anchors to this footer.
+        draw_text(
+            dc,
+            self.hint_font,
+            self.copy("ESC 키를 눌러도 바로 돌아가요."),
+            RECT {
+                left: left + scale(24),
+                top: top + card_height - scale(48),
+                right: left + card_width - scale(24),
+                bottom: top + card_height - scale(16),
+            },
+            FAINT_INK,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | self.text_direction(),
         );
         Ok(())
@@ -695,7 +1107,7 @@ impl WindowOwner {
                 right: left + card_width - scale(36),
                 bottom: top + scale(150),
             },
-            0x536971,
+            MUTED_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         draw_text(
@@ -708,7 +1120,7 @@ impl WindowOwner {
                 right: left + card_width - scale(36),
                 bottom: top + scale(260),
             },
-            0x152c35,
+            INK,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
     }
@@ -732,7 +1144,7 @@ impl WindowOwner {
                 right: left + card_width - scale(48),
                 bottom: top + scale(300),
             },
-            0x152c35,
+            INK,
             DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
     }
@@ -765,6 +1177,7 @@ impl WindowOwner {
                 }
             }
             self.hwnd = HWND::default();
+            self.start = HWND::default();
             self.confirm = HWND::default();
             self.cancel = HWND::default();
         }
@@ -773,6 +1186,7 @@ impl WindowOwner {
             HGDIOBJ(self.title_font.0),
             HGDIOBJ(self.body_font.0),
             HGDIOBJ(self.code_font.0),
+            HGDIOBJ(self.hint_font.0),
             HGDIOBJ(self.background.0),
             HGDIOBJ(self.surface.0),
             HGDIOBJ(self.border.0),
@@ -790,6 +1204,7 @@ impl WindowOwner {
         self.title_font = HFONT::default();
         self.body_font = HFONT::default();
         self.code_font = HFONT::default();
+        self.hint_font = HFONT::default();
         // If HWND/GDI cleanup was uncertain, leave the private font resources
         // registered until process teardown rather than invalidating a borrower.
         let release_fonts = objects_deleted && first.is_none();
@@ -818,8 +1233,9 @@ impl WindowOwner {
 }
 
 impl RendererWindow {
-    /// Creates the window on the current thread desktop, then switches input to it.
-    pub(super) fn show_invitation(text: &str, deadline: Instant) -> Result<Self, Error> {
+    /// Creates the window on the current thread desktop, then switches input to
+    /// it. The QR is prepared but not shown: the introduction comes first.
+    pub(super) fn open(text: &str, deadline: Instant) -> Result<Self, Error> {
         WindowOwner::create(text, deadline)
     }
 
@@ -894,10 +1310,13 @@ unsafe extern "system" fn window_proc(
             if let Some(owner) = owner {
                 let id = wparam.0 & 0xffff;
                 let notification = (wparam.0 >> 16) as u32;
-                if notification == BN_CLICKED && owner.screen == Screen::Comparison {
-                    owner.event = match id {
-                        CONFIRM_ID => Some(UiEvent::Confirmed),
-                        CANCEL_ID => Some(UiEvent::Cancelled),
+                if notification == BN_CLICKED {
+                    // Each identifier is honoured only on the screen whose
+                    // question it answers, whatever control happens to exist.
+                    owner.event = match (id, owner.screen) {
+                        (START_ID, Screen::Introduction) => Some(UiEvent::Proceeded),
+                        (CONFIRM_ID, Screen::Comparison) => Some(UiEvent::Confirmed),
+                        (CANCEL_ID, screen) if screen.is_interactive() => Some(UiEvent::Cancelled),
                         _ => owner.event,
                     };
                 }
@@ -906,13 +1325,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN => {
             if let Some(owner) = owner
-                && owner.screen == Screen::Comparison
+                && let Some(event) = owner.key_decision(wparam.0)
             {
-                if wparam.0 == usize::from(VK_RETURN.0) {
-                    owner.event = Some(UiEvent::Confirmed);
-                } else if wparam.0 == usize::from(VK_ESCAPE.0) {
-                    owner.event = Some(UiEvent::Cancelled);
-                }
+                owner.event = Some(event);
             }
             LRESULT(0)
         }
@@ -1019,6 +1434,32 @@ fn font(dpi: u32, points: i32, weight: i32, face: &str) -> Result<HFONT, Error> 
     }
 }
 
+/// The height this copy needs at the given width, so a band can be filled to fit
+/// its own text in every language instead of one height guessed for all of them.
+fn measure_text(
+    dc: HDC,
+    font: HFONT,
+    text: &str,
+    width: i32,
+    flags: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT,
+) -> i32 {
+    let mut text: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width.max(1),
+        bottom: 0,
+    };
+    // SAFETY: live memory DC, owned font and bounded mutable UTF-16/RECT buffers.
+    // DT_CALCRECT measures into the rect and paints nothing.
+    unsafe {
+        let old = SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(dc, &mut text, &mut rect, flags | DT_CALCRECT);
+        SelectObject(dc, old);
+    }
+    (rect.bottom - rect.top).max(0)
+}
+
 fn draw_text(
     dc: HDC,
     font: HFONT,
@@ -1123,6 +1564,59 @@ mod tests {
         })
         .unwrap()
         .to_qr_text()
+    }
+
+    /// The QR keeps the module size a camera and the lab decoder already read,
+    /// and the way out stays on the card without ever covering the code. The
+    /// widths are the ones the lab runner and ordinary displays actually use.
+    #[test]
+    fn every_supported_display_keeps_the_code_legible_and_the_way_out_reachable() {
+        let modules = qr_modules(&invitation_text()).unwrap().1;
+        assert!(modules >= 21);
+        for (width, height, dpi) in [
+            (1024, 768, 96),
+            (1280, 720, 96),
+            (1366, 768, 96),
+            (1920, 1080, 96),
+            (2560, 1440, 96),
+            (3840, 2160, 192),
+        ] {
+            let client = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            let card = card_rect(client, dpi, Screen::Invitation);
+            let layout = invitation_layout(card, dpi, width.min(height), modules);
+            let scale = |value: i32| value * dpi / 96;
+            let label = format!("{width}x{height}@{dpi} modules={modules} {layout:?} {card:?}");
+            assert!(
+                card.top >= 0 && card.bottom <= height,
+                "{label}: card on screen"
+            );
+            assert!(
+                layout.module_px >= MIN_MODULE_PX,
+                "{label}: {} px modules",
+                layout.module_px
+            );
+            assert!(
+                layout.qr_top >= card.top + scale(238),
+                "{label}: the code never covers the copy above it"
+            );
+            assert!(
+                layout.countdown_top + scale(32) <= layout.button_top,
+                "{label}: countdown clears the button"
+            );
+            assert!(
+                layout.qr_top + layout.qr_side <= layout.countdown_top,
+                "{label}: the button row never covers the code"
+            );
+            assert!(
+                layout.button_top + layout.button_height <= card.bottom,
+                "{label}: the way out stays on the card"
+            );
+        }
     }
 
     #[test]

@@ -232,6 +232,7 @@ fn map_launch_error(error: PairingLaunchError) -> PairingFailure {
             operation: ServiceOperation::LaunchElevatedHelper,
             ..
         } => PairingFailure::HelperFailed,
+        PairingLaunchError::ClosedByUser => PairingFailure::UserCancelled,
         PairingLaunchError::Protocol
         | PairingLaunchError::InvalidPhase
         | PairingLaunchError::LaunchUnconfirmed

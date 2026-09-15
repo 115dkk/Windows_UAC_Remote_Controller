@@ -56,6 +56,8 @@ pub enum PairingLaunchError {
     HelperExited { exit_code: u32 },
     #[error("the pairing helper handoff was cancelled")]
     Cancelled,
+    #[error("the person at the PC closed the pairing screen")]
+    ClosedByUser,
     #[error("the pairing helper cleanup remains unconfirmed")]
     CleanupUnconfirmed,
     #[error("Windows helper operation {operation:?} failed ({hresult:#010x})")]
