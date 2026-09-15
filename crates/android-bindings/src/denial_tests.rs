@@ -186,6 +186,9 @@ impl NativePlatform for Platform {
     fn reopen_local_key_sets(&self, _: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
         Err(BridgeError::NativeUnavailable)
     }
+    fn discard_prepared_key_sets(&self, _: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
     fn release_local_key_references(&self) -> Result<(), BridgeError> {
         self.callback();
         self.key_releases.fetch_add(1, Ordering::SeqCst);
@@ -323,7 +326,7 @@ fn cancel_and_release(
 #[test]
 fn genuine_request_fence_and_one_shot_bytes_produce_only_prepared_unsent_denial() {
     with_fixture(1, |controller, platform, requests| {
-        assert_eq!(bridge_version(), 11);
+        assert_eq!(bridge_version(), 12);
         let scope = controller.reserve_denial(requests[0].clone()).unwrap();
         assert!(scope.same_scope(controller.reserve_denial(requests[0].clone()).unwrap()));
         assert_eq!(

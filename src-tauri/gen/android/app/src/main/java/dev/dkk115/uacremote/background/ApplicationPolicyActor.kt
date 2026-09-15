@@ -479,6 +479,11 @@ internal class ApplicationPolicyActor(private val application: Application) {
             bootTrace.initializing(OwnerInitializationStep.GENERATED_CONTRACT)
             registeringContract = true
             uniffiEnsureInitialized()
+            // The vtable now exists and no ceremony has run, so pin its threads
+            // here: a returning nested callback used to detach a running Rust
+            // ceremony thread and ART killed the process. A zero count restores
+            // only that old risk, so it never stops this startup.
+            NativeCallbackThreads.pinGeneratedCallbacks()
             bootTrace.initializing(OwnerInitializationStep.BRIDGE_ABI)
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
             registeringContract = false

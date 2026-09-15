@@ -64,8 +64,30 @@ impl BootstrapFailure {
     }
 }
 
+/// What an explicit startup resolution actually cleared. It is a record of work
+/// already completed, never a claim about the domain effects the interrupted
+/// operation did or did not release.
+#[derive(Clone, Copy)]
+pub(crate) enum Resolution {
+    InterruptedCommit,
+    AbandonedPreparations,
+}
+
+impl Resolution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::InterruptedCommit => "RESOLVED_INTERRUPTED_COMMIT",
+            Self::AbandonedPreparations => "RESOLVED_ABANDONED_PREPARATIONS",
+        }
+    }
+}
+
 pub(crate) fn bootstrap(failure: BootstrapFailure) {
     emit(Stage::Bootstrap, failure.label());
+}
+
+pub(crate) fn resolved(stage: Stage, resolution: Resolution) {
+    emit(stage, resolution.label());
 }
 
 pub(crate) fn storage(stage: Stage, error: StoreError) {
@@ -85,6 +107,7 @@ fn storage_label(error: StoreError) -> &'static str {
         StoreError::MissingState => "STORE_MISSING_STATE",
         StoreError::WriterLocked => "STORE_WRITER_LOCKED",
         StoreError::RecoveryRequired => "STORE_RECOVERY_REQUIRED",
+        StoreError::InterruptedCommit => "STORE_INTERRUPTED_COMMIT",
         StoreError::CorruptSnapshot => "STORE_CORRUPT_SNAPSHOT",
         StoreError::UnsupportedVersion => "STORE_UNSUPPORTED_VERSION",
         StoreError::SnapshotTooLarge => "STORE_SNAPSHOT_TOO_LARGE",
@@ -183,6 +206,7 @@ mod tests {
             StoreError::MissingState,
             StoreError::WriterLocked,
             StoreError::RecoveryRequired,
+            StoreError::InterruptedCommit,
             StoreError::CorruptSnapshot,
             StoreError::UnsupportedVersion,
             StoreError::SnapshotTooLarge,

@@ -600,6 +600,48 @@ internal class DeviceKeyStore(context: Context) {
         }
     }
 
+    /**
+     * Delete exactly the aliases of abandoned preparations, before this process
+     * has reopened any recorded set. Rust commits Preparing before it asks for a
+     * key set, so a row it never observed as created belongs to an interrupted
+     * ceremony: nothing recorded refers to those aliases and no enrollment can.
+     * Only Rust's committed Preparing handles arrive here, no alias is
+     * enumerated or discovered, an already absent alias is success, and an alias
+     * that survives its own deletion fails rather than reporting completion.
+     * A configured secure lock is deliberately not required: a phone that lost
+     * its lock must still be able to abandon an interrupted pairing.
+     */
+    fun discardPreparedNamespace(handles: List<ByteArray>): KeyStoreOutcome<Unit> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
+        return synchronized(OWNER_LOCK) {
+            var copied: List<ByteArray> = emptyList()
+            try {
+                registryValue(REFERENCES.requireOpen(owner))
+                // Startup reconciliation runs before the first reopen, so any
+                // published registration means this is not that moment.
+                if (REFERENCES.registrationCount() != 0) fail(DeviceKeyError.OWNER_CONFLICT)
+                copied = registryValue(KeyNamespaceObservation.copyHandles(handles))
+                if (copied.isEmpty()) fail(DeviceKeyError.NAMESPACE_MISMATCH)
+                val store = openStore()
+                for (handle in copied) {
+                    for (role in DeviceKeyRole.values()) {
+                        val alias = aliasFor(handle, role)
+                        if (!store.containsAlias(alias)) continue
+                        store.deleteEntry(alias)
+                        if (store.containsAlias(alias)) fail(DeviceKeyError.KEY_UNAVAILABLE)
+                    }
+                }
+                KeyStoreOutcome.Value(Unit)
+            } catch (failure: OwnerFailure) {
+                KeyStoreOutcome.Failure(failure.error)
+            } catch (failure: Exception) {
+                KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEYSTORE_UNAVAILABLE))
+            } finally {
+                copied.forEach { it.fill(0) }
+            }
+        }
+    }
+
     /** Pure downward cleanup may run even when CE/screen-lock observations fail. */
     fun releaseReferences(set: ReopenedDeviceKeySet): KeyStoreOutcome<Unit> = synchronized(OWNER_LOCK) {
         REFERENCES.release(owner, set.registration)

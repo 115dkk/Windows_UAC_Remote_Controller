@@ -92,6 +92,9 @@ impl NativePlatform for Platform {
     fn reopen_local_key_sets(&self, _: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
         Err(BridgeError::NativeUnavailable)
     }
+    fn discard_prepared_key_sets(&self, _: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
     fn release_local_key_references(&self) -> Result<(), BridgeError> {
         Ok(())
     }

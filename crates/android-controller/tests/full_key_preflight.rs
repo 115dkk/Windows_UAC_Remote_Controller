@@ -100,7 +100,7 @@ fn assert_dirty_preserved(temp: &tempfile::TempDir, before: &[u8]) {
     assert!(temp.path().join(INTENT_FILE_NAME).is_file());
     assert_eq!(
         SnapshotStore::open_existing(directory(temp)).unwrap_err(),
-        StoreError::RecoveryRequired
+        StoreError::InterruptedCommit
     );
 }
 fn pc() -> PcIdentity {
@@ -279,7 +279,7 @@ fn rejected_full_preflight_precedes_restore_failure_and_leaves_intent_without_ow
     .unwrap_err();
     assert_eq!(
         retry.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
     assert_eq!(
         calls.get(),
@@ -389,7 +389,7 @@ fn callback_unwind_retains_full_open_intent_and_releases_its_writer_lock() {
         )
     });
     assert!(result.is_err());
-    assert_dirty_preserved(&temp, &before); // RecoveryRequired, not a leaked WriterLocked.
+    assert_dirty_preserved(&temp, &before); // InterruptedCommit, not a leaked WriterLocked.
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn failed_commit_after_preflight_exposes_no_candidate_expiry_effects() {
     .unwrap_err();
     assert_eq!(
         failure.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
     assert_eq!(
         failure.notification_cleanup(),

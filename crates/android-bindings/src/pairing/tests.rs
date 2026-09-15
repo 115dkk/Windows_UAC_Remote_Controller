@@ -361,6 +361,9 @@ impl NativePlatform for Platform {
     fn reopen_local_key_sets(&self, _: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
         Err(BridgeError::NativeUnavailable)
     }
+    fn discard_prepared_key_sets(&self, _: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+        Err(BridgeError::NativeUnavailable)
+    }
     fn release_local_key_references(&self) -> Result<(), BridgeError> {
         self.cleanup.fetch_add(1, Ordering::AcqRel);
         if self.cleanup_fails.load(Ordering::Acquire) {
@@ -1358,7 +1361,7 @@ fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptanc
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let f = Fixture::new();
-    assert_eq!(bridge_version(), 11);
+    assert_eq!(bridge_version(), 12);
     let before = f.bytes();
     let intent = f.intent();
     assert_eq!(f.bytes(), before);

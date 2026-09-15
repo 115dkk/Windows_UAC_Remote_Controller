@@ -98,7 +98,7 @@ fn every_preexisting_partial_artifact_blocks_reopening_without_cleanup() {
             fs::write(&path, bytes).expect("simulate interrupted commit");
             assert_eq!(
                 SnapshotStore::open_existing(directory(&temp)).err(),
-                Some(StoreError::RecoveryRequired)
+                Some(StoreError::InterruptedCommit)
             );
             assert_eq!(fs::read(&path).expect("leftover preserved"), bytes);
             assert_eq!(
@@ -117,7 +117,7 @@ fn a_failed_partial_commit_check_poisons_the_live_owner() {
     fs::write(&path, b"foreign partial intent").expect("simulate an external writer");
     assert_eq!(
         owner.commit(b"new checkpoint"),
-        Err(StoreError::RecoveryRequired)
+        Err(StoreError::InterruptedCommit)
     );
     assert_eq!(owner.snapshot(), Err(StoreError::Poisoned));
     assert_eq!(
@@ -299,6 +299,48 @@ fn nonempty_lock_and_nonregular_fixed_entries_fail_closed() {
         SnapshotStore::create_fresh(directory(&other), b"reset").err(),
         Some(StoreError::UnsafeEntry)
     );
+}
+
+#[test]
+fn an_unrecognized_intent_body_is_refused_and_no_artifact_is_removed() {
+    for body in [
+        b"".as_slice(),
+        b"foreign file under a fixed name".as_slice(),
+        b"WUACDIRT\x00".as_slice(),
+    ] {
+        let temp = tempfile::tempdir().expect("isolated directory");
+        drop(create(&temp, b"previous synthetic checkpoint"));
+        let intent = temp.path().join(INTENT_FILE_NAME);
+        let staging = temp.path().join(STAGING_FILE_NAME);
+        fs::write(&intent, body).expect("simulate an external writer");
+        fs::write(&staging, b"foreign partial staging").expect("simulate an external writer");
+        // An unknown file under the fixed name is not this store's own
+        // interrupted commit, so nothing beside it is this store's to delete.
+        assert_eq!(
+            SnapshotStore::recover_interrupted_commit(directory(&temp)).err(),
+            Some(StoreError::RecoveryRequired)
+        );
+        assert_eq!(fs::read(intent).expect("foreign intent preserved"), body);
+        assert_eq!(
+            fs::read(staging).expect("staging beside it preserved"),
+            b"foreign partial staging"
+        );
+    }
+}
+
+#[test]
+fn a_written_to_lock_is_never_resolved_by_explicit_recovery() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    drop(create(&temp, b"previous synthetic checkpoint"));
+    let intent = temp.path().join(INTENT_FILE_NAME);
+    fs::write(&intent, b"WUACDIRT\x01").expect("simulate an interrupted commit");
+    fs::write(temp.path().join(LOCK_FILE_NAME), b"not a zero-byte lock")
+        .expect("corrupt lock fixture");
+    assert_eq!(
+        SnapshotStore::recover_interrupted_commit(directory(&temp)).err(),
+        Some(StoreError::RecoveryRequired)
+    );
+    assert_eq!(fs::read(intent).expect("intent preserved"), b"WUACDIRT\x01");
 }
 
 #[test]

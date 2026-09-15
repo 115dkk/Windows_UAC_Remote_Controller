@@ -53,7 +53,7 @@ pub use transport::{
 use android_controller::{DurableFault, DurableInbox};
 use notification_policy::{CapacityLimits, LocalTime, MonotonicTime, Weekday};
 use phone_request_core::{ClockReading, InboxClock, PhoneBootId};
-use phone_state_store::NativePrivateDirectory;
+use phone_state_store::{NativePrivateDirectory, SnapshotStore, StoreError};
 use std::{
     fmt,
     sync::{
@@ -188,6 +188,14 @@ pub trait NativePlatform: Send + Sync {
     /// Each NativePlatform instance owns its references; it must keep a cleanup
     /// obligation before partial publication and through any callback failure.
     fn reopen_local_key_sets(&self, keys: Vec<NativeLocalKeySet>) -> Result<(), BridgeError>;
+    /// Delete every alias of exactly these abandoned preparations, then report
+    /// completion. Only a handle this controller committed as Preparing and
+    /// never observed as created reaches this call, and only while startup
+    /// reconciliation holds the store's writer lock. Delete nothing else: not a
+    /// recorded set, not another handle, not any other app state. Repetition is
+    /// expected after an interrupted attempt, so absence is success, while a
+    /// partial deletion must be reported as failure rather than completion.
+    fn discard_prepared_key_sets(&self, handles: Vec<Vec<u8>>) -> Result<(), BridgeError>;
     /// Memory-only, owner-scoped and idempotent. Never delete persisted aliases,
     /// change metadata, clear another instance or retry generation. The native
     /// Application retains this adapter to retry cleanup after constructor error.
@@ -275,7 +283,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    11
+    12
 }
 
 #[uniffi::export]
@@ -462,16 +470,19 @@ impl MobileController {
     fn open(platform: Arc<dyn NativePlatform>, mode: OpenMode) -> Result<Arc<Self>, BridgeError> {
         let owner_lease = Arc::new(OwnerLease::acquire()?);
         let mut key_cleanup_needed = false;
+        let mut resolved_commit = false;
         let result = (|| {
             let path = platform.state_directory()?;
             if path.is_empty() || path.len() > 4096 {
                 return Err(BridgeError::InvalidObservation);
             }
-            let directory =
+            let private_directory = || {
                 NativePrivateDirectory::from_native_app_data(&path).map_err(|error| {
                     startup_diagnostics::storage(startup_diagnostics::Stage::Directory, error);
                     BridgeError::StorageUnavailable
-                })?;
+                })
+            };
+            let directory = private_directory()?;
             let (boot, clock) = map_clock(platform.clock()?)?;
             let initial = match mode {
                 OpenMode::Application => {
@@ -481,34 +492,75 @@ impl MobileController {
             };
             // This is a native constructor, never Windows's weaker host model.
             let mut preflight_error = None;
+            let mut abandoned = None;
             let fresh = matches!(&initial, bootstrap::InitialState::Fresh(_));
-            let created = if let bootstrap::InitialState::Fresh(policy) = initial {
-                DurableInbox::create_fresh(
-                    directory,
-                    policy,
-                    CapacityLimits::default(),
-                    boot,
-                    clock,
-                )
-            } else {
-                DurableInbox::open_existing_with_key_preflight(
-                    directory,
-                    boot,
-                    clock,
-                    |checkpoint| {
-                        local_keys::preflight(
-                            checkpoint.local_keys(),
-                            &*platform,
-                            &mut key_cleanup_needed,
-                        )
-                        .map_err(|error| {
-                            preflight_error = Some(error);
-                            DurableFault::NativeLocalKeysUnavailable
-                        })
-                    },
-                )
+            let mut policy = match initial {
+                bootstrap::InitialState::Fresh(policy) => Some(policy),
+                bootstrap::InitialState::Existing => None,
             };
-            let (owner, update) = created.map_err(|error| {
+            let mut directory = Some(directory);
+            let created = loop {
+                // A first open that only reports its own interrupted commit is
+                // resolved exactly once here. Every other storage failure, and a
+                // second interrupted commit, still fails closed.
+                let directory = match directory.take() {
+                    Some(directory) => directory,
+                    None => private_directory()?,
+                };
+                let opened = match policy.take() {
+                    Some(policy) => DurableInbox::create_fresh(
+                        directory,
+                        policy,
+                        CapacityLimits::default(),
+                        boot,
+                        clock,
+                    ),
+                    None => DurableInbox::open_existing_with_key_preflight(
+                        directory,
+                        boot,
+                        clock,
+                        |checkpoint| {
+                            local_keys::preflight(
+                                checkpoint.local_keys(),
+                                &*platform,
+                                &mut key_cleanup_needed,
+                                &mut abandoned,
+                            )
+                            .map_err(|error| {
+                                preflight_error = Some(error);
+                                DurableFault::NativeLocalKeysUnavailable
+                            })
+                        },
+                    ),
+                };
+                let interrupted = opened.as_ref().err().is_some_and(|failure| {
+                    failure.cause() == DurableFault::Storage(StoreError::InterruptedCommit)
+                });
+                if fresh || resolved_commit || !interrupted {
+                    break opened;
+                }
+                // Resolve the artifacts an interrupted commit left, then let the
+                // ordinary open decide from the snapshot it actually finds. This
+                // clears storage only and claims nothing about the domain effects
+                // of the operation that was interrupted.
+                let (store, _) = SnapshotStore::recover_interrupted_commit(private_directory()?)
+                    .map_err(|error| {
+                        startup_diagnostics::storage(
+                            startup_diagnostics::Stage::OpenExisting,
+                            error,
+                        );
+                        BridgeError::StorageUnavailable
+                    })?;
+                drop(store);
+                startup_diagnostics::resolved(
+                    startup_diagnostics::Stage::OpenExisting,
+                    startup_diagnostics::Resolution::InterruptedCommit,
+                );
+                resolved_commit = true;
+                preflight_error = None;
+                abandoned = None;
+            };
+            let (mut owner, update) = created.map_err(|error| {
                 startup_diagnostics::durable(
                     if fresh {
                         startup_diagnostics::Stage::CreateFresh
@@ -526,6 +578,20 @@ impl MobileController {
                     BridgeError::StorageUnavailable
                 }
             })?;
+            if let Some(abandoned) = &abandoned {
+                // The aliases are already gone, so commit the rows away under
+                // the same lock. A failure here keeps them and the next open
+                // repeats the same deletion; the reverse order could not.
+                for handle in abandoned.handles() {
+                    let _ = owner
+                        .discard_local_key_preparation(*handle)
+                        .map_err(|_| BridgeError::LocalKeysReconciliationRequired)?;
+                }
+                startup_diagnostics::resolved(
+                    startup_diagnostics::Stage::OpenExisting,
+                    startup_diagnostics::Resolution::AbandonedPreparations,
+                );
+            }
             if fresh {
                 // Recheck namespace absence under the new owner as well. A
                 // concurrent unexpected alias never turns empty metadata ready.
@@ -535,6 +601,7 @@ impl MobileController {
                         .map_err(|_| BridgeError::StorageUnavailable)?,
                     &*platform,
                     &mut key_cleanup_needed,
+                    &mut abandoned,
                 )?;
             }
             if owner
@@ -802,8 +869,10 @@ mod tests {
     struct KeyCallbacks {
         reopens: usize,
         releases: usize,
+        discarded: Vec<Vec<u8>>,
         reopen_fails: bool,
         release_fails: bool,
+        discard_fails: bool,
     }
     fn test_platform(path: String, clock: NativeClock) -> Arc<TestPlatform> {
         Arc::new(TestPlatform {
@@ -912,6 +981,14 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        fn discard_prepared_key_sets(&self, handles: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+            let mut state = self.key_callbacks.lock().unwrap();
+            if state.discard_fails {
+                return Err(BridgeError::LocalKeysUnavailable);
+            }
+            state.discarded.extend(handles);
+            Ok(())
         }
         fn release_local_key_references(&self) -> Result<(), BridgeError> {
             let mut state = self.key_callbacks.lock().unwrap();
@@ -1339,46 +1416,85 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn preparing_or_untracked_aliases_are_rejected_before_any_reopen_or_migration() {
+    fn untracked_aliases_are_rejected_before_any_reopen_or_migration() {
         let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
-        for pending in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let clock = NativeClock {
-                boot_count: 1,
-                monotonic_nanos: 1_000_000_000,
-                weekday: 0,
-                minute: 600,
-            };
-            if pending {
-                seed_local_keys(temp.path(), clock, true);
-            } else {
-                let (boot, observed) = map_clock(clock).unwrap();
-                drop(
-                    DurableInbox::create_fresh_host_model(
-                        NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
-                        NotificationPolicy::default(),
-                        CapacityLimits::default(),
-                        boot,
-                        observed,
-                    )
-                    .unwrap(),
-                );
-            }
-            let before =
-                std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap();
-            let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
-            platform.keys_present.store(!pending, Ordering::Release);
-            assert_eq!(
-                MobileController::open_existing(platform.clone()).unwrap_err(),
-                BridgeError::LocalKeysReconciliationRequired
-            );
-            assert_eq!(platform.key_callbacks.lock().unwrap().reopens, 0);
-            assert_eq!(platform.key_callbacks.lock().unwrap().releases, 0);
-            assert_eq!(
-                std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap(),
-                before
-            );
-        }
+        let temp = tempfile::tempdir().unwrap();
+        let clock = NativeClock {
+            boot_count: 1,
+            monotonic_nanos: 1_000_000_000,
+            weekday: 0,
+            minute: 600,
+        };
+        let (boot, observed) = map_clock(clock).unwrap();
+        drop(
+            DurableInbox::create_fresh_host_model(
+                NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
+                NotificationPolicy::default(),
+                CapacityLimits::default(),
+                boot,
+                observed,
+            )
+            .unwrap(),
+        );
+        let before =
+            std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap();
+        let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+        platform.keys_present.store(true, Ordering::Release);
+        assert_eq!(
+            MobileController::open_existing(platform.clone()).unwrap_err(),
+            BridgeError::LocalKeysReconciliationRequired
+        );
+        let calls = platform.key_callbacks.lock().unwrap();
+        assert_eq!(calls.reopens, 0);
+        assert_eq!(calls.releases, 0);
+        // Aliases that no committed row claims are never adopted and never
+        // deleted: only a preparation this controller itself committed is.
+        assert!(calls.discarded.is_empty());
+        drop(calls);
+        assert_eq!(
+            std::fs::read(temp.path().join(phone_state_store::SNAPSHOT_FILE_NAME)).unwrap(),
+            before
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_abandoned_preparation_is_discarded_and_then_the_owner_opens() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let clock = NativeClock {
+            boot_count: 1,
+            monotonic_nanos: 1_000_000_000,
+            weekday: 0,
+            minute: 600,
+        };
+        // A ceremony that died between its durable Preparing row and any
+        // observed creation used to close every later open for good.
+        let temp = tempfile::tempdir().unwrap();
+        seed_local_keys(temp.path(), clock, true);
+        let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+        platform.key_callbacks.lock().unwrap().discard_fails = true;
+        assert_eq!(
+            MobileController::open_existing(platform.clone()).unwrap_err(),
+            BridgeError::LocalKeysUnavailable
+        );
+        platform.key_callbacks.lock().unwrap().discard_fails = false;
+        let controller = MobileController::open_existing(platform.clone()).unwrap();
+        assert!(controller.notification_policy_json().is_ok());
+        let discarded = platform.key_callbacks.lock().unwrap().discarded.clone();
+        assert_eq!(discarded, vec![[1_u8; 32].to_vec()]);
+        assert_eq!(platform.key_callbacks.lock().unwrap().reopens, 0);
+        controller.stop_intake();
+        controller.shutdown_native_owner().unwrap();
+        controller.intake.join_completed_for_tests();
+        drop(controller);
+        // The row is gone, so the next open is an ordinary one that asks for no
+        // further deletion.
+        let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+        let controller = MobileController::open_existing(platform.clone()).unwrap();
+        assert!(platform.key_callbacks.lock().unwrap().discarded.is_empty());
+        controller.stop_intake();
+        controller.shutdown_native_owner().unwrap();
+        controller.intake.join_completed_for_tests();
     }
 
     #[test]

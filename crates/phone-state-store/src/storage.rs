@@ -103,6 +103,14 @@ pub(crate) struct PendingIntent {
     file: File,
 }
 
+// Constructible only by a completed artifact resolution. It reports removals of
+// the two fixed resolvable names, never that any domain effect was released.
+pub(crate) struct ResolvedArtifacts {
+    pub(crate) staging_removed: bool,
+    pub(crate) intent_removed: bool,
+    pub(crate) durability: Durability,
+}
+
 impl Storage {
     pub(crate) fn create_fresh(directory: NativePrivateDirectory) -> Result<Self, StoreError> {
         directory.validate()?;
@@ -145,6 +153,54 @@ impl Storage {
         let storage = Self { directory, lock };
         storage.ensure_clean()?;
         Ok(storage)
+    }
+
+    // Remove only the two fixed resolvable leftovers of an interrupted commit,
+    // under the same lock an ordinary open takes. The committed name is never
+    // created, rewritten or renamed here; unresolvable states stay closed.
+    pub(crate) fn resolve_interrupted(
+        directory: NativePrivateDirectory,
+    ) -> Result<(Self, ResolvedArtifacts), StoreError> {
+        directory.validate()?;
+        let path = directory.path.join(LOCK_FILE_NAME);
+        let lock = open_regular(&path, true)?;
+        take_lock(&path, &lock)?;
+        let storage = Self { directory, lock };
+        let staging_path = storage.path(STAGING_FILE_NAME);
+        let intent_path = storage.path(INTENT_FILE_NAME);
+        let staging_removed = checked_file(&staging_path)?.is_some();
+        let intent_removed = checked_file(&intent_path)?.is_some();
+        // Confirm this store's own fixed intent body before removing anything
+        // at all. An unknown file under that name is not this store's
+        // interrupted commit, so neither leftover beside it is ours to delete.
+        if intent_removed {
+            let mut intent = open_regular(&intent_path, false)?;
+            let owned = check_owned_contents(&intent_path, &mut intent, INTENT);
+            // Windows no-share-delete handles must close before removal.
+            drop(intent);
+            owned.map_err(|_| StoreError::RecoveryRequired)?;
+        }
+        if staging_removed {
+            // A staging name was never renamed, so it holds no committed
+            // document and carries no state this store could still owe.
+            fs::remove_file(&staging_path).map_err(|_| StoreError::WriteFailed)?;
+        }
+        if intent_removed {
+            fs::remove_file(&intent_path).map_err(|_| StoreError::WriteFailed)?;
+        }
+        let durability = storage
+            .directory
+            .sync()
+            .map_err(|_| StoreError::CommitUncertain)?;
+        storage.ensure_clean()?;
+        Ok((
+            storage,
+            ResolvedArtifacts {
+                staging_removed,
+                intent_removed,
+                durability,
+            },
+        ))
     }
 
     pub(crate) fn read_current(&self) -> Result<Vec<u8>, StoreError> {
@@ -301,14 +357,14 @@ impl Storage {
         self.validate_lock()?;
         self.ensure_staging_absent()?;
         if checked_file(&self.path(INTENT_FILE_NAME))?.is_some() {
-            return Err(StoreError::RecoveryRequired);
+            return Err(StoreError::InterruptedCommit);
         }
         Ok(())
     }
 
     fn ensure_staging_absent(&self) -> Result<(), StoreError> {
         if checked_file(&self.path(STAGING_FILE_NAME))?.is_some() {
-            Err(StoreError::RecoveryRequired)
+            Err(StoreError::InterruptedCommit)
         } else {
             Ok(())
         }
@@ -349,7 +405,7 @@ fn create_regular(path: &Path) -> Result<File, StoreError> {
         .open(path)
         .map_err(|error| {
             if error.kind() == io::ErrorKind::AlreadyExists {
-                StoreError::RecoveryRequired
+                StoreError::InterruptedCommit
             } else {
                 StoreError::WriteFailed
             }

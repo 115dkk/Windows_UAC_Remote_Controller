@@ -194,7 +194,7 @@ class PolicyOwnerRulesTest {
             assertFalse(ControllerLibraryPolicy.permitsInitialProperties(listOf(name)))
         }
         assertEquals("uac_android_controller", ControllerLibraryPolicy.LIBRARY)
-        assertEquals(11u, ControllerLibraryPolicy.ABI_VERSION)
+        assertEquals(12u, ControllerLibraryPolicy.ABI_VERSION)
     }
 
     @Test fun loaderPropertyInspectionIsBounded() {

@@ -41,6 +41,10 @@ only after successful completion, not merely by dropping/forgetting the guard.
 Run blocking open/create/begin/commit work on the native storage owner/background worker. Never
 expose directory selection, raw bytes, creation, or recovery as renderer commands.
 There is no automatic recovery, reset, truncation, staging promotion, or rollback.
+The one explicit resolution is
+`SnapshotStore::recover_interrupted_commit(directory) -> Result<(SnapshotStore, ResolvedCommit), StoreError>`;
+see the commit boundary below. `ResolvedCommit` exposes only `staging_removed()`,
+`intent_removed()` and `durability()`.
 
 ## Fixed format and bounds
 
@@ -86,9 +90,22 @@ backup/restore, fresh-enrollment and replay-cutoff rules remain domain duties.
 
 The independent intent is not consumed by snapshot rename. On Android/Linux it
 has a successful directory barrier before replacement starts. A leftover intent
-or staging file causes an explicit error on reopening; the store neither guesses
-the winning version nor silently accepts the old version. If the intent's final
-deletion is lost, reopening conservatively fails instead of recovering itself.
+or staging file causes `InterruptedCommit` on reopening; the store neither guesses
+the winning version nor silently accepts the old version, and nothing clears it
+implicitly. If the intent's final deletion is lost, reopening conservatively fails
+instead of recovering itself.
+
+`recover_interrupted_commit` is the caller's one explicit resolution of that
+state. Under the same writer lock an ordinary open takes, it removes the staging
+name, removes the intent only after confirming the intent's own nine fixed bytes,
+and never creates, rewrites, truncates or renames the committed name: whichever
+version the interrupted rename left is the one it then reads. It reports only
+which artifacts it removed and asserts nothing about domain effects the
+interrupted operation had already released; the caller decides from the snapshot
+it reads whether its own logical operation happened. Unresolvable states stay
+closed. A written-to lock file and an unknown file under the intent name are
+`RecoveryRequired` with nothing removed, and a corrupt or missing snapshot still
+fails with its own error rather than becoming fresh state.
 
 Any commit storage error poisons the current owner: subsequent `snapshot()` and
 `commit()` return `Poisoned`. Oversized convenience `SnapshotStore::commit` input

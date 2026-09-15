@@ -485,3 +485,49 @@ fn debug_redacts_public_identifiers_challenges_and_key_bytes() {
     }
     assert!(debug.contains("unverified") || debug.contains("Unverified"));
 }
+
+#[test]
+fn only_an_abandoned_preparation_is_discarded_and_its_neighbours_stay_recorded() {
+    let mut ledger = LocalKeyLedger::new();
+    ledger.begin_creation(handle(1), challenge(11)).unwrap();
+    ledger.record_created(descriptor(1, 11, 1)).unwrap();
+    ledger.begin_creation(handle(2), challenge(12)).unwrap();
+    assert_eq!(
+        ledger.discard_preparation(handle(3)),
+        Err(LocalKeyError::MissingPreparation)
+    );
+    assert_eq!(
+        ledger.discard_preparation(handle(1)),
+        Err(LocalKeyError::ConflictingObservation)
+    );
+    assert_eq!(ledger.discard_preparation(handle(2)), Ok(()));
+    assert_eq!(ledger.len(), 1);
+    assert!(matches!(
+        ledger.get(handle(1)),
+        Some(LocalKeySetPhase::CreatedUnverified(_))
+    ));
+    assert!(ledger.get(handle(2)).is_none());
+    assert_eq!(
+        ledger.discard_preparation(handle(2)),
+        Err(LocalKeyError::MissingPreparation)
+    );
+}
+
+#[test]
+fn a_discarded_preparation_leaves_no_row_to_reload_and_frees_its_own_handle() {
+    let mut ledger = LocalKeyLedger::new();
+    ledger.begin_creation(handle(4), challenge(14)).unwrap();
+    let recorded = ledger.to_bytes().unwrap();
+    ledger.discard_preparation(handle(4)).unwrap();
+    assert!(ledger.is_empty());
+    assert_eq!(
+        LocalKeyLedger::from_bytes(&ledger.to_bytes().unwrap()).unwrap(),
+        ledger
+    );
+    assert_ne!(ledger.to_bytes().unwrap(), recorded);
+    // A later ceremony mints fresh values; reusing these is still permitted,
+    // because the discarded row retains nothing that a new one could collide
+    // with. It is not a retry: the caller must generate the new pair itself.
+    ledger.begin_creation(handle(4), challenge(14)).unwrap();
+    assert_eq!(ledger.len(), 1);
+}

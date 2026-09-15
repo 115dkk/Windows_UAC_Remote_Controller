@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Store-locked startup inspection, not key generation or enrollment.
-use android_controller::{LocalKeyLedger, LocalKeySetPhase};
+use android_controller::{LocalKeyHandle, LocalKeyLedger, LocalKeySetPhase};
 use std::fmt;
 
 use crate::{BridgeError, NativePlatform};
@@ -30,18 +30,74 @@ impl fmt::Debug for NativeLocalKeySet {
     }
 }
 
+/// Preparations an interrupted creation left behind, in committed handle order.
+/// Their native aliases are deleted under this same store lock before the owner
+/// commits the ledger without them; the reverse order would strand aliases that
+/// no recorded set could ever claim again.
+pub(crate) struct AbandonedPreparations(Vec<LocalKeyHandle>);
+impl AbandonedPreparations {
+    pub(crate) fn handles(&self) -> &[LocalKeyHandle] {
+        &self.0
+    }
+    fn collect(keys: &LocalKeyLedger) -> Self {
+        Self(
+            keys.entries()
+                .filter_map(|phase| match phase {
+                    LocalKeySetPhase::Preparing { handle, .. } => Some(*handle),
+                    LocalKeySetPhase::CreatedUnverified(_) => None,
+                })
+                .collect(),
+        )
+    }
+}
+impl fmt::Debug for AbandonedPreparations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AbandonedPreparations")
+            .field("count", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Startup inspection under the store's writer lock.
+///
+/// A committed Preparing row means this controller asked the native key owner
+/// for a set and never learned whether it was created: the ceremony that asked
+/// is gone, no enrollment can reference the row, and a phone whose interrupted
+/// pairing could never be discarded would stay dead for good. So each such row
+/// is reconciled here by deleting exactly its own aliases, and `abandoned` then
+/// carries the handles whose rows the caller must commit away. Everything else
+/// keeps the original refusals: surviving aliases without metadata never become
+/// a new phone, and a recorded set is only ever reopened, never regenerated.
 pub(crate) fn preflight(
     keys: &LocalKeyLedger,
     platform: &dyn NativePlatform,
     cleanup_needed: &mut bool,
+    abandoned: &mut Option<AbandonedPreparations>,
 ) -> Result<(), BridgeError> {
-    if keys
-        .entries()
-        .any(|phase| matches!(phase, LocalKeySetPhase::Preparing { .. }))
-    {
-        return Err(BridgeError::LocalKeysReconciliationRequired);
+    let preparations = AbandonedPreparations::collect(keys);
+    if !preparations.handles().is_empty() {
+        // Before the call: a failed or partial deletion leaves the rows intact,
+        // so the next open repeats this same bounded deletion.
+        platform.discard_prepared_key_sets(
+            preparations
+                .handles()
+                .iter()
+                .map(|handle| handle.as_bytes().to_vec())
+                .collect(),
+        )?;
+        *abandoned = Some(preparations);
     }
-    if keys.is_empty() {
+    let descriptors = keys
+        .entries()
+        .filter_map(LocalKeySetPhase::descriptor)
+        .map(|key| NativeLocalKeySet {
+            handle: key.handle().as_bytes().to_vec(),
+            approval_spki: key.approval_key().as_spki_der().to_vec(),
+            denial_spki: key.denial_key().as_spki_der().to_vec(),
+            transport_spki: key.transport_key().as_spki_der().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    if descriptors.is_empty() {
         // Required for BOTH legacy and V2-empty metadata, after store ownership.
         // Presence is not a mapper; surviving aliases never become a new phone.
         return if platform.has_device_keys()? {
@@ -50,20 +106,6 @@ pub(crate) fn preflight(
             Ok(())
         };
     }
-    let descriptors = keys
-        .entries()
-        .map(|phase| {
-            let key = phase
-                .descriptor()
-                .ok_or(BridgeError::LocalKeysReconciliationRequired)?;
-            Ok(NativeLocalKeySet {
-                handle: key.handle().as_bytes().to_vec(),
-                approval_spki: key.approval_key().as_spki_der().to_vec(),
-                denial_spki: key.denial_key().as_spki_der().to_vec(),
-                transport_spki: key.transport_key().as_spki_der().to_vec(),
-            })
-        })
-        .collect::<Result<Vec<_>, BridgeError>>()?;
     // Before the call: an error/throw may follow partial native publication.
     *cleanup_needed = true;
     platform.reopen_local_key_sets(descriptors)

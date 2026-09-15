@@ -626,6 +626,40 @@ impl DurableInbox {
         .map_err(LocalKeyMutationError::Owner)
     }
 
+    /// Abandon one preparation that no native key set will ever answer for.
+    ///
+    /// Startup reconciliation alone calls this, and only after the native owner
+    /// reported that every alias of this handle is gone. Committing before that
+    /// deletion would strand aliases no recorded set can claim, which is why the
+    /// order is fixed and why repeating a failed attempt is safe: the native
+    /// deletion is idempotent and this refuses anything but Preparing. It frees
+    /// no key, enrolls no PC and authorizes no retry of the interrupted creation.
+    pub fn discard_local_key_preparation(
+        &mut self,
+        handle: LocalKeyHandle,
+    ) -> Result<CommitReceipt, LocalKeyMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| LocalKeyMutationError::Owner(DurableFailure::new(fault)))?;
+        let mut candidate: LocalKeyLedger = self.liveness.preserve_on_return(
+            || -> Result<LocalKeyLedger, LocalKeyMutationError> {
+                let mut candidate = self.local_keys.clone();
+                candidate
+                    .discard_preparation(handle)
+                    .map_err(LocalKeyMutationError::Rejected)?;
+                self.peer_associations
+                    .validate_relationships(&candidate)
+                    .map_err(LocalKeyMutationError::RejectedAssociation)?;
+                Ok(candidate)
+            },
+        )?;
+        self.transition_all(move |_, _, keys| {
+            std::mem::swap(keys, &mut candidate);
+            Ok(())
+        })
+        .map(|(receipt, ())| receipt)
+        .map_err(LocalKeyMutationError::Owner)
+    }
+
     pub const fn fault(&self) -> Option<DurableFault> {
         self.fault
     }

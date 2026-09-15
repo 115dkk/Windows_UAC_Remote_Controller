@@ -396,6 +396,27 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         }
     }
 
+    /**
+     * Startup reconciliation only. Rust commits Preparing before it ever asks
+     * for a key set, so a row it never saw created belongs to an interrupted
+     * ceremony that nothing can finish: its aliases answer to no recorded set
+     * and to no enrollment. Deleting exactly those aliases is what lets a phone
+     * whose pairing was interrupted start again. Repetition is expected, so an
+     * already absent alias is success, and only the handles Rust holds as
+     * Preparing arrive here.
+     */
+    override fun discardPreparedKeySets(handles: List<ByteArray>) {
+        if (Looper.myLooper() == Looper.getMainLooper() || handles.isEmpty()) {
+            throw BridgeException.LocalKeysReconciliationRequired()
+        }
+        try {
+            keyValue(keyStore.discardPreparedNamespace(handles))
+        } catch (_: Exception) {
+            // The rows stay committed, so the next open repeats this deletion.
+            throw BridgeException.LocalKeysReconciliationRequired()
+        }
+    }
+
     override fun releaseLocalKeyReferences() {
         if (!CreationArgumentCleanupPolicy.ready(creationActive, creationArguments)) {
             throw BridgeException.NativeUnavailable()

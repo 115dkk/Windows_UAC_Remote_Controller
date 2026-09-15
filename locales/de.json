@@ -45,7 +45,7 @@
   "QR 읽기 화면을 열지 못했어요.": "Der QR-Scanner konnte nicht geöffnet werden.",
   "QR 읽기 화면을 열지 못했어요. 휴대폰 상태를 다시 확인한 뒤 시도해 주세요.": "Der QR-Scanner konnte nicht geöffnet werden. Prüfen Sie den Smartphone-Status erneut und versuchen Sie es noch einmal.",
   "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있어요.": "QR-Codes können in der Android-Smartphone-App gescannt werden.",
-  "QR 촬영과 알림 설정을 준비하지 못했어요. 최신 버전으로 업데이트한 뒤 다시 확인해 주세요.": "QR-Scanner und Benachrichtigungseinstellungen konnten nicht vorbereitet werden. Aktualisieren Sie auf die neueste Version und prüfen Sie erneut.",
+  "휴대폰 승인을 준비하지 못했어요. 앱을 완전히 닫았다가 다시 열어 주세요.": "Die Freigabe per Smartphone konnte nicht vorbereitet werden. Schließen Sie die App vollständig und öffnen Sie sie erneut.",
   "UAC 원격 승인": "UAC-Remotefreigabe",
   "UAC 원격 승인 · PC 연결": "UAC-Remotefreigabe · PC verbinden",
   "UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요.": "Tippen Sie in UAC-Remotefreigabe auf [QR-Code des PCs scannen] und richten Sie die Kamera auf diesen QR-Code.",

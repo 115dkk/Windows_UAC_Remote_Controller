@@ -10,10 +10,12 @@
 //! the host's separately gated read-only native identity/policy inspection, not
 //! pairing, signing, authentication or proof of native hardware/attestation.
 //!
-//! No deletion, expiry, alias, key provider, private key, PC identity or recovery
-//! method exists. The 32-set limit matches the native owner's 96 role references;
-//! exhaustion requires a future explicit workflow, not silent eviction/reset.
-//! All observed keys remain unverified and all challenges stay retained. Fresh
+//! Beyond discarding one abandoned preparation whose native aliases are already
+//! gone, no deletion, expiry, alias, key provider, private key, PC identity or
+//! recovery method exists. The 32-set limit matches the native owner's 96 role
+//! references; exhaustion requires a future explicit workflow, not silent
+//! eviction or reset.
+//! All observed keys remain unverified and every retained challenge stays. Fresh
 //! entropy/protected-state provenance and rollback detection remain host duties.
 
 use std::{collections::BTreeMap, fmt};
@@ -289,6 +291,27 @@ impl LocalKeyLedger {
             LocalKeySetPhase::CreatedUnverified(Box::new(descriptor)),
         );
         Ok(LocalKeyObservation::RecordedUnverified)
+    }
+
+    /// Discard exactly one abandoned preparation. The native owner must already
+    /// have reported that no alias of this handle remains, because a ledger that
+    /// forgets a handle first can never claim the aliases it left behind. Only
+    /// Preparing is removable: a recorded observation and a missing entry both
+    /// refuse. This is not a retry, a rollback of created keys, or a reset, and
+    /// the discarded handle and challenge are simply no longer retained. A later
+    /// preparation mints fresh 32-byte values, so an attestation produced for
+    /// this abandoned attempt matches no future entry.
+    pub fn discard_preparation(&mut self, handle: LocalKeyHandle) -> Result<(), LocalKeyError> {
+        match self.entries.get(&handle) {
+            None => Err(LocalKeyError::MissingPreparation),
+            Some(LocalKeySetPhase::CreatedUnverified(_)) => {
+                Err(LocalKeyError::ConflictingObservation)
+            }
+            Some(LocalKeySetPhase::Preparing { .. }) => {
+                self.entries.remove(&handle);
+                Ok(())
+            }
+        }
     }
 
     /// v1: magic8, version u16 BE, count u16 BE, sorted rows. Each row is phase

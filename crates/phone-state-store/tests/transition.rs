@@ -29,7 +29,7 @@ fn an_uncommitted_transition_faults_the_owner_and_blocks_reopening() {
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -101,7 +101,7 @@ fn oversized_reserved_commit_is_not_an_implicit_abort_or_clean_retry() {
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -116,7 +116,7 @@ fn foreign_staging_after_reservation_is_preserved_and_faults_the_transition() {
     fs::write(&path, b"foreign partial staging").expect("filesystem fault fixture");
     assert_eq!(
         transition.commit(b"candidate"),
-        Err(StoreError::RecoveryRequired)
+        Err(StoreError::InterruptedCommit)
     );
     assert_eq!(owner.snapshot(), Err(StoreError::Poisoned));
     assert_eq!(
@@ -126,7 +126,7 @@ fn foreign_staging_after_reservation_is_preserved_and_faults_the_transition() {
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -151,7 +151,7 @@ fn same_byte_reserved_commit_rechecks_external_current_changes() {
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -165,7 +165,7 @@ fn a_failed_begin_is_unaccepted_input_and_does_not_clean_foreign_state() {
     fs::write(&staging, b"preexisting foreign staging").expect("filesystem fault fixture");
     assert_eq!(
         owner.begin_transition().err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
     assert_eq!(owner.snapshot(), Err(StoreError::Poisoned));
     assert!(
@@ -195,6 +195,151 @@ fn transition_debug_discloses_neither_checkpoint_nor_native_path() {
     assert!(!receipt.changed());
 }
 
+#[test]
+fn explicit_recovery_of_a_dropped_transition_reopens_the_prior_snapshot() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (mut owner, first) =
+        SnapshotStore::create_fresh(directory(&temp), b"prior synthetic checkpoint")
+            .expect("fresh store");
+    let transition = owner.begin_transition().expect("reserve intent");
+    drop(transition);
+    drop(owner);
+    assert_eq!(
+        SnapshotStore::open_existing(directory(&temp)).err(),
+        Some(StoreError::InterruptedCommit)
+    );
+    let (recovered, resolved) = SnapshotStore::recover_interrupted_commit(directory(&temp))
+        .expect("resolvable leftover artifacts");
+    assert!(resolved.intent_removed());
+    assert!(!resolved.staging_removed());
+    assert_eq!(resolved.durability(), first.durability());
+    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+    assert_eq!(
+        recovered.snapshot().expect("prior committed checkpoint"),
+        b"prior synthetic checkpoint"
+    );
+}
+
+#[test]
+fn explicit_recovery_discards_a_leftover_staging_beside_the_intent() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (mut owner, _) =
+        SnapshotStore::create_fresh(directory(&temp), b"prior synthetic checkpoint")
+            .expect("fresh store");
+    let committed = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).expect("committed frame");
+    let transition = owner.begin_transition().expect("reserve intent");
+    drop(transition);
+    drop(owner);
+    let staging = temp.path().join(STAGING_FILE_NAME);
+    fs::write(&staging, b"never renamed partial frame").expect("interrupted commit fixture");
+    let (recovered, resolved) = SnapshotStore::recover_interrupted_commit(directory(&temp))
+        .expect("resolvable leftover artifacts");
+    assert!(resolved.staging_removed());
+    assert!(resolved.intent_removed());
+    assert!(!staging.exists());
+    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).expect("committed frame"),
+        committed
+    );
+    assert_eq!(
+        recovered.snapshot().expect("prior committed checkpoint"),
+        b"prior synthetic checkpoint"
+    );
+}
+
+#[test]
+fn a_leftover_staging_alone_is_resolved_without_touching_the_committed_name() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (owner, _) =
+        SnapshotStore::create_fresh(directory(&temp), b"committed synthetic checkpoint")
+            .expect("fresh store");
+    drop(owner);
+    let committed = fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).expect("committed frame");
+    let staging = temp.path().join(STAGING_FILE_NAME);
+    fs::write(&staging, b"never renamed partial frame").expect("interrupted commit fixture");
+    assert_eq!(
+        SnapshotStore::open_existing(directory(&temp)).err(),
+        Some(StoreError::InterruptedCommit)
+    );
+    let (recovered, resolved) = SnapshotStore::recover_interrupted_commit(directory(&temp))
+        .expect("resolvable leftover artifact");
+    assert!(resolved.staging_removed());
+    assert!(!resolved.intent_removed());
+    assert!(!staging.exists());
+    assert_eq!(
+        fs::read(temp.path().join(SNAPSHOT_FILE_NAME)).expect("committed frame"),
+        committed
+    );
+    assert_eq!(
+        recovered.snapshot().expect("committed checkpoint"),
+        b"committed synthetic checkpoint"
+    );
+}
+
+#[test]
+fn recovering_a_missing_snapshot_still_fails_and_initializes_nothing() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (mut owner, _) =
+        SnapshotStore::create_fresh(directory(&temp), b"prior synthetic checkpoint")
+            .expect("fresh store");
+    let transition = owner.begin_transition().expect("reserve intent");
+    drop(transition);
+    drop(owner);
+    let snapshot = temp.path().join(SNAPSHOT_FILE_NAME);
+    fs::remove_file(&snapshot).expect("simulate a lost committed name");
+    assert_eq!(
+        SnapshotStore::recover_interrupted_commit(directory(&temp)).err(),
+        Some(StoreError::MissingState)
+    );
+    // The resolvable artifact was resolved; an absent committed document is
+    // never invented, and this failure is the caller's to refuse.
+    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+    assert!(!snapshot.exists(), "recovery must not create fresh state");
+}
+
+#[test]
+fn recovering_an_already_clean_store_removes_nothing_and_opens_it() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (owner, first) =
+        SnapshotStore::create_fresh(directory(&temp), b"clean synthetic checkpoint")
+            .expect("fresh store");
+    drop(owner);
+    let (recovered, resolved) =
+        SnapshotStore::recover_interrupted_commit(directory(&temp)).expect("clean store opens");
+    assert!(!resolved.staging_removed());
+    assert!(!resolved.intent_removed());
+    assert_eq!(resolved.durability(), first.durability());
+    assert_eq!(
+        recovered.snapshot().expect("committed checkpoint"),
+        b"clean synthetic checkpoint"
+    );
+}
+
+#[test]
+fn a_recovered_owner_commits_again_and_a_later_open_reads_exactly_those_bytes() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let (mut owner, first) =
+        SnapshotStore::create_fresh(directory(&temp), b"prior synthetic checkpoint")
+            .expect("fresh store");
+    let transition = owner.begin_transition().expect("reserve intent");
+    drop(transition);
+    drop(owner);
+    let (mut recovered, _) = SnapshotStore::recover_interrupted_commit(directory(&temp))
+        .expect("resolvable leftover artifacts");
+    let receipt = recovered
+        .commit(b"checkpoint after explicit recovery")
+        .expect("recovered owner commits");
+    assert!(receipt.changed());
+    assert_eq!(receipt.generation(), first.generation() + 1);
+    drop(recovered);
+    let reopened = SnapshotStore::open_existing(directory(&temp)).expect("clean reopen");
+    assert_eq!(
+        reopened.snapshot().expect("healthy"),
+        b"checkpoint after explicit recovery"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn a_blocked_rename_reports_uncertainty_and_preserves_the_intent() {
@@ -220,6 +365,6 @@ fn a_blocked_rename_reports_uncertainty_and_preserves_the_intent() {
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }

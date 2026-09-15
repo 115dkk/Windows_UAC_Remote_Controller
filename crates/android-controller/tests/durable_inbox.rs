@@ -192,7 +192,7 @@ fn maintenance_preserves_existing_intent_and_faults_owner() {
     let error = owner.poll_maintenance(boot(), clock(1, 600)).unwrap_err();
     assert_eq!(
         error.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
     assert_cleanup(error);
     assert_eq!(fs::read(intent).unwrap(), b"SYNTHETIC_INTERRUPTED_INTENT");
@@ -571,7 +571,7 @@ fn failed_ack_preflight_preserves_pending_delivery_in_the_prior_checkpoint() {
     let failure = owner.acknowledge_outcome(row.delivery_id()).unwrap_err();
     assert_eq!(
         failure.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
     assert!(owner.pending_outcomes().is_err());
     assert_eq!(
@@ -613,7 +613,7 @@ fn ack_rename_failure_returns_no_ack_receipt_and_keeps_explicit_uncertain_state(
             .unwrap_err();
     assert_eq!(
         reopened.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
 }
 
@@ -1012,7 +1012,7 @@ fn failed_staging_begin_is_unaccepted_preserves_prior_file_and_latches_all_acces
     let failure = owner
         .receive_opened(&opened(9, 0, 1_000), &mut correlation(0, 0), clock(1, 600))
         .expect_err("no accepted disposition before the intent barrier");
-    let cause = DurableFault::Storage(StoreError::RecoveryRequired);
+    let cause = DurableFault::Storage(StoreError::InterruptedCommit);
     assert_eq!(failure.cause(), cause);
     assert_cleanup(failure);
     assert_eq!(owner.fault(), Some(cause));
@@ -1053,7 +1053,7 @@ fn failed_staging_begin_is_unaccepted_preserves_prior_file_and_latches_all_acces
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -1069,7 +1069,7 @@ fn failed_intent_begin_does_not_accept_a_noop_or_clean_foreign_intent() {
         .expect_err("even no-ops must reserve successfully");
     assert_eq!(
         failure.cause(),
-        DurableFault::Storage(StoreError::RecoveryRequired)
+        DurableFault::Storage(StoreError::InterruptedCommit)
     );
     assert_cleanup(failure);
     assert_eq!(
@@ -1118,7 +1118,7 @@ fn invalid_domain_checkpoint_fails_after_reserved_intent_without_defaulting_poli
     );
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 
@@ -1220,7 +1220,7 @@ fn failed_receive_commit_drops_candidate_body_and_returns_no_show_or_accepted_dr
     drop(owner);
     assert_eq!(
         SnapshotStore::open_existing(directory(&temp)).err(),
-        Some(StoreError::RecoveryRequired)
+        Some(StoreError::InterruptedCommit)
     );
 }
 

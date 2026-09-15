@@ -94,7 +94,7 @@ export const ko = {
   policyPreparingTitle: '알림 설정을 준비하고 있어요',
   policyUnlockTitle: '휴대폰 잠금을 풀어 주세요',
   policyCleanupTitle: '휴대폰 승인을 정리하고 있어요',
-  policyRestartOwner: 'QR 촬영과 알림 설정을 준비하지 못했어요. 최신 버전으로 업데이트한 뒤 다시 확인해 주세요.',
+  policyRestartOwner: '휴대폰 승인을 준비하지 못했어요. 앱을 완전히 닫았다가 다시 열어 주세요.',
   policyStartFirst: '휴대폰 승인을 켠 뒤 설정을 다시 확인해 주세요.',
   policyPreparing: '앱 설정을 준비하고 있어요. 잠시 후 다시 확인해 주세요.',
   policyUnlockFirst: '휴대폰 잠금이 해제된 뒤 설정을 다시 확인해 주세요.',

@@ -287,3 +287,53 @@ fn preflight_unwind_does_not_modify_the_prior_snapshot() {
     );
     assert!(!temp.path().join(INTENT_FILE_NAME).exists());
 }
+
+#[test]
+fn an_abandoned_preparation_is_discarded_once_its_aliases_are_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh(&temp);
+    let _ = owner
+        .begin_local_key_creation(handle(), challenge())
+        .unwrap();
+    drop(owner);
+    let (mut owner, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(1)).unwrap();
+    assert!(owner.local_keys().unwrap().get(handle()).is_some());
+    let receipt = owner.discard_local_key_preparation(handle()).unwrap();
+    assert!(receipt.changed());
+    assert!(owner.local_keys().unwrap().is_empty());
+    assert!(matches!(
+        owner.discard_local_key_preparation(handle()),
+        Err(LocalKeyMutationError::Rejected(_))
+    ));
+    drop(owner);
+    let (mut owner, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(2)).unwrap();
+    assert!(owner.local_keys().unwrap().is_empty());
+    // The interrupted ceremony is abandoned, not retried: a new one still has
+    // to mint and durably prepare its own handle before any native creation.
+    let _ = owner
+        .begin_local_key_creation(handle(), challenge())
+        .unwrap();
+    assert_eq!(owner.local_keys().unwrap().len(), 1);
+}
+
+#[test]
+fn a_recorded_key_set_is_never_discarded_as_an_abandoned_preparation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh(&temp);
+    let _ = owner
+        .begin_local_key_creation(handle(), challenge())
+        .unwrap();
+    let _ = owner.record_local_key_creation(descriptor()).unwrap();
+    assert!(matches!(
+        owner.discard_local_key_preparation(handle()),
+        Err(LocalKeyMutationError::Rejected(_))
+    ));
+    assert!(owner.local_keys().unwrap().get(handle()).is_some());
+    assert!(owner.policy().is_ok());
+    drop(owner);
+    let (owner, _) =
+        DurableInbox::open_existing_host_model(directory(&temp), boot(), clock(2)).unwrap();
+    assert!(owner.local_keys().unwrap().get(handle()).is_some());
+}

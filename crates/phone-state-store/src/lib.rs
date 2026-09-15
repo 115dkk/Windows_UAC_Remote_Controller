@@ -66,6 +66,31 @@ impl CommitReceipt {
     }
 }
 
+/// Which fixed leftover artifacts an explicit recovery removed. Never a commit,
+/// approval or domain-effect receipt. Its durability describes only the removal's
+/// directory synchronization; it claims nothing about the interrupted operation.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedCommit {
+    staging_removed: bool,
+    intent_removed: bool,
+    durability: Durability,
+}
+
+impl ResolvedCommit {
+    pub const fn staging_removed(self) -> bool {
+        self.staging_removed
+    }
+
+    pub const fn intent_removed(self) -> bool {
+        self.intent_removed
+    }
+
+    pub const fn durability(self) -> Durability {
+        self.durability
+    }
+}
+
 /// Fixed categories only. No OS text, paths, payloads, or nested error sources.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum StoreError {
@@ -83,6 +108,8 @@ pub enum StoreError {
     WriterLocked,
     #[error("incomplete phone state requires explicit native recovery")]
     RecoveryRequired,
+    #[error("an interrupted commit left resolvable phone state artifacts")]
+    InterruptedCommit,
     #[error("the phone state snapshot is corrupt")]
     CorruptSnapshot,
     #[error("the phone state snapshot version is unsupported")]
@@ -237,6 +264,40 @@ impl SnapshotStore {
             current,
             poisoned: false,
         })
+    }
+
+    /// Resolve the storage artifacts of one `InterruptedCommit`, nothing else.
+    ///
+    /// The lifetime writer lock is taken exactly as `open_existing` takes it.
+    /// Only the two fixed leftover names are deleted, and the intent only after
+    /// its own fixed contents are confirmed; any other file under that name is
+    /// refused with `RecoveryRequired` and nothing is removed. The committed
+    /// snapshot is never created, rewritten, truncated or renamed: whichever
+    /// version the interrupted rename left on disk is the committed one. This
+    /// is not a reset and invents no fresh state; a corrupt snapshot, a missing
+    /// snapshot and a written-to lock file still fail closed as before.
+    ///
+    /// The resolution describes storage only. It asserts nothing about which
+    /// domain effects the interrupted operation had already released, and is
+    /// never evidence that it released none. The caller must decide from the
+    /// snapshot it then reads whether its own logical operation happened.
+    pub fn recover_interrupted_commit(
+        directory: NativePrivateDirectory,
+    ) -> Result<(Self, ResolvedCommit), StoreError> {
+        let (storage, resolved) = storage::Storage::resolve_interrupted(directory)?;
+        let current = Snapshot::decode(storage.read_current()?)?;
+        Ok((
+            Self {
+                storage,
+                current,
+                poisoned: false,
+            },
+            ResolvedCommit {
+                staging_removed: resolved.staging_removed,
+                intent_removed: resolved.intent_removed,
+                durability: resolved.durability,
+            },
+        ))
     }
 
     /// The cached, frame-checked payload, not a fresh disk read or authority.
