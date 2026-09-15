@@ -405,12 +405,12 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
      * already absent alias is success, and only the handles Rust holds as
      * Preparing arrive here.
      */
-    override fun discardPreparedKeySets(handles: List<ByteArray>) {
+    override fun discardPreparedKeySets(handles: List<ByteArray>, retained: List<ByteArray>) {
         if (Looper.myLooper() == Looper.getMainLooper() || handles.isEmpty()) {
             throw BridgeException.LocalKeysReconciliationRequired()
         }
         try {
-            keyValue(keyStore.discardPreparedNamespace(handles))
+            keyValue(keyStore.discardPreparedNamespace(handles, retained))
         } catch (_: Exception) {
             // The rows stay committed, so the next open repeats this deletion.
             throw BridgeException.LocalKeysReconciliationRequired()

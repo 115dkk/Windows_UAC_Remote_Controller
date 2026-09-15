@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.background
 
+import android.util.Log
 import com.sun.jna.Callback
 import com.sun.jna.CallbackThreadInitializer
 import com.sun.jna.Native
@@ -37,8 +38,13 @@ internal object NativeCallbackThreads {
      * were pinned. Zero means the old detach policy still stands, which is a
      * crash risk and not a reason to refuse to open the owner.
      */
-    internal fun pinGeneratedCallbacks(): Int =
-        try { pin(uniffiCallbackInterfaceNativePlatform.vtable) } catch (failure: Throwable) { unpinned(failure) }
+    internal fun pinGeneratedCallbacks(): Int {
+        val pinned = try { pin(uniffiCallbackInterfaceNativePlatform.vtable) } catch (failure: Throwable) { unpinned(failure) }
+        // Fixed-token startup diagnostic, never a payload. A count below the
+        // vtable's own slots is the crash risk this object exists to remove.
+        try { Log.i("UacBoot", "stage=CALLBACK_PIN pinned=$pinned") } catch (_: Throwable) { }
+        return pinned
+    }
 
     /**
      * The slots are enumerated instead of named, so a regenerated vtable with
@@ -56,11 +62,14 @@ internal object NativeCallbackThreads {
             while (type != null && !type.name.startsWith("com.sun.jna.")) {
                 for (field in type.declaredFields) {
                     if (Modifier.isStatic(field.modifiers)) continue
-                    field.isAccessible = true
-                    val slot = field.get(vtable)
+                    val slot = try {
+                        field.isAccessible = true
+                        field.get(vtable)
+                    } catch (failure: Throwable) { unpinned(failure); continue }
                     if (slot !is Callback) continue
-                    register(slot)
-                    pinned += 1
+                    // Count out only the slot that refused, never the ones that
+                    // are already pinned: the count must be what actually holds.
+                    try { register(slot); pinned += 1 } catch (failure: Throwable) { unpinned(failure) }
                 }
                 type = type.superclass
             }

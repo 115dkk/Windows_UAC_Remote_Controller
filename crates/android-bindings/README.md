@@ -83,7 +83,8 @@ test factories. Fresh creation is explicit and is not recovery from a failed ope
 The temporary policy-only preflight keeps the same writer lock while refusing
 request/source/fault-bearing checkpoints BEFORE recovery can commit and consume
 outcome effects. Under that same lock, empty metadata with surviving aliases or
-Preparing key state rejects before any migration/write. CreatedUnverified metadata
+Preparing key state is reconciled before any migration/write: its own aliases
+are deleted and the row is discarded, in that order. CreatedUnverified metadata
 only reopens exact native keys; it is not an enrolled peer. The last initialization
 clock sample is retained as the next native-observation floor. Full lifecycle
 startup must use the full DurableInbox path and

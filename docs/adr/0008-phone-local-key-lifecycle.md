@@ -21,6 +21,10 @@ no aliases are visible after restart. A failed observation write leaves the
 pending/store-intent reconciliation problem; it does not authorize deleting
 aliases, resetting metadata or creating replacement keys. There is no key
 metadata deletion, expiration, eviction or recovery API in this slice.
+[ADR0035](0035-interrupted-pairing-recovery.md) supersedes that last sentence for
+startup reconciliation alone: a committed Preparing row that no ceremony can
+finish has its own aliases deleted and its row discarded there. The rule still
+holds inside a live ceremony, which rolls back nothing.
 
 Typed invalid input is rejected before a store intent. Accepted candidates use
 the same commit-before-exposure owner as policy/history. Storage failure latches
@@ -35,7 +39,8 @@ and malformed sections do not fall back to another decoder. Native Application
 startup acquires the actual store lock, strictly decodes and checks policy-only
 state, then performs native key preflight BEFORE any migration/restore write.
 Empty metadata in V1 or V2 with any surviving controller alias is reconciliation-
-required. Preparing is reconciliation-required regardless of alias presence.
+required. Preparing is reconciliation-required regardless of alias presence; see
+[ADR0035](0035-interrupted-pairing-recovery.md) for what that reconciliation does.
 Unknown files and the existing fresh-start marker/has_device_keys rules remain.
 No ad-hoc Kotlin preference writer, extra key-state file or second controller is
 introduced. A fresh store also rechecks namespace absence before readiness.

@@ -166,6 +166,11 @@ impl Storage {
         let lock = open_regular(&path, true)?;
         take_lock(&path, &lock)?;
         let storage = Self { directory, lock };
+        // A committed name is only ever published by rename, so its absence
+        // beside a live intent is external interference rather than an
+        // interrupted commit. Refuse before removing the last artifact that
+        // still describes what happened.
+        checked_file(&storage.path(SNAPSHOT_FILE_NAME))?.ok_or(StoreError::MissingState)?;
         let staging_path = storage.path(STAGING_FILE_NAME);
         let intent_path = storage.path(INTENT_FILE_NAME);
         let staging_removed = checked_file(&staging_path)?.is_some();

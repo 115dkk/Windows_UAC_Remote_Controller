@@ -240,7 +240,11 @@ mod tests {
         ) -> Result<(), BridgeError> {
             unreachable!("bootstrap does not reopen keys")
         }
-        fn discard_prepared_key_sets(&self, _: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+        fn discard_prepared_key_sets(
+            &self,
+            _: Vec<Vec<u8>>,
+            _: Vec<Vec<u8>>,
+        ) -> Result<(), BridgeError> {
             unreachable!("bootstrap reconciles no preparation")
         }
         fn release_local_key_references(&self) -> Result<(), BridgeError> {

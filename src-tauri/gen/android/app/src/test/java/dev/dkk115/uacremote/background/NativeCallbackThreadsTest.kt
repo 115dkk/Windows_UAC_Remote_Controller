@@ -38,6 +38,17 @@ class NativeCallbackThreadsTest {
         assertEquals(0, NativeCallbackThreads.pin(FakeVtable()) { throw IllegalStateException("Synthetic registration failure") })
     }
 
+    @Test fun oneRefusedSlotIsCountedOutWhileTheOthersStayPinned() {
+        val vtable = FakeVtable()
+        val pinned = ArrayList<Callback>()
+        val count = NativeCallbackThreads.pin(vtable) { callback ->
+            if (callback === vtable.first) throw IllegalStateException("Synthetic slot failure")
+            pinned.add(callback)
+        }
+        assertEquals(1, count)
+        assertEquals(listOf<Callback>(vtable.second), pinned)
+    }
+
     @Test fun aHolderWhoseFieldsCannotBeReadPinsNothing() {
         // The JDK refuses to open java.lang.Class to this module, so the walk
         // fails inside reflection instead of reporting a partial count. Where a

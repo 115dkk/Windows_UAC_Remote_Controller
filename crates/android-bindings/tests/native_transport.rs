@@ -290,7 +290,11 @@ impl NativePlatform for SyntheticNativePlatform {
     fn reopen_local_key_sets(&self, _keys: Vec<NativeLocalKeySet>) -> Result<(), BridgeError> {
         self.unused()
     }
-    fn discard_prepared_key_sets(&self, _handles: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+    fn discard_prepared_key_sets(
+        &self,
+        _handles: Vec<Vec<u8>>,
+        _retained: Vec<Vec<u8>>,
+    ) -> Result<(), BridgeError> {
         self.unused()
     }
     fn release_local_key_references(&self) -> Result<(), BridgeError> {

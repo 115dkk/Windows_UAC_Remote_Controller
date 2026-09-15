@@ -297,10 +297,15 @@ impl LocalKeyLedger {
     /// have reported that no alias of this handle remains, because a ledger that
     /// forgets a handle first can never claim the aliases it left behind. Only
     /// Preparing is removable: a recorded observation and a missing entry both
-    /// refuse. This is not a retry, a rollback of created keys, or a reset, and
-    /// the discarded handle and challenge are simply no longer retained. A later
-    /// preparation mints fresh 32-byte values, so an attestation produced for
-    /// this abandoned attempt matches no future entry.
+    /// refuse. This is not a retry, a rollback of created keys, or a reset.
+    ///
+    /// The discarded row stops being retained, so the handle and the PC-supplied
+    /// challenge it carried can both appear again. That is not a replay window:
+    /// the keys this attempt may have created are already deleted, so nothing
+    /// can sign under them, and a repeated attestation would still have to be
+    /// produced by keys a later ceremony actually creates. Challenge freshness
+    /// across invitations remains the PC's duty, as it always was; this ledger
+    /// only ever refused a duplicate within what it happened to still hold.
     pub fn discard_preparation(&mut self, handle: LocalKeyHandle) -> Result<(), LocalKeyError> {
         match self.entries.get(&handle) {
             None => Err(LocalKeyError::MissingPreparation),

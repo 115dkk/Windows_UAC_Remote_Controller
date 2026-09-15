@@ -525,9 +525,9 @@ fn a_discarded_preparation_leaves_no_row_to_reload_and_frees_its_own_handle() {
         ledger
     );
     assert_ne!(ledger.to_bytes().unwrap(), recorded);
-    // A later ceremony mints fresh values; reusing these is still permitted,
-    // because the discarded row retains nothing that a new one could collide
-    // with. It is not a retry: the caller must generate the new pair itself.
+    // The discarded row retains nothing for a new one to collide with, so the
+    // same values are accepted again. It is not a retry: the caller still mints
+    // its own handle and carries its own PC-supplied challenge.
     ledger.begin_creation(handle(4), challenge(14)).unwrap();
     assert_eq!(ledger.len(), 1);
 }

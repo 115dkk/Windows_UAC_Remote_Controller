@@ -20,7 +20,8 @@ V2 also retains a bounded LocalKeyLedger in the same transaction. Preparing is
 committed before any future native creation; exact observed public keys become
 CreatedUnverified, not enrolled authority. Native policy-only startup preflights
 keys under the store lock before V1 migration/write. No missing-key regeneration,
-key deletion, additional file or Kotlin writer is introduced. Policy/history
+additional file or Kotlin writer is introduced. The only removal is discarding
+one abandoned preparation whose native aliases are already gone. Policy/history
 changes retain the ledger. See [ADR0008](../../docs/adr/0008-phone-local-key-lifecycle.md).
 
 V3 adds the phone's peer-association ledger to that same payload, not another

@@ -74,19 +74,6 @@ pub(crate) fn preflight(
     cleanup_needed: &mut bool,
     abandoned: &mut Option<AbandonedPreparations>,
 ) -> Result<(), BridgeError> {
-    let preparations = AbandonedPreparations::collect(keys);
-    if !preparations.handles().is_empty() {
-        // Before the call: a failed or partial deletion leaves the rows intact,
-        // so the next open repeats this same bounded deletion.
-        platform.discard_prepared_key_sets(
-            preparations
-                .handles()
-                .iter()
-                .map(|handle| handle.as_bytes().to_vec())
-                .collect(),
-        )?;
-        *abandoned = Some(preparations);
-    }
     let descriptors = keys
         .entries()
         .filter_map(LocalKeySetPhase::descriptor)
@@ -97,6 +84,22 @@ pub(crate) fn preflight(
             transport_spki: key.transport_key().as_spki_der().to_vec(),
         })
         .collect::<Vec<_>>();
+    let preparations = AbandonedPreparations::collect(keys);
+    if !preparations.handles().is_empty() {
+        // The recorded handles travel with the request so the native owner can
+        // refuse a deletion this side should never have asked for. Before the
+        // call: a failed or partial deletion leaves the rows intact, so the next
+        // open repeats this same bounded deletion.
+        platform.discard_prepared_key_sets(
+            preparations
+                .handles()
+                .iter()
+                .map(|handle| handle.as_bytes().to_vec())
+                .collect(),
+            descriptors.iter().map(|key| key.handle.clone()).collect(),
+        )?;
+        *abandoned = Some(preparations);
+    }
     if descriptors.is_empty() {
         // Required for BOTH legacy and V2-empty metadata, after store ownership.
         // Presence is not a mapper; surviving aliases never become a new phone.

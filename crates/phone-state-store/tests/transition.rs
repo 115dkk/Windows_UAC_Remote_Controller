@@ -292,10 +292,49 @@ fn recovering_a_missing_snapshot_still_fails_and_initializes_nothing() {
         SnapshotStore::recover_interrupted_commit(directory(&temp)).err(),
         Some(StoreError::MissingState)
     );
-    // The resolvable artifact was resolved; an absent committed document is
-    // never invented, and this failure is the caller's to refuse.
-    assert!(!temp.path().join(INTENT_FILE_NAME).exists());
+    // A committed name only ever appears by rename, so its absence is external
+    // interference: the intent stays as the last artifact describing it, and no
+    // document is invented in its place.
+    assert!(temp.path().join(INTENT_FILE_NAME).exists());
     assert!(!snapshot.exists(), "recovery must not create fresh state");
+}
+
+#[test]
+fn recovery_keeps_the_snapshot_a_completed_rename_already_published() {
+    let temp = tempfile::tempdir().expect("isolated directory");
+    let snapshot = temp.path().join(SNAPSHOT_FILE_NAME);
+    let (mut owner, _) =
+        SnapshotStore::create_fresh(directory(&temp), b"prior synthetic checkpoint")
+            .expect("fresh store");
+    let prior = fs::read(&snapshot).expect("committed frame");
+    let _ = owner
+        .commit(b"next synthetic checkpoint")
+        .expect("commit the candidate once, to obtain its real frame");
+    let published = fs::read(&snapshot).expect("committed frame");
+    drop(owner);
+    // Put the store back the way it was before that commit, then interrupt the
+    // same commit one step from the end: its rename completed and its intent
+    // was never cleared. Whichever frame the rename left is the committed one.
+    fs::write(&snapshot, &prior).expect("restore the prior committed frame");
+    let mut owner = SnapshotStore::open_existing(directory(&temp)).expect("existing store");
+    let transition = owner.begin_transition().expect("reserve intent");
+    fs::write(temp.path().join(STAGING_FILE_NAME), &published).expect("stage the candidate");
+    fs::rename(temp.path().join(STAGING_FILE_NAME), &snapshot).expect("publish the candidate");
+    drop(transition);
+    drop(owner);
+    let (owner, resolved) =
+        SnapshotStore::recover_interrupted_commit(directory(&temp)).expect("resolve the intent");
+    assert!(resolved.intent_removed());
+    assert!(!resolved.staging_removed());
+    // A recovery that restored the prior payload here would silently roll back
+    // a commit that had actually completed.
+    assert_eq!(
+        owner.snapshot(),
+        Ok(b"next synthetic checkpoint".as_slice())
+    );
+    drop(owner);
+    assert_eq!(fs::read(&snapshot).expect("committed frame"), published);
+    assert_ne!(published, prior);
 }
 
 #[test]

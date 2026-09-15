@@ -192,10 +192,17 @@ pub trait NativePlatform: Send + Sync {
     /// completion. Only a handle this controller committed as Preparing and
     /// never observed as created reaches this call, and only while startup
     /// reconciliation holds the store's writer lock. Delete nothing else: not a
-    /// recorded set, not another handle, not any other app state. Repetition is
-    /// expected after an interrupted attempt, so absence is success, while a
-    /// partial deletion must be reported as failure rather than completion.
-    fn discard_prepared_key_sets(&self, handles: Vec<Vec<u8>>) -> Result<(), BridgeError>;
+    /// recorded set, not another handle, not any other app state. `retained`
+    /// carries the handles this controller has recorded as created, so the
+    /// deletion can be refused outright rather than trusted; a handle in both
+    /// lists is a caller defect. Repetition is expected after an interrupted
+    /// attempt, so absence is success, while a partial deletion must be
+    /// reported as failure rather than completion.
+    fn discard_prepared_key_sets(
+        &self,
+        handles: Vec<Vec<u8>>,
+        retained: Vec<Vec<u8>>,
+    ) -> Result<(), BridgeError>;
     /// Memory-only, owner-scoped and idempotent. Never delete persisted aliases,
     /// change metadata, clear another instance or retry generation. The native
     /// Application retains this adapter to retry cleanup after constructor error.
@@ -601,7 +608,9 @@ impl MobileController {
                         .map_err(|_| BridgeError::StorageUnavailable)?,
                     &*platform,
                     &mut key_cleanup_needed,
-                    &mut abandoned,
+                    // A fresh store has no committed row to reconcile, and this
+                    // recheck runs after the reconciliation above has committed.
+                    &mut None,
                 )?;
             }
             if owner
@@ -982,7 +991,15 @@ mod tests {
                 Ok(())
             }
         }
-        fn discard_prepared_key_sets(&self, handles: Vec<Vec<u8>>) -> Result<(), BridgeError> {
+        fn discard_prepared_key_sets(
+            &self,
+            handles: Vec<Vec<u8>>,
+            retained: Vec<Vec<u8>>,
+        ) -> Result<(), BridgeError> {
+            assert!(
+                !handles.iter().any(|handle| retained.contains(handle)),
+                "a recorded handle must never be offered for deletion"
+            );
             let mut state = self.key_callbacks.lock().unwrap();
             if state.discard_fails {
                 return Err(BridgeError::LocalKeysUnavailable);
@@ -1377,7 +1394,7 @@ mod tests {
             phone_state_store::SnapshotStore::open_existing(
                 NativePrivateDirectory::from_native_app_data(temp.path()).unwrap()
             ),
-            Err(phone_state_store::StoreError::RecoveryRequired)
+            Err(phone_state_store::StoreError::InterruptedCommit)
         ));
     }
 
@@ -1484,17 +1501,21 @@ mod tests {
         assert_eq!(discarded, vec![[1_u8; 32].to_vec()]);
         assert_eq!(platform.key_callbacks.lock().unwrap().reopens, 0);
         controller.stop_intake();
-        controller.shutdown_native_owner().unwrap();
+        // The owner is released before this fixture's own cleanup obligations,
+        // which the synthetic platform never completes.
+        let _ = controller.shutdown_native_owner();
         controller.intake.join_completed_for_tests();
         drop(controller);
-        // The row is gone, so the next open is an ordinary one that asks for no
-        // further deletion.
-        let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
-        let controller = MobileController::open_existing(platform.clone()).unwrap();
-        assert!(platform.key_callbacks.lock().unwrap().discarded.is_empty());
-        controller.stop_intake();
-        controller.shutdown_native_owner().unwrap();
-        controller.intake.join_completed_for_tests();
+        // The committed row is gone, so no later open has anything left to
+        // reconcile.
+        let (boot, observed) = map_clock(clock).unwrap();
+        let (owner, _) = DurableInbox::open_existing_host_model(
+            NativePrivateDirectory::from_native_app_data(temp.path()).unwrap(),
+            boot,
+            observed,
+        )
+        .unwrap();
+        assert!(owner.local_keys().unwrap().is_empty());
     }
 
     #[test]

@@ -608,13 +608,17 @@ internal class DeviceKeyStore(context: Context) {
      * Only Rust's committed Preparing handles arrive here, no alias is
      * enumerated or discovered, an already absent alias is success, and an alias
      * that survives its own deletion fails rather than reporting completion.
+     * `retained` carries the handles Rust has recorded as created, and a handle
+     * present in both lists is refused here rather than trusted, so this side
+     * does not depend on the caller alone to protect a recorded set.
      * A configured secure lock is deliberately not required: a phone that lost
      * its lock must still be able to abandon an interrupted pairing.
      */
-    fun discardPreparedNamespace(handles: List<ByteArray>): KeyStoreOutcome<Unit> {
+    fun discardPreparedNamespace(handles: List<ByteArray>, retained: List<ByteArray>): KeyStoreOutcome<Unit> {
         if (Looper.myLooper() == Looper.getMainLooper()) return KeyStoreOutcome.Failure(DeviceKeyError.WRONG_THREAD)
         return synchronized(OWNER_LOCK) {
             var copied: List<ByteArray> = emptyList()
+            var recorded: List<ByteArray> = emptyList()
             try {
                 registryValue(REFERENCES.requireOpen(owner))
                 // Startup reconciliation runs before the first reopen, so any
@@ -622,6 +626,12 @@ internal class DeviceKeyStore(context: Context) {
                 if (REFERENCES.registrationCount() != 0) fail(DeviceKeyError.OWNER_CONFLICT)
                 copied = registryValue(KeyNamespaceObservation.copyHandles(handles))
                 if (copied.isEmpty()) fail(DeviceKeyError.NAMESPACE_MISMATCH)
+                if (retained.isNotEmpty()) {
+                    recorded = registryValue(KeyNamespaceObservation.copyHandles(retained))
+                    if (copied.any { abandoned -> recorded.any { it.contentEquals(abandoned) } }) {
+                        fail(DeviceKeyError.REGISTRATION_CONFLICT)
+                    }
+                }
                 val store = openStore()
                 for (handle in copied) {
                     for (role in DeviceKeyRole.values()) {
@@ -638,6 +648,7 @@ internal class DeviceKeyStore(context: Context) {
                 KeyStoreOutcome.Failure(nativeError(failure, DeviceKeyError.KEYSTORE_UNAVAILABLE))
             } finally {
                 copied.forEach { it.fill(0) }
+                recorded.forEach { it.fill(0) }
             }
         }
     }
