@@ -1489,6 +1489,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         seed_local_keys(temp.path(), clock, true);
         let platform = test_platform(temp.path().to_str().unwrap().into(), clock);
+        let (progress, notices) = std::sync::mpsc::sync_channel(8);
+        *platform.intake_notices.lock().unwrap() = Some(progress);
         platform.key_callbacks.lock().unwrap().discard_fails = true;
         assert_eq!(
             MobileController::open_existing(platform.clone()).unwrap_err(),
@@ -1501,10 +1503,24 @@ mod tests {
         assert_eq!(discarded, vec![[1_u8; 32].to_vec()]);
         assert_eq!(platform.key_callbacks.lock().unwrap().reopens, 0);
         controller.stop_intake();
-        // The owner is released before this fixture's own cleanup obligations,
-        // which the synthetic platform never completes.
-        let _ = controller.shutdown_native_owner();
-        controller.intake.join_completed_for_tests();
+        // Release the real I/O lifetime before the next reader, exactly the way
+        // the other full-constructor fixtures do.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut cleaned = false;
+        for _ in 0..8 {
+            match controller.continue_native_cleanup() {
+                Ok(()) => {
+                    controller.intake.join_completed_for_tests();
+                    cleaned = true;
+                    break;
+                }
+                Err(BridgeError::Busy | BridgeError::NativeUnavailable) => notices
+                    .recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                    .expect("bounded actual reactor cleanup progress"),
+                Err(error) => panic!("unexpected reconciliation cleanup {error:?}"),
+            }
+        }
+        assert!(cleaned, "release the store before reading it again");
         drop(controller);
         // The committed row is gone, so no later open has anything left to
         // reconcile.
