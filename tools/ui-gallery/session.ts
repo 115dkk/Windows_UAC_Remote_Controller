@@ -46,6 +46,31 @@ export class GallerySession {
   }
 
   async open(selected: GalleryCase, locale: GalleryLocale = 'ko'): Promise<void> {
+    await this.prepare(selected, locale);
+    const heading = selected.fixture.startsWith('desktop-relay-') || ['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing'].includes(selected.fixture) ? '휴대폰 관리'
+      : selected.fixture === 'desktop-history' ? '활동 기록'
+        : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
+        : selected.fixture.startsWith('desktop-') ? 'PC 승인을 휴대폰에서'
+          : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' || selected.fixture.startsWith('phone-service-') ? '알림 시간' : '요청';
+    await expect(this.page.getByRole('heading', { name: galleryText(locale, heading), exact: true, level: 1 })).toBeVisible();
+    await expect(this.page.getByRole('button', { name: galleryText(locale, '다시 확인'), exact: true })).toBeEnabled();
+    await this.page.evaluate(async () => { await document.fonts.ready; });
+    await expect(this.page.getByText(galleryText(locale, bannerText), { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(this.page.locator('input[type="password"]')).toHaveCount(0);
+  }
+
+  /** For a fixture that is not the product shell: the native pairing ceremony
+   * drawn in the client. Blocks the same traffic and keeps the same example
+   * banner, but asserts none of the app's navigation, heading or refresh. */
+  async openStandalone(selected: GalleryCase, locale: GalleryLocale = 'ko'): Promise<void> {
+    await this.prepare(selected, locale);
+    await expect(this.page.locator(`[data-pairing-ceremony]`)).toHaveCount(1);
+    await this.page.evaluate(async () => { await document.fonts.ready; });
+    await expect(this.page.getByText(galleryText(locale, bannerText), { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(this.page.locator('input[type="password"]')).toHaveCount(0);
+  }
+
+  private async prepare(selected: GalleryCase, locale: GalleryLocale): Promise<void> {
     this.selected = selected;
     this.locale = locale;
     await this.page.setViewportSize(selected.viewport);
@@ -70,16 +95,6 @@ export class GallerySession {
       // native scaling claim, content masking or screenshot modification.
       await this.page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
     }
-    const heading = selected.fixture.startsWith('desktop-relay-') || ['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing'].includes(selected.fixture) ? '휴대폰 관리'
-      : selected.fixture === 'desktop-history' ? '활동 기록'
-        : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
-        : selected.fixture.startsWith('desktop-') ? 'PC 승인을 휴대폰에서'
-          : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' || selected.fixture.startsWith('phone-service-') ? '알림 시간' : '요청';
-    await expect(this.page.getByRole('heading', { name: galleryText(locale, heading), exact: true, level: 1 })).toBeVisible();
-    await expect(this.page.getByRole('button', { name: galleryText(locale, '다시 확인'), exact: true })).toBeEnabled();
-    await this.page.evaluate(async () => { await document.fonts.ready; });
-    await expect(this.page.getByText(galleryText(locale, bannerText), { exact: true })).toBeInViewport({ ratio: 1 });
-    await expect(this.page.locator('input[type="password"]')).toHaveCount(0);
   }
 
   async capture(stage: string, caption: string): Promise<void> {

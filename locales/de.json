@@ -51,7 +51,7 @@
   "QR 코드 보기": "QR-Code anzeigen",
   "QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.": "Mit diesen Schritten wird Ihr Telefon per QR-Code bei diesem Computer registriert. Aktivieren Sie die QR-Verbindung auf dem Telefon und fahren Sie dann fort.",
   "{:02}:{:02} 뒤에 저절로 닫혀요": "Schließt sich in {:02}:{:02} von selbst",
-  "이 화면은 연결에만 쓰이고, 끝나면 저절로 사라집니다.": "Dieser Bildschirm dient nur der Verbindung und verschwindet danach von selbst.",
+  "인증이 끝나면 이 화면은 저절로 닫혀요.": "Dieser Bildschirm schließt sich von selbst, sobald die Verbindung bestätigt ist.",
   "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.": "Achtung: Wenn jemand anderes Sie dazu aufgefordert hat, brechen Sie jetzt ab. Teilen Sie diesen QR-Code niemals mit anderen.",
   "취소하고 돌아가기": "Abbrechen und zurück",
   "휴대폰 승인을 준비하지 못했어요. 앱을 완전히 닫았다가 다시 열어 주세요.": "Die Freigabe per Smartphone konnte nicht vorbereitet werden. Schließen Sie die App vollständig und öffnen Sie sie erneut.",

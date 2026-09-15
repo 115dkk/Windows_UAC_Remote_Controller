@@ -70,7 +70,14 @@ foreach ($mode in @('fresh','upgrade')) {
         # Only the test-owned uninstalled wizard process tree; no product service.
         if (-not $process.HasExited) {
             $process.CloseMainWindow() | Out-Null
-            if (-not $process.WaitForExit(1500)) { & "$env:SystemRoot/System32/taskkill.exe" /PID $process.Id /T /F | Out-Null }
+            if (-not $process.WaitForExit(1500)) {
+                # The wizard can close itself between that check and this kill,
+                # and taskkill then reports the PID as unkillable. A process that
+                # is already gone is the wanted end state, so only a wizard still
+                # running after the attempt is a failure worth raising.
+                & "$env:SystemRoot/System32/taskkill.exe" /PID $process.Id /T /F 2>&1 | Out-Null
+                if (-not $process.WaitForExit(3000)) { throw "Installer wizard $locale $mode did not exit" }
+            }
         }
         $process.Dispose()
     }

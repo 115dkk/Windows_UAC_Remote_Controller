@@ -19,9 +19,10 @@ use windows::{
             CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
             DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RTLREADING,
             DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-            FF_DONTCARE, FW_BOLD, FW_NORMAL, FillRect, GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ,
-            InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RemoveFontMemResourceEx,
-            RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            FF_DONTCARE, FW_BOLD, FW_NORMAL, FillRect, GetDC, GetStockObject, HBRUSH, HDC, HFONT,
+            HGDIOBJ, InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC,
+            RemoveFontMemResourceEx, RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
+            TRANSPARENT,
         },
         System::{
             LibraryLoader::GetModuleHandleW,
@@ -108,18 +109,17 @@ impl Screen {
     }
 }
 
-/// The card a screen paints inside. Control layout reads the same rectangle the
-/// painter does, so a button cannot land off the surface or over the code.
-fn card_rect(client: RECT, dpi: i32, screen: Screen) -> RECT {
+const INTRODUCTION_BODY: &str = "QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.";
+const INTRODUCTION_EXIT: &str = "ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다.";
+const INTRODUCTION_CAUTION: &str = "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.";
+
+/// The card the QR and its outcomes paint inside. Control layout reads the same
+/// rectangle the painter does, so a button cannot land off the surface.
+fn card_rect(client: RECT, dpi: i32) -> RECT {
     let scale = |value: i32| value * dpi / 96;
     let width = (client.right * 72 / 100).min(scale(760));
-    // The introduction is a notice and sizes to its own text. The QR screen
-    // needs a tall card so its footer still holds the way out on a short display.
-    let height = if screen == Screen::Introduction {
-        (client.bottom * 70 / 100).min(scale(560))
-    } else {
-        (client.bottom * 96 / 100).min(scale(900))
-    };
+    // Tall enough that the footer still holds the way out on a short display.
+    let height = (client.bottom * 96 / 100).min(scale(900));
     let left = (client.right - width) / 2;
     let top = (client.bottom - height) / 2;
     RECT {
@@ -128,6 +128,20 @@ fn card_rect(client: RECT, dpi: i32, screen: Screen) -> RECT {
         right: left + width,
         bottom: top + height,
     }
+}
+
+/// The introduction's bands, measured from its own copy. Sizing the card to the
+/// text is what keeps a short notice from floating above a half-empty card and a
+/// long translation from being clipped, in every language, without a per-locale
+/// number anywhere.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct IntroductionLayout {
+    card: RECT,
+    body: RECT,
+    escape: RECT,
+    caution: RECT,
+    button_top: i32,
+    button_height: i32,
 }
 
 /// Where the QR sits and where the footer starts, derived together so neither
@@ -218,8 +232,55 @@ impl WindowOwner {
         unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32
     }
 
-    fn card(&self, client: RECT, dpi: i32) -> RECT {
-        card_rect(client, dpi, self.screen)
+    /// The card for whichever screen is showing. The introduction measures its
+    /// own copy, so it needs a device context; every other screen ignores it.
+    fn card(&self, dc: HDC, client: RECT, dpi: i32) -> RECT {
+        if self.screen == Screen::Introduction {
+            self.introduction_layout(dc, client, dpi).card
+        } else {
+            card_rect(client, dpi)
+        }
+    }
+
+    fn introduction_layout(&self, dc: HDC, client: RECT, dpi: i32) -> IntroductionLayout {
+        let scale = |value: i32| value * dpi / 96;
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
+        let width = (client.right * 72 / 100).min(scale(760));
+        let left = (client.right - width) / 2;
+        let text_width = (width - scale(88)).max(1);
+        let measure = |source: &'static str, w: i32| {
+            measure_text(dc, self.body_font, self.copy(source), w, flags)
+        };
+        let body = measure(INTRODUCTION_BODY, text_width);
+        let escape = measure(INTRODUCTION_EXIT, text_width);
+        let caution = measure(INTRODUCTION_CAUTION, (text_width - scale(48)).max(1));
+        // One stack of fixed gaps around three measured blocks. Changing a gap
+        // here moves the card with it; nothing is positioned from the bottom.
+        let height = (scale(26 + 66 + 18 + 20 + 26 + 40 + 32 + 60 + 44) + body + escape + caution)
+            .min(client.bottom * 92 / 100);
+        let top = (client.bottom - height) / 2;
+        let band = |from: i32, tall: i32| RECT {
+            left: left + scale(44),
+            top: from,
+            right: left + width - scale(44),
+            bottom: from + tall,
+        };
+        let body_top = top + scale(26 + 66 + 18);
+        let escape_top = body_top + body + scale(20);
+        let caution_top = escape_top + escape + scale(26);
+        IntroductionLayout {
+            card: RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            },
+            body: band(body_top, body),
+            escape: band(escape_top, escape),
+            caution: band(caution_top, caution + scale(40)),
+            button_top: caution_top + caution + scale(40 + 32),
+            button_height: scale(60),
+        }
     }
 
     fn invitation_layout(&self, card: RECT, dpi: i32) -> InvitationLayout {
@@ -381,11 +442,11 @@ impl WindowOwner {
         // SAFETY: the newly created owned top-level window remains live.
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
         self.register_fonts()?;
-        self.title_font = font(dpi, 20, FW_BOLD.0 as i32, font_face(self.locale))?;
-        self.body_font = font(dpi, 14, FW_NORMAL.0 as i32, font_face(self.locale))?;
+        self.title_font = font(dpi, 22, FW_BOLD.0 as i32, font_face(self.locale))?;
+        self.body_font = font(dpi, 16, FW_NORMAL.0 as i32, font_face(self.locale))?;
         // Comparison digits are immutable ASCII and always use the Latin face.
         self.code_font = font(dpi, 40, FW_BOLD.0 as i32, "UAC Sans")?;
-        self.hint_font = font(dpi, 11, FW_NORMAL.0 as i32, font_face(self.locale))?;
+        self.hint_font = font(dpi, 13, FW_NORMAL.0 as i32, font_face(self.locale))?;
         self.background = brush(0xf2f6f7)?;
         self.surface = brush(0xffffff)?;
         self.border = brush(0xd7e3e7)?;
@@ -591,12 +652,27 @@ impl WindowOwner {
     }
 
     fn layout_buttons(&self) -> Result<(), Error> {
+        // SAFETY: paired GetDC/ReleaseDC on the owned window. The context is
+        // only measured from and drawn into by DT_CALCRECT, which paints nothing.
+        let dc = unsafe { GetDC(Some(self.hwnd)) };
+        if dc.0.is_null() {
+            return Err(Error::InvalidState);
+        }
+        let placed = self.place_buttons(dc);
+        // SAFETY: releases the context this call acquired, exactly once.
+        unsafe {
+            ReleaseDC(Some(self.hwnd), dc);
+        }
+        placed
+    }
+
+    fn place_buttons(&self, dc: HDC) -> Result<(), Error> {
         let mut client = RECT::default();
         // SAFETY: owned valid top-level window and initialized output.
         unsafe { GetClientRect(self.hwnd, &mut client)? };
         let dpi = self.dpi();
         let scale = |value: i32| value * dpi / 96;
-        let card = self.card(client, dpi);
+        let card = self.card(dc, client, dpi);
         match self.screen {
             // A single way out, anchored to the card's footer so it can never be
             // laid over the modules the phone camera has to read.
@@ -628,10 +704,11 @@ impl WindowOwner {
                 let height = scale(60);
                 let gap = scale(16);
                 let left = (client.right - width * 2 - gap) / 2;
-                let top = if introducing {
-                    card.bottom - scale(104)
+                let (top, height) = if introducing {
+                    let layout = self.introduction_layout(dc, client, dpi);
+                    (layout.button_top, layout.button_height)
                 } else {
-                    client.bottom / 2 + scale(120)
+                    (client.bottom / 2 + scale(120), height)
                 };
                 let (primary_left, cancel_left) = if self.locale.is_rtl() {
                     (left + width + gap, left)
@@ -730,7 +807,7 @@ impl WindowOwner {
         }
         let dpi = self.dpi();
         let scale = |value: i32| value * dpi / 96;
-        let border = self.card(client, dpi);
+        let border = self.card(dc, client, dpi);
         let left = border.left;
         let top = border.top;
         let card_width = border.right - border.left;
@@ -760,15 +837,13 @@ impl WindowOwner {
                 left: left + scale(32),
                 top: top + scale(26),
                 right: left + card_width - scale(32),
-                bottom: top + scale(92),
+                bottom: top + scale(96),
             },
             INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
         match self.screen {
-            Screen::Introduction => {
-                self.draw_introduction(dc, left, top, card_width, card_height, scale);
-            }
+            Screen::Introduction => self.draw_introduction(dc, client, dpi),
             Screen::Invitation => {
                 self.draw_invitation(dc, left, top, card_width, card_height, scale)?;
             }
@@ -901,78 +976,43 @@ impl WindowOwner {
 
     /// Says what the ceremony is, that it can be stopped, and what sharing this
     /// code would hand over, before the code itself is ever shown.
-    fn draw_introduction(
-        &self,
-        dc: HDC,
-        left: i32,
-        top: i32,
-        card_width: i32,
-        card_height: i32,
-        scale: impl Fn(i32) -> i32,
-    ) {
+    fn draw_introduction(&self, dc: HDC, client: RECT, dpi: i32) {
+        let scale = |value: i32| value * dpi / 96;
+        let layout = self.introduction_layout(dc, client, dpi);
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
         draw_text(
             dc,
             self.body_font,
-            self.copy(
-                "QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.",
-            ),
-            RECT {
-                left: left + scale(44),
-                top: top + scale(104),
-                right: left + card_width - scale(44),
-                bottom: top + scale(190),
-            },
+            self.copy(INTRODUCTION_BODY),
+            layout.body,
             MUTED_INK,
-            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+            flags,
         );
         draw_text(
             dc,
             self.body_font,
-            self.copy("ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다."),
-            RECT {
-                left: left + scale(44),
-                top: top + scale(198),
-                right: left + card_width - scale(44),
-                bottom: top + scale(240),
-            },
+            self.copy(INTRODUCTION_EXIT),
+            layout.escape,
             MUTED_INK,
-            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+            flags,
         );
-        let caution = RECT {
-            left: left + scale(44),
-            top: top + scale(262),
-            right: left + card_width - scale(44),
-            bottom: (top + scale(422))
-                .min(top + card_height - scale(136))
-                .max(top + scale(263)),
-        };
         let Ok(surface) = brush(CAUTION_SURFACE) else {
-            return;
+            return; // Decoration only: never fail the ceremony over a fill.
         };
         // SAFETY: the memory DC and the temporary caution brush are live here.
         unsafe {
-            FillRect(dc, &caution, surface);
+            FillRect(dc, &layout.caution, surface);
             let _ = DeleteObject(HGDIOBJ(surface.0));
         }
-        let warning = self.copy(
-            "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.",
-        );
-        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
-        let text_left = caution.left + scale(24);
-        let text_right = caution.right - scale(24);
-        // Centre the notice in its own band. Measuring it means a longer
-        // translation sits correctly instead of clinging to the top edge.
-        let height = measure_text(dc, self.body_font, warning, text_right - text_left, flags);
-        let slack = (caution.bottom - caution.top - scale(36) - height).max(0) / 2;
         draw_text(
             dc,
             self.body_font,
-            warning,
+            self.copy(INTRODUCTION_CAUTION),
             RECT {
-                left: text_left,
-                top: caution.top + scale(20) + slack,
-                right: text_right,
-                bottom: caution.bottom - scale(16),
+                left: layout.caution.left + scale(24),
+                top: layout.caution.top + scale(20),
+                right: layout.caution.right - scale(24),
+                bottom: layout.caution.bottom - scale(20),
             },
             CAUTION_INK,
             flags,
@@ -994,9 +1034,9 @@ impl WindowOwner {
             self.copy("UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요."),
             RECT {
                 left: left + scale(36),
-                top: top + scale(100),
+                top: top + scale(104),
                 right: left + card_width - scale(36),
-                bottom: top + scale(172),
+                bottom: top + scale(188),
             },
             MUTED_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
@@ -1004,12 +1044,12 @@ impl WindowOwner {
         draw_text(
             dc,
             self.hint_font,
-            self.copy("이 화면은 연결에만 쓰이고, 끝나면 저절로 사라집니다."),
+            self.copy("인증이 끝나면 이 화면은 저절로 닫혀요."),
             RECT {
                 left: left + scale(36),
-                top: top + scale(176),
+                top: top + scale(194),
                 right: left + card_width - scale(36),
-                bottom: top + scale(212),
+                bottom: top + scale(234),
             },
             FAINT_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
@@ -1103,9 +1143,9 @@ impl WindowOwner {
             self.copy("휴대폰에 표시된 숫자와 같은지 확인해 주세요."),
             RECT {
                 left: left + scale(36),
-                top: top + scale(100),
+                top: top + scale(104),
                 right: left + card_width - scale(36),
-                bottom: top + scale(150),
+                bottom: top + scale(184),
             },
             MUTED_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
@@ -1116,9 +1156,9 @@ impl WindowOwner {
             &self.code,
             RECT {
                 left: left + scale(36),
-                top: top + scale(170),
+                top: top + scale(196),
                 right: left + card_width - scale(36),
-                bottom: top + scale(260),
+                bottom: top + scale(286),
             },
             INK,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
@@ -1587,7 +1627,7 @@ mod tests {
                 right: width,
                 bottom: height,
             };
-            let card = card_rect(client, dpi, Screen::Invitation);
+            let card = card_rect(client, dpi);
             let layout = invitation_layout(card, dpi, width.min(height), modules);
             let scale = |value: i32| value * dpi / 96;
             let label = format!("{width}x{height}@{dpi} modules={modules} {layout:?} {card:?}");
