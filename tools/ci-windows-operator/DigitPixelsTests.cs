@@ -69,7 +69,7 @@ internal static class DigitPixelsTests
     {
         int width = 1280 * dpi / 96, height = 800 * dpi / 96;
         int cardWidth = Math.Min(width * 72 / 100, 760 * dpi / 96);
-        int cardHeight = Math.Min(height * 82 / 100, 820 * dpi / 96);
+        int cardHeight = Math.Min(height * 96 / 100, 900 * dpi / 96);
         int left = (width - cardWidth) / 2, top = (height - cardHeight) / 2;
         IntPtr screen = IntPtr.Zero, memory = IntPtr.Zero, bitmap = IntPtr.Zero, font = IntPtr.Zero;
         IntPtr oldBitmap = IntPtr.Zero, oldFont = IntPtr.Zero;
@@ -89,7 +89,7 @@ internal static class DigitPixelsTests
             oldFont = SelectObject(memory, font); Check(Valid(oldFont));
             Check(SetBkMode(memory, 1) != 0);
             Check(SetTextColor(memory, ColorRef(0x152c35)) != 0xffffffff);
-            var code = new Rect { Left = left + 36 * dpi / 96, Top = top + 170 * dpi / 96,
+            var code = new Rect { Left = left + 36 * dpi / 96, Top = top + 196 * dpi / 96,
                 Right = left + cardWidth - 36 * dpi / 96, Bottom = top + 260 * dpi / 96 };
             Check(DrawText(memory, text, text.Length, ref code, 0x0001 | 0x0004 | 0x0020 | 0x0800) > 0);
             // Mirror capture's BitBlt into the managed RGB bitmap, but the source
@@ -198,9 +198,9 @@ internal static class DigitPixelsTests
                     using (var pixels = Render("012345", dpi))
                     {
                         int cardWidth = Math.Min(pixels.Width * 72 / 100, 760 * dpi / 96);
-                        int cardHeight = Math.Min(pixels.Height * 82 / 100, 820 * dpi / 96);
+                        int cardHeight = Math.Min(pixels.Height * 96 / 100, 900 * dpi / 96);
                         int x = (pixels.Width - cardWidth) / 2 + 36 * dpi / 96 + 1;
-                        int y = (pixels.Height - cardHeight) / 2 + 170 * dpi / 96 + 1;
+                        int y = (pixels.Height - cardHeight) / 2 + 196 * dpi / 96 + 1;
                         pixels.SetPixel(x, y, Color.Black);
                         Reject(pixels, dpi, "ocr_noise_rejected");
                     }

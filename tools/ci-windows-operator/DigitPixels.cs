@@ -20,10 +20,15 @@ internal static class DigitPixels
     internal static string Read(Bitmap screenshot, int dpi)
     {
         Program.Require(dpi >= 96 && dpi <= 240, "ocr_dpi_rejected");
+        // These five numbers are the comparison screen's card and code band from
+        // card_rect and draw_comparison in
+        // crates/windows-service-host/src/ffi/pairing_client/renderer_ui.rs.
+        // Moving that band without moving these reads the wrong pixels, and the
+        // lab then fails at the comparison stage with six glyphs it cannot find.
         int cardWidth = Math.Min(screenshot.Width * 72 / 100, 760 * dpi / 96);
-        int cardHeight = Math.Min(screenshot.Height * 82 / 100, 820 * dpi / 96);
+        int cardHeight = Math.Min(screenshot.Height * 96 / 100, 900 * dpi / 96);
         int left = (screenshot.Width - cardWidth) / 2 + 36 * dpi / 96;
-        int top = (screenshot.Height - cardHeight) / 2 + 170 * dpi / 96;
+        int top = (screenshot.Height - cardHeight) / 2 + 196 * dpi / 96;
         int width = cardWidth - 72 * dpi / 96;
         int height = 90 * dpi / 96;
         Program.Require(left >= 0 && top >= 0 && left + width <= screenshot.Width && top + height <= screenshot.Height,
