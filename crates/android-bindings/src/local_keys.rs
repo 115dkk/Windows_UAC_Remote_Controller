@@ -77,12 +77,7 @@ pub(crate) fn preflight(
     let descriptors = keys
         .entries()
         .filter_map(LocalKeySetPhase::descriptor)
-        .map(|key| NativeLocalKeySet {
-            handle: key.handle().as_bytes().to_vec(),
-            approval_spki: key.approval_key().as_spki_der().to_vec(),
-            denial_spki: key.denial_key().as_spki_der().to_vec(),
-            transport_spki: key.transport_key().as_spki_der().to_vec(),
-        })
+        .map(NativeLocalKeySet::from_descriptor)
         .collect::<Vec<_>>();
     let preparations = AbandonedPreparations::collect(keys);
     if !preparations.handles().is_empty() {
@@ -100,6 +95,36 @@ pub(crate) fn preflight(
         )?;
         *abandoned = Some(preparations);
     }
+    reopen(descriptors, platform, cleanup_needed)
+}
+
+/// The same inspection for a store this owner has just created. There is no
+/// committed row for an interrupted ceremony to have left, so a preparation
+/// here is a defect rather than something to reconcile, and this path deletes
+/// nothing at all.
+pub(crate) fn preflight_fresh(
+    keys: &LocalKeyLedger,
+    platform: &dyn NativePlatform,
+    cleanup_needed: &mut bool,
+) -> Result<(), BridgeError> {
+    if !AbandonedPreparations::collect(keys).handles().is_empty() {
+        return Err(BridgeError::LocalKeysReconciliationRequired);
+    }
+    reopen(
+        keys.entries()
+            .filter_map(LocalKeySetPhase::descriptor)
+            .map(NativeLocalKeySet::from_descriptor)
+            .collect(),
+        platform,
+        cleanup_needed,
+    )
+}
+
+fn reopen(
+    descriptors: Vec<NativeLocalKeySet>,
+    platform: &dyn NativePlatform,
+    cleanup_needed: &mut bool,
+) -> Result<(), BridgeError> {
     if descriptors.is_empty() {
         // Required for BOTH legacy and V2-empty metadata, after store ownership.
         // Presence is not a mapper; surviving aliases never become a new phone.

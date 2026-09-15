@@ -108,7 +108,7 @@ pub enum StoreError {
     WriterLocked,
     #[error("incomplete phone state requires explicit native recovery")]
     RecoveryRequired,
-    #[error("an interrupted commit left resolvable phone state artifacts")]
+    #[error("a leftover staging or intent artifact requires an explicit resolution")]
     InterruptedCommit,
     #[error("the phone state snapshot is corrupt")]
     CorruptSnapshot,

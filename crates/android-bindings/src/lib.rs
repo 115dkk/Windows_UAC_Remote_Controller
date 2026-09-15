@@ -602,15 +602,12 @@ impl MobileController {
             if fresh {
                 // Recheck namespace absence under the new owner as well. A
                 // concurrent unexpected alias never turns empty metadata ready.
-                local_keys::preflight(
+                local_keys::preflight_fresh(
                     owner
                         .local_keys()
                         .map_err(|_| BridgeError::StorageUnavailable)?,
                     &*platform,
                     &mut key_cleanup_needed,
-                    // A fresh store has no committed row to reconcile, and this
-                    // recheck runs after the reconciliation above has committed.
-                    &mut None,
                 )?;
             }
             if owner

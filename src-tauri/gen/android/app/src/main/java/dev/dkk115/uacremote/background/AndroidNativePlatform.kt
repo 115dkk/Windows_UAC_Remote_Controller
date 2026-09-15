@@ -407,13 +407,14 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
      */
     override fun discardPreparedKeySets(handles: List<ByteArray>, retained: List<ByteArray>) {
         if (Looper.myLooper() == Looper.getMainLooper() || handles.isEmpty()) {
-            throw BridgeException.LocalKeysReconciliationRequired()
+            throw BridgeException.LocalKeysUnavailable()
         }
         try {
             keyValue(keyStore.discardPreparedNamespace(handles, retained))
         } catch (_: Exception) {
-            // The rows stay committed, so the next open repeats this deletion.
-            throw BridgeException.LocalKeysReconciliationRequired()
+            // A refused deletion is its own state, not the dead end this exists
+            // to end: the rows stay committed and the next open tries again.
+            throw BridgeException.LocalKeysUnavailable()
         }
     }
 
