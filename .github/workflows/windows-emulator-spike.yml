@@ -136,21 +136,37 @@ jobs:
           $socket = [Net.Sockets.UdpClient]::new()
           try { $socket.Connect('192.0.2.1', 9); $ip = $socket.Client.LocalEndPoint.Address.ToString() } finally { $socket.Dispose() }
           Write-Output "host address=$ip"
-          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($ip), 17443)
+          # What the guest has to work with, before asking it to reach anything.
+          # The first attempt reported a bare exit 1 with no output, which cannot
+          # tell a blocked route from a missing tool.
+          Write-Output '--- guest tools and addressing ---'
+          & $adb -s emulator-5554 shell 'toybox --version' 2>&1 | ForEach-Object { $_ }
+          & $adb -s emulator-5554 shell 'ls -l /system/bin/nc /system/bin/toybox 2>&1' 2>&1 | ForEach-Object { $_ }
+          & $adb -s emulator-5554 shell 'ip -4 addr show; ip route' 2>&1 | ForEach-Object { $_ }
+          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 17443)
           $listener.Start()
           New-NetFirewallRule -DisplayName 'uac-emulator-spike' -Direction Inbound -Action Allow `
             -Protocol TCP -LocalPort 17443 -ErrorAction SilentlyContinue | Out-Null
-          $accept = $listener.BeginAcceptTcpClient($null, $null)
-          Write-Output '--- guest side: toybox nc ---'
-          & $adb -s emulator-5554 shell "echo hello | toybox nc -w 5 $ip 17443" 2>&1 | ForEach-Object { $_ }
-          Write-Output "nc exit=$LASTEXITCODE"
-          $reached = $accept.AsyncWaitHandle.WaitOne(15000)
-          Write-Output "host observed a guest connection: $reached"
-          if ($reached) { $listener.EndAcceptTcpClient($accept).Close() }
+          # Three addresses, one listener, so a failure says which route failed
+          # rather than that something failed. The runner's own address is the
+          # one the lab's relay binds. 10.0.2.2 is the emulator's alias for the
+          # host loopback. adb reverse is the control: if even that does not
+          # arrive, the listener or the firewall is what is wrong, not the route.
+          & $adb -s emulator-5554 reverse tcp:17443 tcp:17443 2>&1 | ForEach-Object { $_ }
+          foreach ($case in @(@{ name = 'runner address'; target = $ip },
+                              @{ name = 'host loopback alias'; target = '10.0.2.2' },
+                              @{ name = 'adb reverse control'; target = '127.0.0.1' })) {
+            $accept = $listener.BeginAcceptTcpClient($null, $null)
+            $output = & $adb -s emulator-5554 shell "echo probe | toybox nc -w 5 $($case.target) 17443" 2>&1
+            $guestExit = $LASTEXITCODE
+            $reached = $accept.AsyncWaitHandle.WaitOne(12000)
+            if ($reached) { $listener.EndAcceptTcpClient($accept).Close() }
+            Write-Output ("{0} ({1}): guest_exit={2} host_saw_connection={3} guest_output={4}" -f `
+              $case.name, $case.target, $guestExit, $reached, (($output -join ' ').Trim()))
+          }
+          & $adb -s emulator-5554 reverse --remove-all 2>&1 | ForEach-Object { $_ }
           $listener.Stop()
           Remove-NetFirewallRule -DisplayName 'uac-emulator-spike' -ErrorAction SilentlyContinue
-          Write-Output '--- also record what 10.0.2.2 does, for comparison ---'
-          & $adb -s emulator-5554 shell "toybox nc -w 3 10.0.2.2 17443; echo alias_exit=$?" 2>&1 | ForEach-Object { $_ }
           exit 0
       - name: Stop the disposable emulator
         if: ${{ always() }}
