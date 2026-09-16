@@ -33,17 +33,17 @@ use windows::{
             Threading::GetCurrentThreadId,
         },
         UI::{
+            Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FLAGS, ODS_FOCUS, ODS_SELECTED},
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN},
             WindowsAndMessaging::{
-                BN_CLICKED, BS_DEFPUSHBUTTON, BS_MULTILINE, BS_PUSHBUTTON, CREATESTRUCTW,
-                CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetSystemMetrics, HMENU, KillTimer,
-                MSG, PM_REMOVE, PeekMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
-                SendMessageW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-                UnregisterClassW, WINDOW_EX_STYLE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN,
-                WM_NCCREATE, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD,
-                WS_EX_RTLREADING, WS_POPUP, WS_VISIBLE,
+                BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW,
+                DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
+                GetSystemMetrics, HMENU, KillTimer, MSG, PM_REMOVE, PeekMessageW, RegisterClassExW,
+                SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SendMessageW, SetTimer, SetWindowLongPtrW,
+                ShowWindow, TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_COMMAND,
+                WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_PAINT, WM_SETFONT,
+                WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_RTLREADING, WS_POPUP, WS_VISIBLE,
             },
         },
     },
@@ -558,17 +558,19 @@ impl WindowOwner {
         None
     }
 
-    /// Creates one fixed standard push button owned by this window. The label is
-    /// authored copy and the identifier is a compile-time constant; neither is
-    /// caller text, a path, a command or anything read from the pipe.
-    fn push_button(&self, label: &str, id: usize, default: bool) -> Result<HWND, Error> {
+    /// Creates one fixed push button owned by this window. The label is authored
+    /// copy and the identifier is a compile-time constant; neither is caller
+    /// text, a path, a command or anything read from the pipe.
+    ///
+    /// The control is owner drawn because this process carries no application
+    /// manifest and enables no theming, so a standard button is painted by
+    /// comctl32's classic path: a grey raised block, next to a window whose
+    /// every other pixel is drawn here. `draw_button` paints it instead. The
+    /// class and the window text stay exactly what they were, because CI drives
+    /// this window through them.
+    fn push_button(&self, label: &str, id: usize) -> Result<HWND, Error> {
         let class = wide("BUTTON");
         let text = wide(label);
-        let style = if default {
-            BS_DEFPUSHBUTTON
-        } else {
-            BS_PUSHBUTTON
-        };
         // SAFETY: fixed standard child control parented to the owned top-level window.
         let button = unsafe {
             CreateWindowExW(
@@ -577,9 +579,7 @@ impl WindowOwner {
                 PCWSTR(text.as_ptr()),
                 WS_CHILD
                     | WS_VISIBLE
-                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
-                        (style | BS_MULTILINE) as u32,
-                    ),
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(BS_OWNERDRAW as u32),
                 0,
                 0,
                 1,
@@ -608,18 +608,33 @@ impl WindowOwner {
         if !self.start.0.is_null() {
             return Ok(());
         }
-        let start = self.push_button(self.copy("QR 코드 보기"), START_ID, true)?;
+        let start = self.push_button(self.button_copy(START_ID), START_ID)?;
         self.start = start;
-        let cancel = self.push_button(self.copy("취소"), CANCEL_ID, false)?;
+        let cancel = self.push_button(self.button_copy(CANCEL_ID), CANCEL_ID)?;
         self.cancel = cancel;
         self.layout_buttons()
+    }
+
+    /// The one place a button's label is chosen. Creation and owner drawing both
+    /// read it, so what is painted cannot drift from the window text the control
+    /// was made with, which is what CI drives this window by. Every screen that
+    /// offers a way out words it for the question that screen is asking.
+    fn button_copy(&self, id: usize) -> &'static str {
+        match (id, self.screen) {
+            (START_ID, _) => self.copy("QR 코드 보기"),
+            (CONFIRM_ID, _) => self.copy("숫자가 같아요"),
+            (CANCEL_ID, Screen::Introduction) => self.copy("취소"),
+            (CANCEL_ID, Screen::Invitation) => self.copy("취소하고 돌아가기"),
+            (CANCEL_ID, _) => self.copy("다릅니다, 취소"),
+            _ => "",
+        }
     }
 
     fn show_invitation_button(&mut self) -> Result<(), Error> {
         if !self.cancel.0.is_null() {
             return Ok(());
         }
-        let cancel = self.push_button(self.copy("취소하고 돌아가기"), CANCEL_ID, false)?;
+        let cancel = self.push_button(self.button_copy(CANCEL_ID), CANCEL_ID)?;
         self.cancel = cancel;
         self.layout_buttons()
     }
@@ -628,11 +643,111 @@ impl WindowOwner {
         if !self.confirm.0.is_null() {
             return Ok(());
         }
-        let confirm = self.push_button(self.copy("숫자가 같아요"), CONFIRM_ID, true)?;
+        let confirm = self.push_button(self.button_copy(CONFIRM_ID), CONFIRM_ID)?;
         self.confirm = confirm;
-        let cancel = self.push_button(self.copy("다릅니다, 취소"), CANCEL_ID, false)?;
+        let cancel = self.push_button(self.button_copy(CANCEL_ID), CANCEL_ID)?;
         self.cancel = cancel;
         self.layout_buttons()
+    }
+
+    /// Paints one button, because nothing else on this window is painted by the
+    /// system and a standard control here is a grey raised block from comctl32's
+    /// classic path. The fill, the border and the three-point radius are the
+    /// ones the gallery mock in `ui/src/PairingCeremony.tsx` was reviewed with.
+    /// Pressed and focus are this function's own, since a static mock has no use
+    /// for them; hover is deliberately absent, as it is in the reviewed design.
+    fn draw_button(&self, item: &DRAWITEMSTRUCT) {
+        let label = self.button_copy(item.CtlID as usize);
+        if label.is_empty() || item.hDC.is_invalid() {
+            return;
+        }
+        let dpi = self.dpi();
+        let scale = |value: i32| (value * dpi / 96).max(1);
+        let state = |flag: ODS_FLAGS| item.itemState.0 & flag.0 != 0;
+        let pressed = state(ODS_SELECTED);
+        let disabled = state(ODS_DISABLED);
+        let focused = state(ODS_FOCUS);
+        // The button that carries the screen's answer wears the accent, and the
+        // mock draws its border and the ring outside it as one solid edge, so
+        // that edge is twice as thick rather than a different colour.
+        let emphasised = is_answer(item.CtlID as usize);
+        let thickness = if emphasised { scale(2) } else { scale(1) };
+        let face = if pressed && !disabled {
+            0xe6eef0
+        } else {
+            0xfdfdfd
+        };
+        let edge = match (disabled, emphasised) {
+            (true, _) => 0xd7e3e7,
+            (false, true) => ACCENT,
+            (false, false) => 0xadadad,
+        };
+        let radius = scale(6);
+        // Border, then face inside it, then a focus ring inside that. Each is a
+        // filled rounded rectangle rather than a stroke, which is how this file
+        // already draws every other shape.
+        // Nothing erases an owner-drawn control's background, and the corners a
+        // rounded rectangle leaves out would keep whatever was there before. The
+        // buttons are anchored inside the card on every screen that has them, so
+        // the card's own surface is what those corners must show.
+        // SAFETY: the device context belongs to this draw request and the
+        // surface brush is this owner's, alive for the whole run.
+        unsafe { FillRect(item.hDC, &item.rcItem, self.surface) };
+        let mut plates = vec![(0, edge), (thickness, face)];
+        if focused && !disabled {
+            let ring = thickness + scale(3);
+            plates.push((ring, ACCENT));
+            plates.push((ring + scale(1), face));
+        }
+        for (inset, fill) in plates {
+            let Ok(plate) = brush(fill) else {
+                return; // Half a button is still better than a failed ceremony.
+            };
+            // SAFETY: the device context belongs to this draw request, the brush
+            // is owned here, and both the pen and the brush are restored before
+            // the brush is deleted.
+            unsafe {
+                let previous_pen = SelectObject(item.hDC, GetStockObject(NULL_PEN));
+                let previous_brush = SelectObject(item.hDC, HGDIOBJ(plate.0));
+                let corner = (radius - inset).max(1);
+                let _ = RoundRect(
+                    item.hDC,
+                    item.rcItem.left + inset,
+                    item.rcItem.top + inset,
+                    item.rcItem.right - inset,
+                    item.rcItem.bottom - inset,
+                    corner,
+                    corner,
+                );
+                SelectObject(item.hDC, previous_brush);
+                SelectObject(item.hDC, previous_pen);
+                let _ = DeleteObject(HGDIOBJ(plate.0));
+            }
+        }
+        // DT_VCENTER does not survive DT_WORDBREAK, so the wrapped height is
+        // measured first and centred here. A label too tall for its button is
+        // drawn from the top rather than clipped symmetrically.
+        let padding = scale(8);
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
+        let width = (item.rcItem.right - item.rcItem.left - padding * 2).max(1);
+        let height = measure_text(item.hDC, self.body_font, label, width, flags);
+        let room = item.rcItem.bottom - item.rcItem.top;
+        let top = item.rcItem.top + ((room - height) / 2).max(0);
+        // SAFETY: the device context belongs to this draw request.
+        unsafe { SetBkMode(item.hDC, TRANSPARENT) };
+        draw_text(
+            item.hDC,
+            self.body_font,
+            label,
+            RECT {
+                left: item.rcItem.left + padding,
+                top,
+                right: item.rcItem.right - padding,
+                bottom: top + height.max(room),
+            },
+            if disabled { FAINT_INK } else { INK },
+            flags,
+        );
     }
 
     fn move_button(
@@ -1343,6 +1458,17 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_DRAWITEM => {
+            if let Some(owner) = owner {
+                // SAFETY: for WM_DRAWITEM lparam is a DRAWITEMSTRUCT the sender
+                // keeps live for the whole of this call, and it is only read.
+                let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+                owner.draw_button(item);
+                return LRESULT(1);
+            }
+            // SAFETY: forwards the untouched message parameters to the default procedure.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_COMMAND => {
             if let Some(owner) = owner {
                 let id = wparam.0 & 0xffff;
@@ -1375,6 +1501,15 @@ unsafe extern "system" fn window_proc(
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
+}
+
+/// The identifiers whose button carries the screen's answer rather than its way
+/// out. Owner drawing cannot ask the system for this: `BS_OWNERDRAW` occupies
+/// the same four style bits as `BS_DEFPUSHBUTTON`, so the two cannot be worn at
+/// once. Nothing was lost with that style. Enter never went through it; `pump`
+/// reads the key itself and `key_decision` answers for the screen.
+fn is_answer(id: usize) -> bool {
+    matches!(id, START_ID | CONFIRM_ID)
 }
 
 fn color(value: u32) -> COLORREF {
