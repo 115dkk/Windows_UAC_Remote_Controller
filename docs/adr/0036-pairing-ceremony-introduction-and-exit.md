@@ -60,7 +60,13 @@ all eleven catalogues.
 **The takeover is signed, once.** The product mark and name are painted in the
 leading top corner only, from axis-aligned primitives and a stock null pen; no
 image, file or resource is loaded. A repeated mark would read as a seal, which is
-the thing being avoided.
+the thing being avoided. The card is painted over that corner afterwards, so a
+translated name with no room left is dropped rather than sliced: a wordmark cut
+by the card edge reads as a rendering fault, and the mark alone still signs the
+screen. Every control row is sized from the longest translation rather than from
+Korean, which is always the shortest; the comparison row is 240 by 72 because at
+184 by 60 the French and European Portuguese labels needed three lines and had
+room for two.
 
 **The QR itself is not reduced.** Its size was never the problem, and it is a
 functional surface for both a phone camera and the lab's screenshot decoder.

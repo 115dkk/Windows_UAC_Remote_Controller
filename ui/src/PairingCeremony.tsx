@@ -5,10 +5,10 @@
 // desktop. This is a client mock at the same geometry and copy so the layout can
 // be reviewed; it is never native proof, and it holds no invitation.
 import { useId, useLayoutEffect, useRef, useState } from 'react';
-import { tr } from './i18n';
+import { currentLocale, tr } from './i18n';
 import { sampleQrModules, sampleQrWidth } from './pairing-ceremony-sample';
 
-export type CeremonyScreen = 'introduction' | 'invitation';
+export type CeremonyScreen = 'introduction' | 'invitation' | 'comparison';
 
 // renderer_ui.rs paints in points at the window's DPI. At 96 DPI one point is
 // 4/3 of a pixel, which is the only conversion the mock needs.
@@ -68,7 +68,15 @@ function SampleCode({ side, modulePx }: { side: number; modulePx: number }) {
   </svg>;
 }
 
-function Signature({ size }: { size: number }) {
+function Signature({ size, room }: { size: number; room: number }) {
+  // The native painter drops the name outright when the card would cover it.
+  // Measure and hide rather than clip, so the gallery shows what ships.
+  const label = useRef<HTMLSpanElement>(null);
+  const [fits, setFits] = useState(false);
+  useLayoutEffect(() => {
+    const node = label.current;
+    setFits(node !== null && room > 0 && node.scrollWidth <= room);
+  }, [room]);
   const unit = (value: number) => (value * size) / 40;
   const plate = (a: number, b: number, c: number, d: number, fill: string) => ({
     position: 'absolute' as const, left: unit(a), top: unit(b),
@@ -82,16 +90,20 @@ function Signature({ size }: { size: number }) {
       <div style={plate(23, 17, 35, 34, SURFACE)} />
       <div style={plate(25, 19, 33, 30, ACCENT)} />
     </div>
-    <span style={{ font: `${pt(16)} var(--font-ui)`, color: ACCENT }}>{tr('UAC 원격 승인')}</span>
+    <span ref={label} style={{
+      font: `${pt(16)} var(--font-ui)`, color: ACCENT, maxWidth: Math.max(0, room),
+      whiteSpace: 'nowrap', visibility: fits ? 'visible' : 'hidden',
+    }} data-signature-name>{tr('UAC 원격 승인')}</span>
   </div>;
 }
 
 function Button({ label, primary }: { label: string; primary?: boolean }) {
+  const paired = primary !== undefined;
   return <button type="button" disabled style={{
-    minWidth: primary === undefined ? 300 : 184, height: primary === undefined ? 56 : 60,
-    font: `${pt(16)} var(--font-ui)`, color: INK, background: '#fdfdfd',
+    width: paired ? 240 : 300, height: paired ? 72 : 56,
+    font: `${pt(16)} var(--font-ui)`, lineHeight: 1.3, color: INK, background: '#fdfdfd',
     border: `1px solid ${primary ? ACCENT : '#adadad'}`, boxShadow: primary ? `0 0 0 1px ${ACCENT}` : 'none',
-    borderRadius: 3, padding: '0 16px',
+    borderRadius: 3, padding: '0 8px', overflowWrap: 'break-word', whiteSpace: 'normal',
   }}>{label}</button>;
 }
 
@@ -117,9 +129,33 @@ function Introduction({ width }: { width: number }) {
       margin: `26px 0 0`, padding: '20px 24px', background: CAUTION_SURFACE,
       font: `${pt(16)} var(--font-ui)`, color: CAUTION_INK,
     }}>{tr('주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.')}</p>
-    <div style={{ display: 'flex', gap: 16, justifyContent: 'center', marginTop: 32 }}>
+    <div style={{ display: 'flex', gap: 16, justifyContent: 'center', marginTop: 32, alignItems: 'stretch' }}>
       <Button label={tr('QR 코드 보기')} primary />
       <Button label={tr('취소')} primary={false} />
+    </div>
+  </section>;
+}
+
+function Comparison({ width, height }: { width: number; height: number }) {
+  const heading = useId();
+  const card = cardRect(width, height);
+  return <section aria-labelledby={heading} style={{
+    position: 'relative', width: card.width, height: card.height,
+    background: SURFACE, border: `1px solid ${BORDER}`, textAlign: 'center',
+  }}>
+    <h2 id={heading} style={{ position: 'absolute', insetInline: 32, top: 26, height: 70, margin: 0, font: `700 ${pt(22)} var(--font-ui)`, color: INK }}>
+      {tr('UAC 원격 승인 · PC 연결')}
+    </h2>
+    <p style={{ position: 'absolute', insetInline: 36, top: 104, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
+      {tr('휴대폰에 표시된 숫자와 같은지 확인해 주세요.')}
+    </p>
+    <p style={{ position: 'absolute', insetInline: 36, top: 196, height: 90, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: `700 ${pt(40)} 'UAC Sans', var(--font-ui)`, color: INK }}>123 456</p>
+    <div data-comparison-actions style={{
+      position: 'absolute', insetInline: 0, top: height / 2 + 120 - card.top,
+      display: 'flex', gap: 16, justifyContent: 'center',
+    }}>
+      <Button label={tr('숫자가 같아요')} primary />
+      <Button label={tr('다릅니다, 취소')} primary={false} />
     </div>
   </section>;
 }
@@ -168,13 +204,18 @@ export function PairingCeremony({ screen }: { screen: CeremonyScreen }) {
     observer.observe(element);
     return () => { observer.disconnect(); };
   }, []);
-  return <div ref={frame} data-pairing-ceremony={screen} style={{
+  return <div ref={frame} data-pairing-ceremony={screen} dir={currentLocale() === 'ar' ? 'rtl' : 'ltr'} style={{
     height: '100%', background: BACKGROUND, position: 'relative', overflow: 'hidden',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
   }}>
-    <div style={{ position: 'absolute', left: 28, top: 24 }}><Signature size={36} /></div>
+    <div style={{ position: 'absolute', insetInlineStart: 28, top: 24 }}>
+      <Signature size={36} room={box === null ? 0
+        : Math.trunc((box.width - Math.min(Math.trunc((box.width * 72) / 100), 760)) / 2) - 28 - 36 - 9 - 9} />
+    </div>
     {box === null ? null : screen === 'introduction'
       ? <Introduction width={box.width} />
-      : <Invitation width={box.width} height={box.height} />}
+      : screen === 'comparison'
+        ? <Comparison width={box.width} height={box.height} />
+        : <Invitation width={box.width} height={box.height} />}
   </div>;
 }

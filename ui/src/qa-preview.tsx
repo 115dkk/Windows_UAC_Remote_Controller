@@ -24,7 +24,8 @@ const banner = <aside className="qa-label" aria-label={ko.exampleDescription}>{k
 // These two fixtures draw the same geometry and copy in the client so the layout
 // can be reviewed. They are not native proof and they carry no invitation.
 const ceremony: CeremonyScreen | null = fixtureName === 'pairing-ceremony-introduction' ? 'introduction'
-  : fixtureName === 'pairing-ceremony-invitation' ? 'invitation' : null;
+  : fixtureName === 'pairing-ceremony-invitation' ? 'invitation'
+    : fixtureName === 'pairing-ceremony-comparison' ? 'comparison' : null;
 if (root && ceremony) {
   createRoot(root).render(<div className="qa-frame">{banner}
     <PairingCeremony screen={ceremony} /></div>);

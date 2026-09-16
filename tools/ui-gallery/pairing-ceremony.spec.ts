@@ -13,7 +13,40 @@ for (const selected of pairingCeremonyCases) {
     const screen = page.locator('[data-pairing-ceremony]');
     // The product signature appears once. A mark in every corner would read as
     // a seal, which is the thing this screen is trying not to be.
-    await expect(page.getByText(galleryText(locale, 'UAC 원격 승인'), { exact: true })).toHaveCount(1);
+    const name = screen.locator('[data-signature-name]');
+    await expect(name).toHaveCount(1);
+    // The card is drawn over this corner. Whatever name survives must be whole:
+    // a translated wordmark sliced by the card edge looks like a rendering fault.
+    const signature = await name.evaluate((node) => ({
+        shown: getComputedStyle(node).visibility === 'visible',
+        wide: node.scrollWidth, room: node.clientWidth,
+      }));
+    if (signature.shown) expect(signature.wide, 'signature name is not clipped').toBeLessThanOrEqual(signature.room);
+
+    // Every ceremony button holds its own label. A fixed-size native button
+    // silently clips a translation that needs one more line than it has room
+    // for, and Korean is always the shortest, so this only shows up elsewhere.
+    for (const button of await screen.getByRole('button').all()) {
+      const fits = await button.evaluate((node) => ({
+        scroll: node.scrollHeight, client: node.clientHeight,
+        wide: node.scrollWidth, room: node.clientWidth, label: node.textContent,
+      }));
+      expect(fits.scroll, `button text height: ${fits.label ?? ''}`).toBeLessThanOrEqual(fits.client);
+      expect(fits.wide, `button text width: ${fits.label ?? ''}`).toBeLessThanOrEqual(fits.room);
+    }
+
+    if (selected.fixture === 'pairing-ceremony-comparison') {
+      await expect(page.getByRole('heading', { name: galleryText(locale, 'UAC 원격 승인 · PC 연결'), exact: true })).toBeVisible();
+      await expect(page.getByText(galleryText(locale, '휴대폰에 표시된 숫자와 같은지 확인해 주세요.'), { exact: true })).toBeVisible();
+      // The digits are a fixed sample; a real comparison code is minted per
+      // attempt and never leaves the protected desktop.
+      await expect(page.getByText('123 456', { exact: true })).toBeVisible();
+      for (const source of ['숫자가 같아요', '다릅니다, 취소']) {
+        await expect(page.getByRole('button', { name: galleryText(locale, source), exact: true })).toBeInViewport({ ratio: 1 });
+      }
+      await gallery.capture('comparison', 'CLIENT/SYNTHETIC · 여섯 자리 비교와 번역이 들어가는 단추');
+      return;
+    }
 
     if (selected.fixture === 'pairing-ceremony-introduction') {
       await expect(page.getByRole('heading', { name: galleryText(locale, 'QR 연결 절차를 시작합니다.'), exact: true })).toBeVisible();

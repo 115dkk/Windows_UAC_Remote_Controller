@@ -256,7 +256,7 @@ impl WindowOwner {
         let caution = measure(INTRODUCTION_CAUTION, (text_width - scale(48)).max(1));
         // One stack of fixed gaps around three measured blocks. Changing a gap
         // here moves the card with it; nothing is positioned from the bottom.
-        let height = (scale(26 + 66 + 18 + 20 + 26 + 40 + 32 + 60 + 44) + body + escape + caution)
+        let height = (scale(26 + 66 + 18 + 20 + 26 + 40 + 32 + 72 + 44) + body + escape + caution)
             .min(client.bottom * 92 / 100);
         let top = (client.bottom - height) / 2;
         let band = |from: i32, tall: i32| RECT {
@@ -279,7 +279,7 @@ impl WindowOwner {
             escape: band(escape_top, escape),
             caution: band(caution_top, caution + scale(40)),
             button_top: caution_top + caution + scale(40 + 32),
-            button_height: scale(60),
+            button_height: scale(72),
         }
     }
 
@@ -701,8 +701,10 @@ impl WindowOwner {
                 if primary.0.is_null() || self.cancel.0.is_null() {
                     return Ok(());
                 }
-                let width = scale(184);
-                let height = scale(60);
+                // Wide enough that the longest translated label needs two lines
+                // rather than three, and tall enough to hold those two.
+                let width = scale(240);
+                let height = scale(72);
                 let gap = scale(16);
                 let left = (client.right - width * 2 - gap) / 2;
                 let (top, height) = if introducing {
@@ -815,7 +817,7 @@ impl WindowOwner {
         let card_height = border.bottom - border.top;
         // One signature, in one corner. A takeover that names itself is a
         // program; the same mark repeated around the screen would be a seal.
-        self.draw_signature(dc, client, scale(28), scale(24), scale(36));
+        self.draw_signature(dc, client, border, scale(28), scale(24), scale(36));
         // SAFETY: the memory DC and owned border brush are live for this paint.
         unsafe { FillRect(dc, &border, self.border) };
         let surface = RECT {
@@ -876,7 +878,7 @@ impl WindowOwner {
     /// The product mark and name, once, in the screen's leading top corner. The
     /// mark is the app icon's two shapes redrawn with axis-aligned primitives;
     /// no image, file or resource is loaded to paint it.
-    fn draw_signature(&self, dc: HDC, client: RECT, margin: i32, top: i32, size: i32) {
+    fn draw_signature(&self, dc: HDC, client: RECT, card: RECT, margin: i32, top: i32, size: i32) {
         let Ok(accent) = brush(ACCENT) else {
             return; // Decoration only: never fail a pairing screen over it.
         };
@@ -951,19 +953,26 @@ impl WindowOwner {
             // The temporary brush is no longer selected or borrowed.
             let _ = DeleteObject(HGDIOBJ(accent.0));
         }
+        // The card is painted over this corner afterwards. A translated name
+        // that would run under it is dropped rather than sliced; the mark alone
+        // still signs the screen, which is all one corner has to do.
         let (text_left, text_right, alignment) = if self.locale.is_rtl() {
             (
-                margin,
+                card.right + size / 4,
                 leading - size / 4,
                 windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(0),
             )
         } else {
-            (leading + size + size / 4, client.right - margin, DT_LEFT)
+            (leading + size + size / 4, card.left - size / 4, DT_LEFT)
         };
+        let name = self.copy("UAC 원격 승인");
+        if text_right - text_left < measure_width(dc, self.body_font, name) {
+            return;
+        }
         draw_text(
             dc,
             self.body_font,
-            self.copy("UAC 원격 승인"),
+            name,
             RECT {
                 left: text_left,
                 top,
@@ -1460,6 +1469,26 @@ fn font(dpi: u32, points: i32, weight: i32, face: &str) -> Result<HFONT, Error> 
     } else {
         Ok(font)
     }
+}
+
+/// The width one line of this copy needs, used to decide whether a translated
+/// name fits the room a corner actually has.
+fn measure_width(dc: HDC, font: HFONT, text: &str) -> i32 {
+    let mut text: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT::default();
+    // SAFETY: live DC, owned font and bounded mutable UTF-16/RECT buffers.
+    // DT_CALCRECT measures into the rect and paints nothing.
+    unsafe {
+        let old = SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(
+            dc,
+            &mut text,
+            &mut rect,
+            DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
+        );
+        SelectObject(dc, old);
+    }
+    (rect.right - rect.left).max(0)
 }
 
 /// The height this copy needs at the given width, so a band can be filled to fit

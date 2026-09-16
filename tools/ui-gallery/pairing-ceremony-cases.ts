@@ -9,7 +9,7 @@ export interface CeremonyCase extends GalleryCase { readonly locale: GalleryLoca
 // screens are GDI on a private desktop; these carry no invitation and prove no
 // native paint. The widths are the ones the layout test also walks: the lab
 // runner's display, the common laptop, and an ordinary desktop.
-function ceremony(screen: 'introduction' | 'invitation', width: number, height: number,
+function ceremony(screen: 'introduction' | 'invitation' | 'comparison', width: number, height: number,
   locale: GalleryLocale = 'ko', forcedColors: 'none' | 'active' = 'none'): CeremonyCase {
   return {
     id: `pairing-ceremony-${screen}-${locale}-${String(width)}x${String(height)}${forcedColors === 'active' ? '-forced' : ''}`,
@@ -21,6 +21,12 @@ function ceremony(screen: 'introduction' | 'invitation', width: number, height: 
 export const pairingCeremonyCases: readonly CeremonyCase[] = [
   ceremony('introduction', 1280, 800),
   ceremony('invitation', 1280, 800),
+  ceremony('comparison', 1280, 800),
+  // The longest button labels in the catalogue. These two are why the row is
+  // 240 wide and 72 tall rather than 184 by 60.
+  ceremony('comparison', 1280, 800, 'fr'),
+  ceremony('comparison', 1280, 800, 'pt-PT'),
+  ceremony('comparison', 1024, 768, 'de'),
   ceremony('introduction', 1024, 768),
   ceremony('invitation', 1024, 768),
   ceremony('invitation', 1280, 720),
