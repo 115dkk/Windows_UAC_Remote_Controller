@@ -112,6 +112,7 @@ pub(super) fn apply(
     let fresh = match capture(&root, seed, &scope) {
         Ok(fresh) => fresh,
         Err(error) if is_observation_change(error) => {
+            lab_note!("apply refused: recapture_changed");
             return Ok(Some(RefusalReason::ContentChanged));
         }
         Err(error) => return Err(error),
@@ -123,6 +124,17 @@ pub(super) fn apply(
         return Err(error);
     }
     if &fresh != retained || fresh.content().digest() != content_digest {
+        // The watch census can call a prompt unchanged while this comparison
+        // calls it changed, and one refusal word cannot tell those apart. Shapes
+        // only: which side disagreed, and how many labels each side holds. The
+        // labels themselves stay where they are.
+        lab_note!(
+            "apply refused: retained_mismatch report_equal={} digest_equal={} fresh_labels={} retained_labels={}",
+            &fresh == retained,
+            fresh.content().digest() == content_digest,
+            fresh.content().labels().len(),
+            retained.content().labels().len()
+        );
         return Ok(Some(RefusalReason::ContentChanged));
     }
     let target = match select_action_target(fresh.content(), action) {
@@ -140,12 +152,26 @@ pub(super) fn apply(
         .iter()
         .find(|label| label.ordinal() == target.ordinal)
     else {
+        lab_note!(
+            "apply refused: chosen_ordinal_absent ordinal={}",
+            target.ordinal
+        );
         return Ok(Some(RefusalReason::ContentChanged));
     };
     let first = match locate_button(&root, &walker, pid, target.ordinal, expected, None, cleanup) {
         Ok(Some(button)) => button,
-        Ok(None) => return Ok(Some(RefusalReason::ContentChanged)),
+        Ok(None) => {
+            lab_note!(
+                "apply refused: first_button_absent ordinal={}",
+                target.ordinal
+            );
+            return Ok(Some(RefusalReason::ContentChanged));
+        }
         Err(error) if is_observation_change(error) => {
+            lab_note!(
+                "apply refused: first_button_changed ordinal={}",
+                target.ordinal
+            );
             return Ok(Some(RefusalReason::ContentChanged));
         }
         Err(error) => return Err(error),
@@ -166,8 +192,18 @@ pub(super) fn apply(
         cleanup,
     ) {
         Ok(Some(button)) => button,
-        Ok(None) => return Ok(Some(RefusalReason::ContentChanged)),
+        Ok(None) => {
+            lab_note!(
+                "apply refused: second_button_absent ordinal={}",
+                target.ordinal
+            );
+            return Ok(Some(RefusalReason::ContentChanged));
+        }
         Err(error) if is_observation_change(error) => {
+            lab_note!(
+                "apply refused: second_button_changed ordinal={}",
+                target.ordinal
+            );
             return Ok(Some(RefusalReason::ContentChanged));
         }
         Err(error) => return Err(error),
