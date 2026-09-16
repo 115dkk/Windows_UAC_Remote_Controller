@@ -10,6 +10,7 @@ import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.nativecore.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 internal sealed class NativeRequestReadReply {
     class Data(val value: NativeRequestPayload) : NativeRequestReadReply()
@@ -29,12 +30,16 @@ internal class NativeRequestCoordinator(
     private val canApprove: (NativeRequestSelection) -> Boolean,
     private val canDeny: (NativeRequestSelection) -> Boolean,
     private val externalProgress: () -> Unit,
-    private val ownerFailed: () -> Unit,
+    private val ownerFailed: (Throwable) -> Unit,
+    private val maintenanceFailed: (Throwable) -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val maintenanceQueued = AtomicBoolean(false)
     private val maintenanceWanted = AtomicBoolean(false)
+    // Consecutive, so one finished pass clears the record. Small, because a
+    // request the owner cannot maintain is one the user is waiting on.
+    private val maintenanceFailures = AtomicInteger(0)
     private val changeQueued = AtomicBoolean(false)
     private val detailsPending = AtomicBoolean(false)
     private val tickets = ConcurrentHashMap<ReadTicket, Unit>()
@@ -59,10 +64,11 @@ internal class NativeRequestCoordinator(
                     platform.requests.catalogMaintained(catalog)
                     advanceDeliveries(controller)
                     externalProgress()
+                    maintenanceFailures.set(0)
                 } catch (_: BridgeException.Busy) { }
                 catch (_: BridgeException.PresentationRefreshRequired) { /* Real clock invalidation already queued rewarm. */ }
                 catch (_: BridgeException.RequestUnavailable) { }
-                catch (_: Exception) { ownerFailed() }
+                catch (failure: Exception) { maintenanceFailure(failure) }
                 finally {
                     maintenanceQueued.set(false); changed()
                     // Only another actual event received during this job asks
@@ -75,6 +81,32 @@ internal class NativeRequestCoordinator(
     }
     /** A previously rejected queue insertion, not a retry of a Busy operation. */
     fun resumeQueued() { if (maintenanceWanted.get() && !maintenanceQueued.get()) progress() }
+
+    /**
+     * What one failed maintenance pass costs. It used to cost the whole owner,
+     * on the first unexpected exception, and the handler discarded the reason,
+     * so the trace could only say NOT_CAPTURED. One pass is small enough to
+     * fail on its own: the next real event runs another one.
+     *
+     * A bridge failure the owner cannot work through still retires it at once,
+     * by the same rule the approval coordinator already uses. Anything else is
+     * survived and counted, and an unbroken run of them retires it too, because
+     * an owner that can never finish a pass is not serving anyone either.
+     */
+    private fun maintenanceFailure(failure: Exception) {
+        val consecutive = maintenanceFailures.incrementAndGet()
+        if (fatal(failure) || consecutive > PolicyOwnerBounds.MAX_CONSECUTIVE_MAINTENANCE_FAILURES) {
+            ownerFailed(failure)
+        }
+        else maintenanceFailed(failure)
+    }
+
+    /** The approval coordinator's rule, applied to the same kind of boundary: a
+     * bridge error the owner declared, minus the ones it can carry on through. */
+    private fun fatal(failure: Throwable): Boolean = failure is BridgeException &&
+        failure !is BridgeException.Busy && failure !is BridgeException.InvalidPolicy &&
+        failure !is BridgeException.RequestUnavailable &&
+        failure !is BridgeException.PresentationRefreshRequired
 
     /** Empty event is only a snapshot wake. It is never navigation/auth data. */
     fun changed() {

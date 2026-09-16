@@ -12,7 +12,7 @@ import { ko, policyUnavailableText, policyUnavailableTitleText, serviceActionTex
 import { PolicyEditor } from './PolicyEditor';
 import { PhoneServicePanel } from './PhoneServicePanel';
 import { PairingEntry } from './PairingEntry';
-import { hasNoPairedPc } from './phoneConnection';
+import { hasNoPairedPc, hasPairedPc } from './phoneConnection';
 import { RequestPanel } from './RequestPanel';
 import { EmptyState, MobileNotices, ServicePanel } from './StatusPanels';
 import { useController } from './useController';
@@ -123,7 +123,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
       {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
-      {phone && page === 'schedule' && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
+      {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableTitle={policyUnavailableTitleText(snapshot.phoneService)} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {

@@ -52,7 +52,9 @@ describe('native QR-input entry, separate from pairing', () => {
   it('leaves lock recovery and Windows presentation unchanged', async () => {
     const lock = view(qaCase('phone-lock-missing').snapshot);
     expect(await screen.findByRole('button', { name: ko.openLockSettings })).toBeEnabled();
-    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
+    // That fixture counts a paired PC, so asking this phone to connect one is
+    // the wrong thing to show whatever its screen lock is doing.
+    expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
     lock.unmount();
     const windows = qaCase('desktop-running').snapshot;
     view({ ...windows, mobile: available().mobile }); // Even a crossed capability cannot create Windows camera UI.
@@ -191,6 +193,8 @@ describe('native QR-input entry, separate from pairing', () => {
     await screen.findByRole('button', { name: ko.openLockSettings });
     await act(async () => { pending.resolve(); await pending.promise; });
     expect(oldRead).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: ko.openPairingScanner })).toBeDisabled();
+    // The replacement owner's phone counts a paired PC, so its entry is gone
+    // rather than disabled, and a late launch result still publishes into none.
+    expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
   });
 });

@@ -73,7 +73,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private val requests = NativeRequestCoordinator(application, platform, { controller }, ::enqueueRequest,
         { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
         approvals::canRequest, denials::canRequest, denials::externalProgress,
-        { failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.REQUEST_MAINTENANCE) })
+        { failure -> failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.REQUEST_MAINTENANCE, failure) },
+        ::traceMaintenanceFailure)
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
@@ -573,6 +574,18 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private fun traceOwnerFailure(status: PolicyStatus, origin: OwnerFailureOrigin, failure: Throwable? = null) {
         try { bootTrace.failed(origin, BootDiagnostics.ownerFailureCategory(failure), status, lifecycle.phase()) }
         catch (_: Throwable) { /* Observations cannot replace the actual failure/cleanup. */ }
+    }
+
+    /** A maintenance pass the owner survived, recorded so the next one is read
+     * rather than guessed. It decides nothing and retires nothing. */
+    private fun traceMaintenanceFailure(failure: Throwable) {
+        try {
+            bootTrace.maintenanceFailed(
+                OwnerFailureOrigin.REQUEST_MAINTENANCE,
+                BootDiagnostics.ownerFailureCategory(failure),
+                lifecycle.phase(),
+            )
+        } catch (_: Throwable) { /* Observations cannot replace the actual failure/cleanup. */ }
     }
 
     private fun failOwner(status: PolicyStatus, origin: OwnerFailureOrigin, failure: Throwable? = null) {

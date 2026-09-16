@@ -24,6 +24,10 @@ internal object PolicyOwnerBounds {
     const val MAX_RAW_ARGUMENT_CHARS = MAX_POLICY_BYTES * 6 + 128
     const val MAX_PENDING = 8
     const val RESPONSE_TIMEOUT_MILLIS = 15_000L
+    /** Consecutive failed request-maintenance passes the owner survives. One
+     * finished pass clears the count. Small, because a request the owner cannot
+     * maintain is a request the user is already waiting on. */
+    const val MAX_CONSECUTIVE_MAINTENANCE_FAILURES = 4
     const val KEY_NAMESPACE = "dev.dkk115.uacremote.keystore.v1."
     const val MAX_KEY_ALIASES = 4096
 

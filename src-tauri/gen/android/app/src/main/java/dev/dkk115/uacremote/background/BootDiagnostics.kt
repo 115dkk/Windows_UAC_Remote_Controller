@@ -55,7 +55,13 @@ internal data class BootDiagnosticRecord(
     }
 }
 
-internal enum class OwnerDiagnosticEvent { OWNER_INIT_STEP, OWNER_READY, OWNER_FIRST_FAILURE, OWNER_CLOSED }
+internal enum class OwnerDiagnosticEvent {
+    OWNER_INIT_STEP, OWNER_READY, OWNER_FIRST_FAILURE, OWNER_CLOSED,
+    /** A maintenance pass the owner survived. Separate from the first failure,
+     * which is the one that retires it, because a survived failure is exactly
+     * the evidence that used to be discarded to keep the owner alive. */
+    OWNER_MAINTENANCE_FAILURE,
+}
 internal enum class OwnerInitializationStep { QUEUED, PACKAGED_LIBRARY, GENERATED_CONTRACT, BRIDGE_ABI, OPEN_NATIVE_OWNER, READY }
 internal enum class OwnerFailureOrigin {
     INIT_TIMER_POST, INIT_WORKER_SCHEDULE, INIT_WATCHDOG, INIT_PRECHECK, INIT_COMPLETION, INIT_EXCEPTION,
@@ -125,6 +131,22 @@ internal class OwnerBootTrace(private val emit: (OwnerDiagnosticRecord) -> Unit)
             if (closed || firstFailure != null) null
             else OwnerDiagnosticRecord(OwnerDiagnosticEvent.OWNER_FIRST_FAILURE, step, phase, origin, category, status)
                 .also { firstFailure = it }
+        }
+    }
+
+    /** A maintenance pass that failed and was survived. It never becomes the
+     * first failure and never hides one that already happened, so the record of
+     * what retired the owner still belongs to whatever retired it. */
+    fun maintenanceFailed(
+        origin: OwnerFailureOrigin,
+        category: OwnerFailureCategory,
+        phase: PolicyOwnerPhase,
+    ) = observe {
+        synchronized(lock) {
+            if (closed || firstFailure != null) null
+            else OwnerDiagnosticRecord(
+                OwnerDiagnosticEvent.OWNER_MAINTENANCE_FAILURE, step, phase, origin, category,
+            )
         }
     }
 

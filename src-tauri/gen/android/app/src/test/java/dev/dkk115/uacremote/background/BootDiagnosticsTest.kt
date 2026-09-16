@@ -149,6 +149,37 @@ class BootDiagnosticsTest {
         assertEquals(PolicyOwnerPhase.CLOSED, events.last().phase)
     }
 
+    @Test fun survivedMaintenanceFailuresAreRecordedWithoutBecomingTheReasonTheOwnerRetired() {
+        val events = ArrayList<OwnerDiagnosticRecord>()
+        val trace = OwnerBootTrace { events.add(it) }
+        trace.initializing(OwnerInitializationStep.OPEN_NATIVE_OWNER)
+        trace.ready()
+        // Every pass the owner survived is its own record. The first release
+        // that met a real request discarded the reason instead and retired on
+        // the spot, so the trace could only say NOT_CAPTURED.
+        repeat(3) {
+            trace.maintenanceFailed(OwnerFailureOrigin.REQUEST_MAINTENANCE,
+                OwnerFailureCategory.OTHER, PolicyOwnerPhase.READY)
+        }
+        assertEquals(3, events.count { it.event == OwnerDiagnosticEvent.OWNER_MAINTENANCE_FAILURE })
+        assertEquals(0, events.count { it.event == OwnerDiagnosticEvent.OWNER_FIRST_FAILURE })
+        trace.failed(OwnerFailureOrigin.REQUEST_MAINTENANCE, OwnerFailureCategory.BRIDGE_CLOSED,
+            PolicyStatus.UNAVAILABLE, PolicyOwnerPhase.READY)
+        // What retired it is still what retired it, and nothing after that
+        // moment can add to the record or replace it.
+        trace.maintenanceFailed(OwnerFailureOrigin.REQUEST_MAINTENANCE,
+            OwnerFailureCategory.OTHER, PolicyOwnerPhase.READY)
+        trace.closed()
+        trace.maintenanceFailed(OwnerFailureOrigin.REQUEST_MAINTENANCE,
+            OwnerFailureCategory.OTHER, PolicyOwnerPhase.CLOSED)
+        assertEquals(3, events.count { it.event == OwnerDiagnosticEvent.OWNER_MAINTENANCE_FAILURE })
+        assertEquals(OwnerFailureCategory.BRIDGE_CLOSED, events.last().category)
+        assertEquals(OwnerDiagnosticEvent.OWNER_CLOSED, events.last().event)
+        // A survived pass is not free: an unbroken run of them still retires
+        // the owner rather than leaving a phone that never answers.
+        assertEquals(4, PolicyOwnerBounds.MAX_CONSECUTIVE_MAINTENANCE_FAILURES)
+    }
+
     @Test fun firstTimeoutReasonSurvivesLateOpenExceptionAndCleanupWithoutReady() {
         val events = ArrayList<OwnerDiagnosticRecord>()
         val trace = OwnerBootTrace { events.add(it) }

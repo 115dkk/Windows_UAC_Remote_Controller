@@ -7,7 +7,7 @@ import { ko, remainingLabel } from './messages';
 import { EmptyState } from './StatusPanels';
 import { RequestDetailsDisclosure } from './RequestDetailsDisclosure';
 import { PairingEntry } from './PairingEntry';
-import { hasNoPairedPc } from './phoneConnection';
+import { hasNoPairedPc, hasPairedPc } from './phoneConnection';
 import { displayText, hasDirectionControls } from './displayText';
 import { tr } from './i18n';
 
@@ -63,6 +63,6 @@ export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOp
   RequestPanelProps & { onOpenScanner: () => void; scannerButtonRef: Ref<HTMLButtonElement> }) {
   return <>
     <RequestContents snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={onDecision} />
-    {snapshot.platform === 'android' && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} scannerButtonRef={scannerButtonRef} />}
+    {snapshot.platform === 'android' && !hasPairedPc(snapshot) && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} scannerButtonRef={scannerButtonRef} />}
   </>;
 }
