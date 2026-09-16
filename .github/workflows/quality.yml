@@ -31,6 +31,16 @@ jobs:
           arguments: --locked --all-features --workspace
           command: check
           command-arguments: licenses
+      - name: Check locked workspace advisories with Cargo Deny
+        # Separate step so a newly published advisory is never mistaken for a
+        # license failure. This one reads the RustSec database, so it can start
+        # failing on a revision that passed yesterday; that is the point of it.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          rust-version: '1.97.0'
+          arguments: --locked --all-features --workspace
+          command: check
+          command-arguments: advisories
 
   protocol-security:
     name: Protocol security (Tamarin)

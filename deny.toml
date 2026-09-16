@@ -37,3 +37,18 @@ unused-allowed-license = "allow"
 
 [licenses.private]
 ignore = false
+
+[advisories]
+# A security vulnerability is denied wherever it sits, however deep. That is the
+# point of this check: rustls gates the phone channel and arrives four levels
+# down, and this gate is what caught RUSTSEC-2026-0285 in it.
+#
+# Unmaintained crates are judged only where this workspace can act on them.
+# Every unmaintained advisory currently in the tree comes from Tauri's own
+# dependencies (gtk -> glib -> glib-macros -> proc-macro-error, and
+# urlpattern -> unic-*), each carrying "no safe upgrade is available". Denying
+# those would buy an ignore list that has to be re-proven every time Tauri
+# moves, in exchange for no decision this project is able to make.
+unmaintained = "workspace"
+# A withdrawn release is always this workspace's problem, whoever pulled it in.
+yanked = "deny"
