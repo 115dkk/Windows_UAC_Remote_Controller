@@ -11,7 +11,8 @@ use tokio::{
 };
 
 use crate::{
-    COPY_BUFFER_BYTES, CancellationToken, HEADER_BYTES, READY_MARKER, Registration, RelayError,
+    ACCEPT_BACKOFF, COPY_BUFFER_BYTES, CancellationToken, HEADER_BYTES,
+    MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES, READY_MARKER, Registration, RelayError,
     RelayLimits, RelayReport, RouteId,
 };
 
@@ -114,6 +115,12 @@ async fn run_loop(
     let mut routes = BTreeMap::new();
     let mut report = RelayReport::default();
     let mut next_id = 0_u64;
+    // Cleared by one accepted connection, so only an unbroken run of refusals
+    // counts. `accept_backoff` disables the accept branch instead of awaiting
+    // inside it, so a refusing listener never stalls cancellation, registration
+    // or task retirement.
+    let mut accept_faults = 0_u32;
+    let mut accept_backoff: Option<Instant> = None;
     let mut failure = loop {
         tokio::select! {
             biased;
@@ -126,8 +133,18 @@ async fn run_loop(
                         }
                     }
                     Some(Err(_)) => {
+                        // Nothing is aborted while this loop runs, so this is a
+                        // panic. The task unwound its own sockets and slots, so
+                        // that connection is already gone and the rest of the
+                        // service is untouched. Its route entry is not: tokio
+                        // names the task with an identifier this crate cannot
+                        // read on stable, so `finish_task` never runs for it and
+                        // the entry holds any retained follower socket until
+                        // shutdown. Serve on, and stop once that leak adds up.
                         report.task_failures = report.task_failures.saturating_add(1);
-                        break Some(RelayError::TaskFailed);
+                        if report.task_failures > MAX_TASK_FAILURES {
+                            break Some(RelayError::TaskFailed);
+                        }
                     }
                     None => (),
                 }
@@ -137,10 +154,27 @@ async fn run_loop(
                     register(registration, &mut routes, &mut report, limits);
                 }
             }
-            accepted = listener.accept() => {
+            accepted = listener.accept(), if accept_backoff.is_none() => {
                 let (socket, _) = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(_) => break Some(RelayError::AcceptFailed),
+                    Ok(accepted) => {
+                        accept_faults = 0;
+                        accepted
+                    }
+                    // A descriptor shortage, or a client that resets while the
+                    // kernel is still completing its handshake, costs the one
+                    // connection it refused. Retiring the listener for it would
+                    // let any client end the service for everyone.
+                    Err(_) => {
+                        report.accept_failures = report.accept_failures.saturating_add(1);
+                        accept_faults = accept_faults.saturating_add(1);
+                        match accept_setback(accept_faults, Instant::now()) {
+                            Ok(until) => {
+                                accept_backoff = Some(until);
+                                continue;
+                            }
+                            Err(error) => break Some(error),
+                        }
+                    }
                 };
                 // No connection task/queue is created until its owned socket
                 // slot is reserved. A full service explicitly closes new sockets.
@@ -168,6 +202,11 @@ async fn run_loop(
                 }
                 tasks.spawn(connection(id, Peer { socket, early_byte: None, _permit: permit }, Instant::now(),
                     mailbox.clone(), limits, cancellation.clone()));
+            }
+            // Last, so a backoff that is already due still yields to
+            // cancellation, retirement and registration first.
+            _ = sleep_until(accept_backoff.unwrap_or_else(Instant::now)), if accept_backoff.is_some() => {
+                accept_backoff = None;
             }
         }
     };
@@ -220,6 +259,16 @@ async fn run_loop(
         return Err(RelayError::TaskFailed);
     }
     Ok(report)
+}
+
+/// What one refused `accept` costs. `Ok` carries the instant the listener may
+/// be polled again; `Err` means it has refused for long enough to be broken
+/// rather than busy, and the run stops.
+fn accept_setback(consecutive: u32, now: Instant) -> Result<Instant, RelayError> {
+    if consecutive > MAX_CONSECUTIVE_ACCEPT_FAILURES {
+        return Err(RelayError::AcceptFailed);
+    }
+    Ok(now + ACCEPT_BACKOFF)
 }
 
 fn register(
@@ -1129,5 +1178,46 @@ mod assignment_ownership_tests {
         )
         .expect("remaining leader cleanup");
         assert_eq!(permits.available_permits(), 3);
+    }
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    use crate::MAX_ACCEPTED_CONNECTIONS;
+
+    #[test]
+    fn a_refused_accept_costs_a_wait_and_not_the_listener() {
+        let now = Instant::now();
+        assert_eq!(accept_setback(1, now), Ok(now + ACCEPT_BACKOFF));
+        assert_eq!(
+            accept_setback(MAX_CONSECUTIVE_ACCEPT_FAILURES, now),
+            Ok(now + ACCEPT_BACKOFF),
+            "the last tolerated refusal still only costs a wait"
+        );
+    }
+
+    #[test]
+    fn a_listener_that_refuses_everything_ends_the_run_within_a_bound() {
+        let now = Instant::now();
+        assert_eq!(
+            accept_setback(MAX_CONSECUTIVE_ACCEPT_FAILURES + 1, now),
+            Err(RelayError::AcceptFailed),
+        );
+        // Refusing every poll costs this much wall clock before the run gives
+        // up. Neither an unbounded spin nor an unbounded wait.
+        let patience = ACCEPT_BACKOFF * MAX_CONSECUTIVE_ACCEPT_FAILURES;
+        assert!(patience >= Duration::from_secs(1), "{patience:?} spins");
+        assert!(patience <= Duration::from_secs(10), "{patience:?} hangs");
+    }
+
+    #[test]
+    fn tolerated_task_panics_cannot_strand_the_whole_socket_pool() {
+        // Each tolerated panic strands one route entry, and that entry holds at
+        // most one retained follower socket and its slot until shutdown.
+        assert!(
+            MAX_TASK_FAILURES < MAX_ACCEPTED_CONNECTIONS as u64,
+            "a run must give up before the strand exhausts its own capacity"
+        );
     }
 }

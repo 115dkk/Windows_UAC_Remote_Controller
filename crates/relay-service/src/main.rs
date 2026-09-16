@@ -85,8 +85,11 @@ async fn main() -> ExitCode {
     match result {
         Ok(report) => {
             println!(
-                "relay stopped: accepted={}, routing_matches={}, capacity_rejections={}, remaining_connections={}",
+                "relay stopped: accepted={}, accept_failures={}, routing_matches={}, capacity_rejections={}, remaining_connections={}",
                 report.accepted,
+                // A survivable refusal ends the run successfully, so this is
+                // the only place an operator sees that the listener struggled.
+                report.accept_failures,
                 report.paired,
                 report.rejected_capacity,
                 report.remaining_connections

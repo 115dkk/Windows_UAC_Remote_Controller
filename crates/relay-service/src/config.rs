@@ -11,6 +11,27 @@ const MAX_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A listener refuses one connection for reasons that pass: a descriptor
+/// shortage, a client that resets while the kernel is still completing its
+/// handshake. Such a refusal must cost that one connection and never the
+/// listener, so the coordinator waits this long before polling again. Without
+/// the wait a listener that keeps refusing spins at full speed, which is a
+/// denial of service of its own.
+pub(crate) const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Consecutive, so one accepted connection clears the record. A listener that
+/// refuses this many in a row is broken rather than busy, and roughly three
+/// seconds of backoff have passed by then.
+pub(crate) const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
+
+/// A panicking connection task unwinds its own sockets and slots, so the
+/// connection dies with it and the service keeps listening. What the
+/// coordinator cannot do is name the task tokio reports, so that task's route
+/// entry, and the retained follower socket the entry may hold, survive until
+/// shutdown clears the map. One route per panic is a bounded leak, so a few are
+/// tolerated and then the run stops.
+pub(crate) const MAX_TASK_FAILURES: u64 = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayLimits {
     pub(crate) connections: usize,
@@ -129,6 +150,7 @@ pub enum RelayError {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RelayReport {
     pub accepted: u64,
+    pub accept_failures: u64,
     pub rejected_capacity: u64,
     pub rejected_waiting_rooms: u64,
     pub rejected_duplicates: u64,
