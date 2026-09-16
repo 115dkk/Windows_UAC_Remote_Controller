@@ -58,6 +58,38 @@ jobs:
             if ($status -eq 0) { [void][Probe.Ncrypt]::NCryptFreeObject($h) }
           }
           exit 0
+      - name: Report whether an accelerated Android emulator could ever run here
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The UAC lab pairs against a synthetic phone. Replacing that fixture
+          # with the real product on an emulator is only possible if this runner
+          # can accelerate one, and an API 36 x86_64 image is not usable without
+          # acceleration. Every line below is a read: no feature is installed and
+          # no hypervisor is enabled.
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, VirtualizationFirmwareEnabled, VMMonitorModeExtensions, SecondLevelAddressTranslationExtensions |
+            Format-List | Out-String -Width 200
+          Write-Output "--- Hyper-V requirements as systeminfo reports them ---"
+          systeminfo 2>&1 | Select-String -Pattern 'Hyper-V|하이퍼' | ForEach-Object { $_.Line }
+          Write-Output "--- hypervisor platform features (state only) ---"
+          foreach ($feature in 'HypervisorPlatform','Microsoft-Hyper-V-All','VirtualMachinePlatform','WindowsHypervisorPlatform') {
+            try {
+              $state = (Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop).State
+            } catch { $state = "query failed: $($_.Exception.Message)" }
+            Write-Output ("{0}={1}" -f $feature, $state)
+          }
+          Write-Output "--- services a hypervisor would bring ---"
+          Get-Service -Name vmcompute, HvHost, vmms -ErrorAction SilentlyContinue |
+            Select-Object Name, Status, StartType | Format-Table -AutoSize | Out-String
+          Write-Output "--- Android SDK present on this image at all ---"
+          $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          Write-Output "ANDROID_SDK=$sdk"
+          if ($sdk -and (Test-Path $sdk)) {
+            Get-ChildItem $sdk -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+            Write-Output "emulator binary: $(Test-Path (Join-Path $sdk 'emulator/emulator.exe'))"
+          }
+          exit 0
       - name: Report VM and OS identity
         shell: pwsh
         run: |
