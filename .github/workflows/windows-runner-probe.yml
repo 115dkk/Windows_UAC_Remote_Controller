@@ -90,6 +90,27 @@ jobs:
             Write-Output "emulator binary: $(Test-Path (Join-Path $sdk 'emulator/emulator.exe'))"
           }
           exit 0
+      - name: Ask the emulator itself, which is the only answer that counts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The feature states above say a hypervisor is present. Whether the
+          # emulator can actually use it is its own question, and it answers it.
+          # -accel-check starts no virtual device and creates nothing.
+          $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          $emulator = Join-Path $sdk 'emulator/emulator.exe'
+          if (-not (Test-Path $emulator)) { Write-Output 'no emulator on this image'; exit 0 }
+          Write-Output "--- emulator -accel-check ---"
+          & $emulator -accel-check 2>&1 | ForEach-Object { $_ }
+          Write-Output "accel-check exit=$LASTEXITCODE"
+          Write-Output "--- emulator -version ---"
+          & $emulator -version 2>&1 | Select-Object -First 4 | ForEach-Object { $_ }
+          Write-Output "--- system images already on the image ---"
+          $images = Join-Path $sdk 'system-images'
+          if (Test-Path $images) {
+            Get-ChildItem $images -Recurse -Depth 2 -Directory | Select-Object -ExpandProperty FullName
+          } else { Write-Output 'no system-images directory: one would have to be installed' }
+          exit 0
       - name: Report VM and OS identity
         shell: pwsh
         run: |
