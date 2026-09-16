@@ -40,7 +40,7 @@ for (const selected of pairingCeremonyCases) {
     }
 
     await expect(page.getByRole('heading', { name: galleryText(locale, 'UAC 원격 승인 · PC 연결'), exact: true })).toBeVisible();
-    await expect(page.getByText(galleryText(locale, '인증이 끝나면 이 화면은 저절로 닫혀요.'), { exact: true })).toBeVisible();
+    await expect(page.getByText(galleryText(locale, '{:02}:{:02} 후 종료').replace('{:02}:{:02}', '01:47'), { exact: true })).toBeVisible();
     const back = page.getByRole('button', { name: galleryText(locale, '취소하고 돌아가기'), exact: true });
     const hint = page.getByText(galleryText(locale, 'ESC 키를 눌러도 바로 돌아가요.'), { exact: true });
     await expect(back).toBeInViewport({ ratio: 1 });

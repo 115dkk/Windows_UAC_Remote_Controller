@@ -164,9 +164,9 @@ fn invitation_layout(card: RECT, dpi: i32, shorter: i32, modules: usize) -> Invi
     let footer = scale(164);
     // A short card gives up the breathing room under its copy before it gives
     // up either the smallest readable code or the way out beneath it.
-    let header = scale(258)
+    let header = scale(214)
         .min(card_height - footer - MIN_MODULE_PX * quiet - scale(8))
-        .max(scale(238));
+        .max(scale(200));
     let band = (card_height - header - footer).max(1);
     let target = (shorter * 38 / 100).min(band);
     let module_px = (target / quiet.max(1)).max(MIN_MODULE_PX);
@@ -312,9 +312,10 @@ impl WindowOwner {
         let minutes = format!("{:02}", self.remaining_second / 60);
         let seconds = format!("{:02}", self.remaining_second % 60);
         let time = format!("\u{202a}{minutes}:{seconds}\u{202c}");
-        // Deliberately not "time remaining": the same fact stated as a harmless
-        // automatic close rather than as a deadline the reader is racing.
-        self.copy("{:02}:{:02} 뒤에 저절로 닫혀요")
+        // Neither a deadline the reader is racing nor a promise that the screen
+        // acts on its own. Just when it ends, which claims nothing about who is
+        // in control of it.
+        self.copy("{:02}:{:02} 후 종료")
             .replace("{:02}:{:02}", &time)
     }
 
@@ -1041,19 +1042,6 @@ impl WindowOwner {
             MUTED_INK,
             DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
         );
-        draw_text(
-            dc,
-            self.hint_font,
-            self.copy("인증이 끝나면 이 화면은 저절로 닫혀요."),
-            RECT {
-                left: left + scale(36),
-                top: top + scale(194),
-                right: left + card_width - scale(36),
-                bottom: top + scale(234),
-            },
-            FAINT_INK,
-            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
-        );
         let layout = self.invitation_layout(
             RECT {
                 left,
@@ -1641,7 +1629,7 @@ mod tests {
                 layout.module_px
             );
             assert!(
-                layout.qr_top >= card.top + scale(238),
+                layout.qr_top >= card.top + scale(200),
                 "{label}: the code never covers the copy above it"
             );
             assert!(

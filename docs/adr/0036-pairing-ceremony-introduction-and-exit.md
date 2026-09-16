@@ -47,9 +47,15 @@ which closes the window, restores the original input desktop and drains the pipe
 through the cancellation path that already existed. No decision frame is written
 and no grant, key or enrollment is created, refused or implied.
 
-**The countdown states the consequence instead of the deadline.** The same
-seconds now read `{:02}:{:02} 뒤에 저절로 닫혀요`. The old `남은 시간` key is gone
-from all eleven catalogues.
+**The countdown says when the screen ends and gives the ending no agent.** The
+same seconds now read `{:02}:{:02} 후 종료`. Counting down what is left is a
+deadline the reader races, and the obvious softening, telling them it closes by
+itself, hands the agency to the screen and so states a second time that they are
+not in control. The bare form attributes the ending to nobody. For the same
+reason the QR screen carries no line promising that it will disappear on its
+own: a reassurance the reader did not ask for, about the machine acting
+unprompted, is worse than saying nothing. The old `남은 시간` key is gone from
+all eleven catalogues.
 
 **The takeover is signed, once.** The product mark and name are painted in the
 leading top corner only, from axis-aligned primitives and a stock null pen; no

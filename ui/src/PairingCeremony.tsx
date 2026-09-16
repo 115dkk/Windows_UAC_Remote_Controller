@@ -37,7 +37,7 @@ function cardRect(width: number, height: number) {
 function invitationLayout(cardHeight: number, shorter: number, modules: number) {
   const quiet = modules + QUIET_MODULES * 2;
   const footer = 164;
-  const header = Math.max(238, Math.min(258, cardHeight - footer - MIN_MODULE_PX * quiet - 8));
+  const header = Math.max(200, Math.min(214, cardHeight - footer - MIN_MODULE_PX * quiet - 8));
   const band = Math.max(1, cardHeight - header - footer);
   const target = Math.min(Math.trunc((shorter * 38) / 100), band);
   const modulePx = Math.max(MIN_MODULE_PX, Math.trunc(target / quiet));
@@ -138,14 +138,11 @@ function Invitation({ width, height }: { width: number; height: number }) {
     <p style={{ position: 'absolute', insetInline: 36, top: 104, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
       {tr('UAC 원격 승인 앱에서 [PC의 QR 코드 촬영]을 누르고 이 QR을 비춰 주세요.')}
     </p>
-    <p style={{ position: 'absolute', insetInline: 36, top: 194, margin: 0, font: `${pt(13)} var(--font-ui)`, color: FAINT_INK }}>
-      {tr('인증이 끝나면 이 화면은 저절로 닫혀요.')}
-    </p>
     <div style={{ position: 'absolute', left: Math.trunc((card.width - layout.side) / 2), top: layout.qrTop }}>
       <SampleCode side={layout.side} modulePx={layout.modulePx} />
     </div>
     <p style={{ position: 'absolute', insetInline: 24, top: layout.countdownTop, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
-      {tr('{:02}:{:02} 뒤에 저절로 닫혀요').replace('{:02}:{:02}', '01:47')}
+      {tr('{:02}:{:02} 후 종료').replace('{:02}:{:02}', '01:47')}
     </p>
     <div style={{ position: 'absolute', insetInline: 0, top: layout.buttonTop, display: 'flex', justifyContent: 'center' }}>
       <Button label={tr('취소하고 돌아가기')} />
