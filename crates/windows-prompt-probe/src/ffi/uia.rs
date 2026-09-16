@@ -123,14 +123,18 @@ pub(super) fn apply(
         }
         return Err(error);
     }
-    if &fresh != retained || fresh.content().digest() != content_digest {
+    if fresh.content() != retained.content()
+        || !fresh.counts().describes_the_same_prompt(retained.counts())
+        || fresh.content().digest() != content_digest
+    {
         // The watch census can call a prompt unchanged while this comparison
         // calls it changed, and one refusal word cannot tell those apart. Shapes
         // only: which side disagreed, and how many labels each side holds. The
         // labels themselves stay where they are.
         lab_note!(
-            "apply refused: retained_mismatch report_equal={} digest_equal={} fresh_labels={} retained_labels={}",
-            &fresh == retained,
+            "apply refused: retained_mismatch content_equal={} counts_equal={} digest_equal={} fresh_labels={} retained_labels={}",
+            fresh.content() == retained.content(),
+            fresh.counts().describes_the_same_prompt(retained.counts()),
             fresh.content().digest() == content_digest,
             fresh.content().labels().len(),
             retained.content().labels().len()

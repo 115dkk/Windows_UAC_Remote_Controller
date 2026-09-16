@@ -545,6 +545,79 @@ mod tests {
     }
 
     #[test]
+    fn a_window_appearing_on_the_secure_desktop_is_not_a_changed_prompt_but_every_other_count_is() {
+        let census = counts();
+        let busier_desktop = ProbeCounts {
+            top_level_windows: census.top_level_windows + 9,
+            ..census
+        };
+        // Whole-report equality calls this a changed prompt. That is why it
+        // cannot be the question asked before acting on a user's decision:
+        // winlogon opens and closes hidden windows while a prompt is up, and
+        // none of them is the prompt or a candidate to be one.
+        assert_ne!(
+            ProbeReport::from_observation(census, observation()).unwrap(),
+            ProbeReport::from_observation(busier_desktop, observation()).unwrap()
+        );
+        assert!(census.describes_the_same_prompt(busier_desktop));
+        assert!(busier_desktop.describes_the_same_prompt(census));
+        // Everything else the census counted is about the prompt itself, so a
+        // move in any one of them is a changed prompt and must refuse.
+        let mutations: [fn(ProbeCounts) -> ProbeCounts; 11] = [
+            |c| ProbeCounts {
+                qualified_candidates: c.qualified_candidates + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                elements: c.elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                password_nodes_skipped: c.password_nodes_skipped + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                enabled_elements: c.enabled_elements - 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                offscreen_elements: c.offscreen_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                native_window_elements: c.native_window_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                button_elements: c.button_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                invoke_pattern_available: c.invoke_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                value_pattern_available: c.value_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                legacy_accessible_pattern_available: c.legacy_accessible_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                maximum_depth: c.maximum_depth + 1,
+                ..c
+            },
+        ];
+        for mutate in mutations {
+            let moved = mutate(census);
+            assert_ne!(moved, census);
+            assert!(!census.describes_the_same_prompt(moved));
+            assert!(!moved.describes_the_same_prompt(census));
+        }
+    }
+
+    #[test]
     fn empty_caption_and_exact_whitespace_are_preserved_but_a_nonempty_label_is_required() {
         let value =
             PromptContentObservation::from_parts(vec![0], String::new(), vec![label(1, " \t ")])

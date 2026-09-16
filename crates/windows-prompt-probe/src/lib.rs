@@ -208,6 +208,29 @@ pub struct ProbeCounts {
     pub maximum_depth: u8,
 }
 
+impl ProbeCounts {
+    /// Equality for the prompt a census found, not for the desktop it stood on.
+    /// Every field here describes the observed prompt except `top_level_windows`,
+    /// which counts every top-level window on the secure desktop including the
+    /// hidden ones that are never candidates. Winlogon creates and destroys those
+    /// while a prompt is up, so comparing that number turns unrelated desktop
+    /// activity into a refused decision, and refusing the user's own approval is
+    /// the expensive way to be wrong. Whether this prompt is still the only
+    /// candidate is a different question, asked separately and answered first.
+    /// Written as a field override rather than a list so a field added later is
+    /// compared by default instead of silently dropping out of the comparison.
+    #[must_use]
+    pub fn describes_the_same_prompt(self, other: Self) -> bool {
+        Self {
+            top_level_windows: 0,
+            ..self
+        } == Self {
+            top_level_windows: 0,
+            ..other
+        }
+    }
+}
+
 /// Bounded read-only observation, not recognized operation or live target proof.
 /// Success always contains content; counts alone cannot construct this report.
 #[derive(Clone, Eq, PartialEq)]
