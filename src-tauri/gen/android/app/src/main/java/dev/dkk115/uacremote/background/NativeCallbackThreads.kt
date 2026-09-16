@@ -33,10 +33,15 @@ internal object NativeCallbackThreads {
     }
 
     /**
-     * Pins the generated vtable after the generated contract check has built it
-     * and before any ceremony thread can enter it. Returns how many callbacks
-     * were pinned. Zero means the old detach policy still stands, which is a
-     * crash risk and not a reason to refuse to open the owner.
+     * Pins the generated vtable. **Call this before anything touches the
+     * generated library object.** That object's own initializer hands the
+     * vtable to Rust, and JNA reads this policy while it converts each slot to
+     * a function pointer, which is the only time it looks. A policy registered
+     * after the handover is recorded and never read, so the count below would
+     * still say 23 while every slot kept the detach behaviour that kills the
+     * process. Returns how many callbacks were pinned. Zero means the old
+     * detach policy still stands, which is a crash risk and not a reason to
+     * refuse to open the owner.
      */
     internal fun pinGeneratedCallbacks(): Int {
         val pinned = try { pin(uniffiCallbackInterfaceNativePlatform.vtable) } catch (failure: Throwable) { unpinned(failure) }
@@ -87,4 +92,21 @@ internal object NativeCallbackThreads {
     }
 
     private fun keepAttached(callback: Callback) = Native.setCallbackThreadInitializer(callback, keepAttachedPolicy)
+
+    /**
+     * The same policy asked for on the thread JNA is running right now, rather
+     * than on a vtable slot. JNA keeps one detach flag per thread and reads it
+     * when a callback returns, so a nested callback that returns first detaches
+     * a thread whose outer Kotlin frames are still on the stack, and ART kills
+     * the process for it. Clearing that flag on entry to a callback that
+     * re-enters Rust ends the nesting hazard for the rest of that thread's
+     * life, and it holds whether or not the slot's own policy took. JNA still
+     * detaches the thread when the thread itself ends.
+     *
+     * Costs nothing off a callback thread and nothing to repeat, so a caller
+     * does not have to know which of its callbacks ran first.
+     */
+    internal fun keepCurrentThreadAttached() {
+        try { Native.detach(false) } catch (failure: Throwable) { unpinned(failure) }
+    }
 }

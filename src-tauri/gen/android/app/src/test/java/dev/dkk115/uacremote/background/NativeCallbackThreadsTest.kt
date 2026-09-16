@@ -49,6 +49,16 @@ class NativeCallbackThreadsTest {
         assertEquals(listOf<Callback>(vtable.second), pinned)
     }
 
+    @Test fun holdingTheCurrentThreadIsSafeWhereNoCallbackAndNoDispatchLibraryExist() {
+        // This runs on a plain JVM thread with no JNA dispatch library, which is
+        // the harshest version of "not a callback thread". The owner calls this
+        // from inside a callback and must never learn that the request could not
+        // be honoured, because the alternative it would fall back to is the
+        // crash. Repeating it is the normal case: every callback entry asks.
+        NativeCallbackThreads.keepCurrentThreadAttached()
+        NativeCallbackThreads.keepCurrentThreadAttached()
+    }
+
     @Test fun aHolderWhoseFieldsCannotBeReadPinsNothing() {
         // The JDK refuses to open java.lang.Class to this module, so the walk
         // fails inside reflection instead of reporting a partial count. Where a

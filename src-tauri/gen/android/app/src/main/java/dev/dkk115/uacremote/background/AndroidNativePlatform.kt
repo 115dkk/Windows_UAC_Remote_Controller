@@ -66,7 +66,13 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         requestProgress = progress; requestChanged = changed; timeChanged = temporal; requestCleanup = cleanup
     }
     override fun intakeProgress() { requestProgress?.invoke() ?: throw BridgeException.NativeUnavailable() }
-    override fun presentationClock(): NativePresentationClock = presentation.observe()
+    // The clock is what an outer callback's re-entry reaches, so it is the one
+    // that returns first and detaches. Holding the thread here covers a nesting
+    // whose outer callback this class has not been told about.
+    override fun presentationClock(): NativePresentationClock {
+        NativeCallbackThreads.keepCurrentThreadAttached()
+        return presentation.observe()
+    }
     override fun publishPendingRequest(request: NativePendingRequest, intent: NativeRequestPresentation, alert: NativeRequestAlert): NativeRequestSinkOutcome =
         requests.publish(request, intent, alert)
     internal fun refreshPresentationClock() { clock() }
@@ -332,6 +338,12 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     override fun hasDeviceKeys(): Boolean = legacy.hasDeviceKeys()
 
     override fun createLocalKeySet(request: NativeKeyCreationRequest): NativeCreatedKeyEvidence {
+        // This callback re-enters Rust below (takeInput, checkCurrent) and Rust
+        // answers by calling back out again, so a callback nests inside this
+        // one and returns while these frames are still live. Hold the ceremony
+        // thread attached before that can happen; the returning inner callback
+        // used to detach it and ART killed the process.
+        NativeCallbackThreads.keepCurrentThreadAttached()
         if (!creationActive.compareAndSet(false, true)) {
             try { creationArguments.closeOrRetain(request) } catch (_: Exception) { }
             throw BridgeException.LocalKeysReconciliationRequired()

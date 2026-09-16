@@ -474,16 +474,21 @@ internal class ApplicationPolicyActor(private val application: Application) {
             }
             bootTrace.initializing(OwnerInitializationStep.PACKAGED_LIBRARY)
             PackagedControllerLibrary.prepare(application)
-            // Run the generator's contract/API checksum checks before any
-            // controller operation; our coarse ABI number is not a substitute.
             bootTrace.initializing(OwnerInitializationStep.GENERATED_CONTRACT)
             registeringContract = true
-            uniffiEnsureInitialized()
-            // The vtable now exists and no ceremony has run, so pin its threads
-            // here: a returning nested callback used to detach a running Rust
-            // ceremony thread and ART killed the process. A zero count restores
-            // only that old risk, so it never stops this startup.
+            // Before the contract check, not after it. That check is what first
+            // touches the generated library object, and the library's own
+            // initializer is what hands the callback vtable to Rust. JNA reads a
+            // slot's thread policy while it converts that slot to a function
+            // pointer, which happens once, inside that handover. Pinning
+            // afterwards recorded a policy nothing read again, and a returning
+            // nested callback went on detaching a running Rust ceremony thread
+            // until ART killed the process. A zero count restores only that old
+            // risk, so it never stops this startup.
             NativeCallbackThreads.pinGeneratedCallbacks()
+            // Run the generator's contract/API checksum checks before any
+            // controller operation; our coarse ABI number is not a substitute.
+            uniffiEnsureInitialized()
             bootTrace.initializing(OwnerInitializationStep.BRIDGE_ABI)
             check(bridgeVersion() == ControllerLibraryPolicy.ABI_VERSION)
             registeringContract = false
