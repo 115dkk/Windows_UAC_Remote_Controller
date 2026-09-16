@@ -52,11 +52,26 @@ jobs:
           # The image must match the lifecycle job, or a later phase would be
           # measuring a different Android than the product is already tested on.
           $image = 'system-images;android-36;google_apis;x86_64'
-          'y' * 20 -split '' | Out-Null
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Used -ne $null } |
+            Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} |
+            Format-Table -AutoSize | Out-String
           $yes = (1..30 | ForEach-Object { 'y' }) -join "`n"
           $yes | & $sdkmanager --licenses 2>&1 | Select-Object -Last 3
-          & $sdkmanager --install $image 'platform-tools' 2>&1 | Select-Object -Last 5
-          if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed: $LASTEXITCODE" }
+          # The first attempt unzipped a truncated archive. A partial download is
+          # the ordinary way this fails, so clear what was left and ask again
+          # rather than reading a broken zip as a verdict about the runner.
+          $installed = $false
+          foreach ($attempt in 1..3) {
+            & $sdkmanager --install $image 'platform-tools' 2>&1 | Select-Object -Last 4
+            if ($LASTEXITCODE -eq 0 -and (Test-Path "$env:ANDROID_SDK\system-images\android-36\google_apis\x86_64\system.img")) {
+              $installed = $true; break
+            }
+            Write-Output "attempt $attempt did not leave a usable image; clearing the partial download"
+            Remove-Item -Recurse -Force "$env:ANDROID_SDK\system-images\android-36" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$env:ANDROID_SDK\.downloadIntermediates" -ErrorAction SilentlyContinue
+          }
+          if (-not $installed) { throw 'The system image never downloaded intact after three attempts.' }
           Write-Output ("image install took {0:n1} minutes" -f ((Get-Date) - $started).TotalMinutes)
       - name: Create a disposable AVD
         shell: pwsh
