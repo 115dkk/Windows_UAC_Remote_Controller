@@ -20,7 +20,11 @@ export default defineConfig(({ mode }) => ({
       if (mode === 'qa') return;
       for (const output of Object.values(bundle)) {
         if (output.type !== 'chunk') continue;
-        if (Object.keys(output.modules).some((id) => /\/qa-(fixtures|preview)\.tsx?(?:\?|$)/u.test(id.replaceAll('\\', '/')))) {
+        // Every gallery-only module, by name. The ceremony preview and its
+        // sample code are reachable only from qa-preview today; naming them here
+        // means an accidental import from the product tree fails the build
+        // instead of shipping a mock of a native screen inside the app.
+        if (Object.keys(output.modules).some((id) => /\/(qa-(fixtures|preview)|PairingCeremony|pairing-ceremony-sample)\.tsx?(?:\?|$)/u.test(id.replaceAll('\\', '/')))) {
           throw new Error('Synthetic gallery code is forbidden in a product build.');
         }
       }
