@@ -79,6 +79,7 @@ version = "0.1.0-alpha.27"
 dependencies = [
  "activity-journal",
  "android-controller",
+ "android-log-sink",
  "approval-protocol",
  "controller-runtime",
  "framed-transport",
@@ -117,6 +118,10 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "android-log-sink"
+version = "0.1.0-alpha.27"
 
 [[package]]
 name = "android_system_properties"

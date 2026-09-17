@@ -19,6 +19,7 @@ members = [
     "crates/android-controller",
     "crates/android-bindings",
     "crates/android-attestation",
+    "crates/android-log-sink",
     "tools/controller-uniffi-bindgen",
     "tools/ci-phone-fixture",
     "crates/relay-service",

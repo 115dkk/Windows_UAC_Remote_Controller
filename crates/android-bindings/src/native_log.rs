@@ -7,95 +7,20 @@
 //! an approval or a denial, and changes no generated interface. It only writes
 //! fixed diagnostic tokens to the device log.
 //!
-//! **Why not stderr.** The existing startup projection writes to stderr because
-//! `tao`'s Android glue pipes stdout and stderr into logcat under
-//! `RustStdoutStderr`. That pipe is installed by the window's own `create`, so
-//! it exists only once an Activity has been created. The owner, the intake
-//! reactor and every peer task run in the foreground service, which starts
-//! without an Activity and keeps running after one is destroyed. Diagnostics
-//! that only survive while the user has the UI open are not diagnostics for a
-//! background failure. `__android_log_write` is in `liblog`, which is linked
-//! into every Android process, needs no crate dependency, and does not care
-//! whether a window exists.
+//! **Where the line goes.** [`android_log_sink`] owns the one `liblog` call and
+//! the shape check. It is a separate crate because the workspace forbids unsafe
+//! here on purpose, and this crate holds the phone's requests, leases and key
+//! references. A log line is not worth weakening that.
 
 use crate::BridgeError;
-#[cfg(target_os = "android")]
-use std::ffi::CString;
-use std::{
-    panic::Location,
-    sync::{
-        Once,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::{panic::Location, sync::Once};
 
-/// Fixed tag for every line this module writes. Matches the `UacBoot` shape the
-/// Kotlin side already uses, so one logcat filter catches both sides.
-#[cfg(target_os = "android")]
+/// Fixed tag for every line this module writes, beside the `UacBoot` tag the
+/// Kotlin side already uses, so one logcat filter catches both.
 const TAG: &[u8] = b"UacNative\0";
 
-/// Total lines one process may write. A retiring owner emits a handful; an
-/// unbounded sink would let a spinning loop bury the line that matters under
-/// its own repetitions. Panic lines and diagnostic lines share this budget
-/// deliberately: the first few of either are what name a failure.
-const MAX_LINES: u32 = 64;
-static WRITTEN: AtomicU32 = AtomicU32::new(0);
-
-/// Accepts a line only if it is already the fixed closed shape every caller
-/// here builds: printable ASCII, no control bytes, bounded. A caller that
-/// somehow assembles anything else writes nothing rather than leaking it.
-fn admissible(line: &str) -> bool {
-    !line.is_empty()
-        && line.len() <= 256
-        && line
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
-}
-
-/// Writes one bounded line to the device log. Best effort in every sense: a
-/// refused line, an exhausted budget and a missing sink all leave the caller's
-/// own result untouched.
 pub(crate) fn write(line: &str) {
-    if !admissible(line) {
-        return;
-    }
-    if WRITTEN
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-            (count < MAX_LINES).then_some(count + 1)
-        })
-        .is_err()
-    {
-        return;
-    }
-    #[cfg(target_os = "android")]
-    {
-        const ANDROID_LOG_INFO: i32 = 4;
-        // SAFETY: `liblog` is linked into every Android process. Both pointers
-        // are owned, NUL-terminated and alive across the call, and the call
-        // borrows them without retaining them.
-        unsafe {
-            if let Ok(text) = CString::new(line) {
-                __android_log_write(
-                    ANDROID_LOG_INFO,
-                    TAG.as_ptr().cast::<std::ffi::c_char>(),
-                    text.as_ptr(),
-                );
-            }
-        }
-    }
-    // Mirrors the startup projection's own shape: off Android the line is built
-    // and vetted exactly as it would be, then goes nowhere.
-    #[cfg(not(target_os = "android"))]
-    let _ = line;
-}
-
-#[cfg(target_os = "android")]
-unsafe extern "C" {
-    fn __android_log_write(
-        priority: i32,
-        tag: *const std::ffi::c_char,
-        text: *const std::ffi::c_char,
-    ) -> i32;
+    android_log_sink::write(TAG, line);
 }
 
 /// The panic line, built apart from the hook so it can be tested without
@@ -131,7 +56,7 @@ fn panic_line(location: Option<&Location<'_>>, thread: Option<&str>) -> Option<S
         location.line(),
         location.column()
     );
-    admissible(&line).then_some(line)
+    android_log_sink::admissible(&line).then_some(line)
 }
 
 /// Installs the panic hook once per process. Chains to the previous hook rather
@@ -270,7 +195,7 @@ mod tests {
             for error in ERRORS.map(Some).into_iter().chain([None]) {
                 let error = error.map_or("NONE", error_label);
                 let line = format!("UAC_NATIVE_INTAKE_V1 site={} error={error}", site.label());
-                assert!(admissible(&line), "{line}");
+                assert!(android_log_sink::admissible(&line), "{line}");
             }
         }
     }
@@ -281,7 +206,7 @@ mod tests {
         assert!(line.starts_with("UAC_NATIVE_PANIC_V1 file="));
         assert!(line.contains("native_log.rs"));
         assert!(line.contains("thread=tokio-worker"));
-        assert!(admissible(&line));
+        assert!(android_log_sink::admissible(&line));
     }
 
     #[test]
@@ -299,22 +224,12 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_the_closed_shape_is_never_written() {
-        assert!(!admissible(""));
-        assert!(!admissible("has\na newline"));
-        assert!(!admissible("한글"));
-        assert!(!admissible(&"x".repeat(257)));
-        assert!(admissible(
+        assert!(!android_log_sink::admissible(""));
+        assert!(!android_log_sink::admissible("has\na newline"));
+        assert!(!android_log_sink::admissible("한글"));
+        assert!(!android_log_sink::admissible(&"x".repeat(257)));
+        assert!(android_log_sink::admissible(
             "UAC_NATIVE_INTAKE_V1 site=PEER_WORK error=NATIVE_UNAVAILABLE"
         ));
-    }
-
-    #[test]
-    fn the_sink_stops_at_its_budget_rather_than_repeating_forever() {
-        WRITTEN.store(MAX_LINES - 1, Ordering::Relaxed);
-        write("UAC_NATIVE_INTAKE_V1 site=PEER_WORK error=BUSY");
-        assert_eq!(WRITTEN.load(Ordering::Relaxed), MAX_LINES);
-        write("UAC_NATIVE_INTAKE_V1 site=PEER_WORK error=BUSY");
-        assert_eq!(WRITTEN.load(Ordering::Relaxed), MAX_LINES);
-        WRITTEN.store(0, Ordering::Relaxed);
     }
 }

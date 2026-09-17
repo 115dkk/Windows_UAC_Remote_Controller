@@ -15,6 +15,7 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 activity-journal = { path = "../activity-journal" }
 android-controller = { path = "../android-controller" }
+android-log-sink = { path = "../android-log-sink" }
 approval-protocol = { path = "../approval-protocol" }
 framed-transport = { path = "../framed-transport" }
 phone-request-core = { path = "../phone-request-core" }
