@@ -6,6 +6,7 @@ use crate::{
     NativeRequestCatalogStatus, NativeRequestPresentation, NativeRequestSelection,
     NativeRequestSinkOutcome,
     native_clock::{self, NativePresentationClock, PresentationTime, native_callback},
+    native_log::{Step, note},
 };
 use android_controller::DurableInbox;
 use notification_policy::{AlertMode, Effect, RequestKey};
@@ -181,7 +182,10 @@ impl MobileController {
                 Err(BridgeError::PresentationRefreshRequired) => {
                     return Err(BridgeError::PresentationRefreshRequired);
                 }
-                Err(error) => return self.fail_closed(error),
+                Err(error) => {
+                    let _ = note::<()>(Step::EffectPublish, Err(error));
+                    return self.fail_closed(error);
+                }
             }
         }
         self.publish_maintenance_deadline()?;
@@ -241,20 +245,24 @@ impl MobileController {
                 Effect::Drop { .. } | Effect::RecordOutcome { .. } => (),
             }
         }
-        withdrawals.extend(
+        withdrawals.extend(note(
+            Step::EffectPrune,
             self.projections
                 .lock()
                 .map_err(|_| BridgeError::Closed)?
-                .prune()?,
-        );
-        self.dispatch_withdrawals(&withdrawals)?;
+                .prune(),
+        )?);
+        note(
+            Step::EffectWithdraw,
+            self.dispatch_withdrawals(&withdrawals),
+        )?;
         if failed {
             return self.fail_closed(BridgeError::OwnerFaulted);
         }
         if presentations.len() > 32 {
             return self.fail_closed(BridgeError::OwnerFaulted);
         }
-        self.reconcile_terminal_outcomes()?;
+        note(Step::EffectReconcile, self.reconcile_terminal_outcomes())?;
         for (key, (intent, alert)) in presentations {
             if withdrawals.contains(&key) {
                 continue;
@@ -264,10 +272,13 @@ impl MobileController {
                 Err(BridgeError::PresentationRefreshRequired) => {
                     return Err(BridgeError::PresentationRefreshRequired);
                 }
-                Err(error) => return self.fail_closed(error),
+                Err(error) => {
+                    let _ = note::<()>(Step::EffectPublish, Err(error));
+                    return self.fail_closed(error);
+                }
             }
         }
-        self.publish_maintenance_deadline()
+        note(Step::EffectDeadline, self.publish_maintenance_deadline())
     }
     fn dispatch_withdrawals(&self, keys: &BTreeSet<RequestKey>) -> Result<(), BridgeError> {
         if keys.is_empty() {

@@ -65,16 +65,18 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         check(requestProgress == null)
         requestProgress = progress; requestChanged = changed; timeChanged = temporal; requestCleanup = cleanup
     }
-    override fun intakeProgress() { requestProgress?.invoke() ?: throw BridgeException.NativeUnavailable() }
+    override fun intakeProgress() = NativeThrowTrace.named("INTAKE_PROGRESS") {
+        requestProgress?.invoke() ?: throw BridgeException.NativeUnavailable()
+    }
     // The clock is what an outer callback's re-entry reaches, so it is the one
     // that returns first and detaches. Holding the thread here covers a nesting
     // whose outer callback this class has not been told about.
-    override fun presentationClock(): NativePresentationClock {
+    override fun presentationClock(): NativePresentationClock = NativeThrowTrace.named("PRESENTATION_CLOCK") {
         NativeCallbackThreads.keepCurrentThreadAttached()
-        return presentation.observe()
+        presentation.observe()
     }
     override fun publishPendingRequest(request: NativePendingRequest, intent: NativeRequestPresentation, alert: NativeRequestAlert): NativeRequestSinkOutcome =
-        requests.publish(request, intent, alert)
+        NativeThrowTrace.named("PUBLISH_PENDING_REQUEST") { requests.publish(request, intent, alert) }
     internal fun refreshPresentationClock() { clock() }
     internal fun invalidateRequestTime() { presentation.invalidate() }
     internal fun stopRequests() { requests.stop() }
@@ -320,7 +322,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
     }
     internal fun prepareApproval(plan: NativeApprovalPlan) = keyStore.prepareApproval(plan)
 
-    override fun withdrawRequests(requests: List<NativeRequestSelection>) {
+    override fun withdrawRequests(requests: List<NativeRequestSelection>) = NativeThrowTrace.named("WITHDRAW_REQUESTS") {
         if (Looper.myLooper() == Looper.getMainLooper() || requests.size > 1024) throw BridgeException.NativeUnavailable()
         val manager = application.getSystemService(NotificationManager::class.java) ?: throw BridgeException.NativeUnavailable()
         try {
@@ -466,7 +468,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         is NativeEnvironmentOutcome.Failure -> throw BridgeException.NativeUnavailable()
     }
 
-    override fun clock(): NativeClock {
+    override fun clock(): NativeClock = NativeThrowTrace.named("CLOCK") {
         val observed = when (val result = environment.observe()) {
             is NativeEnvironmentOutcome.Value -> result.value
             is NativeEnvironmentOutcome.Failure -> throw BridgeException.NativeUnavailable()
@@ -478,7 +480,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         // Values have already passed native shape/coherence checks. Rust checks
         // them again and owns all schedule/expiry/recovery decisions. This sample
         // is not a post-I/O action permit; native dispatch must observe time again.
-        return NativeClock(
+        NativeClock(
             bootCount = observed.bootCount.toUInt(),
             monotonicNanos = observed.elapsedRealtimeNanos.toULong(),
             weekday = observed.weekdayMondayZero.toUByte(),

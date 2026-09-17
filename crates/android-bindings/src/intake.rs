@@ -7,7 +7,7 @@ use crate::{
         DeliveryCommand, DeliveryControl, DeliveryResult, NativeDecisionProgress, QueuedWrite,
     },
     native_clock::{ProjectionAnchor, native_callback},
-    native_log::{self, RetireSite},
+    native_log::{self, RetireSite, Step, note},
 };
 use android_controller::{
     AssociatedPcSocket, NativePeerLease, PcSocketEvent, PcSocketInputs, PeerAssociationRef,
@@ -933,21 +933,24 @@ fn process_parked(
             } = *value;
             let reference = completion.control.reference;
             let stop = completion.control.stop.clone();
-            let socket = owner.with_inbox(|inbox| {
-                AssociatedPcSocket::new(
-                    inbox,
-                    reference,
-                    PcSocketInputs {
-                        socket,
-                        identity,
-                        budget,
-                        clock,
-                        limits: SocketLimits::default(),
-                        stop,
-                    },
-                )
-                .map_err(|_| BridgeError::NativeUnavailable)
-            })?;
+            let socket = note(
+                Step::AttachSocket,
+                owner.with_inbox(|inbox| {
+                    AssociatedPcSocket::new(
+                        inbox,
+                        reference,
+                        PcSocketInputs {
+                            socket,
+                            identity,
+                            budget,
+                            clock,
+                            limits: SocketLimits::default(),
+                            stop,
+                        },
+                    )
+                    .map_err(|_| BridgeError::NativeUnavailable)
+                }),
+            )?;
             Ok(Some(PeerOwned {
                 socket,
                 commands,
@@ -982,7 +985,7 @@ fn process_parked(
                         .control
                         .connected
                         .store(true, Ordering::Release);
-                    queue_probe(owner, &mut owned)?;
+                    note(Step::ReadyProbe, queue_probe(owner, &mut owned))?;
                     owner
                         .intake
                         .native_progress_pending
@@ -992,9 +995,12 @@ fn process_parked(
                     owner
                         .intake
                         .unblock_peer(owned.completion.control.reference);
-                    let now = owner.read_clock()?;
-                    let update = owner
-                        .with_inbox(|inbox| Ok(owned.socket.apply_event(inbox, *message, now)))?;
+                    let now = note(Step::MessageClock, owner.read_clock())?;
+                    let update = note(
+                        Step::MessageApply,
+                        owner
+                            .with_inbox(|inbox| Ok(owned.socket.apply_event(inbox, *message, now))),
+                    )?;
                     let update = match update {
                         Ok(update) => update,
                         Err(android_controller::PeerSocketError::ReceivingSource(_)) => {
@@ -1012,9 +1018,12 @@ fn process_parked(
                         {
                             control.last_correlation.store(received, Ordering::Release);
                             control.next_probe.store(
-                                received
-                                    .checked_add(240_000_000_000)
-                                    .ok_or(BridgeError::InvalidObservation)?,
+                                note(
+                                    Step::MessageProbe,
+                                    received
+                                        .checked_add(240_000_000_000)
+                                        .ok_or(BridgeError::InvalidObservation),
+                                )?,
                                 Ordering::Release,
                             );
                             control.probe_pending.store(false, Ordering::Release);
@@ -1022,9 +1031,12 @@ fn process_parked(
                             control.correlated.store(true, Ordering::Release);
                         }
                     }
-                    owner.dispatch_effects(
-                        update.committed().update().effects().to_vec(),
-                        update.committed().update().fault().is_some(),
+                    note(
+                        Step::MessageEffects,
+                        owner.dispatch_effects(
+                            update.committed().update().effects().to_vec(),
+                            update.committed().update().fault().is_some(),
+                        ),
                     )?;
                     if owner
                         .with_inbox(|inbox| {
@@ -1055,7 +1067,10 @@ fn process_parked(
                 }
                 PeerWork::Decision(command) => {
                     let control = command.control();
-                    match owner.process_delivery(&mut owned.socket, command)? {
+                    match note(
+                        Step::DecisionDeliver,
+                        owner.process_delivery(&mut owned.socket, command),
+                    )? {
                         DeliveryResult::Queued(write) => {
                             if owned.write.is_some() {
                                 owned.socket.abort();

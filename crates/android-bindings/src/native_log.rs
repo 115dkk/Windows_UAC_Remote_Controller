@@ -138,6 +138,70 @@ fn error_label(error: BridgeError) -> &'static str {
     }
 }
 
+/// Which statement produced a bridge error, for the paths where the reactor's
+/// own site still leaves more than one candidate. `PEER_WORK` alone covers a
+/// socket being attached, a clock read, an inbox write, a probe deadline and a
+/// whole notification dispatch; naming the site told us which of ten reactor
+/// arms fired and then stopped being able to help.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Step {
+    AttachSocket,
+    ReadyProbe,
+    MessageClock,
+    MessageApply,
+    MessageProbe,
+    MessageEffects,
+    DecisionDeliver,
+    EffectPrune,
+    EffectWithdraw,
+    EffectReconcile,
+    EffectPublish,
+    EffectDeadline,
+}
+
+impl Step {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AttachSocket => "ATTACH_SOCKET",
+            Self::ReadyProbe => "READY_PROBE",
+            Self::MessageClock => "MESSAGE_CLOCK",
+            Self::MessageApply => "MESSAGE_APPLY",
+            Self::MessageProbe => "MESSAGE_PROBE",
+            Self::MessageEffects => "MESSAGE_EFFECTS",
+            Self::DecisionDeliver => "DECISION_DELIVER",
+            Self::EffectPrune => "EFFECT_PRUNE",
+            Self::EffectWithdraw => "EFFECT_WITHDRAW",
+            Self::EffectReconcile => "EFFECT_RECONCILE",
+            Self::EffectPublish => "EFFECT_PUBLISH",
+            Self::EffectDeadline => "EFFECT_DEADLINE",
+        }
+    }
+}
+
+/// Names the step an error came from and hands the result straight back, so a
+/// caller reads `note(Step::X, expr)?` exactly where it read `expr?` and the
+/// control flow is unchanged.
+///
+/// `Busy` and `PresentationRefreshRequired` are ordinary control flow on these
+/// paths, retried or awaited by design rather than failures anyone is hunting.
+/// Emitting them would spend the per-process budget on the answer nobody asked
+/// for and bury the one line that matters.
+pub(crate) fn note<T>(step: Step, result: Result<T, BridgeError>) -> Result<T, BridgeError> {
+    if let Err(error) = result
+        && !matches!(
+            error,
+            BridgeError::Busy | BridgeError::PresentationRefreshRequired
+        )
+    {
+        write(&format!(
+            "UAC_NATIVE_STEP_V1 step={} error={}",
+            step.label(),
+            error_label(error)
+        ));
+    }
+    result
+}
+
 /// One retire decision, named. `None` is for the sites that carry no bridge
 /// error of their own: a joined task that panicked, or an exhausted peer slot.
 pub(crate) fn intake_retire(site: RetireSite, error: Option<BridgeError>) {
@@ -163,6 +227,20 @@ mod tests {
         RetireSite::PeerJoin,
         RetireSite::PeerBudget,
         RetireSite::Clock,
+    ];
+    const STEPS: [Step; 12] = [
+        Step::AttachSocket,
+        Step::ReadyProbe,
+        Step::MessageClock,
+        Step::MessageApply,
+        Step::MessageProbe,
+        Step::MessageEffects,
+        Step::DecisionDeliver,
+        Step::EffectPrune,
+        Step::EffectWithdraw,
+        Step::EffectReconcile,
+        Step::EffectPublish,
+        Step::EffectDeadline,
     ];
     const ERRORS: [BridgeError; 15] = [
         BridgeError::LifecycleIntegrationRequired,
@@ -191,10 +269,23 @@ mod tests {
         for error in ERRORS {
             assert!(names.insert(error_label(error)));
         }
+        for step in STEPS {
+            assert!(names.insert(step.label()));
+        }
         for site in SITES {
             for error in ERRORS.map(Some).into_iter().chain([None]) {
                 let error = error.map_or("NONE", error_label);
                 let line = format!("UAC_NATIVE_INTAKE_V1 site={} error={error}", site.label());
+                assert!(android_log_sink::admissible(&line), "{line}");
+            }
+        }
+        for step in STEPS {
+            for error in ERRORS {
+                let line = format!(
+                    "UAC_NATIVE_STEP_V1 step={} error={}",
+                    step.label(),
+                    error_label(error)
+                );
                 assert!(android_log_sink::admissible(&line), "{line}");
             }
         }
