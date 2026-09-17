@@ -7,6 +7,7 @@ use crate::{
         DeliveryCommand, DeliveryControl, DeliveryResult, NativeDecisionProgress, QueuedWrite,
     },
     native_clock::{ProjectionAnchor, native_callback},
+    native_log::{self, RetireSite},
 };
 use android_controller::{
     AssociatedPcSocket, NativePeerLease, PcSocketEvent, PcSocketInputs, PeerAssociationRef,
@@ -245,6 +246,7 @@ impl IntakeOwner {
                 && let Some(runtime) = inner.runtime.take()
                 && runtime.thread.join().is_err()
             {
+                native_log::intake_retire(RetireSite::RuntimeJoin, None);
                 self.failed.store(true, Ordering::Release);
             }
             inner
@@ -626,6 +628,7 @@ impl MobileController {
     }
 }
 fn fail_reactor(controller: &Weak<MobileController>, intake: &IntakeOwner) {
+    native_log::intake_retire(RetireSite::Reactor, None);
     intake.failed.store(true, Ordering::Release);
     intake.stop();
     if let Some(owner) = Weak::<MobileController>::upgrade(controller) {
@@ -717,7 +720,8 @@ async fn reactor(
                                 intake.temporal_refresh.store(true, Ordering::Release);
                                 intake.maintenance.store(true, Ordering::Release);
                             }
-                            Err(_) => {
+                            Err(error) => {
+                                native_log::intake_retire(RetireSite::Maintenance, Some(error));
                                 intake.failed.store(true, Ordering::Release);
                                 owner.drop_owner();
                             }
@@ -733,12 +737,17 @@ async fn reactor(
                             Ok(None) => (),
                             Err(BridgeError::PresentationRefreshRequired) => {
                                 intake.await_temporal_refresh();
-                                if owner.pause_native_presentations().is_err() {
+                                if let Err(error) = owner.pause_native_presentations() {
+                                    native_log::intake_retire(
+                                        RetireSite::PresentationPause,
+                                        Some(error),
+                                    );
                                     intake.failed.store(true, Ordering::Release);
                                     owner.drop_owner();
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
+                                native_log::intake_retire(RetireSite::PeerWork, Some(error));
                                 intake.failed.store(true, Ordering::Release);
                                 owner.drop_owner();
                             }
@@ -749,8 +758,9 @@ async fn reactor(
                     // Native worker wake follows actual admission release;
                     // otherwise a fast worker can see Busy and lose this wake.
                     if intake.native_progress_pending.swap(false, Ordering::AcqRel)
-                        && native_callback(|| platform.intake_progress()).is_err()
+                        && let Err(error) = native_callback(|| platform.intake_progress())
                     {
+                        native_log::intake_retire(RetireSite::NativeProgress, Some(error));
                         intake.failed.store(true, Ordering::Release);
                         intake.stop.cancel();
                     }
@@ -802,6 +812,7 @@ async fn reactor(
                             .push(completion);
                     }
                     Some(Err(_)) => {
+                        native_log::intake_retire(RetireSite::DialJoin, None);
                         intake.failed.store(true, Ordering::Release);
                         intake.stop.cancel();
                     }
@@ -811,12 +822,17 @@ async fn reactor(
             completed = jobs.join_next(), if !jobs.is_empty() => {
                 match completed {
                     Some(Ok(peer)) => parked.push_back(Parked::Peer(Box::new(peer))),
-                    Some(Err(_)) => { intake.failed.store(true, Ordering::Release); intake.stop.cancel(); }
+                    Some(Err(_)) => {
+                        native_log::intake_retire(RetireSite::PeerJoin, None);
+                        intake.failed.store(true, Ordering::Release);
+                        intake.stop.cancel();
+                    }
                     None => (),
                 }
             }
         }
         if parked.len() > MAX_PEERS {
+            native_log::intake_retire(RetireSite::PeerBudget, None);
             intake.failed.store(true, Ordering::Release);
             break;
         }
@@ -893,7 +909,8 @@ fn observe_parked(
             }
             intake.maintenance.store(true, Ordering::Release);
         }
-        Err(_) => {
+        Err(error) => {
+            native_log::intake_retire(RetireSite::Clock, Some(error));
             intake.failed.store(true, Ordering::Release);
             intake.stop.cancel();
         }

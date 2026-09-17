@@ -19,6 +19,7 @@ mod intake_delivery;
 mod intake_tests;
 mod local_keys;
 mod native_clock;
+mod native_log;
 mod pairing;
 mod request_projection;
 mod startup_diagnostics;
@@ -475,6 +476,9 @@ impl MobileController {
         .map_err(|_| BridgeError::StorageUnavailable)
     }
     fn open(platform: Arc<dyn NativePlatform>, mode: OpenMode) -> Result<Arc<Self>, BridgeError> {
+        // First, because everything below it can panic and a panic that lands
+        // before the hook is installed is the one that leaves no trace.
+        native_log::install_panic_hook();
         let owner_lease = Arc::new(OwnerLease::acquire()?);
         let mut key_cleanup_needed = false;
         let mut resolved_commit = false;

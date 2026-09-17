@@ -371,7 +371,7 @@ export async function main(args = process.argv.slice(2)) {
       await read(['shell', 'dumpsys', 'user']);
       await read(['shell', 'dumpsys', 'package', PACKAGE]);
       await read(['shell', 'dumpsys', 'activity', 'broadcasts', PACKAGE]);
-      await read(['shell', 'logcat', '-d', '-b', 'all', '-v', 'threadtime', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I', '*:S']);
+      await read(['shell', 'logcat', '-d', '-b', 'all', '-v', 'threadtime', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I', 'UacNative:I', '*:S']);
       await read(['shell', 'logcat', '-d', '-v', 'threadtime', 'ActivityManager:I', 'ActivityTaskManager:I', 'BroadcastQueue:I', 'BroadcastQueueModernImpl:I', 'UacBoot:I', '*:S']);
     };
     for (const packageName of [PACKAGE, TEST_PACKAGE]) {

@@ -165,11 +165,19 @@ fn checkpoint_label(error: InboxCheckpointError) -> &'static str {
 }
 
 // Only private callers above supply labels selected by exhaustive enum matches.
-// The existing Android RustStdoutStderr sink is captured by lifecycle CI. No
-// generated ABI, paths, errno prose, nested Debug values or caller strings cross
-// this projection. A missing/broken sink cannot change the primary failure.
+// No generated ABI, paths, errno prose, nested Debug values or caller strings
+// cross this projection. A missing/broken sink cannot change the primary failure.
+//
+// Two sinks, because they fail in different places. The RustStdoutStderr pipe is
+// what lifecycle CI already greps, but it only exists once an Activity has
+// created it, and this projection reports a startup that can happen in the
+// foreground service with no Activity at all. The logcat sink does not depend on
+// a window. Neither is load-bearing; both are best effort.
 fn emit(stage: Stage, reason: &'static str) {
     let stage = stage.label();
+    crate::native_log::write(&format!(
+        "UAC_NATIVE_STARTUP_V1 stage={stage} reason={reason}"
+    ));
     #[cfg(target_os = "android")]
     {
         use std::io::Write;
