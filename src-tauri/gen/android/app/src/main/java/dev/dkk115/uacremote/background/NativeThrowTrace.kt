@@ -55,13 +55,22 @@ internal object NativeThrowTrace {
     internal fun line(site: String, failure: Throwable): String? {
         if (!token(site, 48)) return null
         val kind = failure.javaClass.simpleName.takeIf { token(it, 64) } ?: return null
-        val frame = runCatching { failure.stackTrace.firstOrNull() }.getOrNull()
-        val at = frame?.let {
-            val type = it.className.substringAfterLast('.').takeIf { name -> token(name, 64) }
-            val method = it.methodName.takeIf { name -> token(name, 64) }
-            if (type == null || method == null || it.lineNumber < 0) null else "$type.$method:${it.lineNumber}"
-        } ?: "unknown"
+        // Three frames, not one. The first frame is where the throwable was
+        // built, which for a framework exception is inside the framework; the
+        // next two are what our own code was doing when it asked.
+        val frames = runCatching { failure.stackTrace.take(FRAMES) }.getOrNull().orEmpty()
+        val at = frames.mapNotNull(::frame).joinToString("|").ifEmpty { "unknown" }
         return "UAC_NATIVE_THROW_V1 site=$site at=$at kind=$kind"
+    }
+
+    /** How many frames of the throwable's own stack the record carries. */
+    private const val FRAMES = 3
+
+    /** One frame as `Type.method:line`, or null when any part is not a token. */
+    private fun frame(element: StackTraceElement): String? {
+        val type = element.className.substringAfterLast('.').takeIf { token(it, 64) } ?: return null
+        val method = element.methodName.takeIf { token(it, 64) } ?: return null
+        return if (element.lineNumber < 0) null else "$type.$method:${element.lineNumber}"
     }
 
     /**

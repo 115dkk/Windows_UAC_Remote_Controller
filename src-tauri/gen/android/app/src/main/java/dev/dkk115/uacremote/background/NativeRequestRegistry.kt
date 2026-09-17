@@ -234,7 +234,13 @@ internal class NativeRequestRegistry(
         } catch (_: BridgeException.RequestUnavailable) {
             entry?.let { discardEntry(it) }
             return NativeRequestSinkOutcome.DiscardedStale
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            // Named before it is converted. Everything this catch sees leaves as
+            // one value, NativeUnavailable, and the native side cannot tell one
+            // cause from another once it has. Discarding the throwable here is
+            // why a reproducible failure could be traced only as far as this
+            // line. The record is the site and the kind, never the message.
+            NativeThrowTrace.note("REGISTRY_PUBLISH_CAUSE", failure)
             synchronized(lock) { failed = true }
             throw BridgeException.NativeUnavailable()
         } finally {

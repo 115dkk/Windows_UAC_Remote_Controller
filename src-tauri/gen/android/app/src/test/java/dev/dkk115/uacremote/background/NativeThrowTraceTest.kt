@@ -13,6 +13,8 @@ class NativeThrowTraceTest {
         val line = requireNotNull(NativeThrowTrace.line("PUBLISH_PENDING_REQUEST", failure))
         assertTrue(line, line.startsWith("UAC_NATIVE_THROW_V1 site=PUBLISH_PENDING_REQUEST at="))
         assertTrue(line, line.contains("NativeThrowTraceTest.thrown:"))
+        // Three frames at most, so one framework throw still shows our caller.
+        assertTrue(line, line.substringAfter("at=").substringBefore(" kind=").split("|").size <= 3)
         assertTrue(line, line.endsWith("kind=IllegalStateException"))
         // The payload is the one thing that can carry a value, so it stays out.
         assertFalse(line, line.contains("synthetic"))
