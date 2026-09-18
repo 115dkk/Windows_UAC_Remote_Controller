@@ -48,7 +48,7 @@ class RequestNotificationPolicyTest {
         assertEquals("", content.path)
     }
     @Test(expected = IllegalArgumentException::class) fun AnAbsentProgramIsStillRefused() {
-        RequestNotificationContent("", "C:\synthetic.exe", false, false)
+        RequestNotificationContent("", "synthetic.exe", false, false)
     }
     @Test(expected = IllegalArgumentException::class) fun AnOversizedPathIsStillRefused() {
         RequestNotificationContent("consent.exe", "x".repeat(1025), false, false)
