@@ -71,15 +71,7 @@ internal class RequestNotificationRenderer(context: Context) {
 
     fun build(content: RequestNotificationContent, mode: RequestNotificationMode, quiet: Boolean, remainingMillis: Long,
               actions: RequestNotificationActions): Notification {
-        // The bound is a real assumption about the request lifetime, and it is
-        // the one a genuine consent prompt trips. `require` reports that as a
-        // caller error with no value attached, which is how a reproducible
-        // failure stayed anonymous; the number is what says whether the window
-        // is merely longer than this bound or on the wrong base entirely.
-        if (remainingMillis !in 1..300_000L) {
-            NativeThrowTrace.measurement("NOTIFICATION_REMAINING", "millis", remainingMillis)
-        }
-        require(remainingMillis in 1..300_000L)
+        require(remainingMillis in 1..MAX_REMAINING_MILLIS)
         val context = this.context // One locale snapshot for this notification.
         val bidi = BidiFormatter.getInstance(context.resources.configuration.locales[0])
         // Executable identifiers share the same fixed LTR base as paths, even
@@ -130,6 +122,12 @@ internal class RequestNotificationRenderer(context: Context) {
     }
 
     companion object {
+        /** The request lifetime this renderer will draw a countdown for. Public
+         * so a caller can say why a request was refused instead of discovering
+         * it as a failed requirement with no value attached. This file is also
+         * built standalone by the renderer gallery, so it stays free of the
+         * app's own diagnostics; the caller owns that. */
+        const val MAX_REMAINING_MILLIS = 300_000L
         const val NOTIFICATION_ID = 1
         private const val SOUND = "uac_requests_sound_v1"
         private const val VIBRATION = "uac_requests_vibration_v1"

@@ -211,6 +211,15 @@ internal class NativeRequestRegistry(
             if (now < 0 || current.deadlineNanos <= now.toULong() || current.validUntilNanos <= now.toULong()) throw BridgeException.RequestUnavailable()
             val remaining = ((current.deadlineNanos - now.toULong()) / 1_000_000uL).toLong()
             if (remaining <= 0) throw BridgeException.RequestUnavailable()
+            // The renderer refuses a lifetime past its own bound, and it reports
+            // that as a failed requirement with no value attached, which is how
+            // a reproducible failure stayed anonymous once the catch below
+            // converted it. The number says whether the window is merely longer
+            // than the bound or on the wrong base entirely. It is the protocol's
+            // own timing, the same countdown the request screen already shows.
+            if (remaining !in 1..RequestNotificationRenderer.MAX_REMAINING_MILLIS) {
+                NativeThrowTrace.measurement("NOTIFICATION_REMAINING", "millis", remaining)
+            }
             val notification = renderer.build(RequestNotificationContent(current.program, current.path,
                 current.programElided, current.pathElided), mode, quiet, remaining, intents)
             synchronized(owned.notificationLock) {
