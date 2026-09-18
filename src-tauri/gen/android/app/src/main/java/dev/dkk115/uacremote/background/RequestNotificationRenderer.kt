@@ -71,6 +71,14 @@ internal class RequestNotificationRenderer(context: Context) {
 
     fun build(content: RequestNotificationContent, mode: RequestNotificationMode, quiet: Boolean, remainingMillis: Long,
               actions: RequestNotificationActions): Notification {
+        // The bound is a real assumption about the request lifetime, and it is
+        // the one a genuine consent prompt trips. `require` reports that as a
+        // caller error with no value attached, which is how a reproducible
+        // failure stayed anonymous; the number is what says whether the window
+        // is merely longer than this bound or on the wrong base entirely.
+        if (remainingMillis !in 1..300_000L) {
+            NativeThrowTrace.measurement("NOTIFICATION_REMAINING", "millis", remainingMillis)
+        }
         require(remainingMillis in 1..300_000L)
         val context = this.context // One locale snapshot for this notification.
         val bidi = BidiFormatter.getInstance(context.resources.configuration.locales[0])

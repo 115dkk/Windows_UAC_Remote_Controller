@@ -34,6 +34,20 @@ class NativeThrowTraceTest {
         assertEquals("UAC_NATIVE_THROW_V1 site=CLOCK at=unknown kind=IllegalStateException", line)
     }
 
+    @Test fun aMeasurementCarriesItsNumberAndRefusesAnythingOutsideTheClosedShape() {
+        assertEquals(
+            "UAC_NATIVE_VALUE_V1 site=NOTIFICATION_REMAINING name=millis value=1789642719503",
+            NativeThrowTrace.measurementLine("NOTIFICATION_REMAINING", "millis", 1789642719503L),
+        )
+        assertEquals(
+            "UAC_NATIVE_VALUE_V1 site=A name=b value=-1",
+            NativeThrowTrace.measurementLine("A", "b", -1L),
+        )
+        assertNull(NativeThrowTrace.measurementLine("has space", "millis", 1L))
+        assertNull(NativeThrowTrace.measurementLine("SITE", "has space", 1L))
+        assertNull(NativeThrowTrace.measurementLine("SITE", "x".repeat(33), 1L))
+    }
+
     @Test fun theBlockResultAndTheFailureBothPassThroughUntouched() {
         assertEquals(7, NativeThrowTrace.named("CLOCK") { 7 })
         val raised = IllegalArgumentException("kept")

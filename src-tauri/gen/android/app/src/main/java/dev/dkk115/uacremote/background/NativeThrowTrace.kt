@@ -41,6 +41,23 @@ internal object NativeThrowTrace {
             throw failure
         }
 
+    /**
+     * One bounded number, for the case where knowing a value is the difference
+     * between naming a defect and guessing at it. Durations and counts only:
+     * this is the protocol's own timing, the same countdown the request screen
+     * already shows, and never a request field.
+     */
+    internal fun measurement(site: String, name: String, value: Long) {
+        val line = measurementLine(site, name, value) ?: return
+        try { Log.i(TAG, line) } catch (_: Throwable) { }
+    }
+
+    /** Separate from [measurement] so the formatting is testable. */
+    internal fun measurementLine(site: String, name: String, value: Long): String? {
+        if (!token(site, 48) || !token(name, 32)) return null
+        return "UAC_NATIVE_VALUE_V1 site=$site name=$name value=$value"
+    }
+
     /** Separate from [named] so the formatting is testable without throwing. */
     internal fun note(site: String, failure: Throwable) {
         val line = line(site, failure) ?: return
