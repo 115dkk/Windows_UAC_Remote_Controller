@@ -27,7 +27,7 @@ use windows::{
                 SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize,
                 SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype,
             },
-            Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantClear},
+            Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_I4, VariantClear},
         },
         UI::Accessibility::{
             CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
@@ -763,8 +763,10 @@ fn pattern_available(
 }
 
 /// `ignore_default` asks UI Automation for the reserved not-supported object
-/// instead of the property default; text readers want that distinction, boolean
-/// availability readers want the default.
+/// instead of the property default. A reader wants that distinction when a
+/// missing value has to stay missing, and wants the default when a missing
+/// value simply means the empty one: names and pattern availability take the
+/// first, the structural identifiers take the second.
 fn read_property<'a>(
     element: &IUIAutomationElement,
     property: UIA_PROPERTY_ID,
@@ -779,7 +781,9 @@ fn read_property<'a>(
         value: ManuallyDrop::new(VARIANT::default()),
         cleanup,
     };
-    // SAFETY: private callers supply only the fixed Name or availability IDs. The
+    // SAFETY: private callers supply only fixed property IDs, all of them
+    // read-only: the name, the pattern availabilities, and the automation id and
+    // class name that say which element is which. The
     // live scoped interface and its exact generated vtable receive one exclusive
     // initialized VARIANT out slot, retained by the guard throughout the call.
     // No edit/value read or pattern action is requested. On either HRESULT path the guarded
@@ -824,13 +828,23 @@ fn bounded_string_property(
     )
 }
 
-/// Whether a property this reader asks for is allowed to be missing.
+/// Whether a property this reader asks for is allowed to be missing, which
+/// decides both how the question is put to UI Automation and how an answer that
+/// is not a string is read.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Absent {
-    /// The read fails. Names are read this way: a caption or label that is
-    /// missing must never be filled in for the producer.
+    /// The read fails. Asks with `ignoreDefaultValue`, so a provider that does
+    /// not supply the property is distinguishable from one that supplies an
+    /// empty one. Names are read this way: what a caption or a label says is
+    /// shown to the person approving, and a missing one must never be filled
+    /// in on the producer's behalf.
     IsMalformed,
-    /// The read yields an empty string, which is what absence means here.
+    /// The read yields an empty string. Asks for the default, which for these
+    /// properties is the empty string, and anything that still arrives as a
+    /// nonstring is read as absence rather than as a failure. Identifiers are
+    /// read this way: they are never shown to anyone and never decide anything.
+    /// They tell this product which element is which, so failing to find one is
+    /// an answer, and it must not be able to cost the whole observation.
     IsEmpty,
 }
 
@@ -860,11 +874,22 @@ fn string_property(
     cleanup: &CleanupLog,
     absent: Absent,
 ) -> Result<String, ProbeError> {
-    let value = read_property(element, property, operation, cleanup, true)?;
-    if absent == Absent::IsEmpty && value.value.vt() == VT_EMPTY {
-        return Ok(String::new());
-    }
+    // Measured on Windows 11, not assumed: with `ignoreDefaultValue` set, an
+    // element whose provider does not supply AutomationId answers with the
+    // reserved not-supported object, a VT_UNKNOWN, and the strict arm below
+    // rightly calls that malformed. Asking for the default instead answers with
+    // an empty VT_BSTR. That is the whole reason the widened read broke the lab.
+    let value = read_property(
+        element,
+        property,
+        operation,
+        cleanup,
+        absent == Absent::IsMalformed,
+    )?;
     if value.value.vt() != VT_BSTR {
+        if absent == Absent::IsEmpty {
+            return Ok(String::new());
+        }
         return Err(malformed(operation));
     }
     // SAFETY: exact VT_BSTR selects this initialized owned union arm. Borrow
