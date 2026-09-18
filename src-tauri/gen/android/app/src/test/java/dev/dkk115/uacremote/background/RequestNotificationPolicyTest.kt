@@ -36,4 +36,21 @@ class RequestNotificationPolicyTest {
     @Test(expected = IllegalArgumentException::class) fun OversizedPreviewCannotReachRenderer() {
         RequestNotificationContent("x".repeat(513), "synthetic.exe", false, false)
     }
+    /**
+     * `RequestContent::new` calls an empty path legal and says why: a consent
+     * prompt does not always show one. Rejecting it here made the first genuine
+     * prompt an IllegalArgumentException, which the publish path converted into
+     * a closed owner, so the app went dead on the request it exists to carry.
+     */
+    @Test fun AnAbsentPathIsAcceptedBecauseTheProtocolCallsItLegal() {
+        val content = RequestNotificationContent("consent.exe", "", false, false)
+        assertEquals("consent.exe", content.program)
+        assertEquals("", content.path)
+    }
+    @Test(expected = IllegalArgumentException::class) fun AnAbsentProgramIsStillRefused() {
+        RequestNotificationContent("", "C:\synthetic.exe", false, false)
+    }
+    @Test(expected = IllegalArgumentException::class) fun AnOversizedPathIsStillRefused() {
+        RequestNotificationContent("consent.exe", "x".repeat(1025), false, false)
+    }
 }

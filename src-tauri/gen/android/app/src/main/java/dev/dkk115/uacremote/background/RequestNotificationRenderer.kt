@@ -18,7 +18,13 @@ import dev.dkk115.uacremote.AppLanguage
  * Production constructs it ONLY after the original opaque Rust handle check. */
 internal class RequestNotificationContent(val program: String, val path: String,
     val programElided: Boolean, val pathElided: Boolean) {
-    init { require(program.isNotEmpty() && program.length <= 512 && path.isNotEmpty() && path.length <= 1024) }
+    // An absent path is not a malformed request. `RequestContent::new` states it
+    // outright: a consent prompt does not always show a file path (MSI, COM
+    // elevation, packaged apps), an empty path is legal and is shown as absent.
+    // Requiring one here turned that legal wire value into IllegalArgumentException
+    // on the first genuine prompt, and the publish catch-all below converted it
+    // into a closed owner. The length bounds are the renderer's own and stay.
+    init { require(program.isNotEmpty() && program.length <= 512 && path.length <= 1024) }
     override fun toString(): String = "RequestNotificationContent([redacted])"
 }
 internal enum class RequestNotificationMode { SOUND, VIBRATION_ONLY, SILENT }
@@ -78,7 +84,11 @@ internal class RequestNotificationRenderer(context: Context) {
         // when the first letter is Arabic. Input must not choose the base.
         val program = bidi.unicodeWrap(UntrustedDisplayText.escape(content.program), TextDirectionHeuristics.LTR)
         val path = bidi.unicodeWrap(UntrustedDisplayText.escape(content.path), TextDirectionHeuristics.LTR)
-        val summary = context.getString(R.string.request_notification_summary, program, path)
+        // The two-line summary has nothing to put on its second line when the
+        // path is absent, and an empty line reads as a value that failed to
+        // load. The program alone is the whole of what is known.
+        val summary = if (content.path.isEmpty()) program
+            else context.getString(R.string.request_notification_summary, program, path)
         // Rust's bounded preview also reports whether the ORIGINAL suffix was
         // elided before this renderer. Never treat that prefix as a full name.
         val fits = !content.programElided && !content.pathElided && UntrustedDisplayText.fitsNotification(summary)
