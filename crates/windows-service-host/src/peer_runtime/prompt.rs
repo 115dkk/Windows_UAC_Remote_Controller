@@ -232,6 +232,24 @@ pub(super) fn map_content(
     if details.len() > MAX_DETAILS_BYTES {
         return Err(PromptContentMappingError::FieldTooLong);
     }
+    // The dialog's shape, so a later rule can name the program, the publisher
+    // and the details control without reading the language they are written in.
+    // Identifiers and positions only; the text is what this is careful not to
+    // write, and it is the only part that carries the request.
+    for label in observation.labels() {
+        crate::ffi::prompt_diagnostics::label(
+            label.ordinal(),
+            label.depth(),
+            match label.kind() {
+                LabelKind::Text => "Text",
+                LabelKind::Button => "Button",
+                LabelKind::Hyperlink => "Hyperlink",
+            },
+            label.enabled(),
+            label.automation_id(),
+            label.class_name(),
+        );
+    }
     // Disposable lab builds only, where the only prompt is the harness's own
     // synthetic request. The harness asserts on the program name and the
     // location, so the mapped fields and the labels they come from have to be
