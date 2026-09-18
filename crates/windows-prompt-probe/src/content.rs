@@ -13,9 +13,9 @@ pub const MAX_RUNTIME_ID_VALUES: usize = 32;
 pub const MAX_PROMPT_FIELD_UTF16_UNITS: usize = 32_768;
 pub const MAX_PROMPT_CONTENT_UTF8_BYTES: usize = 384 * 1024;
 pub const MAX_PROMPT_LABELS: usize = MAX_UIA_ELEMENTS;
-pub const MAX_BUTTON_METADATA_UTF16_UNITS: usize = 256;
+pub const MAX_LABEL_METADATA_UTF16_UNITS: usize = 256;
 const MAX_FIELD_UTF8_BYTES: usize = MAX_PROMPT_FIELD_UTF16_UNITS * 3;
-const MAX_BUTTON_METADATA_UTF8_BYTES: usize = MAX_BUTTON_METADATA_UTF16_UNITS * 3;
+const MAX_LABEL_METADATA_UTF8_BYTES: usize = MAX_LABEL_METADATA_UTF16_UNITS * 3;
 
 /// Closed read-only label kinds, not a UI action or operation classifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,9 +71,13 @@ impl PromptLabel {
         validate_text(&text)?;
         validate_metadata(&automation_id)?;
         validate_metadata(&class_name)?;
-        if kind != LabelKind::Button && (!automation_id.is_empty() || !class_name.is_empty()) {
-            return Err(PromptContentError::InvalidLabel);
-        }
+        // Every kind may carry these, not only the buttons. Which label holds
+        // the program, which holds the publisher and which opens the details is
+        // a question about the dialog's structure, and the only answer that does
+        // not depend on reading the language the dialog is written in is the
+        // identifiers its own author chose. Both are bounded and validated just
+        // above, both are counted against the same total as the text, and
+        // neither is ever forwarded to a phone.
         Ok(Self {
             ordinal,
             depth,
@@ -386,8 +390,8 @@ fn validate_text(value: &str) -> Result<(), PromptContentError> {
 fn validate_metadata(value: &str) -> Result<(), PromptContentError> {
     validate_bounded_text(
         value,
-        MAX_BUTTON_METADATA_UTF8_BYTES,
-        MAX_BUTTON_METADATA_UTF16_UNITS,
+        MAX_LABEL_METADATA_UTF8_BYTES,
+        MAX_LABEL_METADATA_UTF16_UNITS,
     )
 }
 
@@ -458,8 +462,8 @@ impl Input<'_> {
     }
     fn metadata(&mut self) -> Result<String, PromptContentError> {
         self.bounded_text(
-            MAX_BUTTON_METADATA_UTF8_BYTES,
-            MAX_BUTTON_METADATA_UTF16_UNITS,
+            MAX_LABEL_METADATA_UTF8_BYTES,
+            MAX_LABEL_METADATA_UTF16_UNITS,
         )
     }
     fn bounded_text(
@@ -832,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn button_metadata_is_bounded_and_part_of_equality_and_digest() {
+    fn label_metadata_is_bounded_and_part_of_equality_and_digest() {
         let button = PromptLabel::new_with_metadata(
             1,
             2,
@@ -845,18 +849,20 @@ mod tests {
         .unwrap();
         assert_eq!(button.automation_id(), "CommandButton_1");
         assert_eq!(button.class_name(), "Button");
-        assert_eq!(
-            PromptLabel::new_with_metadata(
-                2,
-                2,
-                LabelKind::Text,
-                true,
-                "text".into(),
-                "not-allowed".into(),
-                String::new(),
-            ),
-            Err(PromptContentError::InvalidLabel)
-        );
+        // A text label may carry them too. Naming which one holds the program
+        // and which holds the publisher is the reason this crate reads them.
+        let text = PromptLabel::new_with_metadata(
+            2,
+            2,
+            LabelKind::Text,
+            true,
+            "text".into(),
+            "ProgramName".into(),
+            "Static".into(),
+        )
+        .unwrap();
+        assert_eq!(text.automation_id(), "ProgramName");
+        assert_eq!(text.class_name(), "Static");
         assert_eq!(
             PromptLabel::new_with_metadata(
                 2,
@@ -864,7 +870,7 @@ mod tests {
                 LabelKind::Button,
                 true,
                 "Yes".into(),
-                "a".repeat(MAX_BUTTON_METADATA_UTF16_UNITS + 1),
+                "a".repeat(MAX_LABEL_METADATA_UTF16_UNITS + 1),
                 String::new(),
             ),
             Err(PromptContentError::FieldLimit)

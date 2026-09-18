@@ -15,7 +15,7 @@ mod action;
 pub use action::{ActionSelectionError, ActionTarget, PromptAction, select_action_target};
 mod content;
 pub use content::{
-    LabelKind, MAX_BUTTON_METADATA_UTF16_UNITS, MAX_PROMPT_CONTENT_UTF8_BYTES,
+    LabelKind, MAX_LABEL_METADATA_UTF16_UNITS, MAX_PROMPT_CONTENT_UTF8_BYTES,
     MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS, MAX_RUNTIME_ID_VALUES, PromptContentError,
     PromptContentObservation, PromptLabel, prompt_text_from_utf16,
 };

@@ -8,11 +8,11 @@ use super::{
     window_owner,
 };
 use crate::{
-    ActionSelectionError, LabelKind, MAX_BUTTON_METADATA_UTF16_UNITS,
-    MAX_PROMPT_CONTENT_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS,
-    MAX_RUNTIME_ID_VALUES, NativeOperation, ProbeCounts, ProbeError, ProbeFailure, ProbeReport,
-    PromptAction, PromptContentObservation, PromptLabel, UIA_TIMEOUT_MILLIS, policy,
-    prompt_text_from_utf16, select_action_target, supervision::RefusalReason,
+    ActionSelectionError, LabelKind, MAX_LABEL_METADATA_UTF16_UNITS, MAX_PROMPT_CONTENT_UTF8_BYTES,
+    MAX_PROMPT_FIELD_UTF16_UNITS, MAX_PROMPT_LABELS, MAX_RUNTIME_ID_VALUES, NativeOperation,
+    ProbeCounts, ProbeError, ProbeFailure, ProbeReport, PromptAction, PromptContentObservation,
+    PromptLabel, UIA_TIMEOUT_MILLIS, policy, prompt_text_from_utf16, select_action_target,
+    supervision::RefusalReason,
 };
 use std::{ffi::c_void, marker::PhantomData, mem::ManuallyDrop, rc::Rc, time::Instant};
 use windows::{
@@ -425,13 +425,13 @@ fn locate_button_inner(
         let automation_id = bounded_string_property(
             element,
             UIA_AutomationIdPropertyId,
-            MAX_BUTTON_METADATA_UTF16_UNITS,
+            MAX_LABEL_METADATA_UTF16_UNITS,
             cleanup,
         )?;
         let class_name = bounded_string_property(
             element,
             UIA_ClassNamePropertyId,
-            MAX_BUTTON_METADATA_UTF16_UNITS,
+            MAX_LABEL_METADATA_UTF16_UNITS,
             cleanup,
         )?;
         if text != expected.text()
@@ -629,24 +629,24 @@ fn visit(
                 if observed.labels.len() == MAX_PROMPT_LABELS {
                     return Err(ProbeError::new(ProbeFailure::ContentLimit));
                 }
-                let (automation_id, class_name) = if kind == LabelKind::Button {
-                    (
-                        bounded_string_property(
-                            element,
-                            UIA_AutomationIdPropertyId,
-                            MAX_BUTTON_METADATA_UTF16_UNITS,
-                            cleanup,
-                        )?,
-                        bounded_string_property(
-                            element,
-                            UIA_ClassNamePropertyId,
-                            MAX_BUTTON_METADATA_UTF16_UNITS,
-                            cleanup,
-                        )?,
-                    )
-                } else {
-                    (String::new(), String::new())
-                };
+                // Read for every kind, not only for the buttons. Telling the
+                // program from the publisher from the details control by
+                // position alone stops working the moment a dialog varies, and
+                // telling them apart by their text means reading whatever
+                // language the dialog is in. These are what the dialog's own
+                // author named them, and they read the same everywhere.
+                let automation_id = bounded_string_property(
+                    element,
+                    UIA_AutomationIdPropertyId,
+                    MAX_LABEL_METADATA_UTF16_UNITS,
+                    cleanup,
+                )?;
+                let class_name = bounded_string_property(
+                    element,
+                    UIA_ClassNamePropertyId,
+                    MAX_LABEL_METADATA_UTF16_UNITS,
+                    cleanup,
+                )?;
                 observed.account(&text)?;
                 observed.account(&automation_id)?;
                 observed.account(&class_name)?;
