@@ -27,7 +27,7 @@ use windows::{
                 SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize,
                 SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype,
             },
-            Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_I4, VariantClear},
+            Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantClear},
         },
         UI::Accessibility::{
             CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
@@ -801,6 +801,12 @@ fn read_property<'a>(
     Ok(value)
 }
 
+/// An identifier the element's own provider may simply not supply. Asking with
+/// `ignoreDefaultValue` set means UI Automation answers absence with VT_EMPTY
+/// rather than with an empty string, and for an identifier that is a fact about
+/// the element, not a malformed read: plenty of controls carry no AutomationId.
+/// A present value of the wrong type is still malformed, and absence still has
+/// to arrive as absence, never as a substitute drawn from the element's text.
 fn bounded_string_property(
     element: &IUIAutomationElement,
     property: UIA_PROPERTY_ID,
@@ -814,7 +820,18 @@ fn bounded_string_property(
         maximum_utf16,
         usize::MAX,
         cleanup,
+        Absent::IsEmpty,
     )
+}
+
+/// Whether a property this reader asks for is allowed to be missing.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Absent {
+    /// The read fails. Names are read this way: a caption or label that is
+    /// missing must never be filled in for the producer.
+    IsMalformed,
+    /// The read yields an empty string, which is what absence means here.
+    IsEmpty,
 }
 
 fn name(
@@ -830,6 +847,7 @@ fn name(
         MAX_PROMPT_FIELD_UTF16_UNITS,
         remaining,
         cleanup,
+        Absent::IsMalformed,
     )
 }
 
@@ -840,8 +858,12 @@ fn string_property(
     maximum_utf16: usize,
     remaining: usize,
     cleanup: &CleanupLog,
+    absent: Absent,
 ) -> Result<String, ProbeError> {
     let value = read_property(element, property, operation, cleanup, true)?;
+    if absent == Absent::IsEmpty && value.value.vt() == VT_EMPTY {
+        return Ok(String::new());
+    }
     if value.value.vt() != VT_BSTR {
         return Err(malformed(operation));
     }
