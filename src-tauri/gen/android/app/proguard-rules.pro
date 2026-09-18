@@ -12,12 +12,24 @@
 #   public *;
 #}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Shrinking and optimization stay on; only renaming goes.
+#
+# This tree is public and GPL-2.0-or-later, so renaming hides names that are
+# already published with their comments. It also cannot reach the part worth
+# hiding if hiding were the goal: R8 only rewrites dex, and the protocol, the
+# key handling and the state machine live in the Rust .so, which is 52% of the
+# APK against dex's 5%. The security here rests on keys, attestation, the secure
+# desktop and Windows policy, and a tool that asks for UAC approvals is better
+# for being readable.
+#
+# What it cost: every stack frame from a real device had to be carried back
+# through a 32 MB mapping artifact by hand, and that artifact expires with the
+# workflow run. Line numbers are kept for the same reason.
+-dontobfuscate
+-keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
+# Deliberately left off: that would hide the source file name this build is
+# keeping on purpose.
 #-renamesourcefileattribute SourceFile
 
 # UniFFI/JNA is a native ABI, not just statically reachable Kotlin code. Rust

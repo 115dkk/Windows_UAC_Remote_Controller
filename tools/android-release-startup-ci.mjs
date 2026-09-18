@@ -116,7 +116,13 @@ try {
   const manifest = readFileSync('evidence/manifest.xml', 'utf8');
   assert.match(manifest, /package="dev\.dkk115\.uacremote"/);
   assert.doesNotMatch(manifest, /android:debuggable="true"/);
-  assert.ok(readFileSync('evidence/r8-mapping.txt', 'utf8').length > 1000);
+  // Proof that R8 actually processed our own code, which is what the byte count
+  // was standing in for. It counted bytes because renaming made the file large;
+  // with renaming off the entries become identity mappings and the file can
+  // shrink, so count the entries instead. This says the same thing and says it
+  // whether or not names are rewritten.
+  const mapping = readFileSync('evidence/r8-mapping.txt', 'utf8');
+  assert.ok((mapping.match(/^dev\.dkk115\.uacremote\.\S* -> /gm) ?? []).length >= 100);
   assert.equal(adb(['shell', 'getprop', 'ro.kernel.qemu']).trim(), '1');
   assert.match(adb(['emu', 'avd', 'name']), /^uac-release-startup-ci\r?\n/);
   assert.equal(adb(['shell', 'getprop', 'ro.product.cpu.abi']).trim(), 'x86_64');
