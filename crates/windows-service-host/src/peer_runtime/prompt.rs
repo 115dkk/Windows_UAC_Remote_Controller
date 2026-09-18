@@ -236,6 +236,10 @@ pub(super) fn map_content(
     // and the details control without reading the language they are written in.
     // Identifiers and positions only; the text is what this is careful not to
     // write, and it is the only part that carries the request.
+    // Windows only. The sink is this machine's own event log and the rows can
+    // only ever describe a dialog the probe met on the secure desktop; every
+    // other target reaches this function with a report built by a test.
+    #[cfg(windows)]
     for label in observation.labels() {
         crate::ffi::prompt_diagnostics::label(
             label.ordinal(),
