@@ -98,6 +98,45 @@ pub enum BridgeError {
     #[error("native presentation time is awaiting a known-owner refresh")]
     PresentationRefreshRequired,
 }
+impl BridgeError {
+    /// Whether this error means the owner itself is finished, as against the
+    /// one piece of work that met it.
+    ///
+    /// The distinction had no home. A peer whose socket could not be built, a
+    /// clock sample that came back inconsistent, a notification the platform
+    /// refused to post: each of those is one failed attempt, and each of them
+    /// was answered by retiring the whole owner, which on a phone means the app
+    /// stops serving the requests it exists for until it is force-stopped. That
+    /// was measured on a real device, from a consent prompt that was entirely
+    /// ordinary.
+    ///
+    /// Written as an exhaustive match with no wildcard arm, so a variant added
+    /// later has to be classified here rather than inheriting whichever answer
+    /// the catch-all happened to give.
+    #[must_use]
+    pub(crate) const fn retires_the_owner(self) -> bool {
+        match self {
+            // The owner is already gone, faulted, or was never wired up.
+            Self::LifecycleIntegrationRequired | Self::OwnerFaulted | Self::Closed => true,
+            // Key state the owner cannot serve any request without, and cannot
+            // reconcile by trying the same thing again.
+            Self::LocalKeysReconciliationRequired | Self::LocalKeysUnavailable => true,
+            // One observation, one attempt, one operation, one request. None of
+            // them is the owner, and none of them is worth the owner.
+            Self::NativeUnavailable
+            | Self::InvalidObservation
+            | Self::Busy
+            | Self::StorageUnavailable
+            | Self::InvalidPolicy
+            | Self::HistoryTimeUnavailable
+            | Self::ApprovalRejected
+            | Self::DenialRejected
+            | Self::RequestUnavailable
+            | Self::PresentationRefreshRequired => false,
+        }
+    }
+}
+
 impl From<uniffi::UnexpectedUniFFICallbackError> for BridgeError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
         Self::NativeUnavailable

@@ -18,7 +18,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -30,6 +30,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_PEERS: usize = 32;
+/// Consecutive failed attempts the reactor carries before it decides an intake
+/// that can never finish one is not serving anyone either. The same bound, for
+/// the same reason, as the owner's own maintenance pass on the Kotlin side.
+const MAX_CONSECUTIVE_FAILURES: u8 = 4;
 const OBSERVE_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Rust composition bookkeeping only, never exported through UniFFI/Tauri.
@@ -82,6 +86,7 @@ pub(crate) struct IntakeOwner {
     waiting_admission: AtomicBool,
     native_progress_pending: AtomicBool,
     temporal_refresh: AtomicBool,
+    consecutive_failures: AtomicU8,
 }
 impl Default for IntakeOwner {
     fn default() -> Self {
@@ -95,6 +100,7 @@ impl Default for IntakeOwner {
             waiting_admission: AtomicBool::new(false),
             native_progress_pending: AtomicBool::new(false),
             temporal_refresh: AtomicBool::new(false),
+            consecutive_failures: AtomicU8::new(0),
         }
     }
 }
@@ -627,6 +633,41 @@ impl MobileController {
         self.intake.request_maintenance();
     }
 }
+impl IntakeOwner {
+    /// Records the failure and answers whether it ends the owner.
+    ///
+    /// Most of what reaches these arms is one attempt failing: a socket that
+    /// could not be built, a clock sample that came back inconsistent, a
+    /// notification the platform refused. Every one of them used to retire the
+    /// owner, and on a phone that means the app stops answering the requests it
+    /// exists for until it is force-stopped. The work that met the error is
+    /// already lost by the time we are here, and losing it is the whole cost it
+    /// should carry.
+    ///
+    /// An unbroken run is different. An intake that can never finish an attempt
+    /// is not serving anyone either, so the count decides that, and any attempt
+    /// that completes clears it.
+    ///
+    /// Only the two arms this is used from: applying one peer's work, and one
+    /// maintenance pass. The rest still retire outright, because a panicking
+    /// foreign callback reaches Rust as `NativeUnavailable`, the same value a
+    /// declared failure carries, and a broken platform adapter is not one failed
+    /// attempt. Telling those apart needs a distinction the type does not carry,
+    /// so the arms that observe the platform keep their existing answer.
+    fn survives(&self, site: RetireSite, error: BridgeError) -> bool {
+        native_log::intake_retire(site, Some(error));
+        if error.retires_the_owner() {
+            return false;
+        }
+        self.consecutive_failures.fetch_add(1, Ordering::AcqRel) < MAX_CONSECUTIVE_FAILURES
+    }
+
+    /// One attempt finished. Only an unbroken run of failures retires an owner.
+    fn progressed(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+    }
+}
+
 fn fail_reactor(controller: &Weak<MobileController>, intake: &IntakeOwner) {
     native_log::intake_retire(RetireSite::Reactor, None);
     intake.failed.store(true, Ordering::Release);
@@ -715,15 +756,16 @@ async fn reactor(
                         && intake.maintenance.swap(false, Ordering::AcqRel)
                     {
                         match owner.maintain_requests_admitted() {
-                            Ok(()) => (),
+                            Ok(()) => intake.progressed(),
                             Err(BridgeError::PresentationRefreshRequired) => {
                                 intake.temporal_refresh.store(true, Ordering::Release);
                                 intake.maintenance.store(true, Ordering::Release);
                             }
                             Err(error) => {
-                                native_log::intake_retire(RetireSite::Maintenance, Some(error));
-                                intake.failed.store(true, Ordering::Release);
-                                owner.drop_owner();
+                                if !intake.survives(RetireSite::Maintenance, error) {
+                                    intake.failed.store(true, Ordering::Release);
+                                    owner.drop_owner();
+                                }
                             }
                         }
                         intake
@@ -732,9 +774,10 @@ async fn reactor(
                     } else if let Some(work) = parked.pop_front() {
                         match process_parked(owner, work, Arc::clone(&budget)) {
                             Ok(Some(peer)) => {
+                                intake.progressed();
                                 jobs.spawn(wait_peer(peer));
                             }
-                            Ok(None) => (),
+                            Ok(None) => intake.progressed(),
                             Err(BridgeError::PresentationRefreshRequired) => {
                                 intake.await_temporal_refresh();
                                 if let Err(error) = owner.pause_native_presentations() {
@@ -746,10 +789,14 @@ async fn reactor(
                                     owner.drop_owner();
                                 }
                             }
+                            // The peer that met this is already gone: it was
+                            // taken off the parked queue and its socket dropped
+                            // with the error. That is the cost this should carry.
                             Err(error) => {
-                                native_log::intake_retire(RetireSite::PeerWork, Some(error));
-                                intake.failed.store(true, Ordering::Release);
-                                owner.drop_owner();
+                                if !intake.survives(RetireSite::PeerWork, error) {
+                                    intake.failed.store(true, Ordering::Release);
+                                    owner.drop_owner();
+                                }
                             }
                         }
                     }

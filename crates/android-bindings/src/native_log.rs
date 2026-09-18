@@ -291,6 +291,43 @@ mod tests {
         }
     }
 
+    /// The list above is the crate's one enumeration of every `BridgeError`, so
+    /// it is also the place to state which of them end an owner. A variant added
+    /// later fails to compile in `error_label` and `retires_the_owner` both, and
+    /// this pins the answer for the ones that exist.
+    #[test]
+    fn only_the_five_errors_that_end_an_owner_retire_it() {
+        let retiring: Vec<&str> = ERRORS
+            .into_iter()
+            .filter(|error| error.retires_the_owner())
+            .map(error_label)
+            .collect();
+        assert_eq!(
+            retiring,
+            [
+                "LIFECYCLE_INTEGRATION_REQUIRED",
+                "OWNER_FAULTED",
+                "CLOSED",
+                "LOCAL_KEYS_RECONCILIATION_REQUIRED",
+                "LOCAL_KEYS_UNAVAILABLE",
+            ]
+        );
+        // The ones a real consent prompt produced on a real phone, each of which
+        // used to cost the whole owner.
+        for survivable in [
+            BridgeError::NativeUnavailable,
+            BridgeError::InvalidObservation,
+            BridgeError::StorageUnavailable,
+            BridgeError::RequestUnavailable,
+        ] {
+            assert!(
+                !survivable.retires_the_owner(),
+                "{}",
+                error_label(survivable)
+            );
+        }
+    }
+
     #[test]
     fn a_panic_line_names_the_site_and_never_the_payload() {
         let line = panic_line(Some(Location::caller()), Some("tokio-worker")).unwrap();
