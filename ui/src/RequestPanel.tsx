@@ -30,7 +30,10 @@ function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen
     <h2 id={headingId} ref={heading} tabIndex={-1} className="program-name"><bdi dir="ltr">{displayText(request.programName)}</bdi></h2>
     {[request.programName,request.executablePath,request.computerName].some(hasDirectionControls) && <p className="supporting-text" role="note">{tr('숨은 방향 제어 문자를 눈에 보이게 표시했어요.')}</p>}
     {!pending && <div className="request-result" aria-live="polite"><p className="pending-copy">{requestStateText[request.state]}</p></div>}
-    <dl className="request-facts"><div><dt>{ko.executable}</dt><dd className="path-output original-text" dir="ltr">{displayText(request.executablePath)}</dd></div></dl>
+    {/* A consent prompt does not always show a file path, and the protocol calls
+        that legal. Drawing the row with nothing after it reads as a value that
+        failed to load rather than one that was never there. */}
+    {request.executablePath !== '' && <dl className="request-facts"><div><dt>{ko.executable}</dt><dd className="path-output original-text" dir="ltr">{displayText(request.executablePath)}</dd></div></dl>}
     {request.hasDetails && <RequestDetailsDisclosure request={request} disabled={disabled} read={readDetails} initiallyOpen={initiallyOpen} />}
     {pending && <div className="request-result" aria-live="polite"><p className="time-remaining"><Icon name="clock" />{remainingLabel(request.remainingSeconds)}</p></div>}
     <div className="request-actions"><button type="button" className="button secondary" disabled={disabled || !request.canDeny} onClick={() => onDecision(request.id, 'deny')}>{ko.deny}</button><button type="button" className="button primary" disabled={disabled || !pending || !request.canApprove} onClick={() => onDecision(request.id, 'approve')}><Icon name="check" />{ko.approve}</button></div>

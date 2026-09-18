@@ -60,6 +60,11 @@ internal class ApplicationApprovalCoordinator(
 
     init { application.registerActivityLifecycleCallbacks(this) }
 
+    /** Retries of a failed terminal cleanup, per session. Same bound the owner's
+     * maintenance pass uses, for the same reason: a run of failures that never
+     * ends is not a transient one. */
+    private val cleanupRetries = AtomicInteger(0)
+
     fun canRequest(selection: NativeRequestSelection): Boolean = !stopped.get() && current.get() == null && !denialBlocked(selection)
 
     /** Boolean reports bounded job admission only, never authentication. */
@@ -74,6 +79,7 @@ internal class ApplicationApprovalCoordinator(
         if (denialBlocked(copied)) { callback(NativeApprovalReply.Busy); return false }
         val session = Session(copied, host, callback)
         if (!current.compareAndSet(null, session)) { callback(NativeApprovalReply.Busy); return false }
+        cleanupRetries.set(0)
         return work(session) {
             if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return@work }
             val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
@@ -134,7 +140,28 @@ internal class ApplicationApprovalCoordinator(
     }
 
     /** Called by the owning worker's finally paths if ordinary traffic filled it. */
-    fun cleanupOnWorker() { current.get()?.let { cleanup(it) } }
+    /**
+     * What a failed cleanup costs. It used to cost every later approval: the
+     * slot this session holds is exactly what `canRequest` refuses on, so the
+     * phone's approve button went grey and stayed grey, with nothing on screen
+     * to say why, until the app was force-stopped. Measured on a real device.
+     *
+     * A close that failed once is not proof it will fail forever, and the
+     * handle cursor already guarantees a retry never repeats a close that
+     * succeeded, so retrying is safe by construction. The budget is what keeps
+     * ordinary worker traffic from turning that into the endless immediate loop
+     * the latch was introduced to prevent. Past the budget the slot stays held,
+     * exactly as before, because an obligation that cannot be discharged is not
+     * something to paper over.
+     */
+    fun cleanupOnWorker() {
+        val session = current.get() ?: return
+        if (session.cleanupFailed.get() &&
+            cleanupRetries.getAndIncrement() < PolicyOwnerBounds.MAX_CONSECUTIVE_MAINTENANCE_FAILURES) {
+            session.cleanupFailed.set(false)
+        }
+        cleanup(session)
+    }
     fun hasPendingCleanup(): Boolean = current.get() != null
     /** Explicit owner shutdown retry or actual owner destruction, not a timer. */
     fun retryCleanup() { current.get()?.let {
