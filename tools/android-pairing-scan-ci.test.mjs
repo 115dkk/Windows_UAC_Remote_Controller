@@ -152,6 +152,7 @@ test('scanner extension is separate and never repeats original credential setup 
   assert.ok(!source.includes("'set-pin'") && !source.includes("'reboot'") && !source.includes("'force-stop'") && !source.includes("'install'"));
   assert.ok(source.includes('requireScannerPrerequisite(prior'));
   assert.ok(source.includes('result.deviceOperationMayContinue = true'));
-  assert.ok(source.includes('MAX_COMMANDS = 128'));
+  assert.ok(source.includes('SCANNER_COMMAND_BUDGET = 60 + SCANNER_IMAGES.length'));
+  assert.ok(source.includes('index < SCANNER_COMMAND_BUDGET'));
   assert.ok(source.includes('physicalCameraVerified: false'));
 });
