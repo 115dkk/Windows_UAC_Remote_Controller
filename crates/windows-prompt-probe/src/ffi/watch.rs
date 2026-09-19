@@ -305,15 +305,11 @@ fn worker_census(
         qualified_candidates: 1,
         ..ProbeCounts::default()
     };
-    // Watch is the path a real request travels, so this is where the details
-    // are opened. The argument-free diagnostic keeps reading the dialog exactly
-    // as it finds it.
     let report = match uia::inspect_without_budget(
         candidate.hwnd,
         candidate.pid,
         began,
         counts,
-        uia::Details::Open,
         cleanup,
         || {
             candidate.recheck(session, image, cleanup)?;
