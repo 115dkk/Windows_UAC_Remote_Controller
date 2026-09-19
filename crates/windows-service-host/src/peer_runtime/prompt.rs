@@ -4,9 +4,9 @@
 
 use std::{fmt, sync::Arc, time::Instant};
 
-use approval_core::RequestTtl;
+use approval_core::{AuthorizedDecision, PendingChallenge, RequestTtl};
 use approval_protocol::{DecisionPurpose, DeviceId, RequestBinding, RequestContent, RequestId};
-use service_protocol::{RequestResolution, ServiceTick};
+use service_protocol::{PcEvent, RequestResolution, ServiceTick};
 use windows_prompt_probe::{LabelKind, ProbeReport};
 
 use crate::{ProbeSupervisorError, PromptAction, TargetIdentity};
@@ -28,15 +28,139 @@ pub(crate) trait PromptApply {
 
 pub(super) struct LivePrompt {
     pub(super) target: TargetIdentity,
-    pub(super) session_id: u32,
-    pub(super) binding: RequestBinding,
-    pub(super) request_id: RequestId,
     pub(super) content: Arc<RequestContent>,
     pub(super) content_digest: [u8; 32],
-    pub(super) issued_at: ServiceTick,
-    pub(super) renewal: Option<(RequestBinding, ServiceTick)>,
-    pub(super) deadline: Instant,
-    pub(super) applying: Option<(DeviceId, DecisionPurpose)>,
+    lease: LiveLease,
+    applying: Option<(DeviceId, DecisionPurpose)>,
+}
+
+/// One immutable signed lease and the immediate predecessor needed on reconnect.
+/// Only LivePrompt replaces these facts together. This is presentation state,
+/// not an authorization owner; the engine alone creates replacement challenges.
+struct LiveLease {
+    binding: RequestBinding,
+    issued_at: ServiceTick,
+    deadline: Instant,
+    predecessor: Option<(RequestBinding, ServiceTick)>,
+}
+
+impl LivePrompt {
+    pub(super) fn opened(
+        target: TargetIdentity,
+        challenge: &PendingChallenge,
+        content: Arc<RequestContent>,
+        content_digest: [u8; 32],
+        issued_at: ServiceTick,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            target,
+            content,
+            content_digest,
+            lease: LiveLease {
+                binding: challenge.binding(),
+                issued_at,
+                deadline,
+                predecessor: None,
+            },
+            applying: None,
+        }
+    }
+
+    pub(super) fn binding(&self) -> RequestBinding {
+        self.lease.binding
+    }
+
+    pub(super) fn request_id(&self) -> RequestId {
+        self.lease.binding.request_id()
+    }
+
+    pub(super) fn deadline(&self) -> Instant {
+        self.lease.deadline
+    }
+
+    pub(super) fn is_applying(&self) -> bool {
+        self.applying.is_some()
+    }
+
+    pub(super) fn applying_purpose(&self) -> Option<DecisionPurpose> {
+        self.applying.map(|(_, purpose)| purpose)
+    }
+
+    /// A fresh same-content native observation is required by the caller.
+    /// This gate only narrows when that observation may renew a signed lease.
+    pub(super) fn can_renew(&self, target: TargetIdentity, now: Instant) -> bool {
+        self.target == target
+            && !self.is_applying()
+            && now < self.deadline()
+            && self.deadline().duration_since(now) <= std::time::Duration::from_secs(30)
+    }
+
+    /// Called only with the engine's exact-binding renewal result. It preserves
+    /// the native target/content and decision state, replacing lease facts once.
+    pub(super) fn renew(
+        &mut self,
+        challenge: &PendingChallenge,
+        issued_at: ServiceTick,
+        deadline: Instant,
+    ) {
+        self.lease = LiveLease {
+            binding: challenge.binding(),
+            issued_at,
+            deadline,
+            predecessor: Some((self.lease.binding, self.lease.issued_at)),
+        };
+    }
+
+    /// Both initial publication and reconnect use the retained signed kind.
+    /// A renewed lease must never masquerade as an original Opened request.
+    pub(super) fn publication(&self) -> PcEvent {
+        match self.lease.predecessor {
+            Some((previous_binding, previous_issued_at)) => PcEvent::Renewed {
+                previous_binding,
+                previous_issued_at,
+                binding: self.lease.binding,
+                issued_at: self.lease.issued_at,
+                content: Arc::clone(&self.content),
+            },
+            None => PcEvent::Opened {
+                binding: self.lease.binding,
+                issued_at: self.lease.issued_at,
+                content: Arc::clone(&self.content),
+            },
+        }
+    }
+
+    pub(super) fn resolution(&self, result: PromptResult) -> PcEvent {
+        PcEvent::Resolved {
+            binding: self.lease.binding,
+            issued_at: self.lease.issued_at,
+            outcome: result.resolution(),
+        }
+    }
+
+    pub(super) fn matches_authorized(&self, authorized: &AuthorizedDecision, now: Instant) -> bool {
+        self.binding() == authorized.binding()
+            && authorized.binding().session().logon_id() == 0
+            && self.content.as_ref() == authorized.content()
+            && now < self.deadline()
+            && !self.is_applying()
+    }
+
+    /// Record only an already-dispatched native action for this exact lease.
+    pub(super) fn mark_applying(
+        &mut self,
+        target: TargetIdentity,
+        binding: RequestBinding,
+        device: DeviceId,
+        purpose: DecisionPurpose,
+    ) -> bool {
+        if self.target != target || self.binding() != binding || self.is_applying() {
+            return false;
+        }
+        self.applying = Some((device, purpose));
+        true
+    }
 }
 
 impl fmt::Debug for LivePrompt {

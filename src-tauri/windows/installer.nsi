@@ -944,6 +944,9 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
+  ${If} $NoShortcutMode = 1
+    Return
+  ${EndIf}
   ; Rename an existing, verified owned shortcut even when an upgrade does not
   ; request creation of additional shortcuts. No new shortcut is implied.
   !insertmacro UacMigrateShortcut "$SMPROGRAMS\UAC 원격 승인.lnk" "$SMPROGRAMS\${PRODUCTNAME}.lnk"
@@ -985,6 +988,9 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
+  ${If} $NoShortcutMode = 1
+    Return
+  ${EndIf}
   !insertmacro UacMigrateShortcut "$DESKTOP\UAC 원격 승인.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
   ${If} $NoShortcutMode = 1
   ${OrIf} $UacDesktopChoice <> ${BST_CHECKED}

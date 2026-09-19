@@ -32,7 +32,7 @@
     },
     {
       "path": "crates/windows-service-host/src/peer_runtime.rs",
-      "sha256": "75db621651336f99d434cc890785beeccab201989eed037cfc0f8476f366b9b8"
+      "sha256": "d67e3863afcf4921ef4c489cc047dd5463e194d7a43348c95479a840bc83374c"
     },
     {
       "path": "crates/windows-prompt-probe/src/ffi/watch.rs",
@@ -45,6 +45,10 @@
     {
       "path": "crates/notification-policy/src/lifecycle.rs",
       "sha256": "679292988d2805ea8b3280b29318cfbc5ea29345e24b5e055e0f6a44bf9836bf"
+    },
+    {
+      "path": "crates/windows-service-host/src/peer_runtime/prompt.rs",
+      "sha256": "22f4ed5ced15a18f95b7175a430dc6d33a4a0dcc92aedf8e0251766a34e24081"
     }
   ],
   "models": [

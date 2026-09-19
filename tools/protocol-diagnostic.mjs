@@ -15,7 +15,10 @@ const repository = fileURLToPath(new URL('../', import.meta.url));
 const NORMAL = 'artifacts/protocol-security';
 const DIAGNOSTIC = 'artifacts/protocol-diagnostic';
 const REQUEST_MODEL = 'request-authorization';
-const ROWS = 16;
+// Historical captures have 16 obligations; live-lease coverage adds five.
+// Require the exact row set derived from the reviewed manifest below, rather
+// than rejecting all new models before their individual obligations are read.
+const MAX_ROWS = 64;
 export const DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
 export const DIAGNOSTIC_TIMEOUT_MS = 60_000;
 // Depth8 produced a skeleton, but b5b3b19 depth16 exhausted the fixed60s cap.
@@ -97,7 +100,7 @@ export function admitDiagnostic(manifest, summary, root) {
       manifest.models.length < 2 || manifest.models.length > 8 || !Array.isArray(manifest.sourceBindings) ||
       !manifest.sourceBindings.length || manifest.sourceBindings.length > 32 || summary?.passed !== false ||
       summary.toolVersion !== '1.12.0' || (Object.hasOwn(summary, 'status') && summary.status !== 'failed') ||
-      summary.manifestSha256 !== sha256(JSON.stringify(manifest)) || !Array.isArray(summary.runs) || summary.runs.length !== ROWS) reject();
+      summary.manifestSha256 !== sha256(JSON.stringify(manifest)) || !Array.isArray(summary.runs) || summary.runs.length < 16 || summary.runs.length > MAX_ROWS) reject();
   const inputs = new Set(), plans = [], runIds = new Set(['tool-version']);
   const add = (entry) => { if (!id(entry.id) || runIds.has(entry.id)) reject(); runIds.add(entry.id); plans.push(entry); };
   for (const model of manifest.models) {
@@ -148,7 +151,7 @@ export function admitDiagnostic(manifest, summary, root) {
         expected: canary.expected, mutation: canary.mutation });
     }
   }
-  if (plans.length !== ROWS || !manifest.models.some((model) => model.id === REQUEST_MODEL)) reject();
+  if (plans.length !== summary.runs.length || plans.length > MAX_ROWS || !manifest.models.some((model) => model.id === REQUEST_MODEL)) reject();
   const rows = new Map();
   for (const row of summary.runs) {
     if (!row || !id(row.id) || rows.has(row.id) || row.cancelled !== false || row.cleanupIncomplete !== false ||

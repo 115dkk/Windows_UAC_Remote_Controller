@@ -806,24 +806,16 @@ impl<'key> ServiceSession<'key> {
                     let _ = self.engine.cancel_from_privileged_host(&binding);
                     return Err(PeerRuntimeError::Protocol);
                 }
-                let live = prompt::LivePrompt {
+                let live = prompt::LivePrompt::opened(
                     target,
-                    session_id: session,
-                    binding,
-                    request_id: binding.request_id(),
-                    content: Arc::clone(&content),
-                    content_digest: observed_digest,
-                    issued_at,
-                    renewal: None,
-                    deadline,
-                    applying: None,
-                };
-                self.prompt.replace(live);
-                let event = PcEvent::Opened {
-                    binding,
-                    issued_at,
+                    &challenge,
                     content,
-                };
+                    observed_digest,
+                    issued_at,
+                    deadline,
+                );
+                let event = live.publication();
+                self.prompt.replace(live);
                 let queued = match self.publish_event(event, deadline, now) {
                     Ok(count) => count,
                     Err(error) => {
@@ -856,10 +848,12 @@ impl<'key> ServiceSession<'key> {
                 let Some(live) = self.prompt.live() else {
                     return Ok(prompt::PromptProgress::default());
                 };
-                if live.target != target || live.applying.is_none() {
+                if live.target != target {
                     return Ok(prompt::PromptProgress::default());
                 }
-                let (_, purpose) = live.applying.expect("checked applying state");
+                let Some(purpose) = live.applying_purpose() else {
+                    return Ok(prompt::PromptProgress::default());
+                };
                 let result = match outcome {
                     crate::ApplyOutcome::Gone => match purpose {
                         DecisionPurpose::Approve => prompt::PromptResult::Approved,
@@ -909,11 +903,7 @@ impl<'key> ServiceSession<'key> {
         // a delivery/authentication margin while keeping every signed lease
         // bounded to the original 110 seconds. Never revive an expired lease or
         // rotate one already consumed by a phone decision.
-        if live.target != target
-            || live.applying.is_some()
-            || now >= live.deadline
-            || live.deadline.duration_since(now) > Duration::from_secs(30)
-        {
+        if !live.can_renew(target, now) {
             return Ok(());
         }
         let issued_at = self.tick(now)?;
@@ -921,8 +911,7 @@ impl<'key> ServiceSession<'key> {
             .checked_add(prompt::request_ttl().as_duration())
             .ok_or(PeerRuntimeError::Clock)?;
         let mut live = self.prompt.take().ok_or(PeerRuntimeError::Protocol)?;
-        let previous_binding = live.binding;
-        let previous_issued_at = live.issued_at;
+        let previous_binding = live.binding();
         // Single-threaded exact-binding replacement: one active binding, same
         // prompt lineage and frozen eligible devices, fresh nonce and expiry.
         let challenge = match self.engine.renew_from_privileged_host(
@@ -937,18 +926,8 @@ impl<'key> ServiceSession<'key> {
                 return Err(PeerRuntimeError::Protocol);
             }
         };
-        live.binding = challenge.binding();
-        live.request_id = live.binding.request_id();
-        live.issued_at = issued_at;
-        live.deadline = deadline;
-        live.renewal = Some((previous_binding, previous_issued_at));
-        let event = PcEvent::Renewed {
-            previous_binding,
-            previous_issued_at,
-            binding: live.binding,
-            issued_at,
-            content: Arc::clone(&live.content),
-        };
+        live.renew(&challenge, issued_at, deadline);
+        let event = live.publication();
         self.prompt.replace(live);
         if let Err(error) = self.publish_event(event, deadline, now) {
             let _ = self.cancel_live_prompt(prompt::PromptResult::FailedUnknown, now);
@@ -966,11 +945,11 @@ impl<'key> ServiceSession<'key> {
         let Some(live) = self.prompt.live() else {
             return Ok(None);
         };
-        if now < live.deadline {
+        if now < live.deadline() {
             return Ok(None);
         }
-        let request_id = live.request_id;
-        let applying = live.applying.is_some();
+        let request_id = live.request_id();
+        let applying = live.is_applying();
         let expired = self
             .engine
             .expire_from_privileged_host(now)
@@ -979,7 +958,7 @@ impl<'key> ServiceSession<'key> {
         if self
             .prompt
             .live()
-            .is_some_and(|current| current.request_id != request_id)
+            .is_some_and(|current| current.request_id() != request_id)
             || applying == request_expired
         {
             return Err(PeerRuntimeError::Protocol);
@@ -998,15 +977,16 @@ impl<'key> ServiceSession<'key> {
         let Some(live) = self.prompt.take() else {
             return Ok(None);
         };
-        match self.engine.cancel_from_privileged_host(&live.binding) {
+        match self.engine.cancel_from_privileged_host(&live.binding()) {
             Ok(()) => {}
-            Err(approval_core::CancelError::UnknownOrCompleted) if live.applying.is_some() => {}
+            Err(approval_core::CancelError::UnknownOrCompleted) if live.is_applying() => {}
             Err(_) => {
                 self.prompt.replace(live);
                 return Err(PeerRuntimeError::Protocol);
             }
         }
-        self.prompt.remember_withdrawn(live.binding, live.deadline);
+        self.prompt
+            .remember_withdrawn(live.binding(), live.deadline());
         self.publish_resolution(&live, result, now)?;
         Ok(Some(result))
     }
@@ -1018,7 +998,8 @@ impl<'key> ServiceSession<'key> {
     ) -> Result<(), PeerRuntimeError> {
         let live = self.prompt.take().ok_or(PeerRuntimeError::Protocol)?;
         if result == prompt::PromptResult::Cancelled {
-            self.prompt.remember_withdrawn(live.binding, live.deadline);
+            self.prompt
+                .remember_withdrawn(live.binding(), live.deadline());
         }
         self.publish_resolution(&live, result, now).map(|_| ())
     }
@@ -1035,11 +1016,7 @@ impl<'key> ServiceSession<'key> {
         result: prompt::PromptResult,
         now: Instant,
     ) -> Result<usize, PeerRuntimeError> {
-        let event = PcEvent::Resolved {
-            binding: live.binding,
-            issued_at: live.issued_at,
-            outcome: result.resolution(),
-        };
+        let event = live.resolution(result);
         let deadline = now
             .checked_add(EVENT_LIFETIME)
             .ok_or(PeerRuntimeError::Clock)?;
@@ -1080,28 +1057,15 @@ impl<'key> ServiceSession<'key> {
         let Some(live) = self.prompt.live() else {
             return Ok(());
         };
-        if live.applying.is_some()
-            || now >= live.deadline
-            || self.peers[index].opened_sent == Some(live.request_id)
+        if live.is_applying()
+            || now >= live.deadline()
+            || self.peers[index].opened_sent == Some(live.request_id())
         {
             return Ok(());
         }
-        let request_id = live.request_id;
-        let deadline = live.deadline;
-        let event = match live.renewal {
-            Some((previous_binding, previous_issued_at)) => PcEvent::Renewed {
-                previous_binding,
-                previous_issued_at,
-                binding: live.binding,
-                issued_at: live.issued_at,
-                content: Arc::clone(&live.content),
-            },
-            None => PcEvent::Opened {
-                binding: live.binding,
-                issued_at: live.issued_at,
-                content: Arc::clone(&live.content),
-            },
-        };
+        let request_id = live.request_id();
+        let deadline = live.deadline();
+        let event = live.publication();
         let bytes = self.signed_event_bytes(event)?;
         self.revalidate_peers()?;
         self.queue_signed_event(index, &bytes, deadline, now, Some(request_id))
@@ -1182,10 +1146,10 @@ impl<'key> ServiceSession<'key> {
         let Some(live) = self.prompt.live() else {
             return Ok(());
         };
-        if live.request_id != request_id || live.applying.is_some() {
+        if live.request_id() != request_id || live.is_applying() {
             return Ok(());
         }
-        let result = if now >= live.deadline {
+        let result = if now >= live.deadline() {
             prompt::PromptResult::Expired
         } else {
             result
@@ -1853,13 +1817,7 @@ impl<'key> ServiceSession<'key> {
                                     NotAppliedReason::NoLiveTarget,
                                 ));
                             };
-                            if live.binding != authorized.binding()
-                                || live.session_id != authorized.binding().session().session_id()
-                                || authorized.binding().session().logon_id() != 0
-                                || live.content.as_ref() != authorized.content()
-                                || after >= live.deadline
-                                || live.applying.is_some()
-                            {
+                            if !live.matches_authorized(&authorized, after) {
                                 drop(authorized);
                                 self.settle_consumed(
                                     request_id,
@@ -1889,13 +1847,14 @@ impl<'key> ServiceSession<'key> {
                             }
                             drop(authorized);
                             let live = self.prompt.live_mut().ok_or(PeerRuntimeError::Protocol)?;
-                            if live.target != target
-                                || live.binding != decision.statement().binding()
-                                || live.applying.is_some()
-                            {
+                            if !live.mark_applying(
+                                target,
+                                decision.statement().binding(),
+                                device,
+                                purpose,
+                            ) {
                                 return Err(PeerRuntimeError::Protocol);
                             }
-                            live.applying = Some((device, purpose));
                             Ok(SessionProgress::ApplyRequested { device, purpose })
                         }
                     }
@@ -2092,7 +2051,7 @@ impl<'key> ServiceSession<'key> {
     }
     pub fn begin_shutdown(&mut self) {
         if let Some(live) = self.prompt.take() {
-            let _ = self.engine.cancel_from_privileged_host(&live.binding);
+            let _ = self.engine.cancel_from_privileged_host(&live.binding());
         }
         self.closing = true;
         #[cfg(all(windows, target_pointer_width = "64"))]

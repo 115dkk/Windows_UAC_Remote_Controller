@@ -986,7 +986,7 @@ fn matching_phone_decision_applies_once_to_the_exact_target_and_observation_dige
                 now,
             )
             .unwrap();
-        let binding = session.prompt.live().unwrap().binding;
+        let binding = session.prompt.live().unwrap().binding();
         let wire = decision_for(binding, device(1), DecisionPurpose::Approve, 3);
         let (server, client) = streams();
         session
@@ -1090,6 +1090,124 @@ fn gone_cancels_and_publishes_cancelled_and_late_signed_decision_has_no_live_tar
 }
 
 #[test]
+fn live_prompt_interface_keeps_publication_and_resolution_on_one_coherent_lease() {
+    exercise(|session, _, _, _| {
+        let now = session.now().unwrap();
+        let content = Arc::new(RequestContent::new("Fixture", "", "Synthetic details").unwrap());
+        let first = session
+            .engine
+            .open_from_privileged_host(
+                OsSession::new(12, 0),
+                (*content).clone(),
+                prompt::request_ttl(),
+                now,
+            )
+            .unwrap();
+        let first_tick = session.tick(now).unwrap();
+        let mut live = prompt::LivePrompt::opened(
+            target(44),
+            &first,
+            Arc::clone(&content),
+            [9; 32],
+            first_tick,
+            now + prompt::request_ttl().as_duration(),
+        );
+        assert!(
+            matches!(live.publication(), PcEvent::Opened { binding, issued_at, content: published }
+            if binding == first.binding() && issued_at == first_tick && Arc::ptr_eq(&published, &content))
+        );
+        assert!(!live.can_renew(target(44), now + Duration::from_secs(79)));
+        assert!(!live.can_renew(target(45), now + Duration::from_secs(80)));
+        assert!(!live.can_renew(target(44), live.deadline()));
+
+        let mut previous_binding = first.binding();
+        let mut previous_tick = first_tick;
+        for seconds in [80, 160] {
+            let renewal_time = now + Duration::from_secs(seconds);
+            assert!(live.can_renew(target(44), renewal_time));
+            let challenge = session
+                .engine
+                .renew_from_privileged_host(&previous_binding, prompt::request_ttl(), renewal_time)
+                .unwrap();
+            let issued_at = session.tick(renewal_time).unwrap();
+            let deadline = renewal_time + prompt::request_ttl().as_duration();
+            live.renew(&challenge, issued_at, deadline);
+            assert_eq!(live.binding(), challenge.binding());
+            assert_eq!(live.request_id(), first.binding().request_id());
+            assert_eq!(live.deadline(), deadline);
+            assert_eq!(live.target, target(44));
+            assert_eq!(live.content_digest, [9; 32]);
+            assert_eq!(live.applying_purpose(), None);
+            // Repeated reconnect reads preserve the immediate signed predecessor.
+            for _ in 0..2 {
+                assert!(matches!(live.publication(), PcEvent::Renewed {
+                    previous_binding: old, previous_issued_at: old_tick,
+                    binding, issued_at: current_tick, content: published,
+                } if old == previous_binding && old_tick == previous_tick
+                    && binding == challenge.binding() && current_tick == issued_at
+                    && Arc::ptr_eq(&published, &content)));
+            }
+            assert!(
+                matches!(live.resolution(prompt::PromptResult::Cancelled), PcEvent::Resolved {
+                binding, issued_at: current_tick, outcome: service_protocol::RequestResolution::Cancelled,
+            } if binding == challenge.binding() && current_tick == issued_at)
+            );
+            previous_binding = challenge.binding();
+            previous_tick = issued_at;
+        }
+    });
+}
+
+#[test]
+fn live_prompt_interface_fences_exact_dispatched_action_without_rebinding() {
+    exercise(|session, _, _, _| {
+        let now = session.now().unwrap();
+        let content = Arc::new(RequestContent::new("Fixture", "", "Synthetic details").unwrap());
+        let first = session
+            .engine
+            .open_from_privileged_host(
+                OsSession::new(12, 0),
+                (*content).clone(),
+                prompt::request_ttl(),
+                now,
+            )
+            .unwrap();
+        let mut live = prompt::LivePrompt::opened(
+            target(44),
+            &first,
+            content,
+            [9; 32],
+            session.tick(now).unwrap(),
+            now + prompt::request_ttl().as_duration(),
+        );
+        assert!(!live.mark_applying(
+            target(45),
+            first.binding(),
+            device(1),
+            DecisionPurpose::Approve
+        ));
+        assert!(!live.is_applying());
+        assert!(live.mark_applying(
+            target(44),
+            first.binding(),
+            device(1),
+            DecisionPurpose::Deny
+        ));
+        assert!(live.is_applying());
+        assert_eq!(live.applying_purpose(), Some(DecisionPurpose::Deny));
+        assert!(!live.can_renew(target(44), now + Duration::from_secs(80)));
+        assert!(!live.mark_applying(
+            target(44),
+            first.binding(),
+            device(1),
+            DecisionPurpose::Approve
+        ));
+        assert_eq!(live.applying_purpose(), Some(DecisionPurpose::Deny));
+        assert_eq!(live.binding(), first.binding());
+    });
+}
+
+#[test]
 fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt() {
     exercise(|session, _, _, _| {
         let now = session.now().unwrap();
@@ -1103,8 +1221,8 @@ fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt()
                 now,
             )
             .unwrap();
-        let original = session.prompt.live().unwrap().binding;
-        let original_deadline = session.prompt.live().unwrap().deadline;
+        let original = session.prompt.live().unwrap().binding();
+        let original_deadline = session.prompt.live().unwrap().deadline();
         let digest = session.prompt.live().unwrap().content_digest;
         let early = now + Duration::from_secs(79);
         session
@@ -1113,7 +1231,7 @@ fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt()
                 early,
             )
             .unwrap();
-        assert_eq!(session.prompt.live().unwrap().binding, original);
+        assert_eq!(session.prompt.live().unwrap().binding(), original);
         let renew_at = now + Duration::from_secs(80);
         session
             .handle_watch_event(
@@ -1121,7 +1239,7 @@ fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt()
                 renew_at,
             )
             .unwrap();
-        assert_eq!(session.prompt.live().unwrap().binding, original);
+        assert_eq!(session.prompt.live().unwrap().binding(), original);
         let progress = session
             .handle_watch_event(
                 crate::WatchEvent::StillPresent { target: target(44) },
@@ -1130,10 +1248,15 @@ fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt()
             .unwrap();
         assert_eq!(progress, prompt::PromptProgress::default());
         let renewed = session.prompt.live().unwrap();
-        assert_ne!(renewed.binding, original);
-        assert_eq!(renewed.request_id, original.request_id());
+        assert_ne!(renewed.binding(), original);
+        assert_eq!(renewed.request_id(), original.request_id());
         assert_eq!(renewed.content_digest, digest);
-        assert!(renewed.deadline > original_deadline);
+        assert!(renewed.deadline() > original_deadline);
+        assert!(matches!(
+            renewed.publication(),
+            PcEvent::Renewed { previous_binding, binding, .. }
+                if previous_binding == original && binding == renewed.binding()
+        ));
         assert_eq!(session.engine.pending_count(), 1);
         assert!(
             session
@@ -1172,7 +1295,7 @@ fn deadline_expiry_publishes_expired_and_clears_engine_and_live_target() {
             )
             .unwrap();
         let _ = next_verified_event(&clients[0], session, key);
-        let deadline = session.prompt.live().unwrap().deadline;
+        let deadline = session.prompt.live().unwrap().deadline();
         let progress = session.prompt_deadline_step(deadline).unwrap().unwrap();
         assert_eq!(progress.result(), Some(prompt::PromptResult::Expired));
         assert_eq!(session.engine.pending_count(), 0);
@@ -1209,7 +1332,7 @@ fn applying_prompt_expires_at_its_prompt_deadline_and_publishes_expired() {
         };
         let _ = mark_applying(session, DecisionPurpose::Approve);
         assert_eq!(session.engine.pending_count(), 0);
-        let deadline = session.prompt.live().unwrap().deadline;
+        let deadline = session.prompt.live().unwrap().deadline();
         let progress = session.prompt_deadline_step(deadline).unwrap().unwrap();
         assert_eq!(progress.result(), Some(prompt::PromptResult::Expired));
         assert!(!session.prompt.is_live());
@@ -1280,7 +1403,7 @@ fn replacement_withdraws_the_first_request_before_opening_the_second() {
 
 fn mark_applying(session: &mut ServiceSession<'_>, purpose: DecisionPurpose) -> TargetIdentity {
     let target = session.prompt.live().unwrap().target;
-    let binding = session.prompt.live().unwrap().binding;
+    let binding = session.prompt.live().unwrap().binding();
     let unsigned = UnsignedDecision::new(binding, device(1), purpose);
     let seed = if purpose == DecisionPurpose::Approve {
         3
@@ -1299,7 +1422,13 @@ fn mark_applying(session: &mut ServiceSession<'_>, purpose: DecisionPurpose) -> 
             .submit_decision(&decision, decision_now)
             .unwrap(),
     );
-    session.prompt.live_mut().unwrap().applying = Some((device(1), purpose));
+    assert!(
+        session
+            .prompt
+            .live_mut()
+            .unwrap()
+            .mark_applying(target, binding, device(1), purpose)
+    );
     target
 }
 

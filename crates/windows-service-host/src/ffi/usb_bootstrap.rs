@@ -25,7 +25,8 @@ use windows::{
         },
         System::{
             Registry::{KEY_READ, REG_MULTI_SZ, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW},
-            Threading::{GetCurrentProcess, GetCurrentProcessId, ProcessIdToSessionId},
+            RemoteDesktop::ProcessIdToSessionId,
+            Threading::{GetCurrentProcess, GetCurrentProcessId},
         },
     },
     core::{GUID, PCWSTR, w},

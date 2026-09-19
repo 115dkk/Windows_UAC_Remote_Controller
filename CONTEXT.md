@@ -10,6 +10,13 @@ not a general remote desktop or arbitrary remote execution tool.
   Desktop. A title, PID, screenshot or process name alone is not prompt identity.
 - **Request**: immutable information about one prompt, its PC/session identity,
   unpredictable challenge, content digest and bounded lifetime.
+- **Request lease**: one immutable signed binding within a live Prompt's Request
+  lineage. A fresh same-content native observation may replace a still-pending
+  lease through ApprovalEngine: the RequestId, content and eligible devices stay
+  fixed while nonce and expiry change. Old decisions cannot authorize the new
+  lease. Renewal is not a new prompt, a Windows outcome or permission to restore
+  a suppressed request. The live Prompt module retains the immediate predecessor
+  so reconnect publication remains `Renewed`, never a fabricated `Opened`.
 - **Decision**: one enrolled phone's request-bound signed approval or denial.
   An approval key must require that phone's OS authentication for each use;
   a denial key is separate and does not require it.

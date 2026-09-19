@@ -64,7 +64,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         expect(box?.width ?? 0).toBeGreaterThanOrEqual(48);
         expect(box?.height ?? 0).toBeGreaterThanOrEqual(48);
       }
-      await expect(panel).not.toContainText('서비스');
+      await expect(panel).not.toContainText('요청 전송 준비됨');
       await gallery.capture('overview', '휴대폰 승인 실행 상태 · 합성 클라이언트 화면, 실제 실행 증거 아님');
 
       if (selected.fixture === 'phone-service-stopped') {

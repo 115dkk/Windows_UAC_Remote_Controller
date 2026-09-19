@@ -99,9 +99,11 @@ either fixed installed app/service executable, or `/UPDATE`. Checkbox clicks
 retain choices when navigating Back and Next; revisiting the page does not reset
 defaults.
 
-Unchecked options leave existing shortcuts untouched, including their legacy
-names. Explicitly selected options may create/update their exact shortcut or
-migrate an owned legacy shortcut; a conflicting unrelated target is rejected.
+Unchecked options create no new shortcuts. The verified owned `UAC 원격 승인`
+shortcut is renamed to `UAC 원격 승인기` during this branding upgrade; other legacy
+names remain unchanged unless creation is selected. Explicitly selected options
+may create/update their exact shortcut or migrate an owned legacy shortcut;
+a conflicting unrelated target is rejected.
 `/NS` suppresses shortcut work and the taskbar suggestion. Silent and passive
 fresh installs create desktop/Start menu entries by default, while unattended
 upgrades preserve them. Silent/passive installs never request a taskbar prompt.
