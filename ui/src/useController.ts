@@ -16,6 +16,12 @@ export type ClientCommand =
   | { readonly kind: 'notification-settings' }
   | { readonly kind: 'scan_pairing' };
 
+/** How long before a request's display lease ends to ask for the next one. The
+ * lease is clipped to the end of the wall minute, so this has to be a fraction
+ * of the shortest one that clip can produce while still covering a native read
+ * on a real device. */
+const REQUEST_REFRESH_LEAD_MILLIS = 1200;
+
 interface ViewState {
   readonly owner: ControllerBridge;
   readonly snapshot: AppSnapshot | null;
@@ -233,17 +239,31 @@ export function useController(bridge: ControllerBridge) {
     }
   }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision]);
 
+  // A request's display lease is clipped to the end of the wall minute, so one
+  // that arrives at :58 holds a two-second lease. Withdrawing the bodies and
+  // only then asking for a fresh snapshot left the screen on its empty state
+  // for the whole native round trip, so the request appeared, vanished and came
+  // back, sometimes within a second of arriving.
+  //
+  // Ask early and withdraw on time. The read starts a lead before the lease
+  // ends and its answer replaces this snapshot with no gap in between; the
+  // withdrawal still runs at the lease itself, for the case where no answer
+  // arrives. Neither timer extends what may be displayed by a millisecond.
   useEffect(() => {
     const snapshot = state.snapshot;
     if (!snapshot?.requests.length || state.owner !== bridge) return;
-    const delay = Math.max(0, Math.min(...snapshot.requests.map((request) => request.refreshAfterMillis))
+    const remaining = Math.max(0, Math.min(...snapshot.requests.map((request) => request.refreshAfterMillis))
       - (performance.now() - state.requestObservedAt));
-    const timer = window.setTimeout(() => {
-      if (liveOwner.current !== bridge || current.current.snapshot !== snapshot) return;
+    const showing = () => liveOwner.current === bridge && current.current.snapshot === snapshot;
+    const early = window.setTimeout(() => {
+      if (showing() && document.visibilityState === 'visible') void refresh();
+    }, Math.max(0, remaining - REQUEST_REFRESH_LEAD_MILLIS));
+    const withdraw = window.setTimeout(() => {
+      if (!showing()) return;
       publish({ ...current.current, snapshot: withoutRequestBodies(snapshot) });
       if (document.visibilityState === 'visible') void refresh();
-    }, delay);
-    return () => window.clearTimeout(timer);
+    }, remaining);
+    return () => { window.clearTimeout(early); window.clearTimeout(withdraw); };
   }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot]);
 
   useEffect(() => {

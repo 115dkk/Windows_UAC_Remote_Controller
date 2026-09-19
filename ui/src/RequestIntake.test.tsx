@@ -155,6 +155,26 @@ describe('native request presentation integration', () => {
     } finally { clock.mockRestore(); }
   });
 
+  it('renews the display lease before it ends, and still withdraws on time when no answer comes', async () => {
+    const initial = pending();
+    const short = { ...initial, requests: initial.requests.map((request) => ({ ...request, refreshAfterMillis: 1400 })) };
+    let answer: (value: AppSnapshot) => void = () => {};
+    const reads = vi.fn<ControllerBridge['snapshot']>()
+      .mockResolvedValueOnce(short)
+      .mockImplementationOnce(() => new Promise<AppSnapshot>((resolve) => { answer = resolve; }))
+      .mockResolvedValue(short);
+    view(short, { snapshot: reads });
+    await screen.findByText('설정 도우미.exe');
+    // The lead starts the next read while the current lease still holds, so the
+    // request is on screen at the moment it is asked for again. Withdrawing
+    // first and asking afterwards is what made it vanish and come back.
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); }, { timeout: 1200 });
+    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+    // A read that never answers extends nothing. The lease is still the lease.
+    expect(await screen.findByText(ko.requestUnavailable, {}, { timeout: 2000 })).toBeInTheDocument();
+    await act(() => { answer(short); return Promise.resolve(); });
+  });
+
   it('subtracts bridge latency without extending display validity or declaring expiry', () => {
     const initial = pending();
     const aged = ageRequestPresentation(initial, 50);
