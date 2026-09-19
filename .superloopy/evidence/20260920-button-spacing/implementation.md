@@ -41,3 +41,10 @@ Existing native CI now reads actual Android WebView accessibility bounds on the
 unpaired PC-list page and actual Windows WebView2 button bounds, retaining PNGs.
 These additions navigate only; they do not click pairing actions or inject state.
 ROOT will inspect those native captures alongside the responsive client gallery.
+
+CI1787db4:145/146 browser cases passed. The new PC200%-text case exposed horizontal
+overflow in the same page (main scrollWidth679 vs clientWidth517). QR/USB bounds
+and gap assertions passed before the full-page overflow check. The adjacent
+external-relay text input lacked any intrinsic-width cap; constrain only that
+input to its form content width and add explicit field containment measurements.
+No input value, validation, submission, color or font changes.

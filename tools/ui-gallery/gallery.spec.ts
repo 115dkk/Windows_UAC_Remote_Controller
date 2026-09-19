@@ -35,6 +35,20 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         body: Buffer.from(JSON.stringify({ scope: 'CLIENT/SYNTHETIC', fixture, a, b, horizontalGap, verticalGap, requiredGap })),
         contentType: 'application/json',
       });
+      if (!phone) {
+        const input = page.locator('.relay-advanced input[type="text"]');
+        const field = await input.evaluate(node => {
+          const box = node.getBoundingClientRect();
+          const parent = node.closest('fieldset')!;
+          const container = parent.getBoundingClientRect();
+          const style = getComputedStyle(parent);
+          return { left: box.left, right: box.right, allowedLeft: container.left + Number.parseFloat(style.paddingLeft),
+            allowedRight: container.right - Number.parseFloat(style.paddingRight) };
+        });
+        await info.attach('relay-input-geometry', { body: Buffer.from(JSON.stringify(field)), contentType: 'application/json' });
+        expect(field.left).toBeGreaterThanOrEqual(field.allowedLeft - 0.5);
+        expect(field.right).toBeLessThanOrEqual(field.allowedRight + 0.5);
+      }
       await gallery.capture('pairing-action-spacing', 'CLIENT/SYNTHETIC · QR/USB gaps, wrapping and keyboard order');
     }
     if (selected.action === 'connection-setup') {

@@ -8,6 +8,8 @@ DOM/focus order. PC pairing cards retain their existing full-width stacked
 buttons with `--space-4` top spacing; the same geometry regression checks cover
 both arrangements at narrow widths and enlarged text. No new spacing token,
 color, copy, animation or native authorization behavior is introduced.
+The adjacent external-relay text input keeps its ordinary intrinsic width but
+is capped at its form content width, so200% text cannot widen the PC scroll area.
 
 ## 2026-09-19 utility-copy and USB delta
 
