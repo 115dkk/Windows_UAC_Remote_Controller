@@ -43,7 +43,7 @@ export const ko = {
   fromComputer: '요청한 PC',
   needsDecision: '승인을 요청했어요',
   requestIntro: 'PC와 프로그램을 확인한 뒤 선택해 주세요.',
-  authenticating: '휴대폰에서 본인 확인을 진행해 주세요.',
+  authenticating: '본인 확인을 진행해 주세요.',
   requestWaiting: '앞선 작업이 끝나기를 기다리고 있어요.',
   sending: '선택한 내용을 컴퓨터로 보내고 있어요.',
   awaitingOutcome: 'Windows의 처리 결과를 기다리고 있어요.',

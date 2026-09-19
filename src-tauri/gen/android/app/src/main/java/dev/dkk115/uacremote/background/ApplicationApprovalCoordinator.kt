@@ -88,6 +88,16 @@ internal class ApplicationApprovalCoordinator(
             val deadline = plan.deadlineNanos()
             if (deadline > Long.MAX_VALUE.toULong()) throw IllegalStateException("Native deadline unavailable")
             session.deadlineNanos = deadline.toLong()
+            // Arm the deadline the moment it is known, not when the session
+            // reaches COMPLETED. A session waiting on the identity check sits in
+            // PRESENTING, and nothing else ever wakes it: if that check does not
+            // resolve, the session never becomes terminal, cleanup refuses a
+            // session that is not terminal, and the slot it holds is held for
+            // the life of the process. Approving then stays grey while denying
+            // keeps working, which is exactly what a person reports as the
+            // button being dead. The runnable does nothing once the submission
+            // has been prepared, so arming it early costs a session nothing.
+            scheduleExpiry(session)
             if (session.cancelled.get()) { plan.cancel(); return@work }
             when (val prepared = platform.prepareApproval(plan)) {
                 is ApprovalOperationOutcome.Value -> {
@@ -156,6 +166,17 @@ internal class ApplicationApprovalCoordinator(
      */
     fun cleanupOnWorker() {
         val session = current.get() ?: return
+        // The main-thread deadline above is the first answer; this is the one
+        // that does not depend on a looper still being able to run a callback.
+        // A session past its own deadline is not going to finish, and only
+        // cancelling it makes it terminal enough to be cleaned up.
+        if (expired(session)) {
+            // Which phase it died in is the one thing that says why. The value
+            // is a fixed enum position, never a request, a selection or a key.
+            NativeThrowTrace.measurement("APPROVAL_EXPIRED_ON_WORKER", "phase", session.phase().ordinal.toLong())
+            cancel(session, NativeApprovalReply.Cancelled)
+            return
+        }
         if (session.cleanupFailed.get() &&
             cleanupRetries.getAndIncrement() < PolicyOwnerBounds.MAX_CONSECUTIVE_MAINTENANCE_FAILURES) {
             session.cleanupFailed.set(false)
