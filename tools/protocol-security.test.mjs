@@ -21,10 +21,6 @@ const helpers = {
   request_opened_unique: { trace: 'all-traces', verdict: 'verified' },
   active_registry_production_precedes_revocation: { trace: 'all-traces', verdict: 'verified' },
 };
-const renewalHelpers = {
-  accepted_lease_has_exact_authentication: { trace: 'all-traces', verdict: 'verified' },
-  renewal_precedes_its_authentication: { trace: 'all-traces', verdict: 'verified' },
-};
 const declarations = (wanted, auxiliary = false) => Object.entries(wanted).map(([name, value]) =>
   `lemma ${name}${auxiliary ? ' [reuse]' : ''}:\n  ${value.trace}\n  "synthetic statement"\n`).join('\n');
 
@@ -165,28 +161,36 @@ test('renewal obligations and old-lease control are independently registered wit
     no_accept_after_prompt_gone: { trace: 'all-traces', verdict: 'verified' },
   });
   assert.deepEqual(witnessDischarges(model), {});
-  assert.deepEqual(model.helpers, renewalHelpers);
+  assert.equal(model.helpers, undefined);
   assert.equal(model.canaries.length, 1);
   const canary = model.canaries[0];
   assert.equal(canary.id, 'retained-retired-lease');
   assert.deepEqual(canary.expected, { retired_lease_never_accepted: { trace: 'all-traces', verdict: 'falsified' } });
   assert.equal(counterexampleDischarge(model, canary), null);
-  const source = readFileSync(new URL(`../${model.path}`, import.meta.url), 'utf8');
+  const source = readFileSync(new URL(`../${model.path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const mutant = mutateExactlyOnce(source, canary.mutation);
   assert.equal(mutant, source.replace('// CANARY_RETIRED_LEASE', ', Lease(pc, request, old)'));
   for (const input of [source, mutant]) {
-    const required = validateTheoryRequirements(input, model.expected, model.helpers);
+    const required = validateTheoryRequirements(input, model.expected);
     assert.deepEqual(required.targetLemmas, Object.keys(model.expected));
-    assert.deepEqual(required.helperLemmas, Object.keys(renewalHelpers));
+    assert.deepEqual(required.helperLemmas, []);
   }
-  // Observational decomposition only: erase the two independently proved
-  // lemmas and search-ranking declaration to recover the exact CI89d8481
-  // transition system AND its four original formulas, including the timeout.
+  // Open alone creates immutable context. Both NativePrompt producers preserve
+  // these exact fields; requiring it in Renew is an already-true invariant,
+  // including when the negative control additionally retains the former Lease.
+  assert.ok(source.includes('NativePrompt(~pc, ~epoch, ~request, ~session, ~content, binding),\n    !PromptContext(~pc, ~epoch, ~request, ~session, ~content)'));
+  assert.ok(source.includes('NativePrompt(pc, epoch, request, session, content, old),\n    !PromptContext(pc, epoch, request, session, content)[+]'));
+  assert.ok(source.includes('NativePrompt(pc, epoch, request, session, content, new),\n    Lease(pc, request, new)'));
+  assert.equal((source.match(/!PromptContext\(/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /LeaseOrigin|heuristic:|\[reuse\]|\[sources\]/);
+  assert.ok(mutant.includes('Lease(pc, request, old), Fr(~nonce), Fr(~expiry)'));
+  assert.ok(mutant.includes(', Lease(pc, request, old)\n  ]'));
+  // Erasing only redundant context instrumentation recovers the exact initial
+  // transition system AND all four original formulas, including the timeout.
   let original = source.replace(/\r\n/g, '\n');
-  const start = original.indexOf('// Separating signature origin'), end = original.indexOf('lemma honest_renewed_approval_trace:');
-  assert.ok(start > 0 && end > start);
-  original = original.slice(0, start) + original.slice(end);
-  original = original.replace('// Rank current equality/knowledge constraints before expanding an unbounded\n// chain of predecessor leases. This changes search order, not allowed traces.\nheuristic: i\n\n', '');
+  original = original.replace(/\/\/ CONTEXT_FACTORING_BEGIN\n[\s\S]*?\/\/ CONTEXT_FACTORING_END\n\n/, '')
+    .replace('    !PromptContext(~pc, ~epoch, ~request, ~session, ~content),\n', '')
+    .replace('    !PromptContext(pc, epoch, request, session, content)[+],\n', '');
   assert.equal(createHash('sha256').update(original).digest('hex'), '3a122f08ecd3ee780f57b17392fb58542c0f7591244bda3f143424607ba17dcd');
 });
 
@@ -373,7 +377,7 @@ test('production observation-only helper insertion exactly erases to the retaine
   assert.deepEqual(request.helpers, helpers);
   assert.equal(Object.keys(request.expected).length, 9);
   assertProductionObligations(manifest);
-  assert.equal(manifest.models.filter(model => model.helpers !== undefined).length, 2);
+  assert.equal(manifest.models.filter(model => model.helpers !== undefined).length, 1);
   assert.equal(manifest.sourceBindings.find(binding => binding.path === 'crates/secure-channel/src/identity.rs').sha256,
     '76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195');
   assert.deepEqual(validateTheoryRequirements(source, request.expected, request.helpers).helperLemmas, Object.keys(helpers));
@@ -436,7 +440,7 @@ test('early missing-manifest failure cannot leave a prior passing summary', asyn
 // fake process reports controlled verdict text solely to test orchestration.
 function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, badWitnessControl = false,
   counterexamples = false, badCounterexampleBaseline = false,
-  badRenewalBaseline = false, badRenewalControl = null, badRenewalHelper = false } = {}) {
+  badRenewalBaseline = false, badRenewalControl = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-runner-test-'));
   const directory = join(root, 'artifacts/protocol-security');
   const manifestPath = join(root, 'security/tamarin/manifest.json');
@@ -499,8 +503,7 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
       const attack = name.startsWith('attack_');
       const kind = attack || name === 'executable' || name.startsWith('honest_') || name.startsWith('checked_') ? 'exists-trace' : 'all-traces';
       const negative = /-(sorry|contradiction)\\.spthy$/.test(file);
-      const verdict = ${badRenewalHelper} && name === 'accepted_lease_has_exact_authentication' ? 'unknown'
-        : renewalControl && !helpers.has(name) && ${JSON.stringify(badRenewalControl)} !== null ? ${JSON.stringify(badRenewalControl)}
+      const verdict = renewalControl && !helpers.has(name) && ${JSON.stringify(badRenewalControl)} !== null ? ${JSON.stringify(badRenewalControl)}
         : ${badRenewalBaseline} && file.endsWith('prompt-lease-renewal.spthy') && name === 'retired_lease_never_accepted' ? 'unknown'
         : attack ? (file.endsWith('-baseline.spthy') ? (${badCounterexampleBaseline} ? 'unknown' : 'falsified - no trace found') : 'verified')
         : !selected.length && negative ? (${badWitnessControl} ? 'unknown' : 'analysis incomplete')
@@ -552,11 +555,11 @@ test('synthetic counterexample orchestration retains all twenty-one rows and bot
     for (const [index, row] of renewalRows.entries()) {
       const wanted = index < 4 ? { [Object.keys(renewal.expected)[index]]: Object.values(renewal.expected)[index] } : renewal.canaries[0].expected;
       assert.equal(row.ok, true);
-      assert.deepEqual(row.helperLemmas, Object.keys(renewal.helpers));
+      assert.deepEqual(row.helperLemmas, []);
       assert.deepEqual(row.targetLemmas, Object.keys(wanted));
-      assert.deepEqual(row.selectedLemmas, [...Object.keys(renewal.helpers), ...Object.keys(wanted)]);
-      assert.deepEqual(row.verdicts, { ...renewal.helpers, ...wanted });
-      assert.deepEqual(row.arguments, proofArguments(join(f.directory, row.model), wanted, renewal.helpers));
+      assert.deepEqual(row.selectedLemmas, Object.keys(wanted));
+      assert.deepEqual(row.verdicts, wanted);
+      assert.deepEqual(row.arguments, proofArguments(join(f.directory, row.model), wanted));
     }
     const calls = readFileSync(join(f.root, 'invocations.log'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(calls.length, 24, 'one version + nineteen ordinary rows + four attack contexts');
@@ -599,24 +602,6 @@ test('synthetic renewal baseline remains required even when the old-lease mutant
     assert.equal(summary.runs.length, 21);
     assert.equal(summary.runs.find(row => row.id === 'prompt-lease-renewal-2').ok, false);
     assert.equal(summary.runs.find(row => row.id === 'retained-retired-lease').ok, true);
-  });
-
-test('renewal helpers must verify freshly in every baseline and retained-old-lease mutant context',
-  { skip: process.platform !== 'linux' }, async (t) => {
-    const f = runnerFixture(t, { counterexamples: true, badRenewalHelper: true });
-    await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
-    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
-    assert.equal(summary.passed, false);
-    assert.equal(summary.runs.length, 21);
-    const renewalRows = summary.runs.filter(row => row.id.startsWith('prompt-lease-renewal-') || row.id === 'retained-retired-lease');
-    assert.equal(renewalRows.length, 5);
-    for (const row of renewalRows) {
-      assert.equal(row.ok, false);
-      assert.deepEqual(row.helperLemmas, Object.keys(renewalHelpers));
-      assert.equal(row.verdicts.accepted_lease_has_exact_authentication.verdict, 'inconclusive');
-      assert.ok(row.reasons.some(reason => reason.includes('accepted_lease_has_exact_authentication')));
-    }
-    assert.ok(summary.runs.filter(row => !renewalRows.includes(row)).every(row => row.ok));
   });
 
 test('nested counterexample input names are reserved before any tool or snapshot replacement', async (t) => {

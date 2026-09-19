@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
-import { SCANNER_CASES, SCANNER_STATES, SCANNER_IMAGES, scannerImagePath, parseScannerReceipt, requireScannerPrerequisite, checkScannerPng } from './android-pairing-scan-ci.mjs';
+import { SCANNER_CASES, SCANNER_STATES, SCANNER_IMAGES, SCANNER_COMMAND_BUDGET, scannerImagePath, parseScannerReceipt, requireScannerPrerequisite, checkScannerPng } from './android-pairing-scan-ci.mjs';
 import { PACKAGE, TEST_PACKAGE } from './android-lifecycle-ci.mjs';
 import { hierarchyPath } from './android-first-unlock.mjs';
 
@@ -65,6 +65,8 @@ test('each native check is a real boolean; an unknown or duplicate-shadow check 
 test('fixture paths are only the fixed 80 native no-QR view states under one fresh nonce', () => {
   assert.equal(SCANNER_STATES.length, 17); assert.equal(SCANNER_IMAGES.length, 80);
   assert.equal(new Set(SCANNER_IMAGES).size, 80);
+  assert.equal(SCANNER_COMMAND_BUDGET, 140);
+  assert.equal(SCANNER_COMMAND_BUDGET - SCANNER_IMAGES.length, 60);
   assert.deepEqual(SCANNER_STATES.slice(9, 14), ['connecting', 'compare', 'waiting_pc', 'enrolled', 'failed']);
   for (const name of SCANNER_IMAGES) assert.equal(scannerImagePath('a'.repeat(32), name), `cache/pairing-scanner-fixtures/${'a'.repeat(32)}/${name}`);
   for (const name of ['../secret.png', '/tmp/secret.png', 'read-light-normal.png/../keys', 'unknown.png', 'READ-light-normal.png']) {

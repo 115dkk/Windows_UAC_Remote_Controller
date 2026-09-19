@@ -5,14 +5,22 @@
 theory PromptLeaseRenewal
 begin
 
-// Rank current equality/knowledge constraints before expanding an unbounded
-// chain of predecessor leases. This changes search order, not allowed traces.
-heuristic: i
-
 builtins: signing
 
 restriction Equality:
   "All x y #i. Eq(x,y)@i ==> x = y"
+
+// CONTEXT_FACTORING_BEGIN
+// Every NativePrompt has exactly this immutable context: Open creates both,
+// Renew preserves all five fields and the persistent context, and other rules
+// only consume NativePrompt. The old-slot-retention mutant changes neither.
+// The additional Renew premise is therefore already true in every reachable
+// state: erasing it and the Open conclusion recovers the original trace set.
+// Its priority exposes fresh public-field origins before recursive predecessor
+// search, avoiding false key-leak branches through unconstrained tuple fields.
+// This mirrors LivePrompt's retained PC/epoch/request/session/content and is
+// not a source axiom, disclosure, approval authority or bounded renewal count.
+// CONTEXT_FACTORING_END
 
 rule OpenNativePrompt:
   let binding = <~pc, ~epoch, ~request, ~session, ~content, ~nonce, ~expiry>
@@ -21,6 +29,7 @@ rule OpenNativePrompt:
     Fr(~nonce), Fr(~expiry), Fr(~phone_sk) ]
   --[ LeaseOpened(binding) ]->
   [ NativePrompt(~pc, ~epoch, ~request, ~session, ~content, binding),
+    !PromptContext(~pc, ~epoch, ~request, ~session, ~content),
     Lease(~pc, ~request, binding), !PhoneKey(~pc, ~phone_sk),
     Out(binding), Out(pk(~phone_sk)) ]
 
@@ -30,6 +39,7 @@ rule RenewObservedPrompt:
   let new = <pc, epoch, request, session, content, ~nonce, ~expiry>
   in
   [ NativePrompt(pc, epoch, request, session, content, old),
+    !PromptContext(pc, epoch, request, session, content)[+],
     Lease(pc, request, old), Fr(~nonce), Fr(~expiry) ]
   --[ NativeSamePrompt(old), LeaseRenewed(old,new), LeaseOpened(new) ]->
   [ NativePrompt(pc, epoch, request, session, content, new),
@@ -54,20 +64,6 @@ rule ObservePromptGone:
     Lease(pc,request,binding) ]
   --[ PromptGone(binding) ]->
   [ ]
-
-// Separating signature origin from fresh-nonce ordering avoids searching both
-// obligations through the pending-state renewal chain at once. These are proved
-// in every baseline AND mutant invocation; neither is an axiom/source lemma.
-lemma accepted_lease_has_exact_authentication [reuse]:
-  all-traces
-  "All binding #a.
-     LeaseAccepted(binding)@a
-     ==> (Ex #u. ExactLeaseAuthentication(binding)@u & u < a)"
-
-lemma renewal_precedes_its_authentication [reuse]:
-  all-traces
-  "All old new #r #u.
-     LeaseRenewed(old,new)@r & ExactLeaseAuthentication(new)@u ==> r < u"
 
 lemma honest_renewed_approval_trace:
   exists-trace

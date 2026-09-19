@@ -13,7 +13,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLASS = `${PACKAGE}.PairingScannerInstrumentationTest`;
 const RUNNER = `${TEST_PACKAGE}/androidx.test.runner.AndroidJUnitRunner`;
 const MAX_APK = 256 * 1024 * 1024;
-const MAX_COMMANDS = 128;
 const MAX_PNG = 8 * 1024 * 1024;
 const requireThat = (value, message) => { if (!value) throw new Error(message); };
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -38,6 +37,10 @@ export const SCANNER_STATES = Object.freeze(['preparing', 'permission_pending', 
   'failed', 'invalid', 'expired', 'closed']);
 export const SCANNER_IMAGES = Object.freeze([...SCANNER_STATES, 'usb-scanning', 'usb-unavailable', 'usb-compare'].flatMap(state =>
   ['light', 'dark'].flatMap(theme => ['normal', 'large'].map(scale => `${state}-${theme}-${scale}.png`))));
+// Preserve the original 60-command allowance for guards/instrumentation and
+// allocate one bounded read per declared image (68 -> 80 after USB variants).
+// This changes neither command timeouts nor the ten-minute whole-run deadline.
+export const SCANNER_COMMAND_BUDGET = 60 + SCANNER_IMAGES.length;
 
 export function scannerImagePath(nonce, name) {
   requireThat(/^[0-9a-f]{32}$/.test(nonce) && SCANNER_IMAGES.includes(name), 'Unknown scanner fixture path.');
@@ -146,7 +149,7 @@ export async function main(args = process.argv.slice(2)) {
   const deadline = performance.now() + 600_000;
   const command = async (binary, argv, timeoutMs = 15000, mutates = false, maximum = 512 * 1024, pngName = null) => {
     const remaining = deadline - performance.now();
-    requireThat(!cancellation.signal.aborted && !result.deviceOperationMayContinue && index < MAX_COMMANDS && remaining > 0,
+    requireThat(!cancellation.signal.aborted && !result.deviceOperationMayContinue && index < SCANNER_COMMAND_BUDGET && remaining > 0,
       'Stopped or exhausted scanner CI cannot continue.');
     const name = pngName ?? `${String(index + 1).padStart(3, '0')}.log`; index += 1;
     const path = join(directory, name);
