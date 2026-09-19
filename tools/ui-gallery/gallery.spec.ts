@@ -79,7 +79,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '기다리는 요청이 없어요', exact: true })).toBeVisible();
     const intakeCopy: Record<string, string> = {
       'phone-unpaired': 'PC와 아직 연결하지 않았어요', 'phone-disconnected': '컴퓨터와 연결을 기다리고 있어요',
-      'phone-reconciling': '받은 요청을 확인하고 있어요', 'phone-authenticating': '휴대폰에서 본인 확인을 진행해 주세요.',
+      'phone-reconciling': '받은 요청을 확인하고 있어요', 'phone-authenticating': '본인 확인을 진행해 주세요.',
       'phone-waiting': '앞선 작업이 끝나기를 기다리고 있어요.', 'phone-awaiting-outcome': 'Windows의 처리 결과를 기다리고 있어요.',
     };
     if (intakeCopy[fixture]) {
@@ -368,7 +368,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByText('선택한 내용을 컴퓨터로 보내고 있어요.', { exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeDisabled();
       await expect(page.getByRole('button', { name: '거부', exact: true })).toBeDisabled();
-      await expect(page.getByText('휴대폰에서 본인 확인을 진행해 주세요.', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('본인 확인을 진행해 주세요.', { exact: true })).toHaveCount(0);
       await gallery.capture('simulated-sending', '합성 전송 상태만 표시 · 거부 완료/Windows 동작 증거 아님');
     }
     if (selected.id === 'phone-pending-landscape-844') {
