@@ -170,12 +170,19 @@ internal class ApplicationApprovalCoordinator(
         // that does not depend on a looper still being able to run a callback.
         // A session past its own deadline is not going to finish, and only
         // cancelling it makes it terminal enough to be cleaned up.
-        if (expired(session)) {
+        //
+        // Cancelling is where this pass begins, never where it ends. Returning
+        // here skipped the retry below, so an expired session whose cleanup had
+        // already failed held the slot for the life of the process: the exact
+        // defect the retry exists for, put back one line above it. An expired
+        // session is also the most likely one to need that retry.
+        if (!session.cancelled.get() && expired(session)) {
             // Which phase it died in is the one thing that says why. The value
             // is a fixed enum position, never a request, a selection or a key.
-            NativeThrowTrace.measurement("APPROVAL_EXPIRED_ON_WORKER", "phase", session.phase().ordinal.toLong())
+            if (session.expiryTraced.compareAndSet(false, true)) {
+                NativeThrowTrace.measurement("APPROVAL_EXPIRED_ON_WORKER", "phase", session.phase().ordinal.toLong())
+            }
             cancel(session, NativeApprovalReply.Cancelled)
-            return
         }
         if (session.cleanupFailed.get() &&
             cleanupRetries.getAndIncrement() < PolicyOwnerBounds.MAX_CONSECUTIVE_MAINTENANCE_FAILURES) {
@@ -330,11 +337,28 @@ internal class ApplicationApprovalCoordinator(
         if (changed) nativeProgress()
     }
 
+    /**
+     * Names the guard that turned this pass away, as a fixed position.
+     *
+     * The slot a session holds is what every later approval waits on, so a
+     * cleanup that never starts and one that starts and fails look identical
+     * from the phone: approve is grey and nothing says why. Five conditions can
+     * refuse here and until now none of them left a trace, which is how the
+     * same symptom came back twice under two different causes.
+     */
+    private fun refused(session: Session, reason: CleanupRefusal) {
+        val bit = 1 shl reason.ordinal
+        if ((session.refusalsTraced.getAndUpdate { seen -> seen or bit } and bit) == 0) {
+            NativeThrowTrace.measurement("APPROVAL_CLEANUP_REFUSED", "reason", reason.ordinal.toLong())
+        }
+    }
+
     private fun cleanup(session: Session) {
-        if (session.phase() != Phase.TERMINAL || session.jobs.get() != 0) return
-        if (session.operation?.isQuiescent() == false) return
-        if (session.cleanupFailed.get()) return
-        if (!session.cleanupQueued.compareAndSet(false, true)) return
+        if (session.phase() != Phase.TERMINAL) { refused(session, CleanupRefusal.NOT_TERMINAL); return }
+        if (session.jobs.get() != 0) { refused(session, CleanupRefusal.JOBS_OUTSTANDING); return }
+        if (session.operation?.isQuiescent() == false) { refused(session, CleanupRefusal.OPERATION_BUSY); return }
+        if (session.cleanupFailed.get()) { refused(session, CleanupRefusal.EARLIER_FAILURE); return }
+        if (!session.cleanupQueued.compareAndSet(false, true)) { refused(session, CleanupRefusal.ALREADY_QUEUED); return }
         if (!enqueue {
             try {
                 // Native holder is quiescent; no Signature or live prompt may
@@ -420,12 +444,20 @@ internal class ApplicationApprovalCoordinator(
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 
     private enum class Phase { PREPARING, PREPARED, PROMPT, AUTHENTICATED, CLAIMED, SIGNING, SIGNED, FINISHING, COMPLETED, TERMINAL }
+    /** Order is the record. Append only; a reader holds the earlier positions. */
+    private enum class CleanupRefusal { NOT_TERMINAL, JOBS_OUTSTANDING, OPERATION_BUSY, EARLIER_FAILURE, ALREADY_QUEUED }
     private inner class Session(val selection: NativeRequestSelection, val host: Activity, val callback: (NativeApprovalReply) -> Unit) {
         val lease = ApprovalHostLease(host)
         val cancelled = AtomicBoolean(false)
         val delivered = AtomicBoolean(false)
         val cleanupQueued = AtomicBoolean(false)
         val cleanupFailed = AtomicBoolean(false)
+        // Diagnostics only, and bounded here rather than at the sink: the
+        // worker pass runs on ordinary traffic, so an unbounded line writes the
+        // same answer hundreds of times and buries the record it was meant to
+        // leave. One line per session, and one per distinct refusal.
+        val expiryTraced = AtomicBoolean(false)
+        val refusalsTraced = AtomicInteger(0)
         val cancellationUncertain = AtomicBoolean(false)
         val prepared = AtomicBoolean(false)
         val jobs = AtomicInteger(0)
