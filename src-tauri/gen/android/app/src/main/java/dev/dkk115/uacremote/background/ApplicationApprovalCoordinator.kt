@@ -176,7 +176,14 @@ internal class ApplicationApprovalCoordinator(
         // already failed held the slot for the life of the process: the exact
         // defect the retry exists for, put back one line above it. An expired
         // session is also the most likely one to need that retry.
-        if (!session.cancelled.get() && expired(session)) {
+        //
+        // PREPARING comes first for the reason `advance` puts it first: a
+        // session in that phase has not read its deadline off the plan yet, and
+        // `expired` calls an absent deadline expired. Without this the pass
+        // cancels a brand-new approval in the window between the tap that
+        // claims the slot and the worker job that begins it, and the person
+        // pressing approve sees nothing happen at all.
+        if (!session.cancelled.get() && session.phase() != Phase.PREPARING && expired(session)) {
             // Which phase it died in is the one thing that says why. The value
             // is a fixed enum position, never a request, a selection or a key.
             if (session.expiryTraced.compareAndSet(false, true)) {

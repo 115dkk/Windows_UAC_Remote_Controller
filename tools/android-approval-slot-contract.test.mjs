@@ -30,9 +30,13 @@ test('the worker pass always reaches the retry that frees the approval slot', ()
   assert.ok(pass.indexOf('cleanupFailed.set(false)') < pass.indexOf('cleanup(session)'));
 });
 
-test('an expired session is cancelled once, not once per pass', () => {
+// `expired` calls an absent deadline expired, and a PREPARING session has not
+// read its deadline off the plan yet, so the phase has to be asked first or the
+// pass cancels an approval in the window between the tap that claims the slot
+// and the worker job that begins it. `advance` orders these two the same way.
+test('an expired session is cancelled once, and never one that has not begun', () => {
   const pass = workerPass();
-  assert.match(pass, /if \(!session\.cancelled\.get\(\) && expired\(session\)\)/u);
+  assert.match(pass, /if \(!session\.cancelled\.get\(\) && session\.phase\(\) != Phase\.PREPARING && expired\(session\)\)/u);
   assert.match(pass, /session\.expiryTraced\.compareAndSet\(false, true\)/u);
 });
 
