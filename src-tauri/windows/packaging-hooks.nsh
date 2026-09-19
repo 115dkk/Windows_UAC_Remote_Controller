@@ -29,6 +29,12 @@ LangString UacDataRetained 1033 "Service registration and packaged program files
 LangString UacDataRetained 1042 "서비스 등록과 설치한 프로그램 파일을 제거했습니다. 기록, 설정과 기기 연결 정보는 보존했습니다. 다른 파일이 있는 프로그램 폴더도 남겨 둡니다."
 LangString UacWebViewRequired 1033 "A machine-installed Microsoft Edge WebView2 Runtime could not be confirmed. Install that component from Microsoft's official website, then run this installer again. No program files were installed."
 LangString UacWebViewRequired 1042 "이 컴퓨터에 설치된 Microsoft Edge WebView2 Runtime을 확인하지 못했습니다. Microsoft 공식 웹사이트에서 해당 구성 요소를 설치한 뒤 다시 시도해 주세요. 프로그램 파일은 설치하지 않았습니다."
+LangString UacAppRunning 1033 "The app is open, and its program file cannot be changed while it runs. Close it now and continue? History, settings and device connection information are not touched."
+LangString UacAppRunning 1042 "앱이 열려 있어 실행 중에는 프로그램 파일을 바꿀 수 없습니다. 지금 닫고 계속할까요? 기록, 설정과 기기 연결 정보는 건드리지 않습니다."
+LangString UacAppOpen 1033 "The operation stopped because the app stayed open. No program files were changed, and history, settings and device connection information are retained. Close the app and try again."
+LangString UacAppOpen 1042 "앱을 연 채로 두어 작업을 중단했습니다. 프로그램 파일은 바꾸지 않았고 기록, 설정과 기기 연결 정보는 그대로입니다. 앱을 닫은 뒤 다시 시도해 주세요."
+LangString UacAppCloseFailed 1033 "The open app could not be closed. No program files were changed, and history, settings and device connection information are retained. Close it yourself and try again."
+LangString UacAppCloseFailed 1042 "열려 있는 앱을 닫지 못했습니다. 프로그램 파일은 바꾸지 않았고 기록, 설정과 기기 연결 정보는 그대로입니다. 직접 닫은 뒤 다시 시도해 주세요."
 
 LangString UacUnsafe 1036 "L’opération s’est arrêtée : l’emplacement fixe du programme ou ses permissions n’ont pas pu être vérifiés. L’historique, les réglages et les associations d’appareils n’ont pas été supprimés. Demandez à un administrateur de vérifier l’installation."
 LangString UacUnsafe 1031 "Der feste Programmpfad oder seine Berechtigungen konnten nicht geprüft werden. Der Vorgang wurde beendet. Verlauf, Einstellungen und Geräteverbindungen wurden nicht gelöscht. Lassen Sie die Installation von einem Administrator prüfen."
@@ -111,6 +117,33 @@ LangString UacWebViewRequired 1034 "No se pudo confirmar una instalación de Mic
 LangString UacWebViewRequired 1046 "Não foi possível confirmar a instalação do Microsoft Edge WebView2 Runtime para este computador. Instale o componente pelo site oficial da Microsoft e execute o instalador novamente. Nenhum arquivo do programa foi instalado."
 LangString UacWebViewRequired 2070 "Não foi possível confirmar a instalação do Microsoft Edge WebView2 Runtime para este computador. Instale o componente a partir do site oficial da Microsoft e volte a executar o instalador. Não foram instalados ficheiros do programa."
 LangString UacWebViewRequired 1025 "تعذّر تأكيد تثبيت Microsoft Edge WebView2 Runtime على هذا الكمبيوتر. ثبّت هذا المكوّن من موقع Microsoft الرسمي، ثم شغّل برنامج التثبيت مجددًا. لم تُثبّت أي ملفات للبرنامج."
+LangString UacAppRunning 1036 "L’application est ouverte et son fichier programme ne peut pas être modifié tant qu’elle tourne. La fermer maintenant et continuer ? L’historique, les réglages et les associations d’appareils ne sont pas touchés."
+LangString UacAppRunning 1031 "Die App ist geöffnet, und ihre Programmdatei kann während der Ausführung nicht geändert werden. Jetzt schließen und fortfahren? Verlauf, Einstellungen und Geräteverbindungen bleiben unberührt."
+LangString UacAppRunning 1041 "アプリが開いており、実行中はプログラムファイルを変更できません。今すぐ閉じて続行しますか？履歴、設定、機器の接続情報には手を加えません。"
+LangString UacAppRunning 2052 "应用正在运行，运行期间无法更改其程序文件。现在关闭并继续吗？历史记录、设置和设备连接信息不会受到影响。"
+LangString UacAppRunning 1028 "應用程式正在執行，執行期間無法變更其程式檔案。要立即關閉並繼續嗎？記錄、設定和裝置連線資訊不會受到影響。"
+LangString UacAppRunning 1034 "La aplicación está abierta y su archivo de programa no se puede cambiar mientras se ejecuta. ¿Cerrarla ahora y continuar? No se tocan el historial, los ajustes ni las conexiones de dispositivos."
+LangString UacAppRunning 1046 "O aplicativo está aberto e seu arquivo de programa não pode ser alterado enquanto ele é executado. Fechar agora e continuar? Histórico, configurações e conexões de dispositivos não são afetados."
+LangString UacAppRunning 2070 "A aplicação está aberta e o respetivo ficheiro de programa não pode ser alterado enquanto está em execução. Fechar agora e continuar? O histórico, as definições e as ligações dos dispositivos não são afetados."
+LangString UacAppRunning 1025 "التطبيق مفتوح، ولا يمكن تغيير ملف البرنامج أثناء تشغيله. هل تريد إغلاقه الآن والمتابعة؟ لن يُمسّ السجل أو الإعدادات أو معلومات اتصال الأجهزة."
+LangString UacAppOpen 1036 "L’opération s’est arrêtée parce que l’application est restée ouverte. Aucun fichier n’a été modifié ; l’historique, les réglages et les associations d’appareils sont conservés. Fermez l’application et réessayez."
+LangString UacAppOpen 1031 "Der Vorgang wurde beendet, weil die App geöffnet blieb. Es wurden keine Programmdateien geändert; Verlauf, Einstellungen und Geräteverbindungen bleiben erhalten. Schließen Sie die App und versuchen Sie es erneut."
+LangString UacAppOpen 1041 "アプリが開いたままだったため処理を中断しました。プログラムファイルは変更しておらず、履歴、設定、機器の接続情報は保持しています。アプリを閉じてから再度お試しください。"
+LangString UacAppOpen 2052 "因应用仍处于打开状态，操作已停止。未更改任何程序文件，历史记录、设置和设备连接信息均已保留。请关闭应用后重试。"
+LangString UacAppOpen 1028 "因應用程式仍開啟，已停止操作。未變更任何程式檔案，記錄、設定和裝置連線資訊均已保留。請關閉應用程式後重試。"
+LangString UacAppOpen 1034 "La operación se detuvo porque la aplicación siguió abierta. No se cambiaron archivos; se conservan el historial, los ajustes y las conexiones de dispositivos. Cierre la aplicación y vuelva a intentarlo."
+LangString UacAppOpen 1046 "A operação foi interrompida porque o aplicativo continuou aberto. Nenhum arquivo foi alterado; histórico, configurações e conexões de dispositivos foram mantidos. Feche o aplicativo e tente novamente."
+LangString UacAppOpen 2070 "A operação foi interrompida porque a aplicação continuou aberta. Não foi alterado nenhum ficheiro; o histórico, as definições e as ligações dos dispositivos foram mantidos. Feche a aplicação e tente novamente."
+LangString UacAppOpen 1025 "توقفت العملية لأن التطبيق ظل مفتوحًا. لم تُغيَّر أي ملفات برنامج، وتم الاحتفاظ بالسجل والإعدادات ومعلومات اتصال الأجهزة. أغلق التطبيق وحاول مجددًا."
+LangString UacAppCloseFailed 1036 "L’application ouverte n’a pas pu être fermée. Aucun fichier n’a été modifié ; l’historique, les réglages et les associations d’appareils sont conservés. Fermez-la vous-même et réessayez."
+LangString UacAppCloseFailed 1031 "Die geöffnete App konnte nicht geschlossen werden. Es wurden keine Programmdateien geändert; Verlauf, Einstellungen und Geräteverbindungen bleiben erhalten. Schließen Sie sie selbst und versuchen Sie es erneut."
+LangString UacAppCloseFailed 1041 "開いているアプリを閉じられませんでした。プログラムファイルは変更しておらず、履歴、設定、機器の接続情報は保持しています。手動で閉じてから再度お試しください。"
+LangString UacAppCloseFailed 2052 "无法关闭已打开的应用。未更改任何程序文件，历史记录、设置和设备连接信息均已保留。请手动关闭后重试。"
+LangString UacAppCloseFailed 1028 "無法關閉已開啟的應用程式。未變更任何程式檔案，記錄、設定和裝置連線資訊均已保留。請手動關閉後重試。"
+LangString UacAppCloseFailed 1034 "No se pudo cerrar la aplicación abierta. No se cambiaron archivos; se conservan el historial, los ajustes y las conexiones de dispositivos. Ciérrela usted mismo y vuelva a intentarlo."
+LangString UacAppCloseFailed 1046 "Não foi possível fechar o aplicativo aberto. Nenhum arquivo foi alterado; histórico, configurações e conexões de dispositivos foram mantidos. Feche-o manualmente e tente novamente."
+LangString UacAppCloseFailed 2070 "Não foi possível fechar a aplicação aberta. Não foi alterado nenhum ficheiro; o histórico, as definições e as ligações dos dispositivos foram mantidos. Feche-a manualmente e tente novamente."
+LangString UacAppCloseFailed 1025 "تعذّر إغلاق التطبيق المفتوح. لم تُغيَّر أي ملفات برنامج، وتم الاحتفاظ بالسجل والإعدادات ومعلومات اتصال الأجهزة. أغلقه بنفسك وحاول مجددًا."
 
 Var UacFailure
 Var UacPath
@@ -145,6 +178,11 @@ Var UacServicePin
 Var UacProbePin
 Var UacAppPin
 Var UacUninstallerPin
+Var UacAppList
+Var UacAppCount
+Var UacAppIndex
+Var UacAppAsked
+Var UacAppAllowed
 
 !macro UacFunctions PREFIX
 Function ${PREFIX}UacTrustedSid
@@ -187,6 +225,10 @@ FunctionEnd
 
 Function ${PREFIX}UacRelease
   Call ${PREFIX}UacReleaseFiles
+  ${If} $UacAppList <> 0
+    System::Free $UacAppList
+    StrCpy $UacAppList 0
+  ${EndIf}
   ${If} $UacHandle <> 0
     System::Call 'kernel32::CloseHandle(p $UacHandle)'
     StrCpy $UacHandle 0
@@ -496,6 +538,93 @@ Function ${PREFIX}UacPrepare
   StrCpy $UacHandle 0
 FunctionEnd
 
+; Enough room for far more processes than a machine running this has. A count
+; that somehow filled it would make the app invisible here, which is exactly the
+; state this whole function exists to improve on, never a worse one.
+!define UacPidBufferBytes 16384
+
+; Closes the desktop app so its program file can be replaced.
+;
+; A running executable keeps its own image open, and the fixed-path open in
+; UacInspectFiles deliberately refuses delete sharing, so a running app is not a
+; replaceable file: it is a sharing violation. Until now that ended the
+; installation with a message asking the person to close an app the installer
+; could see perfectly well and could have closed itself.
+;
+; Only a process whose full image path is exactly the file about to be replaced
+; is ever touched. Nothing is matched by executable name, by window, or by
+; anything else a different program could be wearing. Failing to find it, failing
+; to read a path, and failing to open a process are all left alone: the
+; installation then fails the way it did before, which is the old behaviour and
+; not a new one.
+Function ${PREFIX}UacCloseApp
+  StrCpy $UacAppAsked 0
+  StrCpy $UacAppAllowed 1
+  System::Alloc ${UacPidBufferBytes}
+  Pop $UacAppList
+  ${If} $UacAppList = 0
+    Return
+  ${EndIf}
+  System::Call 'kernel32::K32EnumProcesses(p $UacAppList, i ${UacPidBufferBytes}, *i .r0)i.r1'
+  ${If} $1 = 0
+    Return
+  ${EndIf}
+  IntOp $UacAppCount $0 / 4
+  StrCpy $UacAppIndex 0
+  ${While} $UacAppIndex < $UacAppCount
+    IntOp $0 $UacAppIndex * 4
+    IntOp $0 $0 + $UacAppList
+    System::Call '*$0(i.r2)'
+    IntOp $UacAppIndex $UacAppIndex + 1
+    ${If} $2 = 0
+      ${Continue}
+    ${EndIf}
+    ; SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION.
+    ; Query-limited is the weakest right that answers an image path, and this
+    ; asks for nothing that could read the process's memory or its token.
+    System::Call 'kernel32::OpenProcess(i 0x101001,i 0,i r2)p.r3'
+    ${If} $3 = 0
+      ${Continue}
+    ${EndIf}
+    StrCpy $4 ${NSIS_MAX_STRLEN}
+    System::Call 'kernel32::QueryFullProcessImageNameW(p r3,i 0,t.r5,*i r4r4)i.r6'
+    ${If} $6 = 0
+    ${OrIf} $5 != "$INSTDIR\controller-app.exe"
+      System::Call 'kernel32::CloseHandle(p r3)'
+      ${Continue}
+    ${EndIf}
+    ${If} $UacAppAsked = 0
+      StrCpy $UacAppAsked 1
+      MessageBox MB_YESNO|MB_ICONQUESTION "$(UacAppRunning)" /SD IDYES IDYES uac_close_allowed
+      StrCpy $UacAppAllowed 0
+      uac_close_allowed:
+    ${EndIf}
+    ${If} $UacAppAllowed = 0
+      System::Call 'kernel32::CloseHandle(p r3)'
+      StrCpy $UacFailure "$(UacAppOpen)"
+      Call ${PREFIX}UacFail
+    ${EndIf}
+    System::Call 'kernel32::TerminateProcess(p r3,i 0)i.r7'
+    ${If} $7 <> 0
+      ; Termination is asynchronous, and the image handle the kernel holds on
+      ; its behalf outlives the call. Waiting for the process object is what
+      ; makes the file replaceable; the bound keeps a wedged process from
+      ; hanging the installation.
+      System::Call 'kernel32::WaitForSingleObject(p r3,i 20000)i.r8'
+      StrCpy $7 $8
+    ${Else}
+      StrCpy $7 1
+    ${EndIf}
+    System::Call 'kernel32::CloseHandle(p r3)'
+    ${If} $7 <> 0
+      StrCpy $UacFailure "$(UacAppCloseFailed)"
+      Call ${PREFIX}UacFail
+    ${EndIf}
+  ${EndWhile}
+  System::Free $UacAppList
+  StrCpy $UacAppList 0
+FunctionEnd
+
 Function ${PREFIX}UacInspectFiles
   StrCpy $UacFailure "$(UacUnsafe)"
   StrCpy $UacDirectoryMode 0
@@ -542,6 +671,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
   Call UacPrepare
+  Call UacCloseApp
   ${If} $UacDirectoryPin = 0
     ; The sole fresh directory is created AFTER all parent checks, with a
     ; protected inheritable ACL. Unknown preexisting directories are never fixed.
@@ -612,6 +742,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   Call un.UacPrepare
+  Call un.UacCloseApp
   ${If} $UacDirectoryPin <> 0
     Call un.UacInspectFiles
   ${EndIf}
