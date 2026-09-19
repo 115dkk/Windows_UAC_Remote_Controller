@@ -184,6 +184,11 @@ Var UacAppIndex
 Var UacAppAsked
 Var UacAppAllowed
 
+; Enough room for far more processes than a machine running this has. A count
+; that somehow filled it would make the app invisible here, which is exactly the
+; state this whole function exists to improve on, never a worse one.
+!define UacPidBufferBytes 16384
+
 !macro UacFunctions PREFIX
 Function ${PREFIX}UacTrustedSid
   StrCpy $UacSidTrusted 0
@@ -537,11 +542,6 @@ Function ${PREFIX}UacPrepare
   StrCpy $UacDirectoryPin $UacHandle
   StrCpy $UacHandle 0
 FunctionEnd
-
-; Enough room for far more processes than a machine running this has. A count
-; that somehow filled it would make the app invisible here, which is exactly the
-; state this whole function exists to improve on, never a worse one.
-!define UacPidBufferBytes 16384
 
 ; Closes the desktop app so its program file can be replaced.
 ;
