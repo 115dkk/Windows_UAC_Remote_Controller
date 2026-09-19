@@ -769,6 +769,7 @@ impl PhoneInbox {
                     binding.expiry().as_nanos_since_epoch(),
                     guard,
                     true,
+                    matches!(event.event(), PcEvent::Renewed { .. }),
                 ) {
                     push_guard_drop(key, issue, &mut update);
                     return self.finish(update);
@@ -828,6 +829,7 @@ impl PhoneInbox {
                     service_expiry,
                     guard_until_nanos,
                     receiving_generation.is_some(),
+                    matches!(event.event(), PcEvent::Renewed { .. }),
                 ) {
                     push_guard_drop(key, issue, &mut update);
                     return self.finish(update);
@@ -863,6 +865,7 @@ impl PhoneInbox {
             service_expiry,
             guard_until_nanos,
             receiving_generation.is_some(),
+            matches!(event.event(), PcEvent::Renewed { .. }),
         ) {
             push_guard_drop(key, issue, &mut update);
             return self.finish(update);
@@ -1296,11 +1299,18 @@ impl PhoneInbox {
         service_expiry: u64,
         guard_until_nanos: u64,
         renewable: bool,
+        renewed: bool,
     ) -> Option<InboxIssue> {
-        if self
-            .sources
-            .get(&source)
-            .is_some_and(|state| state.lineage_quarantined)
+        // Only an UNKNOWN renewed lease may conceal an old discarded lineage.
+        // A signed initial Opened still passes source watermark, finite guard
+        // quarantine and capacity checks, and receives its own durable marker.
+        // The trusted PC emits Opened only for the original lease; subsequent
+        // reconnect snapshots preserve the signed Renewed discriminant.
+        if renewed
+            && self
+                .sources
+                .get(&source)
+                .is_some_and(|state| state.lineage_quarantined)
         {
             return Some(InboxIssue::GuardQuarantine);
         }

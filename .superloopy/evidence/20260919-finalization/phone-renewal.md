@@ -17,7 +17,9 @@ ROOT approved a stable logical RequestId with separately signed bounded leases: 
 
 Inbox checkpoint schema 4 stores one renewal bit per retained guard and source quarantine/superseded flags. Existing byte/count bounds remain in force; source and guard slots are not evicted to regain availability.
 
-Legacy schema 1/2/3 source epochs lack renewal-suppression provenance and are quarantined against unseen new lineages. Existing immutable leases may finish, but legacy rows are never silently upgraded to renewable ones. A fresh current service epoch removes that uncertainty. This prevents an expired legacy guard followed by a clock-first reconnect from being treated as a new request.
+Legacy schema 1/2/3 source epochs lack renewal-suppression provenance and are quarantined against **unknown Renewed** events. Independent signed initial **Opened** events remain subject to the existing source-watermark, finite-quarantine and capacity gates and receive a new persistent lineage marker; their subsequent known-lineage renewals work normally. This distinction prevents a PC-first/phone-second upgrade from silently hiding unrelated new requests. The trusted service never relabels a renewed snapshot as an initial Opened event. A stale original Opened still fails its expiry watermark or retained suppression marker.
+
+Existing immutable leases may finish, but legacy rows are never silently upgraded to renewable ones. A fresh current service epoch removes the unknown-renewal uncertainty. An already-open pre-upgrade UAC request can require closing it on the PC and opening a new request (or restarting the PC service after updating the phone). Old suppressed requests are not revived.
 
 Unassociated legacy `receive_opened` remains a one-shot immutable-lease seam and rejects renewal; it cannot invent an enrolled receiving source. Production native intake already uses the associated path.
 
@@ -25,7 +27,7 @@ Unassociated legacy `receive_opened` remains a one-shot immutable-lease seam and
 
 - Timely same-key renewal emits Restore only, invalidates original full window, rejects stale binding/source mismatch, and treats exact repeats idempotently.
 - Off-hours suppression persists across old deadline, newer source clock, process restart and missed intermediate renewal.
-- Legacy source guard retirement does not allow latest renewal to become unseen/admissible.
+- Legacy source guard retirement does not allow latest renewal to become unseen/admissible. A fresh independent Opened and its later known-lineage renewal work in the same quarantined legacy epoch; replayed old Opened and subsequent suppressed renewal remain inactive.
 - Known final resolution can skip renewal and records one outcome; acknowledgment of old local-expiry history never removes renewable suppression.
 - Active off-hours crossing withdraws without history and cannot be restored by later hours-on renewal; expired recovery leases remain suppressed.
 - Capacity quarantine persists past old leases; native current epoch replacement retires old lineage and rejects superseded epoch traffic.

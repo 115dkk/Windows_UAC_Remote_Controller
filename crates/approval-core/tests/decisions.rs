@@ -184,12 +184,16 @@ fn renewal_keeps_lineage_and_snapshot_but_rejects_every_old_signature() {
             .unwrap_err(),
         EngineError::RenewalTargetMismatch
     );
-    engine
+    let authorized = engine
         .submit_decision(
             &phone.sign(renewed.binding(), DecisionPurpose::Approve),
             renewal_time,
         )
         .unwrap();
+    assert_eq!(authorized.binding(), renewed.binding());
+    assert_eq!(authorized.device_id(), phone.device);
+    assert_eq!(authorized.purpose(), DecisionPurpose::Approve);
+    assert_eq!(engine.pending_count(), 0);
     assert_eq!(
         engine
             .renew_from_privileged_host(

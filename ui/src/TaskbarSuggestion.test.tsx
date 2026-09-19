@@ -62,7 +62,7 @@ describe('installer taskbar suggestion', () => {
     expect(button).toBeDisabled();
     expect(native.request).toHaveBeenCalledTimes(1);
     await act(async () => { resolve('declined'); await pending; });
-    expect(await screen.findByRole('status')).toHaveTextContent('추가되지 않았어요');
+    expect(await screen.findByRole('status')).toHaveTextContent('추가되지 않았습니다');
     expect(screen.queryByRole('button', { name: '작업 표시줄에 고정' })).not.toBeInTheDocument();
   });
 });

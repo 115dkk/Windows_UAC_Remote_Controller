@@ -8,14 +8,14 @@ import { createQaBridge, qaCase } from './qa-fixtures';
 
 describe('notification settings distinguish owner preparation from policy read failure', () => {
   it.each([
-    ['phone-service-stopped', ko.policyStoppedTitle],
-    ['phone-service-preparing', ko.policyPreparingTitle],
-    ['phone-service-waiting-unlock', ko.policyUnlockTitle],
-    ['phone-service-cleanup', ko.policyCleanupTitle],
-    ['phone-service-unavailable', ko.policyOwnerUnavailableTitle],
-  ])('uses the actual preparation state for %s', async (fixture, title) => {
+    ['phone-service-stopped', 'policyStoppedTitle'],
+    ['phone-service-preparing', 'policyPreparingTitle'],
+    ['phone-service-waiting-unlock', 'policyUnlockTitle'],
+    ['phone-service-cleanup', 'policyCleanupTitle'],
+    ['phone-service-unavailable', 'policyOwnerUnavailableTitle'],
+  ] as const)('uses the actual preparation state for %s', async (fixture, title) => {
     render(<App bridge={createQaBridge(qaCase(fixture).snapshot)} initialPage="schedule" />);
-    expect(await screen.findByRole('heading', { name: title })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: ko[title] })).toBeVisible();
     expect(screen.queryByRole('heading', { name: ko.policyUnavailableTitle })).not.toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
   });

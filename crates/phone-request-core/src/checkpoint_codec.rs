@@ -198,8 +198,9 @@ impl InboxCheckpoint {
                 watermark: input.u64()?,
                 quarantine_expiry: input.optional()?,
                 // Legacy sources did not persist renewal suppression. Reject
-                // unseen lease lineages in that epoch even after old guards
-                // expire; a fresh current native epoch clears this uncertainty.
+                // unseen Renewed leases in that epoch even after old guards
+                // expire. Independent initial Opened events retain normal
+                // watermark/capacity checks; a fresh epoch clears uncertainty.
                 lineage_quarantined: version < VERSION,
                 superseded: false,
             };

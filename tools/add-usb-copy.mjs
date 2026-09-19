@@ -16,6 +16,19 @@ const failures = {
   ar: 'اتصال USB غير متاح. تحقق من برنامج تشغيل USB والكابل أو اتصل باستخدام رمز QR.',
 };
 const guide = 'PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.';
+const guides = {
+  ko: 'PC의 UAC 원격 승인기에서 ‘휴대폰 관리’ → ‘QR 코드 보기’를 선택하십시오. 아래 버튼으로 QR 코드를 촬영할 수 있습니다.',
+  en: 'In UAC Remote Approval on the PC, select “Manage phones” → “Show the QR code”. The button below opens the camera in this app.',
+  fr: 'Sur le PC, ouvrez Approbation UAC à distance, puis « Gérer les téléphones » → « Afficher le code QR ». Le bouton ci-dessous ouvre la caméra.',
+  de: 'Wählen Sie in UAC-Remote-Genehmigung am PC „Telefone verwalten“ → „QR-Code anzeigen“. Die Schaltfläche unten öffnet die Kamera.',
+  ja: 'PCのUACリモート承認で「スマートフォン管理」→「QRコードを表示」を選択してください。下のボタンでカメラを開きます。',
+  'zh-Hans': '在 PC 的 UAC 远程审批中选择“管理手机”→“显示二维码”。下方按钮会打开摄像头。',
+  'zh-Hant': '在 PC 的 UAC 遠端核准中選擇「管理手機」→「顯示 QR 碼」。下方按鈕會開啟相機。',
+  es: 'En Aprobación remota de UAC del PC, seleccione «Gestionar teléfonos» → «Mostrar código QR». El botón inferior abre la cámara.',
+  'pt-BR': 'No PC, abra Aprovação remota UAC e selecione “Gerenciar celulares” → “Mostrar código QR”. O botão abaixo abre a câmera.',
+  'pt-PT': 'No PC, abra Aprovação remota UAC e selecione «Gerir telemóveis» → «Mostrar código QR». O botão abaixo abre a câmara.',
+  ar: 'على الكمبيوتر، افتح الموافقة عن بُعد على UAC واختر «إدارة الهواتف» ثم «عرض رمز QR». الزر أدناه يفتح الكاميرا.',
+};
 const keys = ['USB 연결 대기', '휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오.',
   '휴대폰 승인이 켜져 있는지 확인하지 못했어요.', '휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요.',
   '현재 상태와 자동 시작 설정을 확인한 뒤 다시 시도해 주세요.', '본인 확인을 진행해 주세요.'];
@@ -47,14 +60,10 @@ for (const [locale, label] of Object.entries(labels)) {
   const path = `locales/${locale}.json`;
   const catalog = JSON.parse(readFileSync(path, 'utf8'));
   catalog['USB로 연결'] = label;
+  catalog['PC 승인을 휴대폰에서'] = catalog['UAC 원격 승인'];
   catalog[failureKey] = failures[locale];
   keys.forEach((key, index) => { catalog[key] = translated[locale][index]; });
-  if (locale !== 'ko') {
-    // The source key stays stable. Update the quoted action, not the app name.
-    const oldName = catalog['UAC 원격 승인'];
-    const last = catalog[guide].lastIndexOf(oldName);
-    if (last >= 0) catalog[guide] = catalog[guide].slice(0, last) + catalog['QR 코드 보기'] + catalog[guide].slice(last + oldName.length);
-  }
+  catalog[guide] = guides[locale];
   writeFileSync(path, JSON.stringify(catalog, null, 2) + '\n');
   if (androidCopy[locale]) {
     const qualifier = { 'zh-Hans': 'b+zh+Hans', 'zh-Hant': 'b+zh+Hant', 'pt-BR': 'pt-rBR', 'pt-PT': 'pt-rPT' }[locale] ?? locale;

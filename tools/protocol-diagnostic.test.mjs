@@ -19,7 +19,7 @@ const property = (trace = 'all-traces', verdict = 'verified') => ({ trace, verdi
 const helpers = { enrolled_revision_unique: property(), building_precedes_open: property(),
   request_opened_unique: property(), active_registry_production_precedes_revocation: property() };
 
-function fixture(t, auxiliary, withDischarges = false, withCounterexamples = false) {
+function fixture(t, auxiliary, withDischarges = false, withCounterexamples = false, withRenewal = false) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-diagnostic-test-'));
   t.after(() => {
     // Only this exact newly-created fixture. Never old diagnostic/proof artifacts.
@@ -52,6 +52,12 @@ function fixture(t, auxiliary, withDischarges = false, withCounterexamples = fal
       const profile = witnessProfile(name); return [name, { profile: profile.profile, proof: profile.proof }];
     }));
   }
+  if (withRenewal) {
+    const renewal = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'))
+      .models.find(model => model.id === 'prompt-lease-renewal');
+    assert.ok(renewal);
+    manifest.models.push(renewal);
+  }
   const write = (path, value) => {
     const full = join(root, path);
     mkdirSync(dirname(full), { recursive: true });
@@ -69,6 +75,7 @@ function fixture(t, auxiliary, withDischarges = false, withCounterexamples = fal
     Object.entries(value.expected).map(([name, result]) => withDischarges && value.witnessDischarges?.[name]
       ? `${witnessProfile(name).original}\n\n` : `lemma ${name}: ${result.trace} "synthetic statement"\n`).join('') + '\nend\n');
   if (withCounterexamples) write(manifest.models[1].path, readFileSync(new URL('../security/tamarin/RequestAuthorization.spthy', import.meta.url)));
+  if (withRenewal) write(manifest.models[2].path, readFileSync(new URL('../security/tamarin/PromptLeaseRenewal.spthy', import.meta.url)));
   let summary;
   const refresh = () => {
     const runs = [];
@@ -163,6 +170,24 @@ test('complete normal failure selects first request baseline in manifest order',
   const loaded = loadDiagnosticInputs(f.root);
   assert.equal(loaded.selected.row, 'request-authorization-1');
   assert.equal(loaded.selected.inputSha256, sha256(loaded.selected.bytes));
+});
+
+test('renewal-aware diagnostics require all twenty-one rows while retaining request baseline selection', (t) => {
+  const f = fixture(t, helpers, false, false, true);
+  const admitted = admitDiagnostic(f.manifest, f.summary, f.root);
+  assert.equal(admitted.plans.length, 21);
+  assert.equal(admitted.selected.id, 'request-authorization-1');
+  assert.equal(loadDiagnosticInputs(f.root).selected.row, 'request-authorization-1');
+  const renewalRows = f.summary.runs.filter(row => row.id.startsWith('prompt-lease-renewal-') || row.id === 'retained-retired-lease');
+  assert.equal(renewalRows.length, 5);
+  for (const omitted of renewalRows) {
+    const incomplete = { ...f.summary, runs: f.summary.runs.filter(row => row !== omitted) };
+    assert.throws(() => admitDiagnostic(f.manifest, incomplete, f.root));
+  }
+  const source = join(f.root, normalDirectory, 'prompt-lease-renewal.spthy');
+  const mutant = join(f.root, normalDirectory, 'retained-retired-lease.spthy');
+  writeFileSync(mutant, readFileSync(source));
+  assert.throws(() => loadDiagnosticInputs(f.root));
 });
 
 test('attack-discharge diagnostic admission keeps sixteen originals and never selects a canary attack as baseline', (t) => {

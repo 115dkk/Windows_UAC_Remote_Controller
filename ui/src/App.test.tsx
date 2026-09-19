@@ -490,7 +490,7 @@ describe('destructive action confirmation', () => {
     const stop = await screen.findByRole('button', { name: serviceActionText.stop });
     await user.click(stop);
     let dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveTextContent('자동 실행 설정은 바뀌지 않아요.');
+    expect(dialog).toHaveTextContent('자동 실행 설정은 바뀌지 않습니다.');
     expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
     await user.click(within(dialog).getByRole('button', { name: ko.cancel }));
     expect(stop).toHaveFocus();
@@ -515,7 +515,7 @@ describe('destructive action confirmation', () => {
     const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
     render(<App bridge={bridgeFor(snapshot, { controlService })} />);
     await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
-    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거 확인' });
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능 제거' });
     expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
     expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
     expect(controlService).not.toHaveBeenCalled();

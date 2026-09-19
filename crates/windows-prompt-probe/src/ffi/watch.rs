@@ -446,7 +446,7 @@ fn apply(
     let outcome_began = Instant::now();
     while outcome_began.elapsed() < OUTCOME_WINDOW {
         std::thread::sleep(OUTCOME_INTERVAL);
-        if target_is_gone(session, image, target, &cleanup)? {
+        if target_is_gone(session, image, tracked, &cleanup)? {
             return Ok(ApplyOutcome::Gone);
         }
     }
@@ -524,9 +524,10 @@ fn worker_apply(request: WorkerApply<'_>) -> Result<Option<RefusalReason>> {
 fn target_is_gone(
     session: u32,
     image: &[u16],
-    target: TargetIdentity,
+    tracked: &Tracked,
     cleanup: &CleanupLog,
 ) -> Result<bool> {
+    let target = tracked.identity;
     let desktop = open_input_desktop(cleanup)?;
     if !object_name(HANDLE(desktop.raw().0), NativeOperation::DesktopName)
         .map_err(|_| ())?
@@ -538,7 +539,11 @@ fn target_is_gone(
         desktop.raw(),
         session,
         image,
-        Some(target),
+        Some(tracked),
+        // Outcome observation only: the action is already consumed. This
+        // census publishes no heartbeat/renewal witness and needs only native
+        // disappearance, not another content capture during window teardown.
+        false,
         target.sequence,
         cleanup,
     )?;

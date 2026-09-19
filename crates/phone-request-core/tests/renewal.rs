@@ -298,6 +298,63 @@ fn legacy_source_epoch_cannot_reclassify_a_retired_suppression_as_unseen_renewal
     );
     assert_eq!(update.issue(), Some(InboxIssue::GuardQuarantine));
     no_positive(&update);
+    // PC-first upgrade must not hide unrelated new requests in the same epoch.
+    let independent = opened(2, 2, 1801, 2801);
+    let admitted = restored.receive_opened_from(
+        &independent,
+        generation(1),
+        &mut correlation(1801, 2),
+        clock(1801),
+    );
+    assert!(
+        admitted
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Show(_)))
+    );
+    // A replay of the legacy initial packet is still below the source watermark.
+    let replay = restored.receive_opened_from(
+        &first,
+        generation(1),
+        &mut correlation(1802, 2),
+        clock(1802),
+    );
+    no_positive(&replay);
+    assert!(replay.effects().iter().any(|effect| matches!(
+        effect,
+        Effect::Drop {
+            reason: DropReason::Expired,
+            ..
+        }
+    )));
+    // Remembering that stale initial packet cannot make its latest lease active.
+    no_positive(&restored.receive_opened_from(
+        &third,
+        generation(1),
+        &mut correlation(1803, 2),
+        clock(1803),
+    ));
+    let independent_renewal = renewed(&independent, 8, 2700, 3700);
+    let refreshed = restored.receive_opened_from(
+        &independent_renewal,
+        generation(1),
+        &mut correlation(2700, 2),
+        clock(2700),
+    );
+    assert!(
+        refreshed
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Restore(_)))
+    );
+    assert!(
+        refreshed
+            .effects()
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Show(_) | Effect::RecordOutcome { .. }))
+    );
+    assert_eq!(restored.active_count(), 1);
+    assert!(restored.pending_outcomes().is_empty());
     let _ = saved(&restored);
 }
 
@@ -370,6 +427,15 @@ fn capacity_quarantine_persists_past_old_leases_and_epoch_replacement_retires_ol
     );
     assert_eq!(drop.issue(), Some(InboxIssue::GuardQuarantine));
     no_positive(&drop);
+    // The initial-Opened distinction never bypasses the actual retained bound.
+    let full = inbox.receive_opened_from(
+        &opened(4, 2, 1801, 2801),
+        generation(1),
+        &mut correlation(1801, 2),
+        clock(1801),
+    );
+    assert_eq!(full.issue(), Some(InboxIssue::GuardCapacity));
+    no_positive(&full);
     no_positive(&inbox.observe_service_clock(&correlation(3000, 3), clock(3000)));
     assert_eq!(inbox.retained_count(), 0);
     let next = inbox.receive_opened_from(

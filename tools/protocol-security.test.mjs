@@ -24,10 +24,21 @@ const helpers = {
 const declarations = (wanted, auxiliary = false) => Object.entries(wanted).map(([name, value]) =>
   `lemma ${name}${auxiliary ? ' [reuse]' : ''}:\n  ${value.trace}\n  "synthetic statement"\n`).join('\n');
 
-test('closed canary profiles retain both original universal obligations and sixteen normal rows', () => {
+function assertProductionObligations(manifest) {
+  const rows = manifest.models.map(model => [model.id, Object.keys(model.expected).length, model.canaries.length]);
+  assert.deepEqual(rows, [
+    ['pinned-channel', 4, 1],
+    ['request-authorization', 9, 2],
+    ['prompt-lease-renewal', 4, 1],
+  ]);
+  assert.equal(rows.slice(0, 2).reduce((total, [, positives, controls]) => total + positives + controls, 0), 16);
+  assert.equal(rows.reduce((total, [, positives, controls]) => total + positives + controls, 0), 21);
+}
+
+test('closed canary profiles retain original obligations alongside five mandatory renewal rows', () => {
   const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
   const model = manifest.models.find(model => model.id === 'request-authorization');
-  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 21);
+  assertProductionObligations(manifest);
   for (const canary of model.canaries) {
     const profile = counterexampleDischarge(model, canary);
     assert.deepEqual(canary.expected, { [profile.obligation]: { trace: 'all-traces', verdict: 'falsified' } });
@@ -130,7 +141,7 @@ test('closed discharge profiles cover only the three approved existentials and p
   const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
   const model = manifest.models.find(model => model.id === 'request-authorization');
   assert.deepEqual(Object.keys(witnessDischarges(model)), ['honest_approve_trace', 'honest_deny_without_approval_auth_trace', 'honest_two_approvers_single_winner_trace']);
-  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 16);
+  assertProductionObligations(manifest);
   assert.deepEqual(witnessDischarges({ expected: {} }), {});
   for (const changed of [{}, { bogus: {} }, { honest_approve_trace: { profile: 'approval-conjunction-v1', proof: '../outside.proof' } },
     { honest_approve_trace: { ...model.witnessDischarges.honest_approve_trace, assumed: true } }]) {
@@ -138,6 +149,29 @@ test('closed discharge profiles cover only the three approved existentials and p
   }
   assert.throws(() => witnessDischarges({ ...model, id: 'pinned-channel' }));
   assert.throws(() => witnessDischarges({ ...model, expected: { ...model.expected, honest_approve_trace: { trace: 'all-traces', verdict: 'verified' } } }));
+});
+
+test('renewal obligations and old-lease control are independently registered without discharge shortcuts', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
+  const model = manifest.models.find(model => model.id === 'prompt-lease-renewal');
+  assert.deepEqual(model.expected, {
+    honest_renewed_approval_trace: { trace: 'exists-trace', verdict: 'verified' },
+    retired_lease_never_accepted: { trace: 'all-traces', verdict: 'verified' },
+    renewed_approval_needs_new_authentication: { trace: 'all-traces', verdict: 'verified' },
+    no_accept_after_prompt_gone: { trace: 'all-traces', verdict: 'verified' },
+  });
+  assert.deepEqual(witnessDischarges(model), {});
+  assert.equal(model.helpers, undefined);
+  assert.equal(model.canaries.length, 1);
+  const canary = model.canaries[0];
+  assert.equal(canary.id, 'retained-retired-lease');
+  assert.deepEqual(canary.expected, { retired_lease_never_accepted: { trace: 'all-traces', verdict: 'falsified' } });
+  assert.equal(counterexampleDischarge(model, canary), null);
+  const source = readFileSync(new URL(`../${model.path}`, import.meta.url), 'utf8');
+  const mutant = mutateExactlyOnce(source, canary.mutation);
+  assert.equal(mutant, source.replace('// CANARY_RETIRED_LEASE', ', Lease(pc, request, old)'));
+  assert.deepEqual(validateTheoryRequirements(source, model.expected).targetLemmas, Object.keys(model.expected));
+  assert.deepEqual(validateTheoryRequirements(mutant, model.expected).targetLemmas, Object.keys(model.expected));
 });
 
 test('current transition bytes remain exact while independent witness input contains no helper declarations', () => {
@@ -322,7 +356,7 @@ test('production observation-only helper insertion exactly erases to the retaine
   const request = manifest.models.find(model => model.id === 'request-authorization');
   assert.deepEqual(request.helpers, helpers);
   assert.equal(Object.keys(request.expected).length, 9);
-  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 16);
+  assertProductionObligations(manifest);
   assert.equal(manifest.models.filter(model => model.helpers !== undefined).length, 1);
   assert.equal(manifest.sourceBindings.find(binding => binding.path === 'crates/secure-channel/src/identity.rs').sha256,
     '76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195');
@@ -385,7 +419,8 @@ test('early missing-manifest failure cannot leave a prior passing summary', asyn
 // Synthetic runner fixture, NOT Tamarin or evidence of a security proof. The
 // fake process reports controlled verdict text solely to test orchestration.
 function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, badWitnessControl = false,
-  counterexamples = false, badCounterexampleBaseline = false } = {}) {
+  counterexamples = false, badCounterexampleBaseline = false,
+  badRenewalBaseline = false, badRenewalControl = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'uac-protocol-runner-test-'));
   const directory = join(root, 'artifacts/protocol-security');
   const manifestPath = join(root, 'security/tamarin/manifest.json');
@@ -433,17 +468,24 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
     if (process.argv.includes('--version')) { console.log('tamarin-prover 1.12.0'); process.exit(0); }
     const file = process.argv[2];
     const source = fs.readFileSync(file, 'utf8');
-    const mutant = source.includes('MUTANT') || file.endsWith('missing-pc-pin.spthy');
+    const renewalControl = file.endsWith('retained-retired-lease.spthy');
+    if (renewalControl && (!source.includes(', Lease(pc, request, old)') || source.includes('// CANARY_RETIRED_LEASE'))) {
+      throw new Error('Synthetic renewal control requires the exact registered old-slot retention mutation');
+    }
+    const mutant = source.includes('MUTANT') || file.endsWith('missing-pc-pin.spthy') || renewalControl;
     const helpers = new Set(${JSON.stringify(Object.keys(auxiliary ?? {}))});
     console.log('summary of summaries:\\n analyzed: ' + file);
     const selected = process.argv.filter(x => x.startsWith('--prove=')).map(arg => arg.slice(8));
     const names = selected.length ? selected : [...source.matchAll(/^lemma ([A-Za-z0-9_]+):/gm)].map(match => match[1]);
     for (const name of names) {
       if (${omitHelper} && name === ${JSON.stringify(Object.keys(auxiliary ?? {})[0] ?? '')}) continue;
+      if (renewalControl && ${JSON.stringify(badRenewalControl)} === 'missing') continue;
       const attack = name.startsWith('attack_');
       const kind = attack || name === 'executable' || name.startsWith('honest_') || name.startsWith('checked_') ? 'exists-trace' : 'all-traces';
       const negative = /-(sorry|contradiction)\\.spthy$/.test(file);
-      const verdict = attack ? (file.endsWith('-baseline.spthy') ? (${badCounterexampleBaseline} ? 'unknown' : 'falsified - no trace found') : 'verified')
+      const verdict = renewalControl && ${JSON.stringify(badRenewalControl)} !== null ? ${JSON.stringify(badRenewalControl)}
+        : ${badRenewalBaseline} && file.endsWith('prompt-lease-renewal.spthy') && name === 'retired_lease_never_accepted' ? 'unknown'
+        : attack ? (file.endsWith('-baseline.spthy') ? (${badCounterexampleBaseline} ? 'unknown' : 'falsified - no trace found') : 'verified')
         : !selected.length && negative ? (${badWitnessControl} ? 'unknown' : 'analysis incomplete')
         : mutant && !helpers.has(name) ? 'falsified - found trace' : 'verified';
       console.log(' ' + name + ' (' + kind + '): ' + verdict + ' (1 steps)');
@@ -461,13 +503,13 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
   return { root, directory, config, save };
 }
 
-test('synthetic counterexample orchestration retains sixteen originals with two fresh no-helper auto checks per request canary',
+test('synthetic counterexample orchestration retains all twenty-one rows and both request-canary contexts',
   { skip: process.platform !== 'linux' }, async (t) => {
     const f = runnerFixture(t, { counterexamples: true });
     await runProtocolSecurity(f.root);
     const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
     assert.equal(summary.passed, true); // Synthetic runner behavior, not proof evidence.
-    assert.equal(summary.runs.length, 16);
+    assert.equal(summary.runs.length, 21);
     const rows = summary.runs.filter(row => row.mode === 'checked-counterexample');
     assert.equal(rows.length, 2);
     for (const row of rows) {
@@ -485,8 +527,22 @@ test('synthetic counterexample orchestration retains sixteen originals with two 
       }
     }
     assert.ok(summary.runs.some(row => row.id === 'missing-pc-pin' && row.ok));
+    const renewal = f.config.models.find(model => model.id === 'prompt-lease-renewal');
+    const renewalRows = summary.runs.filter(row => row.id.startsWith('prompt-lease-renewal-') || row.id === 'retained-retired-lease');
+    assert.deepEqual(renewalRows.map(row => row.id), [
+      'prompt-lease-renewal-1', 'prompt-lease-renewal-2', 'prompt-lease-renewal-3', 'prompt-lease-renewal-4', 'retained-retired-lease',
+    ]);
+    for (const [index, row] of renewalRows.entries()) {
+      const wanted = index < 4 ? { [Object.keys(renewal.expected)[index]]: Object.values(renewal.expected)[index] } : renewal.canaries[0].expected;
+      assert.equal(row.ok, true);
+      assert.deepEqual(row.helperLemmas, []);
+      assert.deepEqual(row.targetLemmas, Object.keys(wanted));
+      assert.deepEqual(row.selectedLemmas, Object.keys(wanted));
+      assert.deepEqual(row.verdicts, wanted);
+      assert.deepEqual(row.arguments, proofArguments(join(f.directory, row.model), wanted));
+    }
     const calls = readFileSync(join(f.root, 'invocations.log'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(calls.length, 19, 'one version + fourteen ordinary rows + four attack contexts');
+    assert.equal(calls.length, 24, 'one version + nineteen ordinary rows + four attack contexts');
   });
 
 test('synthetic no-trace baseline failure cannot discharge either canary despite verified mutant attacks',
@@ -494,12 +550,38 @@ test('synthetic no-trace baseline failure cannot discharge either canary despite
     const f = runnerFixture(t, { counterexamples: true, badCounterexampleBaseline: true });
     await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
     const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
-    assert.equal(summary.passed, false); assert.equal(summary.runs.length, 16);
+    assert.equal(summary.passed, false); assert.equal(summary.runs.length, 21);
     for (const row of summary.runs.filter(row => row.mode === 'checked-counterexample')) {
       assert.equal(row.counterexampleDischarge.checks[0].ok, true);
       assert.equal(row.counterexampleDischarge.checks[1].ok, false);
       assert.equal(row.counterexampleDischarge.coverage.discharged, false); assert.equal(row.ok, false);
     }
+  });
+
+test('synthetic renewal controls reject missing, verified and inconclusive counterexamples independently of old models',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    for (const verdict of ['missing', 'verified', 'analysis incomplete']) await t.test(verdict, async (t) => {
+      const f = runnerFixture(t, { counterexamples: true, badRenewalControl: verdict });
+      await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
+      const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+      assert.equal(summary.passed, false);
+      assert.equal(summary.runs.length, 21);
+      const control = summary.runs.find(row => row.id === 'retained-retired-lease');
+      assert.equal(control.ok, false);
+      assert.deepEqual(control.targetLemmas, ['retired_lease_never_accepted']);
+      assert.ok(summary.runs.filter(row => row !== control).every(row => row.ok));
+    });
+  });
+
+test('synthetic renewal baseline remains required even when the old-lease mutant has a counterexample',
+  { skip: process.platform !== 'linux' }, async (t) => {
+    const f = runnerFixture(t, { counterexamples: true, badRenewalBaseline: true });
+    await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
+    const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.runs.length, 21);
+    assert.equal(summary.runs.find(row => row.id === 'prompt-lease-renewal-2').ok, false);
+    assert.equal(summary.runs.find(row => row.id === 'retained-retired-lease').ok, true);
   });
 
 test('nested counterexample input names are reserved before any tool or snapshot replacement', async (t) => {

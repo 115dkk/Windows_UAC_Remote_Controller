@@ -8,7 +8,7 @@ import type { AppSnapshot } from './contracts';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { RelayStatusLine } from './RelayStatusLine';
-import { locales, setPreviewLanguage } from './i18n';
+import { locales, setPreviewLanguage, tr } from './i18n';
 
 describe('Windows relay observation and service recovery', () => {
   it('keeps unknown relay state when the stopped SCM value is only cached', () => {
@@ -43,19 +43,19 @@ describe('Windows relay observation and service recovery', () => {
   it('never promotes readiness or a stale listening DTO while SCM is stopped', () => {
     const source = qaCase('desktop-relay-stopped').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayConfigured: true, relayStatus: null }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('수신 대기하지 않아요.');
+    expect(screen.getByRole('status')).toHaveTextContent('수신 대기하지 않습니다.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, relayConfigured: true, relayStatus: { mode: 'embedded', state: 'listening' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('수신 대기하지 않아요.');
+    expect(screen.getByRole('status')).toHaveTextContent('수신 대기하지 않습니다.');
   });
 
   it('keeps legacy readiness and unknown management distinct from listening', () => {
     const source = qaCase('desktop-running').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayConfigured: true }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했어요.');
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, service: null, relayStatus: { mode: 'embedded', state: 'listening' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했어요.');
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
   });
 
   it('shows preparation failure and keeps unknown external runtime distinct from reachability', () => {
@@ -63,14 +63,14 @@ describe('Windows relay observation and service recovery', () => {
     const view = render(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable' } }} />);
     expect(screen.getByRole('status')).toHaveTextContent('내장 중계를 준비하지 못했습니다. PC의 네트워크와 중계 설정을 확인하십시오.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'external', state: 'unknown' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했어요.');
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
   });
 
   it('does not create a retry capability when native service actions are unavailable', async () => {
     const source = qaCase('desktop-start-failed').snapshot;
     render(<App bridge={createQaBridge({ ...source, service: { ...source.service!, state: null, allowedActions: [] } })} />);
-    expect(await screen.findByText(source.service!.actionIssue!.message)).toBeVisible();
+    expect(await screen.findByText(tr(source.service!.actionIssue!.message))).toBeVisible();
     expect(screen.queryByRole('button', { name: '휴대폰 승인 켜기' })).not.toBeInTheDocument();
   });
 
@@ -136,7 +136,7 @@ describe('Windows relay observation and service recovery', () => {
     const controlService = vi.fn(() => { current = failed; return Promise.resolve({ ...failed, issue: failed.service!.actionIssue! }); });
     render(<App bridge={{ ...createQaBridge(initial), snapshot, controlService }} />);
     fireEvent.click(await screen.findByRole('button', { name: '휴대폰 승인 켜기' }));
-    const message = failed.service!.actionIssue!.message;
+    const message = tr(failed.service!.actionIssue!.message);
     expect(await screen.findAllByText(message)).toHaveLength(1);
     fireEvent.focus(window);
     await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(2));
