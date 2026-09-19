@@ -53,6 +53,21 @@ function ui() {
   assert.ok(xml.length < 1024 * 1024);
   return { xml, document: new JSDOM(xml, { contentType: 'text/xml' }).window.document };
 }
+// A hierarchy read taken the instant a touch lands can arrive while the window
+// is still animating, and UIAutomator answers that with a failure rather than a
+// stale tree. `until` already retries reads for exactly that reason; the
+// evidence capture is the same kind of read and was the only one without the
+// same patience, so one animation cost a whole proof run. The read repeats; the
+// touch never does.
+async function settled(attempts = 10) {
+  for (let attempt = 1; ; attempt++) {
+    try { return ui(); }
+    catch (failure) {
+      if (attempt >= attempts) throw failure;
+      await setTimeout(1000);
+    }
+  }
+}
 async function unlockDisposableEmulator() {
   // One ordinary PIN attempt on the named disposable AVD, before app install.
   // Explicitly lock first so emulator boot/keyguard timing cannot hide the app.
@@ -110,7 +125,7 @@ async function clickLabel(label) {
   adb(['shell', 'input', 'touchscreen', 'swipe', x, y, x, y, '120']);
   clicks += 1;
   writeFileSync(`evidence/click-${clicks}-before.xml`, view.xml);
-  writeFileSync(`evidence/click-${clicks}-after.xml`, ui().xml);
+  writeFileSync(`evidence/click-${clicks}-after.xml`, (await settled()).xml);
 }
 try {
   const manifest = readFileSync('evidence/manifest.xml', 'utf8');
