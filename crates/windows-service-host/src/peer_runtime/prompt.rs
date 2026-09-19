@@ -240,6 +240,8 @@ pub(super) fn map_content(
     // only ever describe a dialog the probe met on the secure desktop; every
     // other target reaches this function with a report built by a test.
     #[cfg(windows)]
+    crate::ffi::prompt_diagnostics::begin();
+    #[cfg(windows)]
     for label in observation.labels() {
         crate::ffi::prompt_diagnostics::label(
             label.ordinal(),

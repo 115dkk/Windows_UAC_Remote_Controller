@@ -23,10 +23,33 @@ use windows::{
 };
 
 /// One prompt's worth of rows, and no more. A consent dialog this product will
-/// act on has a bounded element count; a process that somehow meets many of them
-/// does not get to fill the log with the same answer.
+/// act on has a bounded element count, so a dialog needing more than this is not
+/// the shape these rows describe.
 const MAX_ROWS: u32 = 48;
-static COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// How many prompts one service lifetime describes. The budget used to be the
+/// row count alone, which a single session of reading real prompts exhausted in
+/// three: the point was never to allow one dialog and then stop, it was to keep
+/// a process that meets prompt after prompt from filling the log with the same
+/// answer. Counting prompts says that, and counting rows still bounds each one.
+const MAX_PROMPTS: u32 = 32;
+
+static ROWS: AtomicU32 = AtomicU32::new(0);
+static PROMPTS: AtomicU32 = AtomicU32::new(0);
+
+/// Starts one prompt's rows. Called once per mapped dialog, before its labels.
+pub(crate) fn begin() {
+    if PROMPTS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < MAX_PROMPTS).then_some(count + 1)
+        })
+        .is_ok()
+    {
+        ROWS.store(0, Ordering::Relaxed);
+    } else {
+        ROWS.store(MAX_ROWS, Ordering::Relaxed);
+    }
+}
 
 /// An identifier the dialog's own author chose, or `-` when it is absent or is
 /// not the closed shape this may write. Never a fallback to the label's text.
@@ -51,7 +74,7 @@ pub(crate) fn label(
     automation_id: &str,
     class_name: &str,
 ) {
-    if COUNT
+    if ROWS
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             (count < MAX_ROWS).then_some(count + 1)
         })
@@ -107,6 +130,22 @@ mod tests {
         assert_eq!(identifier("has space"), "-");
         assert_eq!(identifier("Windows 명령 처리기"), "-");
         assert_eq!(identifier(&"x".repeat(65)), "-");
+    }
+
+    #[test]
+    fn each_prompt_starts_with_its_own_rows_until_the_prompts_themselves_run_out() {
+        PROMPTS.store(0, Ordering::Relaxed);
+        begin();
+        ROWS.store(MAX_ROWS, Ordering::Relaxed);
+        // A second dialog is a second dialog, not the tail of the first.
+        begin();
+        assert_eq!(ROWS.load(Ordering::Relaxed), 0);
+        // Past the prompt budget every further dialog writes nothing at all.
+        PROMPTS.store(MAX_PROMPTS, Ordering::Relaxed);
+        begin();
+        assert_eq!(ROWS.load(Ordering::Relaxed), MAX_ROWS);
+        PROMPTS.store(0, Ordering::Relaxed);
+        ROWS.store(0, Ordering::Relaxed);
     }
 
     #[test]
