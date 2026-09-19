@@ -245,6 +245,18 @@ fn is_observation_change(error: ProbeError) -> bool {
     )
 }
 
+/// Whether a read may open the dialog's own details before capturing it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Details {
+    /// Capture the dialog exactly as found. The argument-free diagnostic reads
+    /// this way and performs no action of any kind, which is what lets it stay
+    /// describable as read-only.
+    AsFound,
+    /// Open the details first. What they hold is the command line, and someone
+    /// asked to approve an elevation is entitled to see which command it is.
+    Open,
+}
+
 pub(super) fn inspect(
     hwnd: HWND,
     pid: u32,
@@ -253,7 +265,18 @@ pub(super) fn inspect(
     cleanup: &CleanupLog,
     recheck: impl FnMut() -> Result<(), ProbeError>,
 ) -> Result<ProbeReport, ProbeError> {
-    inspect_inner(hwnd, pid, began, seed, true, cleanup, recheck)
+    inspect_inner(
+        hwnd,
+        pid,
+        began,
+        seed,
+        Reading {
+            cooperative_budget: true,
+            details: Details::AsFound,
+        },
+        cleanup,
+        recheck,
+    )
 }
 
 pub(super) fn inspect_without_budget(
@@ -261,10 +284,30 @@ pub(super) fn inspect_without_budget(
     pid: u32,
     began: Instant,
     seed: ProbeCounts,
+    details: Details,
     cleanup: &CleanupLog,
     recheck: impl FnMut() -> Result<(), ProbeError>,
 ) -> Result<ProbeReport, ProbeError> {
-    inspect_inner(hwnd, pid, began, seed, false, cleanup, recheck)
+    inspect_inner(
+        hwnd,
+        pid,
+        began,
+        seed,
+        Reading {
+            cooperative_budget: false,
+            details,
+        },
+        cleanup,
+        recheck,
+    )
+}
+
+/// What one read is allowed to do: whether it yields its time back to the
+/// helper's own budget, and whether it may open the dialog's details first.
+#[derive(Clone, Copy)]
+struct Reading {
+    cooperative_budget: bool,
+    details: Details,
 }
 
 fn inspect_inner(
@@ -272,10 +315,14 @@ fn inspect_inner(
     pid: u32,
     began: Instant,
     seed: ProbeCounts,
-    cooperative_budget: bool,
+    reading: Reading,
     cleanup: &CleanupLog,
     mut recheck: impl FnMut() -> Result<(), ProbeError>,
 ) -> Result<ProbeReport, ProbeError> {
+    let Reading {
+        cooperative_budget,
+        details,
+    } = reading;
     if cooperative_budget {
         policy::budget(began.elapsed())?;
     }
@@ -293,6 +340,9 @@ fn inspect_inner(
         cooperative_budget,
         cleanup,
     };
+    if details == Details::Open {
+        open_details(&root, &scope, seed, &mut recheck)?;
+    }
     let first = capture(&root, seed, &scope)?;
     recheck()?;
     let second = capture(&root, seed, &scope)?;
@@ -304,6 +354,148 @@ fn inspect_inner(
         return Err(ProbeError::new(ProbeFailure::ObservationChanged));
     }
     Ok(first)
+}
+
+/// The name consent.exe gives the link that shows and hides its own details.
+///
+/// Measured on this product's own prompts, on Korean Windows 11: the dialog's
+/// text carries no automation id at all, its buttons are named `CloseButton`,
+/// `OkButton` and `CancelButton`, and this is the one named Hyperlink in the
+/// tree. Requiring the exact name AND the hyperlink control type is what keeps
+/// this from ever reaching something that decides the elevation, because the
+/// two elements that do decide it are buttons and are named something else.
+const DETAILS_LINK_AUTOMATION_ID: &str = "ShowHideDetails";
+
+/// Opens the dialog's details, so the command line it is willing to show is
+/// part of what gets sent to whoever is asked to approve.
+///
+/// The link toggles, and nothing about it says which way it currently points:
+/// its own text is the dialog's language, which this refuses to read. So the
+/// state is measured rather than assumed. Opening the details can only add
+/// elements, so a capture that did not grow means the details were already
+/// open and this just closed them, and it is put back.
+///
+/// A dialog with no such link is left alone. Failing to open the details is
+/// never a reason to refuse the prompt: the person still gets the program and
+/// the publisher, which is what they got before any of this existed.
+fn open_details(
+    root: &IUIAutomationElement,
+    scope: &Traversal<'_>,
+    seed: ProbeCounts,
+    recheck: &mut impl FnMut() -> Result<(), ProbeError>,
+) -> Result<(), ProbeError> {
+    let Some(link) = locate_details_link(root, scope.walker, scope.pid, scope.cleanup)? else {
+        return Ok(());
+    };
+    let closed = capture(root, seed, scope)?.content().labels().len();
+    recheck()?;
+    if !invoke_once(&link) {
+        return Ok(());
+    }
+    recheck()?;
+    let opened = capture(root, seed, scope)?.content().labels().len();
+    recheck()?;
+    if opened <= closed {
+        // This closed details the local user had already opened. Restore them
+        // rather than quietly changing what is on their screen.
+        let _ = invoke_once(&link);
+        recheck()?;
+    }
+    Ok(())
+}
+
+/// One Invoke, no retry, no input synthesis and no alternate pattern, exactly
+/// as the decision path does it. A link that will not take one is not worth a
+/// second attempt.
+fn invoke_once(element: &IUIAutomationElement) -> bool {
+    // SAFETY: one scoped element, already checked for owner, control type and
+    // automation id. InvokePattern is acquired here and used once.
+    let Ok(pattern) =
+        (unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) })
+    else {
+        return false;
+    };
+    // SAFETY: same scoped pattern on the same element, invoked once.
+    unsafe { pattern.Invoke() }.is_ok()
+}
+
+/// Walks for the one enabled, on-screen hyperlink the dialog's author named
+/// [`DETAILS_LINK_AUTOMATION_ID`], under the same bounds every other traversal
+/// here observes. More than one is refused: a dialog that presents two of them
+/// is not the one this was measured against.
+fn locate_details_link(
+    root: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    pid: u32,
+    cleanup: &CleanupLog,
+) -> Result<Option<IUIAutomationElement>, ProbeError> {
+    let mut found = None;
+    let mut visited = 0u16;
+    locate_details_link_inner(root, walker, pid, cleanup, &mut visited, &mut found)?;
+    Ok(found)
+}
+
+fn locate_details_link_inner(
+    element: &IUIAutomationElement,
+    walker: &IUIAutomationTreeWalker,
+    pid: u32,
+    cleanup: &CleanupLog,
+    visited: &mut u16,
+    found: &mut Option<IUIAutomationElement>,
+) -> Result<(), ProbeError> {
+    if usize::from(*visited) >= crate::MAX_UIA_ELEMENTS {
+        return Err(ProbeError::new(ProbeFailure::ElementLimit));
+    }
+    *visited += 1;
+    // SAFETY: fixed scalar checks on one scoped UIA element.
+    let owner = unsafe { element.CurrentProcessId() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+    if u32::try_from(owner).ok() != Some(pid) {
+        return Err(ProbeError::new(ProbeFailure::ProviderOwnerMismatch));
+    }
+    // SAFETY: password guard precedes any further read or descent.
+    if unsafe { element.CurrentIsPassword() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?
+        .as_bool()
+    {
+        return Ok(());
+    }
+    // SAFETY: fixed scalar control-type query.
+    let control_type = unsafe { element.CurrentControlType() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+    if control_type == UIA_EditControlTypeId
+        || pattern_available(element, UIA_IsValuePatternAvailablePropertyId, cleanup)?
+    {
+        return Ok(());
+    }
+    if control_type == UIA_HYPERLINK_CONTROL_TYPE_ID {
+        let automation_id = bounded_string_property(
+            element,
+            UIA_AutomationIdPropertyId,
+            MAX_LABEL_METADATA_UTF16_UNITS,
+            cleanup,
+        )?;
+        if automation_id == DETAILS_LINK_AUTOMATION_ID {
+            // SAFETY: fixed scalar state queries on the same scoped element.
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+            // SAFETY: same fixed offscreen state query.
+            let offscreen = unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+            if enabled.as_bool() && !offscreen.as_bool() {
+                if found.is_some() {
+                    return Err(ProbeError::new(ProbeFailure::UnsupportedContent));
+                }
+                *found = Some(element.clone());
+            }
+        }
+    }
+    let mut child = walk(walker, element, Walk::FirstChild)?;
+    while let Some(current) = child {
+        locate_details_link_inner(&current, walker, pid, cleanup, visited, found)?;
+        child = walk(walker, &current, Walk::NextSibling)?;
+    }
+    Ok(())
 }
 
 fn automation_for(
