@@ -88,6 +88,11 @@ export function qaCase(name: string): QaCase {
       requestCatalog: { status: 'ready', revision: '1', peerCount: 0, connectedPeerCount: 0 },
       dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' },
     } };
+    case 'phone-devices-pairing': return { page: 'devices', snapshot: { ...phone,
+      mobile: { ...phone.mobile!, canOpenPairingScanner: true },
+      devices: [{ id: 'synthetic-pc', name: '화면 예시 PC', revision: 1, connected: false, routePresent: true, lastSeenLabel: null }],
+      requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 },
+    } };
     case 'phone-disconnected': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 } } };
     case 'phone-reconciling': return { page: 'requests', snapshot: { ...phone, requestCatalog: { status: 'reconciling', revision: '1', peerCount: 1, connectedPeerCount: 1 }, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' } } };
     case 'phone-authenticating': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'authenticating', canApprove: false }] } };

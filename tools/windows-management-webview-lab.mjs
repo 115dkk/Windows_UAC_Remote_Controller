@@ -124,6 +124,22 @@ try {
   }
   assert.deepEqual(debuggerOwnership(), { ready: true, loopback: true, owned: true, webview: true, profile: true });
   confirmService();
+  // Navigate only the real local client. Never invoke pairing/UAC to measure
+  // its entry buttons; native owner, service and bridge admission stay intact.
+  await page.locator('nav .navigation-item').nth(1).click();
+  await page.evaluate(async () => { await document.fonts.ready; });
+  const pairButtons = page.locator('section.pairing-entry').first().locator(':scope > button');
+  await expect(pairButtons.nth(0)).toBeVisible();
+  await expect(pairButtons.nth(1)).toBeVisible();
+  const qr = await pairButtons.nth(0).boundingBox(), usb = await pairButtons.nth(1).boundingBox();
+  assert.ok(qr && usb);
+  const rootFontSize = await page.evaluate(() => Number.parseFloat(getComputedStyle(document.documentElement).fontSize));
+  const clearGap = Math.max(usb.x - qr.x - qr.width, qr.x - usb.x - usb.width,
+    usb.y - qr.y - qr.height, qr.y - usb.y - usb.height);
+  assert.ok(clearGap >= rootFontSize - 0.5, 'Native PC WebView must retain its stacked1rem button gap');
+  writeFileSync(resolve(evidence, 'pairing-action-bounds.json'), JSON.stringify({ qr, usb, clearGap, rootFontSize, engine: browser.version(), owner: 'actual Windows WebView2' }, null, 2), { flag: 'wx' });
+  await page.screenshot({ path: resolve(evidence, 'pairing-actions.png') });
+  confirmService();
   writeFileSync(resolve(evidence, 'management-gui-proof.json'), JSON.stringify({
     commit: process.env.GITHUB_SHA, readOnly: true, actualGuiMedium: true,
     successfulSnapshotChecks: snapshots, refreshes, rejectedClients: rejected, busyReads, originalServicePid: original.pid,

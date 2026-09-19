@@ -275,7 +275,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .device-copy { min-width: 0; flex: 1; }
 .device-copy h2, .activity-list h2 { font-size: var(--text-body); }
 .device-copy .state-line { font-size: var(--text-small); margin-top: var(--space-1); }
-.collection-actions { display: flex; justify-content: flex-start; margin-top: var(--space-6); }
+.collection-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: flex-start; margin-top: var(--space-6); }
 .activity-list > li { display: flex; gap: var(--space-4); padding: var(--space-5); }
 .activity-mark { color: var(--muted); padding-top: var(--space-1); }
 .activity-mark.is-danger { color: var(--danger); }

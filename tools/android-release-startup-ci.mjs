@@ -184,6 +184,27 @@ try {
     assert.ok(!settings.xml.includes('알림 시간 설정을 읽을 수 없습니다'));
     writeFileSync('evidence/unpaired-settings-ui.xml', settings.xml);
     report.checks.push('notification-settings-available-before-pairing');
+    // Actual unpaired product WebView, not a fixture/catalog injection. Inspect
+    // the same collection action row as the reported connected-PC screen.
+    await clickLabel('연결된 PC');
+    const devices = await until(ui, view => Boolean(nodeFor(view, 'PC의 QR 코드 촬영'))
+      && Boolean(nodeFor(view, 'USB로 연결')), 'PC-list connection actions');
+    const actionBounds = label => {
+      const node = nodeFor(devices, label);
+      assert.equal(node.getAttribute('clickable'), 'true');
+      const match = /^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/.exec(node.getAttribute('bounds'));
+      assert.ok(match);
+      const [, left, top, right, bottom] = match.map(Number);
+      assert.ok(right > left && bottom > top && right <= 4096 && bottom <= 4096);
+      return { left, top, right, bottom };
+    };
+    const qr = actionBounds('PC의 QR 코드 촬영'), usb = actionBounds('USB로 연결');
+    const clearGap = Math.max(usb.left - qr.right, qr.left - usb.right, usb.top - qr.bottom, qr.top - usb.bottom);
+    assert.ok(clearGap > 0, 'Native WebView QR/USB hit rectangles must remain separate');
+    writeFileSync('evidence/pairing-action-bounds.json', JSON.stringify({ qr, usb, clearGap, owner: 'actual Android WebView', unpaired: true }, null, 2));
+    writeFileSync('evidence/pairing-actions-ui.xml', devices.xml);
+    writeFileSync('evidence/pairing-actions.png', adb(['exec-out', 'screencap', '-p'], true));
+    report.checks.push('actual-pc-list-qr-usb-action-spacing');
   }
   report.passed = true;
 } finally {

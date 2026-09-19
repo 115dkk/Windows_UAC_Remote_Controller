@@ -11,6 +11,32 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
   test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
+    if (fixture === 'phone-devices-pairing' || fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
+      const phone = fixture === 'phone-devices-pairing';
+      const qr = page.getByRole('button', { name: phone ? 'PC의 QR 코드 촬영' : 'QR 코드 보기', exact: true });
+      const usb = page.getByRole('button', { name: 'USB로 연결', exact: true });
+      const a = await qr.boundingBox(), b = await usb.boundingBox();
+      expect(a).not.toBeNull(); expect(b).not.toBeNull();
+      const rootSize = await page.evaluate(() => Number.parseFloat(getComputedStyle(document.documentElement).fontSize));
+      const horizontalGap = Math.max(b!.x - a!.x - a!.width, a!.x - b!.x - b!.width);
+      const verticalGap = Math.max(b!.y - a!.y - a!.height, a!.y - b!.y - b!.height);
+      const requiredGap = rootSize * (phone ? 0.75 : 1); // --space-3 row / --space-4 PC stack.
+      expect(Math.max(horizontalGap, verticalGap)).toBeGreaterThanOrEqual(requiredGap - 0.5);
+      for (const box of [a!, b!]) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(selected.viewport.width + 0.5);
+        expect(box.height).toBeGreaterThanOrEqual(phone ? 48 : 44);
+      }
+      if (await qr.isEnabled()) {
+        await qr.focus(); await expect(qr).toBeFocused();
+        await page.keyboard.press('Tab'); await expect(usb).toBeFocused();
+      }
+      await info.attach('pairing-action-geometry', {
+        body: Buffer.from(JSON.stringify({ scope: 'CLIENT/SYNTHETIC', fixture, a, b, horizontalGap, verticalGap, requiredGap })),
+        contentType: 'application/json',
+      });
+      await gallery.capture('pairing-action-spacing', 'CLIENT/SYNTHETIC · QR/USB gaps, wrapping and keyboard order');
+    }
     if (selected.action === 'connection-setup') {
       await page.getByRole('button', { name: '알림 시간', exact: true }).click();
       const card = page.locator('.pairing-entry');

@@ -1,5 +1,14 @@
 # Controller interface design
 
+## 2026-09-20 connection-action spacing
+
+Collection action rows use the existing `--space-3` (0.75rem) gap on both axes
+and wrap when their buttons no longer fit. Preserve each button's hit area and
+DOM/focus order. PC pairing cards retain their existing full-width stacked
+buttons with `--space-4` top spacing; the same geometry regression checks cover
+both arrangements at narrow widths and enlarged text. No new spacing token,
+color, copy, animation or native authorization behavior is introduced.
+
 ## 2026-09-19 utility-copy and USB delta
 
 The current visible Korean name is **UAC 원격 승인기**. The PC overview keeps its
