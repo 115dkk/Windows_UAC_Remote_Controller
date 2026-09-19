@@ -87,7 +87,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await page.keyboard.press('Enter');
         let dialog = page.getByRole('dialog', { name: '휴대폰 서비스 중지', exact: true });
         await expect(dialog).toBeVisible();
-        await expect(dialog).toContainText('휴대폰을 다시 켜거나 앱을 열어도 자동으로 시작하지 않아요.');
+        await expect(dialog).toContainText('휴대폰을 다시 켜거나 앱을 열어도 자동으로 시작하지 않습니다.');
         await expect(dialog).not.toContainText('이 PC');
         await expect(dialog.getByRole('button', { name: '취소', exact: true })).toBeFocused();
         await gallery.capture('phone-stop-confirmation', '휴대폰 중지·부팅 자동 시작 해제 설명, 실제 중지 아님');

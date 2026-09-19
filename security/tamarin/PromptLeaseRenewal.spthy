@@ -5,6 +5,10 @@
 theory PromptLeaseRenewal
 begin
 
+// Rank current equality/knowledge constraints before expanding an unbounded
+// chain of predecessor leases. This changes search order, not allowed traces.
+heuristic: i
+
 builtins: signing
 
 restriction Equality:
@@ -50,6 +54,20 @@ rule ObservePromptGone:
     Lease(pc,request,binding) ]
   --[ PromptGone(binding) ]->
   [ ]
+
+// Separating signature origin from fresh-nonce ordering avoids searching both
+// obligations through the pending-state renewal chain at once. These are proved
+// in every baseline AND mutant invocation; neither is an axiom/source lemma.
+lemma accepted_lease_has_exact_authentication [reuse]:
+  all-traces
+  "All binding #a.
+     LeaseAccepted(binding)@a
+     ==> (Ex #u. ExactLeaseAuthentication(binding)@u & u < a)"
+
+lemma renewal_precedes_its_authentication [reuse]:
+  all-traces
+  "All old new #r #u.
+     LeaseRenewed(old,new)@r & ExactLeaseAuthentication(new)@u ==> r < u"
 
 lemma honest_renewed_approval_trace:
   exists-trace

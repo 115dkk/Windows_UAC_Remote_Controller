@@ -14,6 +14,7 @@ const commands = [
   [process.execPath, ['--test', 'tools/i18n-contract.test.mjs']],
   [process.execPath, ['--test', 'tools/ci-private-child.test.mjs', 'tools/ci-fixture-diagnostics.test.mjs']],
   [process.execPath, ['--test', 'tools/windows-ci-powershell.test.mjs']],
+  [process.execPath, ['--test', 'tools/service-startup-diagnostics.test.mjs']],
   [process.execPath, ['--test', 'tools/ci-operator-process.test.mjs']],
   [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-abi.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs', 'tools/verify-android-apk.test.mjs', 'tools/android-approval-slot-contract.test.mjs']],
   [process.execPath, ['--test', 'tools/protocol-security.test.mjs', 'tools/prover-process.test.mjs', 'tools/protocol-diagnostic.test.mjs', 'tools/verify-android-boot-manifest.test.mjs']],

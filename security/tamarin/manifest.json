@@ -204,6 +204,16 @@
     {
       "id": "prompt-lease-renewal",
       "path": "security/tamarin/PromptLeaseRenewal.spthy",
+      "helpers": {
+        "accepted_lease_has_exact_authentication": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "renewal_precedes_its_authentication": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        }
+      },
       "expected": {
         "honest_renewed_approval_trace": {
           "trace": "exists-trace",

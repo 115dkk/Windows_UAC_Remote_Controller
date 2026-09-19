@@ -132,18 +132,47 @@ struct CheckedAcl {
     observer: Option<usize>,
 }
 
+/// Closed diagnostic classification only. Never a policy input or raw trustee.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(super) enum Rejection {
+    None = 0,
+    SubjectShape = 1,
+    Owner = 2,
+    Header = 3,
+    Count = 4,
+    AceBounds = 5,
+    AceShape = 6,
+    SidShape = 7,
+    Observer = 8,
+    TrustedMask = 9,
+    Trustee = 10,
+    SubjectControl = 11,
+    MissingObserver = 12,
+    Padding = 13,
+    Capacity = 14,
+    OwnerChanged = 15,
+    GroupChanged = 16,
+    LabelsChanged = 17,
+    ControlChanged = 18,
+    AclChanged = 19,
+}
+
 fn check(
     snapshot: &Snapshot,
     service_sid: &[u8],
     observed_logon: Option<&[u8]>,
     require_observer: bool,
-) -> Result<CheckedAcl, ServiceError> {
+) -> Result<CheckedAcl, Rejection> {
     if !crate::policy::service_sid_matches(service_sid, "NT SERVICE")
         || observed_logon.is_some_and(|value| !valid_logon_sid(value))
-        || (![SYSTEM, ADMIN, service_sid].contains(&snapshot.owner.as_slice())
-            && !observed_logon_matches(&snapshot.owner, observed_logon))
     {
-        return Err(rejected());
+        return Err(Rejection::SubjectShape);
+    }
+    if ![SYSTEM, ADMIN, service_sid].contains(&snapshot.owner.as_slice())
+        && !observed_logon_matches(&snapshot.owner, observed_logon)
+    {
+        return Err(Rejection::Owner);
     }
     let acl = &snapshot.acl;
     if !(8..=MAX_ACL).contains(&acl.len())
@@ -152,27 +181,27 @@ fn check(
         || acl[6..8] != [0, 0]
         || usize::from(u16::from_le_bytes([acl[2], acl[3]])) != acl.len()
     {
-        return Err(rejected());
+        return Err(Rejection::Header);
     }
     let count = usize::from(u16::from_le_bytes([acl[4], acl[5]]));
     if count == 0 || count > MAX_ACES {
-        return Err(rejected());
+        return Err(Rejection::Count);
     }
     let mut offset = 8;
     let mut observer = None;
     let mut subject_control = 0;
     for _ in 0..count {
-        let header = acl.get(offset..offset + 8).ok_or_else(rejected)?;
+        let header = acl.get(offset..offset + 8).ok_or(Rejection::AceBounds)?;
         let size = usize::from(u16::from_le_bytes([header[2], header[3]]));
         // Only standard, noninheriting ALLOW. Any DENY/unknown/inherited ACE
         // blocks startup; no deny is removed, reordered or overridden.
         if header[0] != 0 || header[1] != 0 || size < 20 || !size.is_multiple_of(4) {
-            return Err(rejected());
+            return Err(Rejection::AceShape);
         }
-        let ace = acl.get(offset..offset + size).ok_or_else(rejected)?;
-        let trustee = sid(ace, 8)?;
+        let ace = acl.get(offset..offset + size).ok_or(Rejection::AceBounds)?;
+        let trustee = sid(ace, 8).map_err(|_| Rejection::SidShape)?;
         if trustee.len() + 8 != size {
-            return Err(rejected());
+            return Err(Rejection::SidShape);
         }
         let mask = u32::from_le_bytes([ace[4], ace[5], ace[6], ace[7]]);
         if trustee == INTERACTIVE {
@@ -181,14 +210,14 @@ fn check(
                 || mask & !OBSERVER != 0
                 || (require_observer && mask != OBSERVER)
             {
-                return Err(rejected());
+                return Err(Rejection::Observer);
             }
             observer = Some(offset);
         } else if [SYSTEM, ADMIN, service_sid].contains(&trustee)
             || observed_logon_matches(trustee, observed_logon)
         {
             if mask == 0 || mask & !KNOWN_TRUSTED_RIGHTS != 0 {
-                return Err(rejected());
+                return Err(Rejection::TrustedMask);
             }
             // These principals are proven active in the current SYSTEM service
             // subject. Administrator ACEs are preserved but do not establish
@@ -200,15 +229,18 @@ fn check(
                 subject_control |= subject_control_rights(mask);
             }
         } else {
-            return Err(rejected());
+            return Err(Rejection::Trustee);
         }
         offset += size;
     }
-    if subject_control & SUBJECT_CONTROL != SUBJECT_CONTROL
-        || (require_observer && observer.is_none())
-        || acl[offset..].iter().any(|byte| *byte != 0)
-    {
-        return Err(rejected());
+    if subject_control & SUBJECT_CONTROL != SUBJECT_CONTROL {
+        return Err(Rejection::SubjectControl);
+    }
+    if require_observer && observer.is_none() {
+        return Err(Rejection::MissingObserver);
+    }
+    if acl[offset..].iter().any(|byte| *byte != 0) {
+        return Err(Rejection::Padding);
     }
     Ok(CheckedAcl {
         end: offset,
@@ -222,7 +254,7 @@ pub(super) fn merge(
     service_sid: &[u8],
     observed_logon: Option<&[u8]>,
 ) -> Result<Vec<u8>, ServiceError> {
-    let checked = check(snapshot, service_sid, observed_logon, false)?;
+    let checked = check(snapshot, service_sid, observed_logon, false).map_err(|_| rejected())?;
     // Unused zero allocation padding has no ACE semantics and is not copied.
     // Every trusted ACE's bytes and order remain exactly unchanged.
     let mut acl = snapshot.acl[..checked.end].to_vec();
@@ -252,7 +284,7 @@ pub(super) fn verify_readback(
     service_sid: &[u8],
     observed_logon: Option<&[u8]>,
 ) -> Result<(), ServiceError> {
-    check(after, service_sid, observed_logon, true)?;
+    check(after, service_sid, observed_logon, true).map_err(|_| rejected())?;
     // An explicit DACL legitimately clears DACL_DEFAULTED (0x0008). Every
     // other reported control bit, including protection/inheritance, is kept.
     if before.owner != after.owner
@@ -264,6 +296,49 @@ pub(super) fn verify_readback(
         return Err(rejected());
     }
     Ok(())
+}
+
+/// Reuses the exact admission parser, but cannot mutate or relax policy.
+pub(super) fn merge_rejection(
+    snapshot: &Snapshot,
+    service_sid: &[u8],
+    observed_logon: Option<&[u8]>,
+) -> Rejection {
+    match check(snapshot, service_sid, observed_logon, false) {
+        Err(reason) => reason,
+        Ok(checked)
+            if checked.observer.is_none()
+                && (checked.count == MAX_ACES || checked.end + 20 > MAX_ACL) =>
+        {
+            Rejection::Capacity
+        }
+        Ok(_) => Rejection::None,
+    }
+}
+
+pub(super) fn readback_rejection(
+    before: &Snapshot,
+    after: &Snapshot,
+    expected: &[u8],
+    service_sid: &[u8],
+    observed_logon: Option<&[u8]>,
+) -> Rejection {
+    if let Err(reason) = check(after, service_sid, observed_logon, true) {
+        return reason;
+    }
+    if before.owner != after.owner {
+        Rejection::OwnerChanged
+    } else if before.group != after.group {
+        Rejection::GroupChanged
+    } else if before.labels != after.labels {
+        Rejection::LabelsChanged
+    } else if before.control & !0x0008 != after.control & !0x0008 {
+        Rejection::ControlChanged
+    } else if after.acl != expected {
+        Rejection::AclChanged
+    } else {
+        Rejection::None
+    }
 }
 
 pub(super) fn startup_guard(
@@ -444,6 +519,62 @@ mod tests {
         assert_eq!(merge(&after, &service_sid(), None).unwrap(), expected);
         let partial = fixture(&ace(INTERACTIVE, 0x1000));
         assert_eq!(merge(&partial, &service_sid(), None).unwrap(), expected);
+    }
+    #[test]
+    fn closed_rejection_classifies_failure_without_changing_policy() {
+        let mut before = fixture(&[]);
+        assert_eq!(
+            merge_rejection(&before, &service_sid(), None),
+            Rejection::None
+        );
+        before.owner = INTERACTIVE.to_vec();
+        assert_eq!(
+            merge_rejection(&before, &service_sid(), None),
+            Rejection::Owner
+        );
+        assert_eq!(
+            merge(&before, &service_sid(), None),
+            Err(ServiceError::UnsafePermissions)
+        );
+        let authenticated = [1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
+        before = fixture(&ace(&authenticated, OBSERVER));
+        assert_eq!(
+            merge_rejection(&before, &service_sid(), None),
+            Rejection::Trustee
+        );
+        assert_eq!(
+            merge(&before, &service_sid(), None),
+            Err(ServiceError::UnsafePermissions)
+        );
+        before = fixture(&[]);
+        before.acl[12..16].copy_from_slice(&OBSERVER.to_le_bytes());
+        assert_eq!(
+            merge_rejection(&before, &service_sid(), None),
+            Rejection::SubjectControl
+        );
+        before = fixture(&ace(INTERACTIVE, OBSERVER));
+        let observer_offset = before.acl.len() - 20;
+        before.acl[observer_offset] = 1;
+        assert_eq!(
+            merge_rejection(&before, &service_sid(), None),
+            Rejection::AceShape
+        );
+        let before = fixture(&[]);
+        let expected = merge(&before, &service_sid(), None).unwrap();
+        let mut after = Snapshot {
+            acl: expected.clone(),
+            ..fixture(&[])
+        };
+        assert_eq!(
+            readback_rejection(&before, &after, &expected, &service_sid(), None),
+            Rejection::None
+        );
+        after.control ^= 0x1000;
+        assert_eq!(
+            readback_rejection(&before, &after, &expected, &service_sid(), None),
+            Rejection::ControlChanged
+        );
+        assert!(verify_readback(&before, &after, &expected, &service_sid(), None).is_err());
     }
     #[test]
     fn every_extra_observer_bit_and_wrong_trustee_are_rejected() {

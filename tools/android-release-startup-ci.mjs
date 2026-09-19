@@ -168,20 +168,20 @@ try {
   } else {
     assert.match(state, /owner_phase=READY/);
     report.checks.push('unpaired-native-owner-ready');
-    const initial = await until(ui, view => Boolean(nodeFor(view, 'PC와 아직 연결하지 않았어요')), 'known-unpaired UI');
-    assert.ok(nodeFor(initial, '기다리는 요청이 없어요'));
+    const initial = await until(ui, view => Boolean(nodeFor(view, 'PC와 아직 연결하지 않았습니다')), 'known-unpaired UI');
+    assert.ok(nodeFor(initial, '승인 요청 없음'));
     writeFileSync('evidence/unpaired-ui.xml', initial.xml);
     await clickLabel('PC의 QR 코드 촬영');
     await until(ui, view => Boolean(nodeFor(view, 'PC 연결 QR 읽기')), 'native scanner opened');
     report.checks.push('actual-client-button-opens-native-scanner-before-pairing');
     await clickLabel('닫기');
     await clickLabel('알림 시간');
-    await until(ui, view => Boolean(nodeFor(view, '휴대폰 승인 켜짐')), 'schedule owner panel');
+    await until(ui, view => Boolean(nodeFor(view, '서비스 실행 중')), 'schedule owner panel');
     // The first policy choice can be below the connection and service cards on
     // this fixed Pixel 6 portrait emulator. Exercise scrolling, not DOM injection.
     adb(['shell', 'input', 'swipe', '540', '1800', '540', '850', '400']);
     const settings = await until(ui, view => Boolean(nodeFor(view, '항상')), 'default schedule before pairing');
-    assert.ok(!settings.xml.includes('알림 시간 설정을 읽을 수 없어요'));
+    assert.ok(!settings.xml.includes('알림 시간 설정을 읽을 수 없습니다'));
     writeFileSync('evidence/unpaired-settings-ui.xml', settings.xml);
     report.checks.push('notification-settings-available-before-pairing');
   }

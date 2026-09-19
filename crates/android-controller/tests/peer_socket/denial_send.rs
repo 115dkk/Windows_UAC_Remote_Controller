@@ -771,6 +771,13 @@ async fn authenticated_new_service_epoch_stops_a_queued_denial_progress_record()
             .apply_event(&mut f.owner, received, f.clock.inbox())
             .unwrap();
         assert!(changed.committed().update().fault().is_none());
+        assert_eq!(
+            changed.committed().update().effects(),
+            &[Effect::Withdraw {
+                key: request_key(f.binding),
+                reason: notification_policy::WithdrawalReason::RecoveryRejected,
+            }],
+        );
         assert!(changed.check_current(&f.owner).is_err());
         assert_eq!(ticket.progress(), DenialWriteProgress::Stopped);
         assert!(f.pair.phone.next_event().await.is_err());
@@ -778,7 +785,18 @@ async fn authenticated_new_service_epoch_stops_a_queued_denial_progress_record()
             f.pair.pc.next_event().await,
             Ok(SocketEvent::Frame(_))
         ));
-        f.assert_no_outcome();
+        // Unlike cancellation of this socket alone, a verified replacement
+        // service epoch retires the old renewable request and body. Its source
+        // marker remains to reject old-epoch traffic; retirement is not a UAC
+        // outcome and cannot create denial/completion history.
+        let counts = f.owner.counts().unwrap();
+        assert_eq!(counts.active(), 0);
+        assert_eq!(counts.retained(), 0);
+        assert_eq!(counts.retained_bodies(), 0);
+        assert_eq!(counts.recovering(), 0);
+        assert_eq!(counts.sources(), 2);
+        assert!(f.owner.pending_outcomes().unwrap().is_empty());
+        assert!(f.owner.history().unwrap().is_empty());
     })
     .await
     .expect("bounded changed-epoch denial withdrawal");

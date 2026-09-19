@@ -37,3 +37,9 @@ Unassociated legacy `receive_opened` remains a one-shot immutable-lease seam and
 ## Verification boundary
 
 No builds, tests, fmt, lint, Rust Analyzer, executable checks or native device QA were executed by this child. Source was inspected and tests were authored only. ROOT owns formatting/CI and actual artifact/native review. Static peer review found the replacement/outbox ordering coherent and requested the off-hours/recovery/ACK regressions included above. Actual UAC approval and phone authentication remain user acceptance items.
+
+## CI feedback correction: queued denial after source epoch replacement
+
+ROOT reported that Linux Rust CI for `89d8481` failed `authenticated_new_service_epoch_stops_a_queued_denial_progress_record` at `denial_send.rs:362`. Source inspection shows this was the shared helper's `active() == 1` assertion, not evidence of an unsafe send: the test had already checked that the queued denial stopped, the old socket context was invalid, and no complete decision frame reached the peer.
+
+The helper models socket-only cancellation, where the independent request stays active. Authenticated source-epoch replacement now deliberately retires the old renewable request and body while preserving a superseded source marker. The narrow test correction requires the exact `RecoveryRejected` withdrawal; zero active/retained/body/recovering request counts; two source markers; empty outcome outbox and history. All stopped/no-stale-send assertions remain. No production code was changed for this feedback, and this child did not rerun validation; the corrected expectation awaits ROOT CI.

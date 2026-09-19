@@ -9,6 +9,7 @@
 //! DWORD-aligned storage through the synchronous call and is never null. The
 //! current-process pseudo-handle is borrowed and never closed.
 
+mod diagnostics;
 mod policy;
 
 use std::mem;
@@ -36,12 +37,13 @@ use crate::{ServiceError, ServiceOperation};
 // Fixed lab API phases survive the outer startup error projection. This file
 // is separate from the generic failure report, which replaces its old content.
 macro_rules! observe {
-    ($phase:literal, $result:expr) => {{
+    ($trace:ident, $phase:ident, $result:expr) => {{
+        $trace.enter(diagnostics::Phase::$phase);
         #[cfg(feature = "lab-software-identity")]
         {
             let result = $result;
             note(
-                $phase,
+                diagnostics::Phase::$phase.name(),
                 result
                     .as_ref()
                     .err()
@@ -209,28 +211,49 @@ fn recheck_subject(original: &TokenFacts) -> Result<(), ServiceError> {
 }
 
 pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
+    let mut trace = diagnostics::Trace::new();
+    let result = provision(&mut trace);
+    // Failure-only, once per service process; no retry or effect on admission.
+    if let Err(error) = result {
+        trace.report(error);
+    }
+    result
+}
+
+fn provision(trace: &mut diagnostics::Trace) -> Result<(), ServiceError> {
     observe!(
-        "context",
+        trace,
+        Context,
         windows_identity::verify_service_context().map_err(ServiceError::from_identity)
     )?;
-    let installation = observe!("installation", super::validate_installation(true))?;
+    let installation = observe!(trace, Installation, super::validate_installation(true))?;
     let service = observe!(
-        "scm",
+        trace,
+        Scm,
         crate::native::running_service_for_probe(installation.executable())
     )?;
-    observe!("startup_before", recheck_startup(&installation, &service))?;
-    let service_sid = OwnServiceSid::lookup()?.bytes();
-    let subject = observe!("subject_before", current_subject())?;
+    observe!(
+        trace,
+        StartupBefore,
+        recheck_startup(&installation, &service)
+    )?;
+    let service_sid = observe!(trace, ServiceSid, OwnServiceSid::lookup())?.bytes();
+    let subject = observe!(trace, SubjectBefore, current_subject())?;
     let logon_sid = observe!(
-        "logon_before",
+        trace,
+        LogonBefore,
         subject.enabled_logon_sid().map_err(subject_error)
     )?;
-    let before = observe!("read_before", read_current_descriptor())?;
+    let before = observe!(trace, ReadBefore, read_current_descriptor())?;
     #[cfg(feature = "lab-software-identity")]
     for line in policy::diagnostic_summary(&before, &service_sid, logon_sid) {
         write_lab_line(&format!("before {line}\n"));
     }
-    let merged = observe!("merge", policy::merge(&before, &service_sid, logon_sid))?;
+    let merged = observe!(trace, Merge, {
+        trace.policy = policy::merge_rejection(&before, &service_sid, logon_sid);
+        policy::merge(&before, &service_sid, logon_sid)
+    })?;
+    trace.enter(diagnostics::Phase::MergedShape);
     if merged.is_empty() || !merged.len().is_multiple_of(4) {
         return Err(ServiceError::UnsafePermissions);
     }
@@ -241,19 +264,24 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
         .collect();
     // SAFETY: pure policy validated every ACL/ACE bound; this complete owned
     // DWORD-aligned allocation remains immutable through validation/publication.
+    trace.enter(diagnostics::Phase::NativeAclValidation);
     if !unsafe { IsValidAcl(aligned.as_ptr().cast::<ACL>()) }.as_bool() {
         return Err(ServiceError::UnsafePermissions);
     }
     observe!(
-        "startup_before_set",
+        trace,
+        StartupBeforeSet,
         recheck_startup(&installation, &service)
     )?;
     // Detect a concurrent policy edit before attempting the approved merge.
     // There is no retry/overwrite loop and no compensating ACL reset.
-    if observe!("read_before_set", read_current_descriptor())? != before {
+    let current = observe!(trace, ReadBeforeSet, read_current_descriptor())?;
+    trace.enter(diagnostics::Phase::DescriptorDrift);
+    if current != before {
         return Err(ServiceError::UnsafePermissions);
     }
-    observe!("subject_before_set", recheck_subject(&subject))?;
+    observe!(trace, SubjectBeforeSet, recheck_subject(&subject))?;
+    trace.enter(diagnostics::Phase::StopBeforeSet);
     if crate::entry::stop_requested() {
         return Err(ServiceError::ConfigurationConflict);
     }
@@ -261,6 +289,7 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     // DACL_SECURITY_INFORMATION is requested. Owner/group/SACL are not supplied;
     // no protected/unprotected or label bits are set. The nonempty validated
     // DWORD-aligned ACL stays live unchanged through the synchronous call.
+    trace.enter(diagnostics::Phase::SetDacl);
     let result = unsafe {
         SetSecurityInfo(
             GetCurrentProcess(),
@@ -274,7 +303,8 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     };
     if result.0 != 0 {
         return observe!(
-            "set_dacl",
+            trace,
+            SetDacl,
             Err(ServiceError::WindowsCall {
                 operation: ServiceOperation::HardenService,
                 code: result.0,
@@ -283,15 +313,20 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     }
     #[cfg(feature = "lab-software-identity")]
     note("set_dacl", 0);
-    observe!("subject_after", recheck_subject(&subject))?;
-    let after = observe!("read_after", read_current_descriptor())?;
+    observe!(trace, SubjectAfter, recheck_subject(&subject))?;
+    let after = observe!(trace, ReadAfter, read_current_descriptor())?;
     #[cfg(feature = "lab-software-identity")]
     for line in policy::diagnostic_summary(&after, &service_sid, logon_sid) {
         write_lab_line(&format!("after {line}\n"));
     }
-    observe!(
-        "readback",
+    observe!(trace, Readback, {
+        trace.policy =
+            policy::readback_rejection(&before, &after, &merged, &service_sid, logon_sid);
         policy::verify_readback(&before, &after, &merged, &service_sid, logon_sid)
-    )?;
-    observe!("startup_after", recheck_startup(&installation, &service))
+    })?;
+    observe!(
+        trace,
+        StartupAfter,
+        recheck_startup(&installation, &service)
+    )
 }
