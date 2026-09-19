@@ -71,4 +71,7 @@
     <string name="main_activity_title">UAC リモート承認</string>
     <string name="controller_service_title">UAC リモート承認</string>
     <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="pairing_usb_title">USBでPCに接続</string>
+    <string name="pairing_usb_waiting">ケーブルを接続してPCでUSBを選択し、Androidでアクセスを許可してください。最大30秒待機します。</string>
+    <string name="pairing_usb_unavailable">USB接続情報を読み取れませんでした。ケーブルとUSB権限を確認するか、QRコードで接続してください。</string>
 </resources>

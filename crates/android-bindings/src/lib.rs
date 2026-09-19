@@ -43,7 +43,7 @@ pub use pairing::{
     NativeKeyCreationRequest, NativePairingCeremony, NativePairingScan, NativePairingScanResult,
 };
 pub use request_projection::{
-    NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
+    NativePairedPc, NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
     NativeRequestCatalogStatus, NativeRequestDetails, NativeRequestNotPosted,
     NativeRequestPresentation, NativeRequestPreview, NativeRequestSinkOutcome,
 };

@@ -201,6 +201,7 @@ pub struct ManagementObservation {
     pub relay_configured: bool,
     pub relay_status: RelayStatusView,
     pub devices: Vec<ManagementDevice>,
+    pub activity: Option<Vec<ActivityView>>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]

@@ -29,6 +29,15 @@ impl PairingStarter for WindowsPairingStarter {
     }
 
     fn start(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure> {
+        self.start_transport(false)
+    }
+    fn start_usb(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure> {
+        self.start_transport(true)
+    }
+}
+
+impl WindowsPairingStarter {
+    fn start_transport(&self, usb: bool) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure> {
         let started_at = Instant::now();
         let state = Arc::new(Mutex::new(PairingUiState::connecting(started_at)));
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -36,7 +45,7 @@ impl PairingStarter for WindowsPairingStarter {
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = thread::Builder::new()
             .name("ui-pairing-starter".to_owned())
-            .spawn(move || run_attempt(worker_state, worker_cancelled, started_at))
+            .spawn(move || run_attempt(worker_state, worker_cancelled, started_at, usb))
             .map_err(|_| PairingFailure::Unavailable)?;
         Ok(Box::new(WindowsPairingAttempt {
             state,
@@ -125,7 +134,12 @@ impl PairingAttemptHandle for WindowsPairingAttempt {
     }
 }
 
-fn run_attempt(state: Arc<Mutex<PairingUiState>>, cancelled: Arc<AtomicBool>, started_at: Instant) {
+fn run_attempt(
+    state: Arc<Mutex<PairingUiState>>,
+    cancelled: Arc<AtomicBool>,
+    started_at: Instant,
+    usb: bool,
+) {
     let Some(deadline) = started_at.checked_add(ATTEMPT_LIFETIME) else {
         publish_failure(&state, PairingFailure::Unavailable);
         return;
@@ -140,7 +154,11 @@ fn run_attempt(state: Arc<Mutex<PairingUiState>>, cancelled: Arc<AtomicBool>, st
     // PairingHelperLaunch::from_starter owns the Offer read. Reading it through
     // PairingClient first marks the protocol used and makes this transfer invalid.
     // The UI owner therefore never decodes or copies Offer bytes.
-    let mut launch = match client.into_helper_launch() {
+    let mut launch = match if usb {
+        client.into_usb_helper_launch()
+    } else {
+        client.into_helper_launch()
+    } {
         Ok(launch) => launch,
         Err(error) => {
             publish_failure(&state, map_launch_error(error));
@@ -227,6 +245,7 @@ fn map_launch_error(error: PairingLaunchError) -> PairingFailure {
         PairingLaunchError::Client(PairingClientError::DeadlineElapsed) => PairingFailure::Timeout,
         PairingLaunchError::Client(error) => map_client_error(error),
         PairingLaunchError::UserCancelled => PairingFailure::UserCancelled,
+        PairingLaunchError::UsbUnavailable => PairingFailure::UsbUnavailable,
         PairingLaunchError::HelperExited { .. } => PairingFailure::HelperFailed,
         PairingLaunchError::Native {
             operation: ServiceOperation::LaunchElevatedHelper,

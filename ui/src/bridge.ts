@@ -13,7 +13,7 @@ export const controllerBridge: ControllerBridge = {
   snapshot: () => native<AppSnapshot>('app_snapshot'),
   savePolicy: (policy) => native<AppSnapshot>('save_notification_policy', { policyJson: JSON.stringify(policy) }),
   controlService: (action) => native<AppSnapshot>('control_service', { action }),
-  beginPairing: () => native<AppSnapshot>('begin_pairing'),
+  beginPairing: (transport) => native<AppSnapshot>(transport === 'usb' ? 'begin_pairing_usb' : 'begin_pairing'),
   removeDevice: (deviceId) => native<AppSnapshot>('remove_device', { deviceId }),
   setRelay: (address) => native<AppSnapshot>('set_relay', { address }),
   decide: (requestId, decision) => native<AppSnapshot>('decide_request', { requestId, decision }),
@@ -26,5 +26,5 @@ export const controllerBridge: ControllerBridge = {
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),
-  openPairingScanner: () => native<void>('open_pairing_scanner'),
+  openPairingScanner: (transport) => native<void>(transport === 'usb' ? 'open_pairing_usb' : 'open_pairing_scanner'),
 };

@@ -50,6 +50,25 @@ fn pixel_input_rejects_non_png_and_non_base64_without_echoing_data() {
 }
 
 #[test]
+fn only_absent_qr_is_retryable_and_multiple_grids_remain_terminal() {
+    assert_eq!(pixels::require_one_grid(0), Err("qr_not_ready"));
+    assert_eq!(pixels::require_one_grid(1), Ok(()));
+    for count in [2, 3, usize::MAX] {
+        assert_eq!(
+            pixels::require_one_grid(count),
+            Err("expected_exactly_one_qr")
+        );
+    }
+    let blank = image::GrayImage::from_pixel(128, 128, image::Luma([255]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    blank.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    assert!(matches!(
+        pixels::decode(Zeroizing::new(STANDARD.encode(png.into_inner()))),
+        Err("qr_not_ready")
+    ));
+}
+
+#[test]
 fn challenge_reissue_preserves_ephemeral_root_and_separate_role_keys() {
     let mut candidate = SyntheticRkp::new();
     let root = candidate.chains[0].last().unwrap().clone();

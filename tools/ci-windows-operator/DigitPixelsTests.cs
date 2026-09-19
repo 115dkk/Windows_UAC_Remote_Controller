@@ -177,6 +177,8 @@ internal static class DigitPixelsTests
             {
                 if (args.Length != 0 || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
                     Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted") return 2;
+                stage = "comparison_readiness";
+                ReadinessControls();
                 foreach (int dpi in new[] { 96, 120, 144, 192, 240 })
                 {
                     testedDpi = dpi;
@@ -231,5 +233,49 @@ internal static class DigitPixelsTests
                 return 1;
             }
         }
+    }
+
+    private static void ReadinessControls()
+    {
+        long clock = 0;
+        int reads = 0;
+        string code = ProtectedUi.ReadStableComparison(() =>
+        {
+            reads++;
+            if (reads == 1) return null;
+            if (reads == 2) throw new Program.GateFailure("ocr_six_glyphs_required");
+            return "012345"; // Public synthetic digits only.
+        }, () => clock, () => { clock += 150; });
+        Check(code == "012345" && reads == 4);
+
+        // Identity/authentication failures never enter the presentation retry.
+        foreach (string gate in new[] { "renderer_changed", "input_desktop_changed", "ocr_region_rejected", "ocr_dpi_rejected", "font_resource_rejected" })
+        {
+            reads = 0;
+            try
+            {
+                ProtectedUi.ReadStableComparison(() => { reads++; throw new Program.GateFailure(gate); },
+                    () => 0, () => { throw new InvalidOperationException(); });
+                Check(false);
+            }
+            catch (Program.GateFailure failure) { Check(failure.Code == gate && reads == 1); }
+        }
+        clock = 0;
+        reads = 0;
+        try
+        {
+            ProtectedUi.ReadStableComparison(() => { reads++; return null; },
+                () => clock, () => { clock += 5000; });
+            Check(false);
+        }
+        catch (Program.GateFailure failure) { Check(failure.Code == "comparison_readiness_timeout" && reads == 2); }
+        reads = 0;
+        try
+        {
+            ProtectedUi.ReadStableComparison(() => ++reads == 1 ? "012345" : reads == 2 ? null : "678901",
+                () => 0, () => { });
+            Check(false);
+        }
+        catch (Program.GateFailure failure) { Check(failure.Code == "comparison_mismatch" && reads == 3); }
     }
 }

@@ -98,10 +98,9 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main>{settingsDialog}</div>;
 
   const items = navigationFor(snapshot);
-  const title = !phone && page === 'status' ? ko.homeTitle
+  const title = !phone && page === 'status' ? ko.appName
     : items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
-  const description = !phone && page === 'status' ? ko.homePurpose
-    : page === 'schedule' ? ko.scheduleIntro
+  const description = page === 'schedule' ? ko.scheduleIntro
       : page === 'requests' && snapshot.requests.some(request => request.state === 'pending')
         && snapshot.dataAvailability.requests === 'available' ? ko.requestIntro : null;
   const navigation = <aside className="navigation-shell">
@@ -109,7 +108,6 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
     <nav aria-label={ko.navigation}>{items.map((item) => item.available
       ? <button key={item.page} type="button" className={`navigation-item ${page === item.page ? 'current' : ''}`} aria-current={page === item.page ? 'page' : undefined} onClick={() => navigate(item.page)}><Icon name={item.icon} /><span>{item.label}</span></button>
       : <button key={item.page} type="button" disabled className="navigation-item passive"><Icon name={item.icon} /><span>{item.label}{' '}<small>{ko.unavailable}</small></span></button>)}</nav>
-    <p className="rail-caption">{ko.appDescription}</p>
   </aside>;
 
   const main = <main id="main-content" className="main-scroll" tabIndex={-1}>
@@ -122,9 +120,9 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} onAction={serviceAction} />}
       {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
-      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
-      {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} scannerButtonRef={scannerButton} />}
-      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: 'pair' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
+      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
+      {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
+      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair' }); }} onPairUsb={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair', transport: 'usb' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableTitle={policyUnavailableTitleText(snapshot.phoneService)} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });

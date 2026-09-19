@@ -37,6 +37,9 @@ fn run() -> Result<(), ServiceError> {
     if command == Command::PairInspector {
         return windows_service_host::run_pair_inspector();
     }
+    if command == Command::UsbBootstrap {
+        return windows_service_host::run_usb_bootstrap();
+    }
     if command == Command::ProbeOnce {
         let accepted = windows_service_host::request_probe_once()?;
         let mut output = io::stdout().lock();
@@ -99,6 +102,7 @@ fn run() -> Result<(), ServiceError> {
         | Command::ProbeOnce
         | Command::Pair(_)
         | Command::PairInspector
+        | Command::UsbBootstrap
         | Command::PairRenderer(_) => {
             return Err(ServiceError::InvalidArguments);
         }

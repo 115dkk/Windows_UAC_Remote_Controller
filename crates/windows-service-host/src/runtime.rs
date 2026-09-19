@@ -295,12 +295,26 @@ fn run(
                     return Ok(());
                 }
                 let mut last_purge = Instant::now();
+                let mut last_activity_read: Option<Instant> = None;
                 let mut watcher_alive_journaled = false;
                 loop {
                     if cancellation_requested(stop) {
                         break;
                     }
                     let iteration_now = Instant::now();
+                    if last_activity_read
+                        .is_none_or(|at| iteration_now.duration_since(at) >= Duration::from_secs(1))
+                    {
+                        let records = diagnostic_time()
+                            .and_then(|now| UnixMillis::new(now).ok())
+                            .and_then(|now| {
+                                journal
+                                    .recent(now, crate::management_protocol::MAX_ACTIVITY_RECORDS)
+                                    .ok()
+                            });
+                        session.observe_activity(records);
+                        last_activity_read = Some(Instant::now());
+                    }
                     let watcher = watch.as_mut().ok_or(ServiceError::WorkerFailed)?;
                     for event in watcher
                         .poll(iteration_now)

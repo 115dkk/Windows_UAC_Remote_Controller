@@ -39,7 +39,7 @@
   "PC와 아직 연결하지 않았어요": "Nenhum PC conectado ainda",
   "PC와 프로그램을 확인한 뒤 선택해 주세요.": "Confira o PC e o programa antes de escolher.",
   "PC의 QR 코드 촬영": "Ler o código QR do PC",
-  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "No aplicativo Aprovação remota UAC do PC, selecione “Gerenciar celulares” → “Aprovação remota UAC” para exibir um código QR. O botão abaixo abre a câmera neste aplicativo.",
+  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "No aplicativo Mostrar o código QR do PC, selecione “Gerenciar celulares” → “Mostrar o código QR” para exibir um código QR. O botão abaixo abre a câmera neste aplicativo.",
   "PC의 설치 상태를 확인한 뒤 새로고침해 주세요.": "Verifique a instalação no PC e atualize a tela.",
   "PC의 휴대폰 승인에 연결하고 있어요.": "Conectando à aprovação pelo celular no PC.",
   "PC의 휴대폰 승인이 준비되지 않았어요.": "A aprovação pelo celular no PC não está pronta.",
@@ -357,5 +357,13 @@
   "휴대폰을 연결하지 못했어요. 다시 시도해 주세요.": "Não foi possível parear o celular. Tente novamente.",
   "휴대폰을 연결했어요.": "Celular pareado.",
   "휴대폰을 켤 때 자동 실행": "Iniciar automaticamente ao ligar o celular",
-  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "As permissões de notificação e as configurações de som do celular também se aplicam."
+  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "As permissões de notificação e as configurações de som do celular também se aplicam.",
+  "USB로 연결": "Conectar por USB",
+  "USB 연결 대기": "Aguardando conexão USB",
+  "휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오.": "Permita o acesso USB no celular e compare os códigos nos dois dispositivos.",
+  "휴대폰 승인이 켜져 있는지 확인하지 못했어요.": "Não foi possível verificar o serviço do celular.",
+  "휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요.": "Não foi possível confirmar a alteração do serviço do celular.",
+  "현재 상태와 자동 시작 설정을 확인한 뒤 다시 시도해 주세요.": "Verifique o estado atual e a inicialização automática e tente novamente.",
+  "본인 확인을 진행해 주세요.": "Conclua a verificação de identidade.",
+  "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.": "Conexão USB indisponível. Verifique o driver e o cabo USB ou conecte pelo código QR."
 }

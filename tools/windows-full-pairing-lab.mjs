@@ -11,12 +11,13 @@ import { expect } from '@playwright/test';
 import { PrivateChild } from './ci-private-child.mjs';
 import { operatorStartupDiagnostic } from './ci-fixture-diagnostics.mjs';
 import { OperatorProcess } from './ci-operator-process.mjs';
+import { awaitQrEnrollment } from './ci-presentation-readiness.mjs';
 
 const lab = 'C:\\ProgramData\\UacRemoteCiE2e';
 const service = 'C:\\Program Files\\휴대폰 승인\\uac-service.exe';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-function privateChild(exe, env = process.env) {
-  return new PrivateChild(spawn(exe, [], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
+function privateChild(exe, env = process.env, options) {
+  return new PrivateChild(spawn(exe, [], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }), options);
 }
 // Shape-only client view for a failed stage: closed vocabulary words and counts.
 // Never a device id, key, QR payload, comparison digit or free-text message.
@@ -55,7 +56,9 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     const ip = ps("$s=[Net.Sockets.UdpClient]::new();try{$s.Connect('192.0.2.1',9);$s.Client.LocalEndPoint.Address.ToString()}finally{$s.Dispose()}").trim();
     assert.ok(Object.values(networkInterfaces()).flat().some(value => value?.address === ip && !value.internal), 'Relay must belong to this runner');
     stage = 'prepare-phone';
-    phone = privateChild(resolve(process.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release/ci-phone-fixture.exe'), { ...process.env, WUAC_CI_PHONE_FIXTURE: '1' });
+    // The real UAC hold is deliberately 115s; permit bounded scheduling slack
+    // for its next payload-free observation, not longer protocol credentials.
+    phone = privateChild(resolve(process.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release/ci-phone-fixture.exe'), { ...process.env, WUAC_CI_PHONE_FIXTURE: '1' }, { responseTimeoutMs: 150000 });
     const prepared = await phone.request({ command: 'prepare', expected_relay_ip: ip }, 'prepared');
     assert.ok(prepared.app_signer_sha256 === '08'.repeat(32), 'Fixture signer mismatch');
     const ca = Buffer.from(prepared.root_der_base64, 'base64');
@@ -84,19 +87,26 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     await expect(qr).toBeEnabled({ timeout: 15000 });
     await qr.click();
     stage = 'qr-pixels';
-    const pixels = await bridge.request({ command: 'capture_qr' }, 'qr_pixels');
-    assert.ok(typeof pixels.pngBase64 === 'string' && pixels.pngBase64.length < 12 * 1024 * 1024);
-    await phone.send({ command: 'enroll_pixels', png_base64: pixels.pngBase64 });
-    pixels.pngBase64 = null;
-    const comparisonReady = await phone.next();
-    assert.ok(comparisonReady.state === 'awaiting_comparison', 'Actual pixels did not start verified enrollment');
+    await awaitQrEnrollment({
+      capture: () => bridge.request({ command: 'capture_qr' }, 'qr_pixels'),
+      onAttempt: count => { proof.qrCaptureAttempts = count; },
+      enroll: async pixels => {
+        assert.ok(typeof pixels.pngBase64 === 'string' && pixels.pngBase64.length < 12 * 1024 * 1024);
+        try { await phone.send({ command: 'enroll_pixels', png_base64: pixels.pngBase64 }); }
+        finally { pixels.pngBase64 = null; }
+        return phone.next();
+      },
+    });
     proof.checks.push('actual-protected-qr-pixels-decoded');
-    stage = 'comparison';
+    stage = 'comparison-read';
     const comparison = await bridge.request({ command: 'read_comparison' }, 'comparison_pixels');
     assert.ok(typeof comparison.code === 'string' && /^[0-9]{6}$/.test(comparison.code));
+    stage = 'comparison-phone-confirm';
     await phone.request({ command: 'confirm_comparison', code: comparison.code }, 'phone_confirmation_queued');
+    stage = 'comparison-pc-confirm';
     await bridge.request({ command: 'compare_confirm', code: comparison.code }, 'confirmed');
     comparison.code = null;
+    stage = 'comparison-signed-acceptance';
     const acceptance = await phone.next();
     assert.ok(acceptance.state === 'enrollment_accepted', 'Signed enrollment acceptance missing');
     proof.checks.push('both-actual-comparison-confirmations-and-signed-enrollment');
@@ -125,6 +135,17 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     ps("$p='C:\\ProgramData\\UacRemoteCiE2e\\request.trigger';[IO.File]::WriteAllText($p,'trigger');$a=Get-Acl -LiteralPath $p;$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow));Set-Acl -LiteralPath $p -AclObject $a");
     const request = await phone.next();
     assert.ok(request.state === 'request_verified' && /^[a-f0-9]{64}$/.test(request.request_id) && /^[a-f0-9]{64}$/.test(request.content_digest), 'Bound native UAC request missing');
+    stage = 'request-native-lease-hold';
+    const renewed = await phone.next();
+    assert.ok(renewed.state === 'lease_renewed' && renewed.request_id === request.request_id &&
+      renewed.content_digest === request.content_digest && Number.isInteger(renewed.held_millis) &&
+      renewed.held_millis >= 115000 && renewed.held_millis <= 150000 &&
+      Number.isInteger(renewed.renewals) && renewed.renewals >= 1 && renewed.renewals <= 4,
+    'Verified renewal after native UAC hold missing');
+    proof.nativeHoldMillis = renewed.held_millis;
+    proof.leaseRenewals = renewed.renewals;
+    proof.checks.push('native-uac-survives-original-lease-with-verified-fresh-renewal');
+    stage = 'request-renewed-denial';
     assert.ok((await phone.next()).state === 'denial_queued');
     const result = await phone.next();
     assert.ok(result.state === 'pc_resolution' && result.outcome === 'denied' && result.request_id === request.request_id && result.content_digest === request.content_digest, 'PC did not verify/resolve the same denial');
@@ -139,6 +160,7 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     const diagnostic = phone?.diagnostic ?? operatorStartupDiagnostic() ?? bridge?.diagnostic;
     if (diagnostic) proof.failure = diagnostic;
     proof.failedStage = stage;
+    proof.privateProcesses = { phone: phone?.snapshot() ?? null, bridge: bridge?.snapshot() ?? null };
     // Distinguishes a service that never registered the device from a client
     // that cannot yet read management while its pairing worker is still live.
     proof.clientView = await clientShape(page);

@@ -62,10 +62,10 @@ function RequestContents({ snapshot, disabled, onDecision, readDetails }: Reques
   })}</div>;
 }
 
-export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOpenScanner, scannerButtonRef }:
-  RequestPanelProps & { onOpenScanner: () => void; scannerButtonRef: Ref<HTMLButtonElement> }) {
+export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOpenScanner, onOpenUsb, scannerButtonRef }:
+  RequestPanelProps & { onOpenScanner: () => void; onOpenUsb?: () => void; scannerButtonRef: Ref<HTMLButtonElement> }) {
   return <>
     <RequestContents snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={onDecision} />
-    {snapshot.platform === 'android' && !hasPairedPc(snapshot) && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} scannerButtonRef={scannerButtonRef} />}
+    {snapshot.platform === 'android' && !hasPairedPc(snapshot) && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} {...(onOpenUsb ? { onOpenUsb } : {})} scannerButtonRef={scannerButtonRef} />}
   </>;
 }

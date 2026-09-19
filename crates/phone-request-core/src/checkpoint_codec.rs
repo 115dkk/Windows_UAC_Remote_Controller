@@ -22,7 +22,8 @@ use service_protocol::{MAX_REQUEST_LIFETIME_NANOS, MappedRequestWindow, ServiceT
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAGIC: &[u8; 8] = b"UACINBX\0";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
+const ASSOCIATED_LEGACY_VERSION: u16 = 3;
 const OUTCOMES_LEGACY_VERSION: u16 = 2;
 const POLICY_ONLY_LEGACY_VERSION: u16 = 1;
 const MAX_BYTES: usize = 384 * 1024;
@@ -92,6 +93,7 @@ impl InboxCheckpoint {
             out.0.extend_from_slice(source.epoch.as_bytes());
             out.u64(state.watermark);
             out.optional(state.quarantine_expiry);
+            out.u8(u8::from(state.lineage_quarantined) | (u8::from(state.superseded) << 1));
         }
         out.u16(self.retained.len() as u16);
         for entry in &self.retained {
@@ -110,6 +112,7 @@ impl InboxCheckpoint {
             // Appended only in schema3. The optional nonzero scalar freezes the
             // original receiver; never encode a current registry lookup here.
             out.optional(entry.receiving_generation.map(ReceivingGeneration::get));
+            out.u8(u8::from(entry.renewable_lineage));
         }
         out.u16(self.pending_outcomes.len() as u16);
         for pending in &self.pending_outcomes {
@@ -136,7 +139,14 @@ impl InboxCheckpoint {
             return Err(Error::InvalidState);
         }
         let version = input.u16()?;
-        if ![POLICY_ONLY_LEGACY_VERSION, OUTCOMES_LEGACY_VERSION, VERSION].contains(&version) {
+        if ![
+            POLICY_ONLY_LEGACY_VERSION,
+            OUTCOMES_LEGACY_VERSION,
+            ASSOCIATED_LEGACY_VERSION,
+            VERSION,
+        ]
+        .contains(&version)
+        {
             return Err(Error::UnsupportedVersion);
         }
         let phone_boot = PhoneBootId::from_native_boot_count(input.u32()?)?;
@@ -187,7 +197,21 @@ impl InboxCheckpoint {
             let state = SourceState {
                 watermark: input.u64()?,
                 quarantine_expiry: input.optional()?,
+                // Legacy sources did not persist renewal suppression. Reject
+                // unseen lease lineages in that epoch even after old guards
+                // expire; a fresh current native epoch clears this uncertainty.
+                lineage_quarantined: version < VERSION,
+                superseded: false,
             };
+            let mut state = state;
+            if version == VERSION {
+                let flags = input.u8()?;
+                if flags >= 3 {
+                    return Err(Error::InvalidState);
+                }
+                state.lineage_quarantined = flags & 1 != 0;
+                state.superseded = flags & 2 != 0;
+            }
             if sources.insert(source, state).is_some() {
                 return Err(Error::InvalidState);
             }
@@ -231,7 +255,7 @@ impl InboxCheckpoint {
             let was_active = input.boolean()?;
             let recovery_until_nanos = input.optional()?;
             let engine_state = input.u8()?;
-            let receiving_generation = if version == VERSION {
+            let receiving_generation = if version >= ASSOCIATED_LEGACY_VERSION {
                 input
                     .optional()?
                     .map(ReceivingGeneration::from_trusted_owner)
@@ -242,6 +266,12 @@ impl InboxCheckpoint {
                 // retained, not inferred from the current PC or key registry.
                 None
             };
+            // Legacy associated rows were immutable one-shot leases. Never infer
+            // renewal provenance by upgrading a current registry lookup.
+            let renewable_lineage = version == VERSION && input.boolean()?;
+            if renewable_lineage && receiving_generation.is_none() {
+                return Err(Error::InvalidState);
+            }
             if engine_state > 2
                 || (engine_state != 0 && !has_engine)
                 || was_active != (engine_state == 2)
@@ -255,6 +285,7 @@ impl InboxCheckpoint {
                 ));
             }
             retained.push(RetainedCheckpoint {
+                renewable_lineage,
                 binding,
                 receiving_generation,
                 issued_at,
@@ -266,7 +297,7 @@ impl InboxCheckpoint {
             });
         }
         let mut pending_outcomes = Vec::new();
-        if version == OUTCOMES_LEGACY_VERSION || version == VERSION {
+        if version >= OUTCOMES_LEGACY_VERSION {
             let count = usize::from(input.u16()?);
             if count > limits.max_retained() {
                 return Err(Error::InvalidState);
@@ -404,6 +435,9 @@ impl InboxCheckpoint {
             })
             .unwrap_or_default();
         for entry in &self.retained {
+            if entry.renewable_lineage && entry.receiving_generation.is_none() {
+                return Err(Error::InvalidState);
+            }
             let lifetime = entry
                 .binding
                 .expiry()
@@ -419,6 +453,9 @@ impl InboxCheckpoint {
                 })
                 .ok_or(Error::InvalidState)?;
             let key = request_key(entry.binding);
+            if source.superseded {
+                return Err(Error::InvalidState);
+            }
             if entries.insert(key, entry).is_some() {
                 return Err(Error::InvalidState);
             }
@@ -503,13 +540,20 @@ impl InboxCheckpoint {
                 })
                 .ok_or(Error::InvalidState)?;
             if let Some(original) = entries.get(&pending.key()) {
-                if original.binding != pending.binding()
-                    || original.issued_at != pending.issued_at()
-                    || original.was_active
-                {
+                let original_or_newer = original.binding == pending.binding()
+                    && original.issued_at == pending.issued_at()
+                    || crate::inbox::newer_lease(
+                        pending.binding(),
+                        pending.issued_at(),
+                        original.binding,
+                        original.issued_at,
+                    );
+                if !original_or_newer || original.was_active {
                     return Err(Error::InvalidState);
                 }
-            } else if source.watermark < pending.binding().expiry().as_nanos_since_epoch() {
+            } else if !source.superseded
+                && source.watermark < pending.binding().expiry().as_nanos_since_epoch()
+            {
                 // A removed guard must still have its original source-expiry
                 // proof; ACK must not delete the only protection for a live ID.
                 return Err(Error::InvalidState);

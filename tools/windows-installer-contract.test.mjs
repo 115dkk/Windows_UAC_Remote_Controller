@@ -68,7 +68,7 @@ test('source contract fixes per-machine x64 package and protected product names'
   assert.equal(base.bundle.windows.nsis.installerHooks, 'windows/packaging-hooks.nsh');
   assert.deepEqual(base.bundle.windows.nsis.languages, installerLanguages);
   for (const guard of ['!if "${INSTALLMODE}" != "perMachine"', '!if "${ARCH}" != "x64"',
-    '!if "${MAINBINARYNAME}" != "controller-app"', '!if "${PRODUCTNAME}" != "UAC 원격 승인"']) rejectingGuard(template, guard);
+    '!if "${MAINBINARYNAME}" != "controller-app"', '!if "${PRODUCTNAME}" != "UAC 원격 승인기"']) rejectingGuard(template, guard);
   position(template, '!define INSTALLATIONID "휴대폰 승인"');
   position(template, '!define PLACEHOLDER_INSTALL_DIR "placeholder\\${INSTALLATIONID}"');
   position(template, '!define UNINSTKEY "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${INSTALLATIONID}"');

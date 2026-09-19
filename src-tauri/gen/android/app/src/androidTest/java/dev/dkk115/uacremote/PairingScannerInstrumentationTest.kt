@@ -130,7 +130,9 @@ class PairingScannerInstrumentationTest {
         assertFalse("Fresh native view fixture directory required", root.exists())
         assertTrue(root.mkdirs())
         var count = 0
-        for (dark in listOf(false, true)) for (large in listOf(false, true)) for (state in PairingScannerState.values()) {
+        val variants = PairingScannerState.values().map { false to it } +
+            listOf(PairingScannerState.SCANNING, PairingScannerState.UNAVAILABLE, PairingScannerState.COMPARE).map { true to it }
+        for (dark in listOf(false, true)) for (large in listOf(false, true)) for ((usb, state) in variants) {
             val bitmap = onMain {
                 val config = Configuration(instrumentation.targetContext.resources.configuration).apply {
                     fontScale = if (large) 2f else 1f
@@ -139,7 +141,7 @@ class PairingScannerInstrumentationTest {
                         (if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO)
                 }
                 val configured = instrumentation.targetContext.createConfigurationContext(config)
-                val view = PairingScannerView(ContextThemeWrapper(configured, R.style.Theme_PairingScanner), {}, {})
+                val view = PairingScannerView(ContextThemeWrapper(configured, R.style.Theme_PairingScanner), {}, {}, usb = usb)
                 // COMPARE needs a code to draw its controls. This is an explicitly synthetic gallery
                 // fixture, never a value the production View could supply on its own.
                 view.render(state, permissionSettingsAvailable = true,
@@ -154,7 +156,7 @@ class PairingScannerInstrumentationTest {
                 view.layout(0, 0, 390, 844)
                 Bitmap.createBitmap(390, 844, Bitmap.Config.ARGB_8888).also { view.draw(Canvas(it)) }
             }
-            val name = "${state.name.lowercase(Locale.ROOT)}-${if (dark) "dark" else "light"}-${if (large) "large" else "normal"}.png"
+            val name = "${if (usb) "usb-" else ""}${state.name.lowercase(Locale.ROOT)}-${if (dark) "dark" else "light"}-${if (large) "large" else "normal"}.png"
             val output = File(root, name)
             assertTrue(output.createNewFile())
             try { output.outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
@@ -162,10 +164,10 @@ class PairingScannerInstrumentationTest {
             assertTrue(output.length() in 1..2_000_000L)
             count++
         }
-        assertEquals(PairingScannerState.values().size * 4, count)
-        assertEquals(68, count)
+        assertEquals((PairingScannerState.values().size + 3) * 4, count)
+        assertEquals(80, count)
         receipt(input, "native-view-render", listOf("ownedNativeViewOnly", "noQrOrCameraFixture", "normalAndLargeText",
-            "lightAndDark", "allFixtureFilesWritten"))
+            "lightAndDark", "allFixtureFilesWritten", "usbTransportWaitingFailureComparison"))
     }
 
     private fun inputs(): Input {

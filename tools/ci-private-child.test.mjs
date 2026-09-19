@@ -42,6 +42,8 @@ test('response timeout retires the wait and remains sticky', async t => {
   await assert.rejects(owner.next(), { reason: 'response_timeout' });
   await assert.rejects(owner.next(), { reason: 'response_timeout' });
   await assert.rejects(owner.send({ command: 'finish' }), { reason: 'response_timeout' });
+  assert.deepEqual(owner.snapshot(), { closed: false, exitCode: null, signaled: false,
+    failure: 'response_timeout', queuedReplies: 0, waiting: false });
 });
 
 test('final reply without process exit fails bounded completion', async t => {
@@ -95,5 +97,7 @@ test('JSON primitives and CR lines fail without exposing input', async t => {
   for (const line of ['null\n', '[]\n', '{"status":"done"}\r\n']) {
     const owner = fixture(t, `process.stdout.write(${JSON.stringify(line)});`);
     await assert.rejects(owner.next(), { reason: 'invalid_response' });
+    assert.equal(owner.snapshot().failure, 'invalid_response');
+    assert.ok(!JSON.stringify(owner.snapshot()).includes(line));
   }
 });

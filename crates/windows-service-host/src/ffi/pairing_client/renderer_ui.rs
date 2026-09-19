@@ -208,6 +208,7 @@ struct WindowOwner {
     border: HBRUSH,
     modules: Vec<bool>,
     module_width: usize,
+    usb: bool,
     deadline: Instant,
     remaining_second: u64,
     screen: Screen,
@@ -343,11 +344,15 @@ impl WindowOwner {
         Ok(())
     }
 
-    fn create(text: &str, deadline: Instant) -> Result<RendererWindow, Error> {
+    fn create(text: &str, deadline: Instant, usb: bool) -> Result<RendererWindow, Error> {
         if Instant::now() >= deadline {
             return Err(Error::InvalidState);
         }
-        let (modules, module_width) = qr_modules(text)?;
+        let (modules, module_width) = if usb {
+            (Vec::new(), 21)
+        } else {
+            qr_modules(text)?
+        };
         // SAFETY: current process module and current thread's already assigned desktop only.
         let module = unsafe { GetModuleHandleW(None)? };
         let instance = HINSTANCE(module.0);
@@ -389,11 +394,16 @@ impl WindowOwner {
             border: HBRUSH::default(),
             modules,
             module_width,
+            usb,
             deadline,
             remaining_second: remaining_seconds(deadline),
             // The QR is never the first thing the takeover shows. The reader
             // gets told what this is, and how to leave, before it appears.
-            screen: Screen::Introduction,
+            screen: if usb {
+                Screen::Invitation
+            } else {
+                Screen::Introduction
+            },
             code: String::new(),
             event: None,
             paint_failed: false,
@@ -452,7 +462,11 @@ impl WindowOwner {
         self.surface = brush(0xffffff)?;
         self.border = brush(0xd7e3e7)?;
         // The way out exists before the desktop switches, not after it.
-        self.show_introduction_buttons()?;
+        if self.usb {
+            self.show_invitation_button()?;
+        } else {
+            self.show_introduction_buttons()?;
+        }
         // SAFETY: current thread desktop is the launcher-assigned private desktop.
         let private = unsafe { GetThreadDesktop(GetCurrentThreadId())? };
         // SAFETY: window exists on private before it becomes the input desktop.
@@ -946,7 +960,9 @@ impl WindowOwner {
         draw_text(
             dc,
             self.title_font,
-            self.copy(if self.screen == Screen::Introduction {
+            self.copy(if self.usb && self.screen == Screen::Invitation {
+                "USB 연결 대기"
+            } else if self.screen == Screen::Introduction {
                 "QR 연결 절차를 시작합니다."
             } else {
                 "UAC 원격 승인 · PC 연결"
@@ -1153,6 +1169,27 @@ impl WindowOwner {
         card_height: i32,
         scale: impl Fn(i32) -> i32,
     ) -> Result<(), Error> {
+        if self.usb {
+            draw_text(dc, self.body_font,
+                self.copy("휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오."),
+                RECT { left: left + scale(36), top: top + scale(140),
+                    right: left + card_width - scale(36), bottom: top + scale(280) },
+                MUTED_INK, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction());
+            draw_text(
+                dc,
+                self.body_font,
+                &self.remaining_copy(),
+                RECT {
+                    left: left + scale(36),
+                    top: top + scale(310),
+                    right: left + card_width - scale(36),
+                    bottom: top + scale(360),
+                },
+                MUTED_INK,
+                DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+            );
+            return Ok(());
+        }
         draw_text(
             dc,
             self.body_font,
@@ -1387,8 +1424,8 @@ impl WindowOwner {
 impl RendererWindow {
     /// Creates the window on the current thread desktop, then switches input to
     /// it. The QR is prepared but not shown: the introduction comes first.
-    pub(super) fn open(text: &str, deadline: Instant) -> Result<Self, Error> {
-        WindowOwner::create(text, deadline)
+    pub(super) fn open(text: &str, deadline: Instant, usb: bool) -> Result<Self, Error> {
+        WindowOwner::create(text, deadline, usb)
     }
 
     pub(super) fn show_comparison(&mut self, code: &str) -> Result<(), Error> {

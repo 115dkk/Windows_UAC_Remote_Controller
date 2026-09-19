@@ -310,7 +310,9 @@ impl Owner {
             ) => {
                 // Only an actual normally authenticated completion reaches this
                 // decoder. The terminal transfer cannot accept external bytes.
-                match Frame::decode(&bytes).map_err(|_| Error::Protocol)? {
+                let frame = Frame::decode(&bytes).map_err(|_| Error::Protocol)?;
+                let usb = matches!(&frame, Frame::RendererUsbInvitation { .. });
+                match frame {
                     Frame::RendererBound(request)
                         if self.phase == Phase::AwaitBound
                             && request.invocation == self.invocation =>
@@ -326,10 +328,12 @@ impl Owner {
                         self.client_mut()?.begin_read()?;
                     }
                     Frame::RendererInvitation { invocation, text }
+                    | Frame::RendererUsbInvitation { invocation, text }
                         if self.phase == Phase::Bound && invocation == self.invocation =>
                     {
                         self.window = Some(
-                            RendererWindow::open(text.as_str(), self.deadline).map_err(ui_error)?,
+                            RendererWindow::open(text.as_str(), self.deadline, usb)
+                                .map_err(ui_error)?,
                         );
                         crate::ffi::pairing_diagnostics::milestone(
                             crate::ffi::pairing_diagnostics::Point::WindowOpened,

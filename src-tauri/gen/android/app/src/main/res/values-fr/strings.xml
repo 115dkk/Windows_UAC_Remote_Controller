@@ -71,4 +71,7 @@
     <string name="main_activity_title">Approbation UAC à distance</string>
     <string name="controller_service_title">Approbation UAC à distance</string>
     <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="pairing_usb_title">Connexion USB au PC</string>
+    <string name="pairing_usb_waiting">Branchez le câble et choisissez USB sur le PC. Autorisez l’accès sur Android. Attente maximale : 30 secondes.</string>
+    <string name="pairing_usb_unavailable">Impossible de lire les informations USB. Vérifiez le câble et l’autorisation USB, ou utilisez le code QR.</string>
 </resources>

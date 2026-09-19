@@ -201,6 +201,22 @@ pub(crate) async fn remove_device(
 }
 
 #[tauri::command]
+pub(crate) async fn begin_pairing_usb(
+    _arguments: crate::mobile::ScannerArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<AppSnapshot, AppIssue> {
+    #[cfg(not(target_os = "android"))]
+    {
+        with_runtime(&state, |runtime| runtime.begin_pairing_usb()).await
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = state;
+        Err(controller_runtime::UnwiredCapability::Pairing.issue())
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn set_relay(
     address: String,
     state: tauri::State<'_, ControllerState>,
@@ -341,6 +357,23 @@ pub(crate) async fn open_pairing_scanner(
         // Released on the native Dialog's opened/busy/unavailable reply, not on
         // camera completion. No QR, key, expected tuple or result body returns.
         crate::mobile::open_pairing_scanner(&app, &origin)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}
+
+/// Fixed native USB input surface; accepts no invitation, path or peer from JS.
+#[tauri::command]
+pub(crate) async fn open_pairing_usb(
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
+    _arguments: crate::mobile::ScannerArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<(), AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        crate::mobile::open_pairing_usb(&app, &origin)
     })
     .await
     .map_err(|_| worker_issue())?

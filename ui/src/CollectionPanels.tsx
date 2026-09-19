@@ -17,10 +17,11 @@ function deviceLabel(device: PairedDeviceView, pc: boolean): string {
   return device.name;
 }
 
-export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemove, onSetRelay }: {
+export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStatus, onRemove, onSetRelay }: {
   snapshot: AppSnapshot; disabled: boolean; onPair: () => void; onRemove: (device: PairedDeviceView) => void;
   onSetRelay: (address: string) => Promise<AppSnapshot | null>;
   onOpenStatus?: () => void;
+  onPairUsb?: () => void;
 }) {
   const [address, setAddress] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -103,16 +104,21 @@ export function DevicesPanel({ snapshot, disabled, onPair, onOpenStatus, onRemov
   const qrEntry = pc && <section className="surface pairing-entry" aria-label={ko.pairPhone}>
     <p className="supporting-text" id={`${id}-qr-purpose`}>{ko.pairingQrPurpose}</p>
     <button type="button" className="button primary" disabled={qrDisabled} aria-describedby={`${id}-qr-purpose`} onClick={onPair}><Icon name="qr" />{ko.pairPhone}</button>
+    {onPairUsb && <button type="button" className="button secondary" disabled={qrDisabled} onClick={onPairUsb}>{tr('USB로 연결')}</button>}
     {pairing && <p className="supporting-text" role="status">{tr(pairing.message)}</p>}
     {!pairingActive && recovery && <p className="supporting-text">{recovery}</p>}
     {!pairingActive && !snapshot.canPair && onOpenStatus && !(embeddedSelected && snapshot.service?.state === 'stopped') && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
   </section>;
-  if (unavailable) return <>{qrEntry}{unavailableState}{relayForm}</>;
+  const phoneEntry = phone && snapshot.mobile?.canOpenPairingScanner === true && <div className="collection-actions">
+    <button type="button" className="button primary" disabled={disabled} onClick={onPair}>{ko.openPairingScanner}</button>
+    {onPairUsb && <button type="button" className="button secondary" disabled={disabled} onClick={onPairUsb}>{tr('USB로 연결')}</button>}
+  </div>;
+  if (unavailable) return <>{qrEntry}{unavailableState}{phoneEntry}{relayForm}</>;
   return <>
     {qrEntry}
     {unavailable ? unavailableState : snapshot.devices.length ? <ul className="surface device-list">{snapshot.devices.map((device) => <li key={device.id}><span className="device-icon"><Icon name={phone ? 'pc' : 'phone'} /></span><div className="device-copy"><h2><bdi dir="ltr">{displayText(deviceLabel(device, pc))}</bdi></h2><p className={`state-line ${device.connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{device.connected ? ko.connected : ko.disconnected}</p>{device.lastSeenLabel && <p className="supporting-text"><bdi dir="ltr">{displayText(device.lastSeenLabel)}</bdi></p>}</div>{snapshot.canUnpair && <button type="button" className="button danger-quiet" disabled={disabled} onClick={() => onRemove(device)} aria-label={`${displayText(deviceLabel(device, pc))} ${ko.removeDevice}`}>{ko.removeDevice}</button>}</li>)}</ul>
       : <EmptyState icon={phone ? 'pc' : 'phone'} title={phone ? ko.noComputers : ko.noPhones} description={ko.noDevicesBody} />}
-    {!pc && (snapshot.canPair || pairingActive ? <div className="collection-actions"><button type="button" className="button primary" disabled={disabled || pairingActive} onClick={onPair}><Icon name="plus" />{ko.pairComputer}</button></div> : !pairing && <p className="supporting-text">{ko.pairingUnavailable}</p>)}
+    {phoneEntry}
     {!pc && pairing && <p className="supporting-text" role="status">{tr(pairing.message)}</p>}
     {relayForm}
   </>;

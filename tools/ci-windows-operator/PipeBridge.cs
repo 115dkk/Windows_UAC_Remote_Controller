@@ -89,12 +89,17 @@ internal static class PipeBridge
                         {
                             string[] commands = { "arm", "capture_qr", "read_comparison", "compare_confirm", "finish" };
                             string[] statuses = { "ready", "qr_pixels", "comparison_pixels", "confirmed", "done" };
-                            for (int phase = 0; phase < commands.Length; phase++)
+                            int qrCaptures = 0;
+                            for (int phase = 0; phase < commands.Length;)
                             {
                                 string requestLine = BoundedLine(input, 4096);
                                 var request = Program.Object(requestLine, 4096);
                                 Program.Keys(request, phase == 3 ? new[] { "command", "code" } : new[] { "command" });
-                                Program.Require(Program.Value(request, "command") == commands[phase], "command_order_rejected");
+                                string command = Program.Value(request, "command");
+                                bool recapture = phase == 2 && command == "capture_qr";
+                                Program.Require(command == commands[phase] || recapture, "command_order_rejected");
+                                int responsePhase = recapture ? 1 : phase;
+                                if (responsePhase == 1) Program.Require(++qrCaptures <= 25, "qr_readiness_timeout");
                                 if (phase == 3) Program.Require(Regex.IsMatch(Program.Value(request, "code"), "\\A[0-9]{6}\\z"), "comparison_input_rejected");
                                 writer.WriteLine(requestLine);
                                 requestLine = null;
@@ -107,14 +112,14 @@ internal static class PipeBridge
                                     output.WriteLine(Program.Json.Serialize(diagnostic));
                                     return 1;
                                 }
-                                Program.Require(Program.Value(response, "status") == statuses[phase], "response_order_rejected");
-                                if (phase == 1)
+                                Program.Require(Program.Value(response, "status") == statuses[responsePhase], "response_order_rejected");
+                                if (responsePhase == 1)
                                 {
                                     Program.Keys(response, "status", "pngBase64", "rendererPid");
                                     Program.Require(Program.Value(response, "pngBase64").Length <= 8 * 1024 * 1024 &&
                                         Int32.Parse(Program.Value(response, "rendererPid")) > 0, "pixel_response_rejected");
                                 }
-                                else if (phase == 2)
+                                else if (responsePhase == 2)
                                 {
                                     Program.Keys(response, "status", "code");
                                     Program.Require(Regex.IsMatch(Program.Value(response, "code"), "\\A[0-9]{6}\\z"), "comparison_response_rejected");
@@ -122,6 +127,7 @@ internal static class PipeBridge
                                 else Program.Keys(response, "status");
                                 output.WriteLine(responseLine);
                                 responseLine = null;
+                                if (!recapture) phase++;
                             }
                         }
                     }

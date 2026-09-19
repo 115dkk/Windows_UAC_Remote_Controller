@@ -25,6 +25,8 @@ pub(crate) mod prompt_diagnostics;
 mod security;
 mod taskbar;
 mod trust_store;
+#[cfg(target_pointer_width = "64")]
+pub(crate) mod usb_bootstrap;
 
 pub use language::{LanguageError, get_language_settings, set_language_preference};
 pub use taskbar::{

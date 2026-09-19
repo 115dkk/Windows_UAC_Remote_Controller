@@ -58,6 +58,7 @@ pub enum InboxCheckpointError {
 
 #[derive(Clone)]
 pub(crate) struct RetainedCheckpoint {
+    pub(crate) renewable_lineage: bool,
     pub(crate) binding: RequestBinding,
     pub(crate) receiving_generation: Option<ReceivingGeneration>,
     pub(crate) issued_at: ServiceTick,
@@ -161,6 +162,7 @@ impl PhoneInbox {
                 .retained
                 .values()
                 .map(|entry| RetainedCheckpoint {
+                    renewable_lineage: entry.renewable_lineage,
                     binding: entry.binding,
                     receiving_generation: entry.receiving_generation,
                     issued_at: entry.issued_at,
@@ -218,6 +220,7 @@ impl PhoneInbox {
                     (
                         request_key(entry.binding),
                         RetainedRequest {
+                            renewable_lineage: entry.renewable_lineage,
                             binding: entry.binding,
                             // Association identity is independent of phone boot
                             // and local timer comparability. Preserve even None.

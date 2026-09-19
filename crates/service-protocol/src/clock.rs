@@ -172,6 +172,9 @@ impl ClockCorrelation {
             PcEvent::Opened {
                 binding, issued_at, ..
             }
+            | PcEvent::Renewed {
+                binding, issued_at, ..
+            }
             | PcEvent::Resolved {
                 binding, issued_at, ..
             } => (*binding, *issued_at),

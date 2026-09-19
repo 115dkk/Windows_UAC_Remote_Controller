@@ -21,6 +21,9 @@ use service_protocol::{
 };
 use sha2::{Digest, Sha256};
 
+#[path = "support/legacy_codec.rs"]
+mod legacy_codec;
+
 const MILLI: u64 = 1_000_000;
 const OUTCOME_ROW_BYTES: usize = 32 + 180 + 8 + 1;
 const BODY_MARKER: &str = "SYNTHETIC_BODY_NOT_A_JOURNAL_ENTRY";
@@ -139,7 +142,7 @@ fn one_pending() -> (PhoneInbox, VerifiedPcEvent) {
 fn legacy_without_outbox(state: &PhoneInbox) -> Vec<u8> {
     let checkpoint = state.checkpoint().unwrap();
     assert_eq!(checkpoint.receiving_sources().count(), 0);
-    let mut bytes = checkpoint.to_bytes().unwrap();
+    let mut bytes = legacy_codec::as_v3(&checkpoint.to_bytes().unwrap());
     let tail = 2 + state.pending_outcomes().len() * OUTCOME_ROW_BYTES;
     // These legacy fixtures have zero or one unassociated retained row. Remove
     // the new schema3 None tag before making a genuine schema1 layout; merely
@@ -410,7 +413,7 @@ fn schema1_migration_is_only_for_fully_valid_policy_only_state() {
     let legacy = legacy_without_outbox(&policy_only);
     let migrated = InboxCheckpoint::from_bytes(&legacy).unwrap();
     assert!(migrated.is_policy_only());
-    assert_eq!(&migrated.to_bytes().unwrap()[8..10], &3_u16.to_be_bytes());
+    assert_eq!(&migrated.to_bytes().unwrap()[8..10], &4_u16.to_be_bytes());
     let mut corrupt = legacy.clone();
     corrupt.push(0);
     assert!(InboxCheckpoint::from_bytes(&corrupt).is_err());

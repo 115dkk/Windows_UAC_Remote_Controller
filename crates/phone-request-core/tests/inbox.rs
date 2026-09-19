@@ -572,7 +572,9 @@ fn checkpoint_decoder_rejects_an_original_issue_in_the_saved_submillisecond_futu
 
 fn binding(event: &VerifiedPcEvent) -> RequestBinding {
     match event.event() {
-        PcEvent::Opened { binding, .. } | PcEvent::Resolved { binding, .. } => *binding,
+        PcEvent::Opened { binding, .. }
+        | PcEvent::Renewed { binding, .. }
+        | PcEvent::Resolved { binding, .. } => *binding,
         PcEvent::Clock { .. } => panic!("fixture must be a request"),
     }
 }
@@ -587,6 +589,9 @@ fn resolution(event: &VerifiedPcEvent, outcome: RequestResolution) -> VerifiedPc
             binding, issued_at, ..
         }
         | PcEvent::Resolved {
+            binding, issued_at, ..
+        }
+        | PcEvent::Renewed {
             binding, issued_at, ..
         } => (*binding, *issued_at),
         PcEvent::Clock { .. } => panic!("fixture must be a request"),

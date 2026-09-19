@@ -25,6 +25,30 @@ pub enum LabelKind {
     Hyperlink,
 }
 
+/// Scoped native ancestry, not a global deduplication set. Every visited node
+/// (including unnamed layout containers) closes ancestors at its own depth.
+/// Ordinals/counts still describe the complete traversal used by action lookup.
+#[derive(Default)]
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+pub(crate) struct ButtonCaptions(Vec<(u8, String)>);
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+impl ButtonCaptions {
+    pub(crate) fn enter(&mut self, depth: u8) {
+        while self.0.last().is_some_and(|(parent, _)| *parent >= depth) {
+            self.0.pop();
+        }
+    }
+
+    pub(crate) fn observe(&mut self, depth: u8, kind: LabelKind, text: &str) -> bool {
+        let echo = kind == LabelKind::Text && self.0.iter().any(|(_, caption)| caption == text);
+        if kind == LabelKind::Button && !text.is_empty() {
+            self.0.push((depth, text.to_owned()));
+        }
+        echo
+    }
+}
+
 /// A producer-selected nonpassword, on-screen label. These fields do not prove
 /// native visibility/origin; the supervised native reader must establish that.
 /// Ordinal is zero-based traversal order, including skipped/other visited nodes.
@@ -37,6 +61,7 @@ pub struct PromptLabel {
     text: String,
     automation_id: String,
     class_name: String,
+    provider_label: String,
 }
 impl PromptLabel {
     pub fn new(
@@ -86,6 +111,7 @@ impl PromptLabel {
             text,
             automation_id,
             class_name,
+            provider_label: String::new(),
         })
     }
     pub const fn ordinal(&self) -> u16 {
@@ -109,6 +135,16 @@ impl PromptLabel {
     pub fn class_name(&self) -> &str {
         &self.class_name
     }
+    /// Exact Name of this element's UIA LabeledBy relationship, never inferred
+    /// from a preceding/sibling text element or from the displayed field value.
+    pub fn with_provider_label(mut self, label: String) -> Result<Self, PromptContentError> {
+        validate_metadata(&label)?;
+        self.provider_label = label;
+        Ok(self)
+    }
+    pub fn provider_label(&self) -> &str {
+        &self.provider_label
+    }
 }
 impl fmt::Debug for PromptLabel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -121,6 +157,7 @@ impl fmt::Debug for PromptLabel {
             .field("text", &"[redacted]")
             .field("automation_id", &"[redacted]")
             .field("class_name", &"[redacted]")
+            .field("provider_label", &"[redacted]")
             .finish()
     }
 }
@@ -164,6 +201,7 @@ impl PromptContentObservation {
                 .checked_add(label.text.len())
                 .and_then(|value| value.checked_add(label.automation_id.len()))
                 .and_then(|value| value.checked_add(label.class_name.len()))
+                .and_then(|value| value.checked_add(label.provider_label.len()))
                 .ok_or(PromptContentError::TotalLimit)?;
             if total > MAX_PROMPT_CONTENT_UTF8_BYTES {
                 return Err(PromptContentError::TotalLimit);
@@ -193,7 +231,12 @@ impl PromptContentObservation {
             + self
                 .labels
                 .iter()
-                .map(|label| label.text.len() + label.automation_id.len() + label.class_name.len())
+                .map(|label| {
+                    label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
+                })
                 .sum::<usize>()
     }
 
@@ -201,7 +244,7 @@ impl PromptContentObservation {
     /// Root RuntimeId is intentionally excluded because this is a content digest.
     pub fn digest(&self) -> [u8; 32] {
         let mut canonical = Vec::with_capacity(self.canonical_len());
-        canonical.extend_from_slice(b"UACPC001");
+        canonical.extend_from_slice(b"UACPC002");
         append_text(&mut canonical, &self.caption);
         canonical.extend_from_slice(&(self.labels.len() as u16).to_be_bytes());
         for label in &self.labels {
@@ -216,6 +259,7 @@ impl PromptContentObservation {
             append_text(&mut canonical, &label.text);
             append_text(&mut canonical, &label.automation_id);
             append_text(&mut canonical, &label.class_name);
+            append_text(&mut canonical, &label.provider_label);
         }
         Sha256::digest(canonical).into()
     }
@@ -264,7 +308,10 @@ impl PromptContentObservation {
                 .labels
                 .iter()
                 .map(|label| {
-                    17 + label.text.len() + label.automation_id.len() + label.class_name.len()
+                    21 + label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
                 })
                 .sum::<usize>()
     }
@@ -278,7 +325,10 @@ impl PromptContentObservation {
                 .labels
                 .iter()
                 .map(|label| {
-                    17 + label.text.len() + label.automation_id.len() + label.class_name.len()
+                    21 + label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
                 })
                 .sum::<usize>()
     }
@@ -302,6 +352,7 @@ impl PromptContentObservation {
             append_text(bytes, &label.text);
             append_text(bytes, &label.automation_id);
             append_text(bytes, &label.class_name);
+            append_text(bytes, &label.provider_label);
         }
     }
 
@@ -342,15 +393,19 @@ impl PromptContentObservation {
             let text = input.text()?;
             let automation_id = input.metadata()?;
             let class_name = input.metadata()?;
-            labels.push(PromptLabel::new_with_metadata(
-                ordinal,
-                depth,
-                kind,
-                enabled,
-                text,
-                automation_id,
-                class_name,
-            )?);
+            let provider_label = input.metadata()?;
+            labels.push(
+                PromptLabel::new_with_metadata(
+                    ordinal,
+                    depth,
+                    kind,
+                    enabled,
+                    text,
+                    automation_id,
+                    class_name,
+                )?
+                .with_provider_label(provider_label)?,
+            );
         }
         if input.offset != bytes.len() {
             return Err(PromptContentError::InvalidEncoding);
@@ -524,6 +579,50 @@ impl std::error::Error for PromptContentError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_relationship_is_bounded_round_tripped_and_digest_bound() {
+        let original = PromptLabel::new(0, 1, LabelKind::Text, true, "synthetic".into()).unwrap();
+        let labeled = original
+            .clone()
+            .with_provider_label("Program name:".into())
+            .unwrap();
+        let plain = PromptContentObservation::from_parts(vec![1], "Consent".into(), vec![original])
+            .unwrap();
+        let observed =
+            PromptContentObservation::from_parts(vec![1], "Consent".into(), vec![labeled.clone()])
+                .unwrap();
+        assert_ne!(plain.digest(), observed.digest());
+        let mut bytes = Vec::new();
+        observed.append_encoded(&mut bytes);
+        assert_eq!(PromptContentObservation::decode(&bytes), Ok(observed));
+        assert!(
+            labeled
+                .with_provider_label("x".repeat(MAX_LABEL_METADATA_UTF16_UNITS + 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn button_text_echo_is_scoped_to_actual_traversed_ancestors() {
+        let mut captions = ButtonCaptions::default();
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Button, "예"));
+        captions.enter(3);
+        assert!(captions.observe(3, LabelKind::Text, "예"));
+        assert!(!captions.observe(3, LabelKind::Text, "additional meaning"));
+        // Unnamed sibling containers end ancestry too. Label depths alone
+        // cannot establish whether this text belongs to the previous button.
+        captions.enter(2);
+        captions.enter(3);
+        assert!(!captions.observe(3, LabelKind::Text, "예"));
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Button, "아니요"));
+        captions.enter(3);
+        assert!(captions.observe(3, LabelKind::Text, "아니요"));
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Text, "아니요"));
+    }
     use crate::ProbeReport;
 
     fn label(ordinal: u16, text: &str) -> PromptLabel {

@@ -132,7 +132,15 @@ impl WatchMachine {
                     return Err(MessageError::Protocol);
                 }
                 self.heartbeats = self.heartbeats.saturating_add(1);
-                Ok(())
+                // The helper emits this only after a fresh, double-captured
+                // same-content census. Never renew a consumed/applying target.
+                if let Some(tracked) = self.tracked.filter(|tracked| !tracked.applied) {
+                    self.enqueue(WatchEvent::StillPresent {
+                        target: tracked.identity,
+                    })
+                } else {
+                    Ok(())
+                }
             }
         }?;
         self.last_message = now;
@@ -284,6 +292,39 @@ mod tests {
             content,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn fresh_heartbeat_only_renews_an_unconsumed_tracked_target() {
+        let now = Instant::now();
+        let mut machine = WatchMachine::new(now);
+        machine
+            .ingest(HelperMessage::Heartbeat { sequence: 0 }, 4, now)
+            .unwrap();
+        assert!(machine.drain().is_empty());
+        machine
+            .ingest(
+                HelperMessage::Appeared {
+                    target: target(1),
+                    report: report(),
+                },
+                4,
+                now,
+            )
+            .unwrap();
+        machine.drain();
+        machine
+            .ingest(HelperMessage::Heartbeat { sequence: 1 }, 4, now)
+            .unwrap();
+        assert_eq!(
+            machine.drain(),
+            vec![WatchEvent::StillPresent { target: target(1) }]
+        );
+        machine.reserve_apply(target(1)).unwrap();
+        machine
+            .ingest(HelperMessage::Heartbeat { sequence: 1 }, 4, now)
+            .unwrap();
+        assert!(machine.drain().is_empty());
     }
 
     #[test]

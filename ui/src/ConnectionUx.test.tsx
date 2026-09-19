@@ -4,7 +4,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { hasNoPairedPc } from './phoneConnection';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 
 describe('pre-approval connection guidance', () => {

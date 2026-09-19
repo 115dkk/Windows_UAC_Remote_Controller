@@ -114,7 +114,7 @@ ${StrLoc}
 !if "${MAINBINARYNAME}" != "controller-app"
   !error "Unexpected controller executable name."
 !endif
-!if "${PRODUCTNAME}" != "UAC 원격 승인"
+!if "${PRODUCTNAME}" != "UAC 원격 승인기"
   !error "Unexpected fixed protected installation folder."
 !endif
 
@@ -315,7 +315,7 @@ Page custom UacShortcutPage UacShortcutPageLeave
 {{/each}}
 
 LangString UacProductName 1033 "UAC Remote Approval"
-LangString UacProductName 1042 "UAC 원격 승인"
+LangString UacProductName 1042 "UAC 원격 승인기"
 LangString UacProductName 1036 "Approbation UAC à distance"
 LangString UacProductName 1031 "UAC-Freigabe aus der Ferne"
 LangString UacProductName 1041 "UAC リモート承認"
@@ -944,6 +944,12 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
+  ; Rename an existing, verified owned shortcut even when an upgrade does not
+  ; request creation of additional shortcuts. No new shortcut is implied.
+  !insertmacro UacMigrateShortcut "$SMPROGRAMS\UAC 원격 승인.lnk" "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  !if "${STARTMENUFOLDER}" != ""
+    !insertmacro UacMigrateShortcut "$SMPROGRAMS\$AppStartMenuFolder\UAC 원격 승인.lnk" "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+  !endif
   ${If} $NoShortcutMode = 1
   ${OrIf} $UacStartMenuChoice <> ${BST_CHECKED}
     Return
@@ -979,6 +985,7 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
+  !insertmacro UacMigrateShortcut "$DESKTOP\UAC 원격 승인.lnk" "$DESKTOP\${PRODUCTNAME}.lnk"
   ${If} $NoShortcutMode = 1
   ${OrIf} $UacDesktopChoice <> ${BST_CHECKED}
     Return

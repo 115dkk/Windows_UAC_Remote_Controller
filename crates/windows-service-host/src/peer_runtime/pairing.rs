@@ -78,6 +78,7 @@ enum Io {
     RendererPrepareWrite,
     RendererRegisterWrite,
     RendererParentRead,
+    UsbInvitationWrite,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -194,14 +195,25 @@ impl RendererRun {
                 ContentAction::Invitation,
             )
     }
-    pub(super) fn send_invitation(&mut self, text: &InvitationText) -> Result<(), Failure> {
+    pub(super) fn send_invitation(
+        &mut self,
+        text: &InvitationText,
+        usb: bool,
+    ) -> Result<(), Failure> {
         if !self.ready_for_invitation() {
             return Err(Failure::Protocol);
         }
         self.begin_renderer_write(
-            Frame::RendererInvitation {
-                invocation: self.request.invocation,
-                text: text.clone(),
+            if usb {
+                Frame::RendererUsbInvitation {
+                    invocation: self.request.invocation,
+                    text: text.clone(),
+                }
+            } else {
+                Frame::RendererInvitation {
+                    invocation: self.request.invocation,
+                    text: text.clone(),
+                }
             },
             RendererIo::InvitationWrite,
         )?;
@@ -550,6 +562,7 @@ pub(super) struct ServicePairing {
     commit_authorized: bool,
     committed_device: Option<DeviceId>,
     renderer_attempted: bool,
+    usb: bool,
     next_side: ServiceSide,
     first_failure: Option<Failure>,
     cleanup_failed: bool,
@@ -589,6 +602,7 @@ impl ServicePairing {
             commit_authorized: false,
             committed_device: None,
             renderer_attempted: false,
+            usb: false,
             next_side: ServiceSide::Starter,
             first_failure: None,
             cleanup_failed: false,
@@ -1158,7 +1172,8 @@ impl ServicePairing {
             intended_revision: original.intended_revision,
             policy,
         };
-        renderer.send_invitation(&invitation_text)?;
+        renderer.send_invitation(&invitation_text, self.usb)?;
+        let usb_invocation = renderer.request.invocation;
         let enrollment = EnrollmentCarrier::start(EnrollmentInputs {
             relay,
             route: original.route,
@@ -1182,6 +1197,16 @@ impl ServicePairing {
         .map_err(|_| Failure::Enrollment)?;
         self.enrollment_route = Some((relay, original.route));
         self.enrollment = Some(enrollment);
+        if self.usb {
+            self.write(
+                ServiceSide::Starter,
+                Frame::StarterUsbInvitation {
+                    invocation: usb_invocation,
+                    text: invitation_text,
+                },
+                Io::UsbInvitationWrite,
+            )?;
+        }
         Ok(())
     }
 
@@ -1501,11 +1526,22 @@ impl ServicePairing {
             (Io::StarterRead | Io::HelperRead | Io::AckRead, PairingPipeProgress::Read(bytes)) => {
                 *self.channel(side)?.pipe()?.1 = Io::Idle;
                 let frame = Frame::decode(&bytes).map_err(|_| Failure::Protocol)?;
+                let usb = matches!(&frame, Frame::HelperLaunchedUsb { .. });
                 self.protocol
                     .as_mut()
                     .ok_or(Failure::Protocol)?
                     .receive(side, frame)
-                    .map_err(|_| Failure::Protocol)
+                    .map_err(|_| Failure::Protocol)?;
+                if operation == Io::StarterRead {
+                    self.usb = usb;
+                }
+                Ok(())
+            }
+            (Io::UsbInvitationWrite, PairingPipeProgress::Written)
+                if side == ServiceSide::Starter =>
+            {
+                *self.channel(side)?.pipe()?.1 = Io::Idle;
+                Ok(())
             }
             (Io::BoundWrite, PairingPipeProgress::Written) => {
                 self.match_pair()?;
@@ -1665,6 +1701,7 @@ impl ServicePairing {
         self.commit_authorized = false;
         self.committed_device = None;
         self.renderer_attempted = false;
+        self.usb = false;
         self.generation = None;
         if self.rearm
             && !self.cleanup_failed

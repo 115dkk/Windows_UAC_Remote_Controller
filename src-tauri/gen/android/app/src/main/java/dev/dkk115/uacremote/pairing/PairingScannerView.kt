@@ -26,6 +26,7 @@ internal class PairingScannerView(
     onPermission: () -> Unit,
     onConfirm: () -> Unit = {},
     onReject: () -> Unit = {},
+    private val usb: Boolean = false,
 ) : ScrollView(context) {
     // The dialog already owns a frozen localized Context. Select from that
     // snapshot, not a fresh preference read that could mix languages mid-flow.
@@ -42,7 +43,7 @@ internal class PairingScannerView(
     private val latinTypeface = context.resources.getFont(R.font.noto_sans)
     private val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val heading = TextView(context).apply {
-        setText(R.string.pairing_scanner_title); textSize = 24f
+        setText(if (usb) R.string.pairing_usb_title else R.string.pairing_scanner_title); textSize = 24f
         typeface = Typeface.create(bodyTypeface, Typeface.BOLD)
         includeFontPadding = true
         setTextColor(context.getColor(R.color.pairing_scanner_text))
@@ -138,7 +139,9 @@ internal class PairingScannerView(
         failureDetail: Int? = null,
     ) {
         val displayedState = PairingScannerCopy.resolvedState(state, comparisonCode)
-        message.setText(when (displayedState) {
+        message.setText(if (usb && displayedState in setOf(PairingScannerState.PREPARING, PairingScannerState.SCANNING)) R.string.pairing_usb_waiting
+        else if (usb && displayedState in setOf(PairingScannerState.UNAVAILABLE, PairingScannerState.INVALID, PairingScannerState.EXPIRED)) R.string.pairing_usb_unavailable
+        else when (displayedState) {
             PairingScannerState.PREPARING -> R.string.pairing_scanner_preparing
             PairingScannerState.PERMISSION_PENDING -> R.string.pairing_scanner_permission_pending
             PairingScannerState.PERMISSION_DENIED -> R.string.pairing_scanner_permission_denied
@@ -157,7 +160,7 @@ internal class PairingScannerView(
             PairingScannerState.EXPIRED -> R.string.pairing_scanner_expired
             PairingScannerState.CLOSED -> R.string.pairing_scanner_closed
         })
-        previewContainer.visibility = if (displayedState in setOf(PairingScannerState.PREPARING, PairingScannerState.SCANNING)) VISIBLE else GONE
+        previewContainer.visibility = if (!usb && displayedState in setOf(PairingScannerState.PREPARING, PairingScannerState.SCANNING)) VISIBLE else GONE
         val detailText = when (displayedState) {
             PairingScannerState.READ -> R.string.pairing_scanner_read_detail
             PairingScannerState.CONNECTING -> R.string.pairing_scanner_connecting_detail

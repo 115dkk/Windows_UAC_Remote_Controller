@@ -761,6 +761,12 @@ impl PairingClient {
         }
         result
     }
+    /// Same authenticated ceremony; only public invitation delivery uses USB.
+    pub fn into_usb_helper_launch(self) -> Result<PairingHelperLaunch, PairingLaunchError> {
+        let mut launch = PairingHelperLaunch::from_starter(self)?;
+        launch.enable_usb()?;
+        Ok(launch)
+    }
     fn inner_ref(&self) -> &Inner {
         self.inner
             .as_deref()

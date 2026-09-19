@@ -38,6 +38,7 @@ internal class PairingScannerDialog(
     private val currentHost: () -> Boolean,
     private val finished: (PairingScannerDialog) -> Unit,
     private val ceremonyFinished: (PairingScannerDialog) -> Unit,
+    private val usb: Boolean = false,
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val started = SystemClock.elapsedRealtime()
@@ -67,7 +68,7 @@ internal class PairingScannerDialog(
         override fun dismiss() { this@PairingScannerDialog.close() }
         fun dismissOriginalWindow() { super.dismiss() }
     }
-    private val content = PairingScannerView(dialog.context, ::close, ::permissionAction, ::confirmCeremony, ::close)
+    private val content = PairingScannerView(dialog.context, ::close, ::permissionAction, ::confirmCeremony, ::close, usb)
     private var state = PairingScannerState.PREPARING
     private var closed = false
     private var coreReady = false
@@ -76,6 +77,8 @@ internal class PairingScannerDialog(
     private var permissionPending = false
     private var permissionResult: Boolean? = null
     private var camera: PairingCameraSession? = null
+    private var usbSession: PairingUsbSession? = null
+    private var usbReleased = true
     private var completionReported = false
     private val expiry = Runnable { expire() }
 
@@ -113,7 +116,7 @@ internal class PairingScannerDialog(
             if (!live()) { close(); return@beginPairingScan }
             Log.i("UacScan", "stage=begin_scan result=${result.name} cancelled=${ticket.isCancelled()}")
             if (result != PairingScanStart.READY || ticket.isCancelled()) terminal(PairingScannerState.UNAVAILABLE)
-            else { coreReady = true; permissionOrCamera() }
+            else { coreReady = true; if (usb) startUsb() else permissionOrCamera() }
         }, { actorReleased = true; finishIfReleased() })
         if (!owned) actorReleased = true
         return true
@@ -170,12 +173,13 @@ internal class PairingScannerDialog(
         if (closed) return
         if (!live()) { close(); return }
         applyPermissionResult()
+        usbSession?.resume()
     }
 
     fun hostPaused() {
         // Only the outstanding original native permission callback may bridge a
         // temporary pause. onStop/destroy always cancels, even during permission.
-        if (!permissionPending) close()
+        if (!permissionPending && usbSession?.permissionPending != true) close()
     }
     fun rotationChanged() { if (live()) camera?.rotationChanged() else close() }
 
@@ -199,6 +203,20 @@ internal class PairingScannerDialog(
         } catch (_: Exception) {
             terminal(PairingScannerState.CAMERA_UNAVAILABLE)
         }
+    }
+
+    private fun startUsb() {
+        if (!live() || !coreReady || usbSession != null) return
+        render(PairingScannerState.SCANNING)
+        usbReleased = false
+        val session = PairingUsbSession(activity, ::live,
+            { text ->
+                if (!live()) close()
+                else if (text == null) terminal(PairingScannerState.UNAVAILABLE)
+                else decoded(OfflineQrResult.Text(text))
+            }, { usbReleased = true; finishIfReleased() })
+        usbSession = session
+        session.start()
     }
 
     private fun decoded(result: OfflineQrResult) {
@@ -251,6 +269,7 @@ internal class PairingScannerDialog(
     private fun terminal(value: PairingScannerState, failureDetail: Int? = null) {
         if (closed || PairingCeremonyRules.terminal(state)) return
         camera?.close()
+        usbSession?.close()
         actor.cancelPairingScan(ticket)
         coreReady = false
         render(value, failureDetail = failureDetail)
@@ -310,6 +329,7 @@ internal class PairingScannerDialog(
         main.removeCallbacks(expiry)
         actor.cancelPairingScan(ticket)
         camera?.close()
+        usbSession?.close()
         if (windowRelease.beginDismiss()) {
             try { dialog.dismissOriginalWindow(); windowRelease.returnedNormally() }
             catch (_: Exception) { windowRelease.failed() }
@@ -325,7 +345,7 @@ internal class PairingScannerDialog(
     } catch (_: Exception) { false }
 
     private fun finishIfReleased() {
-        if (closed && actorReleased && cameraReleased && windowReleased() && !completionReported) {
+        if (closed && actorReleased && cameraReleased && usbReleased && windowReleased() && !completionReported) {
             completionReported = true
             originalDecor?.removeOnAttachStateChangeListener(decorListener)
             try { if (currentHost() && priorFocus?.isAttachedToWindow == true) priorFocus.requestFocus() }

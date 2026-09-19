@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, NotificationPolicy } from './contracts';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { PolicyEditor } from './PolicyEditor';
 import { draftFromPolicy, parseDraft, samePolicy, timeToMinute } from './policy-draft';
 import { createQaBridge, exampleSnapshot } from './qa-fixtures';

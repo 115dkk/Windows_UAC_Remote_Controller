@@ -3,7 +3,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App } from './App';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 
 describe('notification settings distinguish owner preparation from policy read failure', () => {

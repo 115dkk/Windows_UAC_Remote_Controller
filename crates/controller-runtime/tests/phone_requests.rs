@@ -16,8 +16,8 @@ fn row() -> Value {
 }
 
 fn catalog() -> Value {
-    json!({"version":1,"status":"ready","revision":"18446744073709551615",
-        "peerCount":1,"connectedPeerCount":1,"requests":[row()]})
+    json!({"version":2,"status":"ready","revision":"18446744073709551615",
+        "peerCount":1,"connectedPeerCount":1,"peers":[{"id":"1".repeat(64),"revision":"1","routePresent":true,"connected":true}],"requests":[row()]})
 }
 
 fn details() -> Value {
@@ -38,7 +38,7 @@ fn catalogue_is_strict_bounded_and_never_contains_bulk_commands() {
             .is_none()
     );
     for (field, invalid) in [
-        ("version", json!(2)),
+        ("version", json!(1)),
         ("status", json!("connected")),
         ("revision", json!(9007199254740993_u64)),
         ("revision", json!("01")),
@@ -74,16 +74,63 @@ fn nonready_is_not_a_known_empty_inventory_and_zero_peers_is_not_connected() {
     empty["requests"] = json!([]);
     empty["peerCount"] = json!(0);
     empty["connectedPeerCount"] = json!(0);
+    empty["peers"] = json!([]);
     let value = decode_phone_requests_json(&serde_json::to_vec(&empty).unwrap()).unwrap();
     assert_eq!(value.catalog.peer_count, 0);
     assert_eq!(value.catalog.connected_peer_count, 0);
 }
 
 #[test]
+fn paired_pc_rows_require_complete_bounded_metadata_and_observed_connection() {
+    let mut document = catalog();
+    let value = decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(value.devices.len(), 1);
+    assert!(value.devices[0].connected);
+    document["connectedPeerCount"] = json!(0);
+    document["peers"][0]["connected"] = json!(false);
+    let value = decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(!value.devices[0].connected);
+    assert_eq!(value.devices[0].name, "PC 111111111111");
+    for (field, invalid) in [
+        ("id", json!("0".repeat(64))),
+        ("id", json!("1".repeat(65))),
+        ("revision", json!("0")),
+        ("revision", json!("01")),
+        ("revision", json!("9007199254740992")),
+        ("connected", json!(true)),
+    ] {
+        let mut invalid_document = document.clone();
+        invalid_document["peers"][0][field] = invalid;
+        assert!(
+            decode_phone_requests_json(&serde_json::to_vec(&invalid_document).unwrap()).is_err()
+        );
+    }
+    document["peers"] = json!([]);
+    assert!(decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).is_err());
+}
+
+#[test]
+fn localized_native_computer_labels_do_not_hide_the_paired_pc_catalogue() {
+    for label in [
+        "연결한 컴퓨터",
+        "Paired computer",
+        "Gekoppelter Computer",
+        "接続済みの PC",
+    ] {
+        let mut document = catalog();
+        document["requests"][0]["computerName"] = json!(label);
+        let value = decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(value.requests[0].computer_name, label);
+        assert_eq!(value.devices.len(), 1);
+    }
+}
+
+#[test]
 fn rows_reject_contradictions_lossy_display_and_authority_fields() {
     for (field, invalid) in [
         ("id", json!("../../key")),
-        ("computerName", json!("invented host")),
+        ("computerName", json!("")),
+        ("computerName", json!("x".repeat(129))),
         ("programName", json!("a".repeat(513))),
         ("executablePath", json!("😀".repeat(513))),
         ("programName", json!("bad\0name")),

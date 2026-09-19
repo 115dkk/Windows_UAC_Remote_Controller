@@ -179,7 +179,7 @@ class ControllerApplication : Application() {
 
     /** Zero-payload native opening. The original physical binding is retained only as liveness. */
     internal fun openPairingScanner(activity: MainActivity, origin: Any, originCurrent: () -> Boolean,
-        callback: (PairingScannerLaunch) -> Unit) {
+        callback: (PairingScannerLaunch) -> Unit, usb: Boolean = false) {
         check(Looper.myLooper() == Looper.getMainLooper())
         // Bounded fixed-token diagnostics for CI: outcome and branch only, never payloads.
         val report = { result: PairingScannerLaunch, reason: String ->
@@ -207,7 +207,7 @@ class ControllerApplication : Application() {
                 // native result window remains open; it does not release its slot.
                 if (pairingScanner === finished && policyActor === actor &&
                     isCurrentForegroundControllerHost(activity) && originCurrent()) requestSnapshotChanged()
-            }) } catch (error: Exception) { report(PairingScannerLaunch.UNAVAILABLE, "construct:${error.javaClass.simpleName}"); return }
+            }, usb) } catch (error: Exception) { report(PairingScannerLaunch.UNAVAILABLE, "construct:${error.javaClass.simpleName}"); return }
         pairingScanner = flow
         try {
             val opened = flow.show()

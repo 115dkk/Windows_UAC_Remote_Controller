@@ -806,9 +806,16 @@ fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_bod
     assert_eq!(status.attached_peers, 0);
     assert_eq!(status.connected_peers, 0);
     assert_eq!(status.configured_peers, 1); // Synthetic persisted metadata, not a live connection.
+    assert_eq!(status.peers.len(), 1);
+    assert!(!status.peers[0].connected);
+    assert_eq!(status.peers[0].id.len(), 64);
     let peer = fixture.connect();
     peer.send(opened(3).0);
     let view = fixture.projection();
+    let connected = fixture.controller.request_catalog_status().unwrap();
+    assert_eq!(connected.peers.len(), 1);
+    assert!(connected.peers[0].connected);
+    assert_eq!(connected.peers[0].id, status.peers[0].id);
     let policy = serde_json::to_string(&NotificationPolicy::new(
         Some(Schedule::Never),
         AlertMode::Silent,

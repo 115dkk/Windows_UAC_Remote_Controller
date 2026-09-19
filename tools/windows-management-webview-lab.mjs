@@ -82,7 +82,7 @@ try {
   assert.match(offerProof, /starter_connected\r?\noffer_received_and_drained\r?\n$/,
     'Actual installed medium client must receive the service Offer before UAC');
   await expect(page.locator('.desktop-shell')).toBeVisible({ timeout: 30000 });
-  assert.ok(['UAC 원격 승인', 'UAC Remote Approval'].includes(await page.title()));
+  assert.ok(['UAC 원격 승인기', 'UAC Remote Approval'].includes(await page.title()));
   async function snapshot() {
     // Existing read-only command through this exact product WebView's IPC.
     const state = await page.evaluate(async () => {

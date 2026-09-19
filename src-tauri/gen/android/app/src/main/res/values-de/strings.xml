@@ -71,4 +71,7 @@
     <string name="main_activity_title">UAC-Freigabe aus der Ferne</string>
     <string name="controller_service_title">UAC-Freigabe aus der Ferne</string>
     <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="pairing_usb_title">PC über USB verbinden</string>
+    <string name="pairing_usb_waiting">Verbinden Sie das Kabel und wählen Sie USB am PC. Erlauben Sie den Zugriff unter Android. Wartezeit: höchstens 30 Sekunden.</string>
+    <string name="pairing_usb_unavailable">USB-Verbindungsdaten konnten nicht gelesen werden. Prüfen Sie Kabel und USB-Berechtigung oder verwenden Sie den QR-Code.</string>
 </resources>

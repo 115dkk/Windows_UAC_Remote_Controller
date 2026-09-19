@@ -29,12 +29,14 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             embedded_relay,
             relay_listening,
             devices,
+            activity,
             ..
         } = windows_service_host::management_query().map_err(management_error)?
         else {
             return Err(PlatformError::StatusUnavailable);
         };
         Ok(ManagementObservation {
+            activity: activity.map(crate::pc_history::project),
             relay_configured: relay.is_some(),
             relay_status: RelayStatusView {
                 mode: if embedded_relay {

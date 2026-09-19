@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AppIssue, RequestState, RequestView};
+use crate::{AppIssue, PairedDeviceView, RequestState, RequestView};
 
 pub const MAX_PHONE_REQUESTS_JSON_BYTES: usize = 512 * 1024;
 pub const MAX_PHONE_REQUEST_DETAILS_JSON_BYTES: usize = 2 * 1024 * 1024;
@@ -33,6 +33,7 @@ pub struct RequestCatalogView {
 pub struct PhoneRequestCatalog {
     pub catalog: RequestCatalogView,
     pub requests: Vec<RequestView>,
+    pub devices: Vec<PairedDeviceView>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
@@ -56,7 +57,17 @@ struct CatalogDocument {
     revision: String,
     peer_count: u8,
     connected_peer_count: u8,
+    peers: Vec<PeerDocument>,
     requests: Vec<RequestView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct PeerDocument {
+    id: String,
+    revision: String,
+    route_present: bool,
+    connected: bool,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -118,20 +129,53 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         .revision
         .parse::<u64>()
         .map_err(|_| phone_request_issue())?;
-    if document.version != 1
+    if document.version != 2
         || revision.to_string() != document.revision
         || usize::from(document.peer_count) > MAX_REQUESTS
         || document.connected_peer_count > document.peer_count
+        || document.peers.len() != usize::from(document.peer_count)
+        || document.peers.iter().filter(|peer| peer.connected).count()
+            != usize::from(document.connected_peer_count)
         || document.requests.len() > MAX_REQUESTS
         || document.peer_count == 0 && !document.requests.is_empty()
     {
         return Err(phone_request_issue());
     }
+    let mut seen_peers = BTreeSet::new();
+    let mut devices = Vec::with_capacity(document.peers.len());
+    for peer in document.peers {
+        let revision = peer
+            .revision
+            .parse::<u64>()
+            .map_err(|_| phone_request_issue())?;
+        if peer.id.len() != 64
+            || !peer
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || peer.id.bytes().all(|byte| byte == b'0')
+            || !seen_peers.insert(peer.id.clone())
+            || revision == 0
+            || revision.to_string() != peer.revision
+            || revision > 9_007_199_254_740_991
+        {
+            return Err(phone_request_issue());
+        }
+        devices.push(PairedDeviceView {
+            name: format!("PC {}", &peer.id[..12]),
+            id: peer.id,
+            revision,
+            route_present: peer.route_present,
+            connected: peer.connected,
+            last_seen_label: None,
+        });
+    }
     let mut seen = BTreeSet::new();
     for request in &document.requests {
         check_request_locator(&request.id)?;
         if !seen.insert(&request.id)
-            || request.computer_name != "연결한 컴퓨터"
+            || request.computer_name.is_empty()
+            || !valid_text(&request.computer_name, 128)
             || !valid_text(&request.program_name, 512)
             || !valid_text(&request.executable_path, 1024)
             || (request.program_elided || request.path_elided) && !request.has_details
@@ -144,6 +188,11 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         }
     }
     Ok(PhoneRequestCatalog {
+        devices: if document.status == RequestCatalogState::Ready {
+            devices
+        } else {
+            Vec::new()
+        },
         requests: if document.status == RequestCatalogState::Ready {
             document.requests
         } else {

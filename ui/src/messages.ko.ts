@@ -110,7 +110,7 @@ export const ko = {
   relayConfigured: '중계 서버 주소가 설정되어 있어요.',
   relayUnconfigured: '중계 연결을 준비하고 있어요. PC의 네트워크 연결을 확인해 주세요.',
   pairingUnavailable: '지금은 새 기기를 연결할 수 없어요.',
-  pairPhone: 'UAC 원격 승인',
+  pairPhone: 'QR 코드 보기',
   pairingQrPurpose: '연결용 QR 코드를 표시해 휴대폰을 등록해요.',
   pairingPcStartFirst: 'PC 상태에서 휴대폰 승인을 켜면 QR 코드를 표시할 수 있어요.',
   pairingPcInstallFirst: 'PC 연결 기능을 먼저 설치해 주세요. PC 상태에서 설치 안내를 볼 수 있어요.',

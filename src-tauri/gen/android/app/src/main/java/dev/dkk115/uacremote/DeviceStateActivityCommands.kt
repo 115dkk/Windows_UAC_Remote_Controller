@@ -419,6 +419,14 @@ internal class DeviceStateActivityCommands(
     }
 
     fun openPairingScanner(invoke: Invoke) {
+        openPairingInput(invoke, false)
+    }
+
+    fun openPairingUsb(invoke: Invoke) {
+        openPairingInput(invoke, true)
+    }
+
+    private fun openPairingInput(invoke: Invoke, usb: Boolean) {
         android.util.Log.i("UacScan", "stage=command argumentBytes=${invoke.getRawArgs().length}")
         if (!acceptsNoArguments(invoke)) return
         activity.runOnUiThread {
@@ -430,7 +438,7 @@ internal class DeviceStateActivityCommands(
             }
             android.util.Log.i("UacScan", "stage=open-request owner=${owner != null} foreground=${isForeground()}")
             if (owner == null || !isForeground()) reply(dev.dkk115.uacremote.pairing.PairingScannerLaunch.UNAVAILABLE)
-            else owner.openPairingScanner(activity, binding, ::isForeground, ::reply)
+            else owner.openPairingScanner(activity, binding, ::isForeground, ::reply, usb)
         }
     }
 

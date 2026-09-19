@@ -490,6 +490,8 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     management: management::ServiceManagement,
     #[cfg(all(windows, target_pointer_width = "64"))]
+    activity: Option<(Instant, Vec<activity_journal::ActivityRecord>)>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
     dialer: Option<dialer::DeviceDialer>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     embedded_relay: Option<relay_service::HostedRelay>,
@@ -529,6 +531,18 @@ impl fmt::Debug for ServiceSession<'_> {
 }
 
 impl<'key> ServiceSession<'key> {
+    /// Presentation only; the exclusive native journal owner is the sole caller.
+    /// Failed reads discard the previous snapshot instead of exposing stale data.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(crate) fn observe_activity(
+        &mut self,
+        records: Option<Vec<activity_journal::ActivityRecord>>,
+    ) {
+        self.activity = records
+            .filter(|rows| rows.len() <= crate::management_protocol::MAX_ACTIVITY_RECORDS)
+            .map(|rows| (Instant::now(), rows));
+    }
+
     #[cfg(windows)]
     pub(crate) fn for_service(
         registry: crate::ServiceRegistry<'key>,
@@ -576,6 +590,8 @@ impl<'key> ServiceSession<'key> {
             pairing: pairing::ServicePairing::dormant(),
             #[cfg(all(windows, target_pointer_width = "64"))]
             management: management::ServiceManagement::dormant(),
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            activity: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
             dialer: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
@@ -798,6 +814,7 @@ impl<'key> ServiceSession<'key> {
                     content: Arc::clone(&content),
                     content_digest: observed_digest,
                     issued_at,
+                    renewal: None,
                     deadline,
                     applying: None,
                 };
@@ -815,6 +832,11 @@ impl<'key> ServiceSession<'key> {
                     }
                 };
                 Ok(prompt::PromptProgress::opened(queued, previous))
+            }
+            crate::WatchEvent::StillPresent { target } => {
+                self.renew_live_prompt(target, now)?;
+                // A lease change is not a new Windows request or an outcome.
+                Ok(prompt::PromptProgress::default())
             }
             crate::WatchEvent::Gone { target, .. } => {
                 if self
@@ -873,6 +895,66 @@ impl<'key> ServiceSession<'key> {
                 )
             }
         }
+    }
+
+    fn renew_live_prompt(
+        &mut self,
+        target: crate::TargetIdentity,
+        now: Instant,
+    ) -> Result<(), PeerRuntimeError> {
+        let Some(live) = self.prompt.live() else {
+            return Ok(());
+        };
+        // Only a fresh native same-content census can enter this method. Leave
+        // a delivery/authentication margin while keeping every signed lease
+        // bounded to the original 110 seconds. Never revive an expired lease or
+        // rotate one already consumed by a phone decision.
+        if live.target != target
+            || live.applying.is_some()
+            || now >= live.deadline
+            || live.deadline.duration_since(now) > Duration::from_secs(30)
+        {
+            return Ok(());
+        }
+        let issued_at = self.tick(now)?;
+        let deadline = now
+            .checked_add(prompt::request_ttl().as_duration())
+            .ok_or(PeerRuntimeError::Clock)?;
+        let mut live = self.prompt.take().ok_or(PeerRuntimeError::Protocol)?;
+        let previous_binding = live.binding;
+        let previous_issued_at = live.issued_at;
+        // Single-threaded exact-binding replacement: one active binding, same
+        // prompt lineage and frozen eligible devices, fresh nonce and expiry.
+        let challenge = match self.engine.renew_from_privileged_host(
+            &previous_binding,
+            prompt::request_ttl(),
+            now,
+        ) {
+            Ok(challenge) => challenge,
+            Err(_) => {
+                let _ = self.engine.cancel_from_privileged_host(&previous_binding);
+                self.publish_resolution(&live, prompt::PromptResult::FailedUnknown, now)?;
+                return Err(PeerRuntimeError::Protocol);
+            }
+        };
+        live.binding = challenge.binding();
+        live.request_id = live.binding.request_id();
+        live.issued_at = issued_at;
+        live.deadline = deadline;
+        live.renewal = Some((previous_binding, previous_issued_at));
+        let event = PcEvent::Renewed {
+            previous_binding,
+            previous_issued_at,
+            binding: live.binding,
+            issued_at,
+            content: Arc::clone(&live.content),
+        };
+        self.prompt.replace(live);
+        if let Err(error) = self.publish_event(event, deadline, now) {
+            let _ = self.cancel_live_prompt(prompt::PromptResult::FailedUnknown, now);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn prompt_deadline_step(
@@ -971,7 +1053,9 @@ impl<'key> ServiceSession<'key> {
         now: Instant,
     ) -> Result<usize, PeerRuntimeError> {
         let opened = match &event {
-            PcEvent::Opened { binding, .. } => Some(binding.request_id()),
+            PcEvent::Opened { binding, .. } | PcEvent::Renewed { binding, .. } => {
+                Some(binding.request_id())
+            }
             _ => None,
         };
         let bytes = self.signed_event_bytes(event)?;
@@ -1004,10 +1088,19 @@ impl<'key> ServiceSession<'key> {
         }
         let request_id = live.request_id;
         let deadline = live.deadline;
-        let event = PcEvent::Opened {
-            binding: live.binding,
-            issued_at: live.issued_at,
-            content: Arc::clone(&live.content),
+        let event = match live.renewal {
+            Some((previous_binding, previous_issued_at)) => PcEvent::Renewed {
+                previous_binding,
+                previous_issued_at,
+                binding: live.binding,
+                issued_at: live.issued_at,
+                content: Arc::clone(&live.content),
+            },
+            None => PcEvent::Opened {
+                binding: live.binding,
+                issued_at: live.issued_at,
+                content: Arc::clone(&live.content),
+            },
         };
         let bytes = self.signed_event_bytes(event)?;
         self.revalidate_peers()?;
@@ -1548,6 +1641,11 @@ impl<'key> ServiceSession<'key> {
                     identity_provider: crate::contract::IDENTITY_PROVIDER_PROFILE.into(),
                     android_signer_digests: crate::ANDROID_SIGNER_SHA256.to_vec(),
                     devices,
+                    activity: self
+                        .activity
+                        .as_ref()
+                        .filter(|(at, _)| at.elapsed() <= std::time::Duration::from_secs(2))
+                        .map(|(_, records)| records.clone()),
                 }))
             }
             ManagementRequest::RemoveDevice { device } => {

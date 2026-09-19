@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { DevicesPanel } from './CollectionPanels';
 import type { AppSnapshot, ControllerBridge, PairingView, ServiceAction } from './contracts';
-import { ko, serviceActionText, serviceStateText } from './messages.ko';
+import { ko, serviceActionText, serviceStateText } from './messages';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 
 function deferred<T>() {
@@ -48,16 +48,16 @@ describe('native snapshot truth in the client', () => {
 
   it('does not equate a running service with remote readiness', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
-    expect(await screen.findByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 1, name: 'PC 승인을 휴대폰에서' })).toBeInTheDocument();
-    expect(screen.getByText(ko.homePurpose)).toBeInTheDocument();
-    expect(screen.getByText('이 PC에서 실행')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '서비스 실행 중' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'UAC 원격 승인기' })).toBeInTheDocument();
+    expect(screen.queryByText(ko.homePurpose)).not.toBeInTheDocument();
+    expect(screen.getByText('PC 서비스')).toBeInTheDocument();
     expect(screen.getByText(ko.remoteNotReady)).toBeInTheDocument();
-    expect(screen.getByText('지금은 PC의 관리자 권한 창에서 직접 선택해 주세요.')).toBeInTheDocument();
+    expect(screen.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).toBeInTheDocument();
     expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
-    expect(screen.queryByText(/서비스/u)).not.toBeInTheDocument();
+    expect(screen.getByText('PC 서비스')).toBeInTheDocument();
   });
 
   it('uses the separate native readiness flag, not the renamed on state', async () => {
@@ -66,7 +66,7 @@ describe('native snapshot truth in the client', () => {
     render(<App bridge={bridgeFor(ready)} />);
     expect(await screen.findByText(ko.remoteReady)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
-    expect(screen.getByText(ko.remoteReadyBody)).toBeInTheDocument();
+    expect(screen.queryByText(ko.remoteReadyBody)).not.toBeInTheDocument();
     expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
     expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
   });
@@ -515,7 +515,7 @@ describe('destructive action confirmation', () => {
     const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
     render(<App bridge={bridgeFor(snapshot, { controlService })} />);
     await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
-    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거할까요?' });
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거 확인' });
     expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
     expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
     expect(controlService).not.toHaveBeenCalled();

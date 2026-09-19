@@ -79,7 +79,9 @@ fn main() {
             .build()
             .map_err(|_| "runtime_unavailable")?;
         let result = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(300), run())
+            // Prior 300s whole-run budget plus 115s deliberate native-consent
+            // hold and 5s scheduling margin. Per-authentication TTLs unchanged.
+            tokio::time::timeout(Duration::from_secs(420), run())
                 .await
                 .map_err(|_| "whole_run_timeout")?
         });
@@ -142,10 +144,34 @@ async fn run() -> Result<()> {
         "hardware_attestation_verified":false,
         "biometrics_verified":false
     }))?;
-    let qr = match command(&mut input).await? {
-        Command::Enroll { qr } => Zeroizing::new(qr),
-        Command::EnrollPixels { png_base64 } => pixels::decode(Zeroizing::new(png_base64))?,
-        _ => return Err("expected_enroll"),
+    // A visible HWND/control is not proof that its pixels have been painted.
+    // Retry only zero-grid frames, before any enrollment effects. The deadline
+    // and attempt budget are fixed once; successful decode still requires one
+    // valid canonical invitation and the unchanged enrollment authentication.
+    let mut capture_deadline = Instant::now() + STEP_LIMIT;
+    let mut captures = 0;
+    let qr = loop {
+        let next = tokio::time::timeout_at(capture_deadline.into(), command(&mut input))
+            .await
+            .map_err(|_| "qr_readiness_timeout")??;
+        match next {
+            Command::Enroll { qr } if captures == 0 => break Zeroizing::new(qr),
+            Command::EnrollPixels { png_base64 } => {
+                if captures == 0 {
+                    capture_deadline = Instant::now() + Duration::from_secs(10);
+                }
+                captures += 1;
+                match pixels::decode(Zeroizing::new(png_base64)) {
+                    Ok(qr) => break qr,
+                    Err("qr_not_ready") if captures < 25 => {
+                        emit(json!({"state":"qr_not_ready"}))?;
+                    }
+                    Err("qr_not_ready") => return Err("qr_readiness_timeout"),
+                    Err(reason) => return Err(reason),
+                }
+            }
+            _ => return Err("expected_enroll"),
+        }
     };
     let invitation = PairingInvitation::from_qr_text(&qr).map_err(|_| "invalid_invitation")?;
     drop(qr);

@@ -555,19 +555,51 @@ internal static class ProtectedUi
 
     internal static string ReadComparison()
     {
+        return ReadStableComparison(() => OnInput((desktop, name) =>
+        {
+            IntPtr window = Renderer(desktop, name, false);
+            if (ConfirmButton(window) == IntPtr.Zero) return null;
+            using (var pixels = Capture(window, name))
+                return DigitPixels.Read(pixels, (int)Math.Max(96, Native.GetDpiForWindow(window)));
+        }), () => Program.Lifetime.ElapsedMilliseconds, () => Thread.Sleep(150));
+    }
+
+    internal static string ReadStableComparison(Func<string> read, Func<long> now, Action pause)
+    {
+        long until = now() + 10000;
+        string first = null;
+        string previous = null;
+        string lastGate = "comparison_readiness_timeout";
         while (true)
         {
             Program.Deadline();
-            string code = OnInput((desktop, name) =>
+            Program.Require(now() < until, lastGate);
+            string code = null;
+            try { code = read(); }
+            catch (Program.GateFailure error)
             {
-                IntPtr window = Renderer(desktop, name, false);
-                if (ConfirmButton(window) == IntPtr.Zero) return null;
-                using (var pixels = Capture(window, name))
-                    return DigitPixels.Read(pixels, (int)Math.Max(96, Native.GetDpiForWindow(window)));
-            });
-            if (code != null) return code;
-            Thread.Sleep(150);
+                if (!IsTransientComparisonPaint(error.Code)) throw;
+                lastGate = error.Code;
+            }
+            Program.Require(now() < until, lastGate);
+            // Two independently captured reads across a paint interval, not a
+            // visible-control assumption. A valid changed code is terminal.
+            if (code != null)
+            {
+                Program.Require(first == null || code == first, "comparison_mismatch");
+                first = code;
+                if (previous != null) return code;
+            }
+            previous = code;
+            pause();
         }
+    }
+
+    internal static bool IsTransientComparisonPaint(string gate)
+    {
+        return gate == "ocr_six_glyphs_required" || gate == "ocr_noise_rejected" ||
+            gate == "ocr_excess_glyphs" || gate == "ocr_no_matching_glyph" ||
+            gate == "ocr_glyph_difference" || gate == "ocr_not_unique";
     }
 
     internal static void ConfirmComparison(string expected)

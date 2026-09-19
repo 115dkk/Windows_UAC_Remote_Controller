@@ -104,6 +104,10 @@ pub(super) fn run(
             WatchRead::Pending => {}
         }
 
+        // A heartbeat carrying a tracked sequence is also a fresh same-content
+        // witness. Decide before census: crossing the interval during a census
+        // that skipped UIA must not accidentally publish a renewal witness.
+        let heartbeat_due = last_output.elapsed() >= HEARTBEAT_INTERVAL;
         let desktop = open_input_desktop(cleanup)?;
         let desktop_name =
             object_name(HANDLE(desktop.raw().0), NativeOperation::DesktopName).map_err(|_| ())?;
@@ -130,7 +134,8 @@ pub(super) fn run(
                 desktop.raw(),
                 session,
                 &image,
-                tracked.as_ref().map(|value| value.identity),
+                tracked.as_ref(),
+                heartbeat_due,
                 next_sequence,
                 cleanup,
             )?;
@@ -206,7 +211,7 @@ pub(super) fn run(
         if began.elapsed() >= MAX_LIFETIME {
             break;
         }
-        if last_output.elapsed() >= HEARTBEAT_INTERVAL {
+        if heartbeat_due && last_output.elapsed() >= HEARTBEAT_INTERVAL {
             channel.write(&HelperMessage::Heartbeat { sequence })?;
             last_output = Instant::now();
         }
@@ -230,7 +235,8 @@ fn scoped_census(
     desktop: HDESK,
     session: u32,
     image: &[u16],
-    tracked: Option<TargetIdentity>,
+    tracked: Option<&Tracked>,
+    verify_content: bool,
     next_sequence: u32,
     cleanup: &CleanupLog,
 ) -> Result<Census> {
@@ -238,7 +244,17 @@ fn scoped_census(
     let cleanup = Arc::clone(cleanup);
     std::thread::scope(|scope| {
         scope
-            .spawn(move || worker_census(token, session, image, tracked, next_sequence, &cleanup))
+            .spawn(move || {
+                worker_census(
+                    token,
+                    session,
+                    image,
+                    tracked,
+                    verify_content,
+                    next_sequence,
+                    &cleanup,
+                )
+            })
             .join()
             .map_err(|_| ())?
     })
@@ -248,7 +264,8 @@ fn worker_census(
     token: usize,
     session: u32,
     image: &[u16],
-    tracked: Option<TargetIdentity>,
+    tracked: Option<&Tracked>,
+    verify_content: bool,
     next_sequence: u32,
     cleanup: &CleanupLog,
 ) -> Result<Census> {
@@ -285,16 +302,16 @@ fn worker_census(
     let Some(candidate) = candidates.pop() else {
         return Ok(Census::None);
     };
-    let same = tracked.is_some_and(|value| native_identity(&candidate, value));
+    let same = tracked.is_some_and(|value| native_identity(&candidate, value.identity));
     let identity = if same {
-        tracked.ok_or(())?
+        tracked.ok_or(())?.identity
     } else {
         target_identity(&candidate, next_sequence)?
     };
     if candidate.recheck(session, image, cleanup).is_err() {
         return Ok(Census::VerificationFailed);
     }
-    if same {
+    if same && !verify_content {
         return Ok(Census::One {
             identity,
             report: None,
@@ -328,8 +345,22 @@ fn worker_census(
         }
     };
     candidate.recheck(session, image, cleanup).map_err(|_| ())?;
+    if same
+        && tracked.is_some_and(|prior| {
+            report.content() == prior.report.content()
+                && report
+                    .counts()
+                    .describes_the_same_prompt(prior.report.counts())
+        })
+    {
+        return Ok(Census::One {
+            identity,
+            report: None,
+        });
+    }
     Ok(Census::One {
-        identity,
+        // Changed content under the same HWND is a replacement, not renewal.
+        identity: target_identity(&candidate, next_sequence)?,
         report: Some(report),
     })
 }

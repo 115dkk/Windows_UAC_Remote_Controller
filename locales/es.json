@@ -39,7 +39,7 @@
   "PC와 아직 연결하지 않았어요": "Aún no has conectado un PC",
   "PC와 프로그램을 확인한 뒤 선택해 주세요.": "Comprueba el PC y el programa antes de elegir.",
   "PC의 QR 코드 촬영": "Escanear el QR del PC",
-  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "En Aprobación remota UAC del PC, pulsa «Administrar teléfonos» → «Aprobación remota UAC» para abrir el código QR. El botón de abajo abre la cámara en esta aplicación.",
+  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "En Mostrar el código QR del PC, pulsa «Administrar teléfonos» → «Mostrar el código QR» para abrir el código QR. El botón de abajo abre la cámara en esta aplicación.",
   "PC의 설치 상태를 확인한 뒤 새로고침해 주세요.": "Comprueba el estado de instalación en el PC y actualiza la información.",
   "PC의 휴대폰 승인에 연결하고 있어요.": "Conectando con la aprobación desde el teléfono del PC.",
   "PC의 휴대폰 승인이 준비되지 않았어요.": "La aprobación desde el teléfono del PC aún no está lista.",
@@ -357,5 +357,13 @@
   "휴대폰을 연결하지 못했어요. 다시 시도해 주세요.": "No se pudo conectar el teléfono. Inténtalo de nuevo.",
   "휴대폰을 연결했어요.": "Se conectó el teléfono.",
   "휴대폰을 켤 때 자동 실행": "Inicio automático al encender el teléfono",
-  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "También se aplican los permisos de notificaciones y la configuración de sonido del teléfono."
+  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "También se aplican los permisos de notificaciones y la configuración de sonido del teléfono.",
+  "USB로 연결": "Conectar por USB",
+  "USB 연결 대기": "Esperando conexión USB",
+  "휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오.": "Permita el acceso USB en el teléfono y compare los códigos de ambos dispositivos.",
+  "휴대폰 승인이 켜져 있는지 확인하지 못했어요.": "No se pudo comprobar el servicio del teléfono.",
+  "휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요.": "No se pudo confirmar el cambio del servicio del teléfono.",
+  "현재 상태와 자동 시작 설정을 확인한 뒤 다시 시도해 주세요.": "Compruebe el estado y el inicio automático e inténtelo de nuevo.",
+  "본인 확인을 진행해 주세요.": "Complete la verificación de identidad.",
+  "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.": "Conexión USB no disponible. Compruebe el controlador y el cable USB, o conecte mediante QR."
 }

@@ -121,6 +121,9 @@ pub trait PairingAttemptHandle: Send {
 pub trait PairingStarter: Send {
     fn available(&self) -> bool;
     fn start(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure>;
+    fn start_usb(&self) -> Result<Box<dyn PairingAttemptHandle>, PairingFailure> {
+        Err(PairingFailure::Unavailable)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +134,7 @@ pub enum PairingFailure {
     Timeout,
     RelayUnconfigured,
     Unavailable,
+    UsbUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -462,6 +466,14 @@ impl AppRuntime {
     }
 
     pub fn begin_pairing(&mut self) -> Result<AppSnapshot, AppIssue> {
+        self.begin_pairing_transport(false)
+    }
+
+    pub fn begin_pairing_usb(&mut self) -> Result<AppSnapshot, AppIssue> {
+        self.begin_pairing_transport(true)
+    }
+
+    fn begin_pairing_transport(&mut self, usb: bool) -> Result<AppSnapshot, AppIssue> {
         if self.platform != Platform::Windows {
             return Err(pairing_issue(PairingFailure::Unavailable));
         }
@@ -493,7 +505,14 @@ impl AppRuntime {
         {
             return Err(service_not_ready());
         }
-        self.pairing_attempt = Some(self.pairing_starter.start().map_err(pairing_issue)?);
+        self.pairing_attempt = Some(
+            if usb {
+                self.pairing_starter.start_usb()
+            } else {
+                self.pairing_starter.start()
+            }
+            .map_err(pairing_issue)?,
+        );
         // The runtime mutex serializes commands, including snapshots. Mark the
         // owner before returning, even if its native worker has not run yet.
         self.pairing_worker_joined = false;
@@ -609,7 +628,20 @@ impl AppRuntime {
     }
 
     pub fn read_activity(&self) -> Result<Vec<ActivityView>, AppIssue> {
-        Err(activity_unavailable())
+        if self.platform != Platform::Windows
+            || !self.pairing_worker_joined
+            || !self.adapter.observe_service().is_ok_and(|service| {
+                service.state == ObservedServiceState::Installed(ServiceState::Running)
+            })
+        {
+            return Err(activity_unavailable());
+        }
+        self.adapter
+            .observe_management()
+            .and_then(validate_management)
+            .ok()
+            .and_then(|management| management.activity)
+            .ok_or_else(activity_unavailable)
     }
 
     pub fn clear_activity(&mut self) -> Result<AppSnapshot, AppIssue> {
@@ -785,6 +817,14 @@ impl AppRuntime {
         if management_running {
             data_availability.devices = crate::Availability::Available;
         }
+        let activity = self
+            .last_management
+            .as_ref()
+            .filter(|_| management_running)
+            .and_then(|management| management.activity.clone());
+        if activity.is_some() {
+            data_availability.activity = crate::Availability::Available;
+        }
         AppSnapshot {
             schema_version: 4,
             platform: self.platform,
@@ -809,7 +849,7 @@ impl AppRuntime {
             requests: Vec::new(),
             request_catalog: None,
             request_review: None,
-            activity: Vec::new(),
+            activity: activity.unwrap_or_default(),
             data_availability,
             pairing,
             can_pair: self.platform == Platform::Windows
@@ -1003,6 +1043,11 @@ fn service_not_ready() -> AppIssue {
 
 fn pairing_issue(failure: PairingFailure) -> AppIssue {
     match failure {
+        PairingFailure::UsbUnavailable => AppIssue {
+            code: "pairing_usb_unavailable",
+            message: "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.",
+            next_action: None,
+        },
         PairingFailure::ServiceNotReady => service_not_ready(),
         PairingFailure::UserCancelled => AppIssue {
             code: "pairing_user_cancelled",
@@ -1062,6 +1107,10 @@ fn pairing_view(phase: PairingUiPhase, failure: Option<PairingFailure>) -> Pairi
 
 fn pairing_failure_view(failure: PairingFailure) -> PairingView {
     let (message, code) = match failure {
+        PairingFailure::UsbUnavailable => (
+            "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.",
+            "usb_unavailable",
+        ),
         PairingFailure::ServiceNotReady => {
             ("PC의 휴대폰 승인이 준비되지 않았어요.", "service_not_ready")
         }

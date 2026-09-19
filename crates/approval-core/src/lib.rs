@@ -462,6 +462,59 @@ impl ApprovalEngine {
         Ok(challenge)
     }
 
+    /// Replace one still-pending bounded lease after the privileged watcher has
+    /// freshly proved the same native prompt and content. RequestId is the
+    /// persistent prompt lineage; nonce/expiry form a new immutable binding.
+    /// Frozen eligibility is never widened by renewal. No consumed or expired
+    /// request can be recreated through this method.
+    pub fn renew_from_privileged_host(
+        &mut self,
+        previous: &RequestBinding,
+        ttl: RequestTtl,
+        now: Instant,
+    ) -> Result<PendingChallenge, EngineError> {
+        self.observe_time(now)?;
+        self.remove_expired(now);
+        let pending = self
+            .pending
+            .get(&previous.request_id())
+            .filter(|pending| pending.binding == *previous)
+            .ok_or(EngineError::RenewalTargetMismatch)?;
+        let deadline = now
+            .checked_add(ttl.as_duration())
+            .filter(|deadline| *deadline > pending.deadline)
+            .ok_or(EngineError::ClockRangeExceeded)?;
+        let tick = u64::try_from(deadline.duration_since(self.epoch_start).as_nanos())
+            .map_err(|_| EngineError::ClockRangeExceeded)?;
+        let expiry = ExpiryTick::from_nanos_since_epoch(tick)
+            .map_err(|_| EngineError::ClockRangeExceeded)?;
+        let nonce = ChallengeNonce::from_bytes(random_nonzero()?)
+            .map_err(|_| EngineError::RandomUnavailable)?;
+        if nonce == previous.nonce() {
+            return Err(EngineError::RandomUnavailable);
+        }
+        let binding = RequestBinding::new(
+            previous.pc(),
+            previous.epoch(),
+            previous.session(),
+            previous.request_id(),
+            nonce,
+            previous.content_digest(),
+            expiry,
+        );
+        let pending = self
+            .pending
+            .get_mut(&previous.request_id())
+            .ok_or(EngineError::RenewalTargetMismatch)?;
+        pending.binding = binding;
+        pending.deadline = deadline;
+        Ok(PendingChallenge {
+            binding,
+            content: Arc::clone(&pending.content),
+            eligible_devices: pending.eligible.keys().copied().collect(),
+        })
+    }
+
     /// Verify exact binding, current enrollment and its snapshotted purpose key,
     /// then atomically remove the request. Invalid live decisions never consume
     /// state. Only expiration can remove state before successful verification.
@@ -644,6 +697,8 @@ pub enum ClockError {
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
+    #[error("the renewal target is no longer the exact pending request")]
+    RenewalTargetMismatch,
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
     #[error(transparent)]

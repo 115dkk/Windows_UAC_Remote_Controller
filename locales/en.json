@@ -39,7 +39,7 @@
   "PC와 아직 연결하지 않았어요": "No PC connected yet",
   "PC와 프로그램을 확인한 뒤 선택해 주세요.": "Check the PC and program before making your choice.",
   "PC의 QR 코드 촬영": "Scan the PC's QR code",
-  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "In UAC Remote Approval on the PC, select “Manage phones” → “UAC Remote Approval” to display a QR code. The button below opens the camera in this app.",
+  "PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.": "In Show the QR code on the PC, select “Manage phones” → “Show the QR code” to display a QR code. The button below opens the camera in this app.",
   "PC의 설치 상태를 확인한 뒤 새로고침해 주세요.": "Check the installation on the PC, then refresh.",
   "PC의 휴대폰 승인에 연결하고 있어요.": "Connecting to phone approval on the PC.",
   "PC의 휴대폰 승인이 준비되지 않았어요.": "Phone approval on the PC is not ready.",
@@ -357,5 +357,13 @@
   "휴대폰을 연결하지 못했어요. 다시 시도해 주세요.": "Could not pair the phone. Please retry.",
   "휴대폰을 연결했어요.": "Phone paired.",
   "휴대폰을 켤 때 자동 실행": "Start automatically when the phone turns on",
-  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "The phone's notification permissions and sound settings also apply."
+  "휴대폰의 알림 권한과 소리 설정도 적용됩니다.": "The phone's notification permissions and sound settings also apply.",
+  "USB로 연결": "Connect by USB",
+  "USB 연결 대기": "Waiting for USB connection",
+  "휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오.": "Allow USB access on the phone. Then compare the codes on both devices.",
+  "휴대폰 승인이 켜져 있는지 확인하지 못했어요.": "Could not check the phone service status.",
+  "휴대폰 승인을 켜거나 끈 결과를 확인하지 못했어요.": "Could not confirm the phone service change.",
+  "현재 상태와 자동 시작 설정을 확인한 뒤 다시 시도해 주세요.": "Check the current state and automatic startup setting, then try again.",
+  "본인 확인을 진행해 주세요.": "Complete identity verification.",
+  "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.": "USB connection is unavailable. Check the USB driver and cable, or connect by QR code."
 }

@@ -82,7 +82,7 @@ export interface AppIssue { readonly code: string; readonly message: string; rea
 export interface PairingView {
   readonly phase: 'connecting' | 'waiting_for_admin' | 'helper_running' | 'finished' | 'failed';
   readonly message: string;
-  readonly failure: null | 'service_not_ready' | 'user_cancelled' | 'helper_failed' | 'timeout' | 'relay_unconfigured' | 'unavailable';
+  readonly failure: null | 'service_not_ready' | 'user_cancelled' | 'helper_failed' | 'timeout' | 'relay_unconfigured' | 'usb_unavailable' | 'unavailable';
 }
 export interface AppSnapshot {
   readonly schemaVersion: 4;
@@ -114,7 +114,7 @@ export interface ControllerBridge {
   snapshot(): Promise<AppSnapshot>;
   savePolicy(policy: NotificationPolicy): Promise<AppSnapshot>;
   controlService(action: ServiceAction): Promise<AppSnapshot>;
-  beginPairing(): Promise<AppSnapshot>;
+  beginPairing(transport?: 'usb'): Promise<AppSnapshot>;
   removeDevice(deviceId: string): Promise<AppSnapshot>;
   setRelay(address: string): Promise<AppSnapshot>;
   decide(requestId: string, decision: 'approve' | 'deny'): Promise<AppSnapshot>;
@@ -123,5 +123,5 @@ export interface ControllerBridge {
   clearActivity(): Promise<AppSnapshot>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;
-  openPairingScanner(): Promise<void>;
+  openPairingScanner(transport?: 'usb'): Promise<void>;
 }

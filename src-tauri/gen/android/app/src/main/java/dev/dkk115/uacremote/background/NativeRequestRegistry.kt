@@ -351,7 +351,13 @@ internal class NativeRequestRegistry(
         }
         if (catalog.configuredPeers > 32u || catalog.connectedPeers > catalog.configuredPeers || rows.length() > NativeRequestRules.MAX_REQUESTS ||
             (catalog.configuredPeers == 0.toUByte() && rows.length() != 0)) throw BridgeException.NativeUnavailable()
-        val root = JSONObject().put("version", 1).put("status", status).put("revision", catalog.revision.toString())
+        val peers = JSONArray()
+        for (peer in catalog.peers) {
+            peers.put(JSONObject().put("id", peer.id).put("revision", peer.revision.toString())
+                .put("routePresent", peer.routePresent).put("connected", peer.connected))
+        }
+        if (peers.length() != catalog.configuredPeers.toInt() || catalog.peers.count { it.connected } != catalog.connectedPeers.toInt()) throw BridgeException.NativeUnavailable()
+        val root = JSONObject().put("version", 2).put("status", status).put("revision", catalog.revision.toString()).put("peers", peers)
             .put("peerCount", catalog.configuredPeers.toInt()).put("connectedPeerCount", catalog.connectedPeers.toInt()).put("requests", rows)
         return payload(root, NativeRequestRules.MAX_LIST_JSON, observed, until, originalGeneration)
     }
@@ -399,7 +405,7 @@ internal class NativeRequestRegistry(
     }
     fun invalidateTime() { synchronized(lock) { temporalInvalid = true; bump() }; changed() }
     fun catalogMaintained(catalog: NativeRequestCatalogStatus) {
-        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}"
+        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}"
         val modified = synchronized(lock) {
             val result = (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
             catalogReady = catalog.state == NativeRequestCatalogState.READY

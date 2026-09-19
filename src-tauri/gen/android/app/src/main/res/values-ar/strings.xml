@@ -71,4 +71,7 @@
     <string name="main_activity_title">الموافقة على UAC عن بُعد</string>
     <string name="controller_service_title">الموافقة على UAC عن بُعد</string>
     <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="pairing_usb_title">توصيل الكمبيوتر عبر USB</string>
+    <string name="pairing_usb_waiting">وصّل الكابل واختر USB على الكمبيوتر واسمح بالوصول في Android. الانتظار لمدة 30 ثانية كحد أقصى.</string>
+    <string name="pairing_usb_unavailable">تعذرت قراءة بيانات اتصال USB. تحقق من الكابل وإذن USB أو اتصل باستخدام رمز QR.</string>
 </resources>

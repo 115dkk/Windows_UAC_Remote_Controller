@@ -33,6 +33,7 @@ impl PlatformAdapter for Adapter {
     fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
         Ok(ManagementObservation {
+            activity: None,
             relay_configured: true,
             relay_status: RelayStatusView {
                 mode: RelayMode::Embedded,

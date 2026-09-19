@@ -28,15 +28,15 @@ export const SCANNER_CASES = Object.freeze({
   },
   'native-view-render': {
     method: 'renderNativeViewsWithNoQrFixture',
-    checks: ['ownedNativeViewOnly', 'noQrOrCameraFixture', 'normalAndLargeText', 'lightAndDark', 'allFixtureFilesWritten'],
+    checks: ['ownedNativeViewOnly', 'noQrOrCameraFixture', 'normalAndLargeText', 'lightAndDark', 'allFixtureFilesWritten', 'usbTransportWaitingFailureComparison'],
   },
 });
 // Exact `PairingScannerState` order (PairingScanRules.kt): the enrollment ceremony states sit between
-// `read` and `invalid`. The gallery multiplies these by light/dark and normal/large text: 17 x 4 = 68 PNGs.
+// `read` and `invalid`. Plus three USB presentation variants: 20 x 4 = 80 PNGs.
 export const SCANNER_STATES = Object.freeze(['preparing', 'permission_pending', 'permission_denied', 'permission_settings',
   'camera_unavailable', 'unavailable', 'scanning', 'reading', 'read', 'connecting', 'compare', 'waiting_pc', 'enrolled',
   'failed', 'invalid', 'expired', 'closed']);
-export const SCANNER_IMAGES = Object.freeze(SCANNER_STATES.flatMap(state =>
+export const SCANNER_IMAGES = Object.freeze([...SCANNER_STATES, 'usb-scanning', 'usb-unavailable', 'usb-compare'].flatMap(state =>
   ['light', 'dark'].flatMap(theme => ['normal', 'large'].map(scale => `${state}-${theme}-${scale}.png`))));
 
 export function scannerImagePath(nonce, name) {

@@ -10,6 +10,23 @@ pub(crate) fn encode(event: &PcEvent) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&1_u16.to_be_bytes());
     match event {
+        PcEvent::Renewed {
+            previous_binding,
+            previous_issued_at,
+            binding,
+            issued_at,
+            content,
+        } => {
+            bytes.push(4);
+            put_binding(&mut bytes, *previous_binding);
+            bytes.extend_from_slice(&previous_issued_at.as_nanos_since_epoch().to_be_bytes());
+            put_binding(&mut bytes, *binding);
+            bytes.extend_from_slice(&issued_at.as_nanos_since_epoch().to_be_bytes());
+            for text in [content.program_name(), content.path(), content.details()] {
+                bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(text.as_bytes());
+            }
+        }
         PcEvent::Opened {
             binding,
             issued_at,
@@ -72,6 +89,26 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<PcEvent, PcEventError> {
         return Err(PcEventError::UnsupportedVersion);
     }
     let event = match reader.u8()? {
+        4 => {
+            let previous_binding = reader.binding()?;
+            let previous_issued_at = ServiceTick::from_nanos_since_epoch(reader.u64()?);
+            let binding = reader.binding()?;
+            let issued_at = ServiceTick::from_nanos_since_epoch(reader.u64()?);
+            let name = reader.text(MAX_PROGRAM_NAME_BYTES)?;
+            let path = reader.text(MAX_PATH_BYTES)?;
+            let details = reader.text(MAX_DETAILS_BYTES)?;
+            let content = Arc::new(
+                RequestContent::new(name, path, details)
+                    .map_err(|_| PcEventError::InvalidFields)?,
+            );
+            PcEvent::Renewed {
+                previous_binding,
+                previous_issued_at,
+                binding,
+                issued_at,
+                content,
+            }
+        }
         1 => {
             let binding = reader.binding()?;
             let issued_at = ServiceTick::from_nanos_since_epoch(reader.u64()?);

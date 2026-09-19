@@ -12,15 +12,15 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
 pub const PROBE_EXECUTABLE: &str = "uac-prompt-probe.exe";
-pub const PIPE_PREFIX: &str = r"\\.\pipe\UacRemoteController.PromptProbe.v2.";
+pub const PIPE_PREFIX: &str = r"\\.\pipe\UacRemoteController.PromptProbe.v3.";
 pub const CHALLENGE_BYTES: usize = 40;
 pub const REPORT_HEADER_BYTES: usize = 80;
 pub const MAX_REPORT_BYTES: usize = 512 * 1024;
 pub const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 pub const MAX_WATCH_MESSAGE_BYTES: usize = PIPE_BUFFER_BYTES as usize;
-const CHALLENGE_MAGIC: &[u8; 8] = b"WPRBC002";
-const REPORT_MAGIC: &[u8; 8] = b"WPRBR002";
-const HELPER_MESSAGE_MAGIC: &[u8; 8] = b"WPHM0001";
+const CHALLENGE_MAGIC: &[u8; 8] = b"WPRBC003";
+const REPORT_MAGIC: &[u8; 8] = b"WPRBR003";
+const HELPER_MESSAGE_MAGIC: &[u8; 8] = b"WPHM0002";
 const SERVICE_MESSAGE_MAGIC: &[u8; 8] = b"WPSM0001";
 const WATCH_REPORT_CHALLENGE: [u8; 32] = [0x57; 32];
 const WATCH_HEADER_BYTES: usize = 16;
@@ -936,7 +936,7 @@ mod tests {
         old_challenge[..8].copy_from_slice(b"WPRBC001");
         assert!(Challenge::decode(&old_challenge).is_err());
         let bytes = encode_report(challenge(), Ok(report())).unwrap();
-        for magic in [b"WPRBR001", b"WPRBR003"] {
+        for magic in [b"WPRBR002", b"WPRBR004"] {
             let mut invalid = bytes.clone();
             invalid[..8].copy_from_slice(magic);
             assert!(decode_report(&invalid, challenge()).is_err());
@@ -1001,7 +1001,8 @@ mod tests {
         let first_text = first_label + 9;
         let first_automation_id = first_text + sample.labels()[0].text().len();
         let first_class_name = first_automation_id + 4;
-        let second_label = first_class_name + 4;
+        let first_provider_label = first_class_name + 4;
+        let second_label = first_provider_label + 4;
         for runtime_count in [0, 33, u8::MAX] {
             let mut invalid = bytes.clone();
             invalid[REPORT_HEADER_BYTES] = runtime_count;
@@ -1012,6 +1013,7 @@ mod tests {
             first_label + 5,
             first_automation_id,
             first_class_name,
+            first_provider_label,
         ] {
             let mut invalid = bytes.clone();
             invalid[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
@@ -1072,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn maximum_content_and_label_metadata_fit_large_bounded_v2_message() {
+    fn maximum_content_and_label_metadata_fit_large_bounded_v3_message() {
         use crate::{
             LabelKind, MAX_PROMPT_CONTENT_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS,
             MAX_PROMPT_LABELS, MAX_RUNTIME_ID_VALUES, PromptLabel,
@@ -1120,7 +1122,7 @@ mod tests {
                 + 4 * MAX_RUNTIME_ID_VALUES
                 + 4
                 + 2
-                + 17 * MAX_PROMPT_LABELS
+                + 21 * MAX_PROMPT_LABELS
                 + MAX_PROMPT_CONTENT_UTF8_BYTES
         );
         assert_eq!(
@@ -1131,7 +1133,7 @@ mod tests {
             decode_report(&bytes, challenge()),
             Ok(ReportOutcome::Observed(report))
         );
-        // Add one ASCII byte to the final label's empty ClassName. Its field and
+        // Add one ASCII byte to the final label's empty provider label. Its field and
         // label remain valid, while aggregate text exceeds 384 KiB by one.
         let mut over = bytes;
         let final_class_name_length = over.len() - 4;

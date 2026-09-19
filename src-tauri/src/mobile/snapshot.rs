@@ -149,6 +149,8 @@ pub(super) fn snapshot(
     match port.requests().and_then(RequestsReply::requests) {
         Ok(requests) => {
             if requests.catalog.status == controller_runtime::RequestCatalogState::Ready {
+                value.data_availability.devices = Availability::Available;
+                value.devices = requests.devices;
                 value.data_availability.requests = Availability::Available;
                 value.requests = requests.requests;
             }
@@ -173,6 +175,8 @@ pub(super) fn snapshot(
     let current = after.unwrap_or(PhoneServiceView::UNAVAILABLE);
     value.phone_service = Some(current);
     if !current.policy_owner_ready {
+        value.devices.clear();
+        value.data_availability.devices = Availability::Unavailable;
         value.policy = None;
         value.activity.clear();
         value.can_clear_activity = false;

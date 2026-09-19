@@ -33,6 +33,7 @@ struct Port {
     policy_failed: Cell<bool>,
     history_failed: Cell<bool>,
     control_failed: Cell<bool>,
+    requests_json: RefCell<String>,
 }
 
 impl Port {
@@ -44,6 +45,7 @@ impl Port {
             policy_failed: Cell::new(false),
             history_failed: Cell::new(false),
             control_failed: Cell::new(false),
+            requests_json: RefCell::new(r#"{"version":2,"status":"unavailable","revision":"0","peerCount":0,"connectedPeerCount":0,"peers":[],"requests":[]}"#.into()),
         }
     }
     fn count(&self, name: &str) -> usize {
@@ -58,7 +60,9 @@ impl Port {
 impl OwnerPort for Port {
     fn requests(&self) -> Result<RequestsReply, AppIssue> {
         self.calls.borrow_mut().push("requests");
-        Ok(RequestsReply::Ok { requests_json: r#"{"version":1,"status":"unavailable","revision":"0","peerCount":0,"connectedPeerCount":0,"requests":[]}"#.into() })
+        Ok(RequestsReply::Ok {
+            requests_json: self.requests_json.borrow().clone(),
+        })
     }
     fn review(&self) -> Result<RequestReviewReply, AppIssue> {
         Ok(RequestReviewReply::Ok {
@@ -140,6 +144,30 @@ fn stopped_owner_still_has_recovery_surface_without_policy_or_history_calls() {
         controller_runtime::DataAvailability::UNAVAILABLE
     );
     assert_eq!(port.count("policy") + port.count("history"), 0);
+}
+
+#[test]
+fn paired_pc_projection_is_available_only_for_a_current_ready_owner() {
+    for (observations, status, available) in [
+        (vec![ready()], "ready", true),
+        (vec![ready()], "reconciling", false),
+        (vec![ready(), ready(), stopped()], "ready", false),
+    ] {
+        let port = Port::new(&observations);
+        *port.requests_json.borrow_mut() = serde_json::json!({
+            "version":2,"status":status,"revision":"1","peerCount":1,"connectedPeerCount":1,
+            "peers":[{"id":"1".repeat(64),"revision":"1","routePresent":true,"connected":true}],"requests":[]
+        }).to_string();
+        let view = snapshot(&port, OwnerOperation::Read).unwrap();
+        assert_eq!(
+            view.data_availability.devices == Availability::Available,
+            available
+        );
+        assert_eq!(view.devices.len(), usize::from(available));
+        if available {
+            assert!(view.devices[0].connected);
+        }
+    }
 }
 
 #[test]

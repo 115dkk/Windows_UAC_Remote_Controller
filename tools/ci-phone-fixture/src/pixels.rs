@@ -51,9 +51,7 @@ pub(super) fn decode(encoded: Zeroizing<String>) -> Result<Zeroizing<String>> {
     let mut prepared =
         rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| pixels[y * width + x]);
     let grids = prepared.detect_grids();
-    if grids.len() != 1 {
-        return Err("expected_exactly_one_qr");
-    }
+    require_one_grid(grids.len())?;
     let (_, decoded) = grids[0].decode().map_err(|_| "qr_decode_rejected")?;
     let decoded = Zeroizing::new(decoded);
     if decoded.len() > 16 * 1024 {
@@ -64,6 +62,16 @@ pub(super) fn decode(encoded: Zeroizing<String>) -> Result<Zeroizing<String>> {
     service_protocol::PairingInvitation::from_qr_text(&decoded)
         .map_err(|_| "qr_protocol_rejected")?;
     Ok(decoded)
+}
+
+// Only the absence of a grid can be an unfinished native paint. Multiple grids,
+// an undecodable grid and invalid protocol data are terminal, never retried.
+pub(super) fn require_one_grid(count: usize) -> Result<()> {
+    match count {
+        0 => Err("qr_not_ready"),
+        1 => Ok(()),
+        _ => Err("expected_exactly_one_qr"),
+    }
 }
 
 fn limits() -> Limits {

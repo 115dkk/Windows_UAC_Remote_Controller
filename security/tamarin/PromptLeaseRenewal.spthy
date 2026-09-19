@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Symbolic contract, not native/implementation refinement. NativeSamePrompt is
+// a trusted fresh same-identity/content observation by the protected watcher.
+// Time arithmetic, OS isolation, storage commits and hardware auth remain TCB.
+theory PromptLeaseRenewal
+begin
+
+builtins: signing
+
+restriction Equality:
+  "All x y #i. Eq(x,y)@i ==> x = y"
+
+rule OpenNativePrompt:
+  let binding = <~pc, ~epoch, ~request, ~session, ~content, ~nonce, ~expiry>
+  in
+  [ Fr(~pc), Fr(~epoch), Fr(~request), Fr(~session), Fr(~content),
+    Fr(~nonce), Fr(~expiry), Fr(~phone_sk) ]
+  --[ LeaseOpened(binding) ]->
+  [ NativePrompt(~pc, ~epoch, ~request, ~session, ~content, binding),
+    Lease(~pc, ~request, binding), !PhoneKey(~pc, ~phone_sk),
+    Out(binding), Out(pk(~phone_sk)) ]
+
+// Exact pending binding is consumed, while stable request identity and content
+// persist. Neither a consumed decision nor an old nonce can renew this slot.
+rule RenewObservedPrompt:
+  let new = <pc, epoch, request, session, content, ~nonce, ~expiry>
+  in
+  [ NativePrompt(pc, epoch, request, session, content, old),
+    Lease(pc, request, old), Fr(~nonce), Fr(~expiry) ]
+  --[ NativeSamePrompt(old), LeaseRenewed(old,new), LeaseOpened(new) ]->
+  [ NativePrompt(pc, epoch, request, session, content, new),
+    Lease(pc, request, new), Out(new)
+    // CANARY_RETIRED_LEASE
+  ]
+
+rule AuthenticateExactLease:
+  [ !PhoneKey(pc, phone_sk), In(binding) ]
+  --[ ExactLeaseAuthentication(binding) ]->
+  [ Out(<binding, sign(<'approve-lease',binding>,phone_sk)>) ]
+
+rule AcceptExactLease:
+  [ Lease(pc, request, binding), !PhoneKey(pc,phone_sk),
+    In(<binding,signature>) ]
+  --[ Eq(verify(signature,<'approve-lease',binding>,pk(phone_sk)),true),
+      LeaseAccepted(binding) ]->
+  [ ]
+
+rule ObservePromptGone:
+  [ NativePrompt(pc, epoch, request, session, content, binding),
+    Lease(pc,request,binding) ]
+  --[ PromptGone(binding) ]->
+  [ ]
+
+lemma honest_renewed_approval_trace:
+  exists-trace
+  "Ex old new #r #u #a.
+     LeaseRenewed(old,new)@r & ExactLeaseAuthentication(new)@u
+     & LeaseAccepted(new)@a & r < u & u < a"
+
+lemma retired_lease_never_accepted:
+  all-traces
+  "All old new #r #a.
+     LeaseRenewed(old,new)@r & LeaseAccepted(old)@a ==> a < r"
+
+lemma renewed_approval_needs_new_authentication:
+  all-traces
+  "All old new #r #a.
+     LeaseRenewed(old,new)@r & LeaseAccepted(new)@a
+     ==> (Ex #u. ExactLeaseAuthentication(new)@u & r < u & u < a)"
+
+lemma no_accept_after_prompt_gone:
+  all-traces
+  "All binding #g #a.
+     PromptGone(binding)@g & LeaseAccepted(binding)@a ==> a < g"
+
+end

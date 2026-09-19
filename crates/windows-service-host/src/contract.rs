@@ -26,6 +26,7 @@ pub enum Command {
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
     PairInspector,
+    UsbBootstrap,
     Help,
 }
 
@@ -164,6 +165,7 @@ impl fmt::Debug for Command {
             Self::Pair(_) => "Command::Pair(redacted)",
             Self::PairRenderer(_) => "Command::PairRenderer(redacted)",
             Self::PairInspector => "Command::PairInspector",
+            Self::UsbBootstrap => "Command::UsbBootstrap",
             Self::Help => "Command::Help",
         })
     }
@@ -321,6 +323,7 @@ impl Command {
         }
         match first.as_ref().to_str() {
             Some("pair-inspector") => Ok(Self::PairInspector),
+            Some("usb-bootstrap") => Ok(Self::UsbBootstrap),
             Some("relay-auto") => Ok(Self::EmbeddedRelay),
             Some("status") => Ok(Self::Status),
             Some("relay-status") => Ok(Self::RelayStatus),

@@ -467,6 +467,7 @@ struct Capture {
     caption: Option<String>,
     labels: Vec<PromptLabel>,
     utf8_bytes: usize,
+    button_captions: crate::content::ButtonCaptions,
 }
 struct Traversal<'a> {
     walker: &'a IUIAutomationTreeWalker,
@@ -507,6 +508,7 @@ fn capture(
         caption: None,
         labels: Vec::with_capacity(MAX_PROMPT_LABELS),
         utf8_bytes: 0,
+        button_captions: crate::content::ButtonCaptions::default(),
     };
     visit(root, 1, &mut observed, traversal)?;
     let content = PromptContentObservation::from_parts(
@@ -539,6 +541,7 @@ fn visit(
     }
     let ordinal = observed.counts.elements;
     policy::visit(&mut observed.counts, depth)?;
+    observed.button_captions.enter(depth);
     // SAFETY: live scoped UIA element. Only fixed scalar capability/identity
     // identity property first; no text is queried until exclusion guards pass.
     let owner = unsafe { element.CurrentProcessId() }
@@ -623,9 +626,12 @@ fn visit(
                 observed.remaining(),
                 cleanup,
             )?;
-            // Actual empty producer text contributes no label. No trim,
-            // deduplication, normalization, synthesized content or lossy decode.
-            if !text.is_empty() {
+            // RawView includes TextBlock children repeating their owning
+            // button Name. Preserve the actionable Button once, but do not
+            // project that exact descendant caption a second time. Distinct
+            // descendants and equal sibling fields remain separate labels.
+            let echo = observed.button_captions.observe(depth, kind, &text);
+            if !text.is_empty() && !echo {
                 if observed.labels.len() == MAX_PROMPT_LABELS {
                     return Err(ProbeError::new(ProbeFailure::ContentLimit));
                 }
@@ -647,9 +653,11 @@ fn visit(
                     MAX_LABEL_METADATA_UTF16_UNITS,
                     cleanup,
                 )?;
+                let provider_label = provider_label(element, pid, cleanup)?;
                 observed.account(&text)?;
                 observed.account(&automation_id)?;
                 observed.account(&class_name)?;
+                observed.account(&provider_label)?;
                 observed.labels.push(
                     PromptLabel::new_with_metadata(
                         ordinal,
@@ -660,6 +668,7 @@ fn visit(
                         automation_id,
                         class_name,
                     )
+                    .and_then(|label| label.with_provider_label(provider_label))
                     .map_err(|_| ProbeError::new(ProbeFailure::UnsupportedContent))?,
                 );
             }
@@ -677,6 +686,53 @@ fn visit(
         child = walk(walker, &current, Walk::NextSibling)?;
     }
     Ok(())
+}
+
+fn provider_label(
+    element: &IUIAutomationElement,
+    pid: u32,
+    cleanup: &CleanupLog,
+) -> Result<String, ProbeError> {
+    let mut output: *mut c_void = std::ptr::null_mut();
+    // SAFETY: scoped apartment-owned element; exact generated interface-out
+    // signature and initialized null slot. S_OK + null means no LabeledBy, not
+    // a guessed nearest sibling. A successful non-null pointer owns one AddRef.
+    unsafe { (element.vtable().CurrentLabeledBy)(element.as_raw(), &mut output) }
+        .ok()
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+    if output.is_null() {
+        return Ok(String::new());
+    }
+    // SAFETY: unique adoption of the successful COM out reference, dropped on
+    // this thread before the apartment. No recursion through linked elements.
+    let label = unsafe { IUIAutomationElement::from_raw(output) };
+    // SAFETY: fixed scalar ownership/password/control checks precede any Name.
+    let owner = unsafe { label.CurrentProcessId() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?;
+    if u32::try_from(owner).ok() != Some(pid) {
+        return Err(ProbeError::new(ProbeFailure::ProviderOwnerMismatch));
+    }
+    // SAFETY: scalar exclusion flag, not credential content.
+    if unsafe { label.CurrentIsPassword() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?
+        .as_bool()
+    {
+        return Ok(String::new());
+    }
+    // SAFETY: fixed read-only control type. A relationship never opens an editor.
+    if unsafe { label.CurrentControlType() }
+        .map_err(|error| native_error(NativeOperation::ElementProperty, error))?
+        != UIA_TEXT_CONTROL_TYPE_ID
+        || pattern_available(&label, UIA_IsValuePatternAvailablePropertyId, cleanup)?
+    {
+        return Ok(String::new());
+    }
+    bounded_string_property(
+        &label,
+        UIA_NamePropertyId,
+        MAX_LABEL_METADATA_UTF16_UNITS,
+        cleanup,
+    )
 }
 
 enum Walk {

@@ -132,6 +132,108 @@ struct BindingFields {
     expiry: ExpiryTick,
 }
 
+#[test]
+fn renewal_keeps_lineage_and_snapshot_but_rejects_every_old_signature() {
+    let phone = PhoneFixture::new(1);
+    let later_phone = PhoneFixture::new(2);
+    let now = Instant::now();
+    let mut engine = engine(&[&phone], 4, 4, now);
+    let first = open(&mut engine, now, 110_000);
+    let old_decision = phone.sign(first.binding(), DecisionPurpose::Approve);
+    engine
+        .enroll_device_from_privileged_host(later_phone.device, later_phone.public_keys())
+        .unwrap();
+    let renewal_time = now + Duration::from_secs(80);
+    let renewed = engine
+        .renew_from_privileged_host(
+            &first.binding(),
+            RequestTtl::from_millis(110_000).unwrap(),
+            renewal_time,
+        )
+        .unwrap();
+    assert_eq!(first.binding().request_id(), renewed.binding().request_id());
+    assert_eq!(
+        first.binding().content_digest(),
+        renewed.binding().content_digest()
+    );
+    assert_ne!(first.binding().nonce(), renewed.binding().nonce());
+    assert_ne!(first.binding().expiry(), renewed.binding().expiry());
+    assert_eq!(engine.pending_count(), 1);
+    assert_eq!(
+        engine
+            .submit_decision(&old_decision, renewal_time)
+            .unwrap_err(),
+        DecisionError::BindingMismatch
+    );
+    assert_eq!(
+        engine
+            .submit_decision(
+                &later_phone.sign(renewed.binding(), DecisionPurpose::Approve),
+                renewal_time,
+            )
+            .unwrap_err(),
+        DecisionError::NotEligible
+    );
+    assert_eq!(
+        engine
+            .renew_from_privileged_host(
+                &first.binding(),
+                RequestTtl::from_millis(110_000).unwrap(),
+                renewal_time,
+            )
+            .unwrap_err(),
+        EngineError::RenewalTargetMismatch
+    );
+    engine
+        .submit_decision(
+            &phone.sign(renewed.binding(), DecisionPurpose::Approve),
+            renewal_time,
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .renew_from_privileged_host(
+                &renewed.binding(),
+                RequestTtl::from_millis(110_000).unwrap(),
+                renewal_time,
+            )
+            .unwrap_err(),
+        EngineError::RenewalTargetMismatch
+    );
+}
+
+#[test]
+fn expired_or_cancelled_prompt_cannot_be_renewed() {
+    let phone = PhoneFixture::new(1);
+    let now = Instant::now();
+    let mut engine = engine(&[&phone], 4, 4, now);
+    let expired = open(&mut engine, now, 1_000);
+    assert_eq!(
+        engine
+            .renew_from_privileged_host(
+                &expired.binding(),
+                RequestTtl::from_millis(110_000).unwrap(),
+                now + Duration::from_secs(1),
+            )
+            .unwrap_err(),
+        EngineError::RenewalTargetMismatch
+    );
+    let cancelled = open(&mut engine, now + Duration::from_secs(1), 110_000);
+    engine
+        .cancel_from_privileged_host(&cancelled.binding())
+        .unwrap();
+    assert_eq!(
+        engine
+            .renew_from_privileged_host(
+                &cancelled.binding(),
+                RequestTtl::from_millis(110_000).unwrap(),
+                now + Duration::from_secs(2),
+            )
+            .unwrap_err(),
+        EngineError::RenewalTargetMismatch
+    );
+}
+
 impl From<RequestBinding> for BindingFields {
     fn from(binding: RequestBinding) -> Self {
         Self {

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { DevicesPanel } from './CollectionPanels';
 import type { AppSnapshot } from './contracts';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { RelayStatusLine } from './RelayStatusLine';
 import { locales, setPreviewLanguage } from './i18n';
@@ -14,8 +14,8 @@ describe('Windows relay observation and service recovery', () => {
   it('keeps unknown relay state when the stopped SCM value is only cached', () => {
     const cached = qaCase('desktop-relay-stopped').snapshot;
     render(<RelayStatusLine snapshot={{ ...cached, relayStatus: { mode: 'embedded', state: 'unknown' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.');
-    expect(screen.queryByText('내장 중계 중지됨 · 수신 대기하지 않아요.')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.');
+    expect(screen.queryByText('내장 중계 중지됨 · 수신 대기하지 않습니다.')).not.toBeInTheDocument();
   });
   it.each(locales)('translates stopped relay, selected mode and the next step in %s', (locale) => {
     setPreviewLanguage(locale);
@@ -28,11 +28,11 @@ describe('Windows relay observation and service recovery', () => {
   });
 
   it.each([
-    ['desktop-relay-stopped', '내장 중계 중지됨 · 수신 대기하지 않아요.'],
-    ['desktop-relay-listening', '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인해 주세요.'],
-    ['desktop-relay-waiting', '내장 중계가 네트워크를 기다리고 있어요.'],
-    ['desktop-relay-unknown', '중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.'],
-    ['desktop-relay-external', '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.'],
+    ['desktop-relay-stopped', '내장 중계 중지됨 · 수신 대기하지 않습니다.'],
+    ['desktop-relay-listening', '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인하십시오.'],
+    ['desktop-relay-waiting', '내장 중계: 네트워크 연결 대기 중'],
+    ['desktop-relay-unknown', '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.'],
+    ['desktop-relay-external', '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았습니다.'],
   ])('renders %s from observed runtime state', (fixture, message) => {
     render(<RelayStatusLine snapshot={qaCase(fixture).snapshot} />);
     expect(screen.getByRole('status')).toHaveTextContent(message);
@@ -61,7 +61,7 @@ describe('Windows relay observation and service recovery', () => {
   it('shows preparation failure and keeps unknown external runtime distinct from reachability', () => {
     const source = qaCase('desktop-relay-listening').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('내장 중계를 준비하지 못했어요. PC의 네트워크와 중계 설정을 확인해 주세요.');
+    expect(screen.getByRole('status')).toHaveTextContent('내장 중계를 준비하지 못했습니다. PC의 네트워크와 중계 설정을 확인하십시오.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'external', state: 'unknown' } }} />);
     expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했어요.');
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
@@ -84,9 +84,9 @@ describe('Windows relay observation and service recovery', () => {
     expect(selected).toBeDisabled();
     fireEvent.click(selected);
     expect(setRelay).toHaveBeenCalledExactlyOnceWith('embedded');
-    expect(screen.getByText('내장 중계 중지됨 · 수신 대기하지 않아요.')).toBeVisible();
-    expect(screen.getByText('내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.')).toBeVisible();
-    expect(screen.queryByText('중계 서버 주소가 설정되어 있어요.')).not.toBeInTheDocument();
+    expect(screen.getByText('내장 중계 중지됨 · 수신 대기하지 않습니다.')).toBeVisible();
+    expect(screen.getByText('내장 중계가 선택되어 있습니다. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비합니다.')).toBeVisible();
+    expect(screen.queryByText('중계 서버 주소가 설정되어 있습니다.')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
     expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeVisible();
     expect(screen.getByRole('button', { name: '휴대폰 승인 켜기' })).toBeEnabled();
@@ -140,7 +140,7 @@ describe('Windows relay observation and service recovery', () => {
     expect(await screen.findAllByText(message)).toHaveLength(1);
     fireEvent.focus(window);
     await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(within(screen.getByRole('region', { name: '휴대폰 승인 꺼짐' })).getByText(message)).toBeVisible());
+    await waitFor(() => expect(within(screen.getByRole('region', { name: '서비스 중지됨' })).getByText(message)).toBeVisible());
     expect(screen.getAllByText(message)).toHaveLength(1);
     const retry = screen.getByRole('button', { name: '휴대폰 승인 켜기' });
     expect(retry).toBeEnabled();

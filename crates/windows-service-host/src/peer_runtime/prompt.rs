@@ -34,6 +34,7 @@ pub(super) struct LivePrompt {
     pub(super) content: Arc<RequestContent>,
     pub(super) content_digest: [u8; 32],
     pub(super) issued_at: ServiceTick,
+    pub(super) renewal: Option<(RequestBinding, ServiceTick)>,
     pub(super) deadline: Instant,
     pub(super) applying: Option<(DeviceId, DecisionPurpose)>,
 }
@@ -176,45 +177,17 @@ pub enum PromptContentMappingError {
     InvalidContent,
 }
 
-const PROGRAM_NAME_SEPARATOR: &str = " · ";
-
 pub(super) fn map_content(
     report: &ProbeReport,
 ) -> Result<Arc<RequestContent>, PromptContentMappingError> {
     let observation = report.content();
-    // The caption followed by the first two naming Text labels names the
-    // program. A dialog that repeats its own title as a text element, or that
-    // draws its shield from a private-use icon font, names nothing: skipping
-    // those keeps the two places that carry the request and the program. A
-    // label that would push the name over its byte bound is left out whole;
-    // the labels themselves are never cut, and every label stays in details.
+    // Only a provider-authored LabeledBy relationship identifies a field. A
+    // caption is the neutral fallback; text order and path-looking values do
+    // not prove that a string is the program, publisher, command or location.
     let caption = replace_controls(observation.caption());
-    let mut program_name = caption.clone();
-    let mut considered = 0_u8;
-    for label in observation
-        .labels()
-        .iter()
-        .filter(|label| label.kind() == LabelKind::Text)
-    {
-        if considered == 2 {
-            break;
-        }
-        let part = replace_controls(label.text());
-        if !names_program(&part, &caption) {
-            continue;
-        }
-        considered += 1;
-        let separator = if program_name.is_empty() {
-            ""
-        } else {
-            PROGRAM_NAME_SEPARATOR
-        };
-        if program_name.len() + separator.len() + part.len() > MAX_PROGRAM_NAME_BYTES {
-            continue;
-        }
-        program_name.push_str(separator);
-        program_name.push_str(&part);
-    }
+    let program_name = provider_field(observation.labels(), ProviderField::Program)
+        .map(replace_controls)
+        .unwrap_or(caption);
     if program_name.is_empty() || program_name.len() > MAX_PROGRAM_NAME_BYTES {
         return Err(PromptContentMappingError::FieldTooLong);
     }
@@ -222,12 +195,22 @@ pub(super) fn map_content(
     let mapped_labels: Vec<String> = observation
         .labels()
         .iter()
-        .map(|label| replace_controls(label.text()))
+        .map(|label| {
+            let value = replace_controls(label.text());
+            if label.provider_label().is_empty() {
+                value
+            } else {
+                format!(
+                    "{}: {value}",
+                    replace_controls(label.provider_label()).trim_end_matches([':', '：'])
+                )
+            }
+        })
         .collect();
-    let path = mapped_labels
-        .iter()
-        .find(|text| is_path(text))
-        .map_or("", String::as_str);
+    let path = provider_field(observation.labels(), ProviderField::Location)
+        .filter(|value| is_path(value))
+        .map(replace_controls)
+        .unwrap_or_default();
     let details = mapped_labels.join("\n");
     if details.len() > MAX_DETAILS_BYTES {
         return Err(PromptContentMappingError::FieldTooLong);
@@ -274,7 +257,7 @@ pub(super) fn map_content(
             ));
         }
     }
-    RequestContent::new(&program_name, path, &details)
+    RequestContent::new(&program_name, &path, &details)
         .map(Arc::new)
         .map_err(|_| PromptContentMappingError::InvalidContent)
 }
@@ -292,20 +275,40 @@ fn replace_controls(value: &str) -> String {
         .collect()
 }
 
-/// Whether a text label can carry the program's identity at all. A label that
-/// repeats the window title says only what the title already said, and one
-/// drawn entirely from an icon font carries no readable name. Both appear in
-/// the current Windows consent dialog ahead of the program it is asking about.
-fn names_program(part: &str, caption: &str) -> bool {
-    let trimmed = part.trim();
-    !trimmed.is_empty()
-        && trimmed != caption.trim()
-        && trimmed.chars().any(|character| !is_private_use(character))
+#[derive(Clone, Copy)]
+enum ProviderField {
+    Program,
+    Location,
 }
 
-fn is_private_use(character: char) -> bool {
-    matches!(character,
-        '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}' | '\u{100000}'..='\u{10fffd}')
+fn provider_field(
+    labels: &[windows_prompt_probe::PromptLabel],
+    field: ProviderField,
+) -> Option<&str> {
+    let names: &[&str] = match field {
+        ProviderField::Program => &["Program name", "App name", "프로그램 이름", "앱 이름"],
+        ProviderField::Location => &[
+            "Program location",
+            "File location",
+            "프로그램 위치",
+            "파일 위치",
+        ],
+    };
+    let mut fields = labels.iter().filter(|label| {
+        label.kind() == LabelKind::Text
+            && names.iter().any(|name| {
+                label
+                    .provider_label()
+                    .trim()
+                    .trim_end_matches([':', '：'])
+                    .trim()
+                    .eq_ignore_ascii_case(name)
+            })
+    });
+    match (fields.next(), fields.next()) {
+        (Some(label), None) if !label.text().trim().is_empty() => Some(label.text()),
+        _ => None,
+    }
 }
 
 fn is_path(value: &str) -> bool {
@@ -361,7 +364,66 @@ mod tests {
     }
 
     #[test]
-    fn mapping_preserves_order_replaces_controls_and_selects_first_drive_or_unc_path() {
+    fn provider_relationships_distinguish_program_location_and_publisher() {
+        let base = report(
+            "Consent",
+            &[
+                ("C:\\Misleading\\program-name.exe", LabelKind::Text),
+                ("C:\\Actual\\program.exe", LabelKind::Text),
+                ("Example publisher", LabelKind::Text),
+                ("C:\\Actual\\program.exe --inert", LabelKind::Text),
+            ],
+        );
+        let labels = base
+            .content()
+            .labels()
+            .iter()
+            .cloned()
+            .zip([
+                "Program name:",
+                "Program location:",
+                "Publisher:",
+                "Command line:",
+            ])
+            .map(|(label, name)| label.with_provider_label(name.into()).unwrap())
+            .collect();
+        let observed =
+            PromptContentObservation::from_parts(vec![1], "Consent".into(), labels).unwrap();
+        let mapped =
+            map_content(&ProbeReport::from_observation(base.counts(), observed).unwrap()).unwrap();
+        assert_eq!(mapped.program_name(), "C:\\Misleading\\program-name.exe");
+        assert_eq!(mapped.path(), "C:\\Actual\\program.exe");
+        assert!(mapped.details().contains("Publisher: Example publisher"));
+        assert!(
+            mapped
+                .details()
+                .contains("Command line: C:\\Actual\\program.exe --inert")
+        );
+    }
+
+    #[test]
+    fn ambiguous_provider_program_names_use_neutral_caption() {
+        let base = report(
+            "Consent",
+            &[("first", LabelKind::Text), ("second", LabelKind::Text)],
+        );
+        let labels = base
+            .content()
+            .labels()
+            .iter()
+            .cloned()
+            .map(|label| label.with_provider_label("프로그램 이름:".into()).unwrap())
+            .collect();
+        let observed =
+            PromptContentObservation::from_parts(vec![1], "Consent".into(), labels).unwrap();
+        let mapped =
+            map_content(&ProbeReport::from_observation(base.counts(), observed).unwrap()).unwrap();
+        assert_eq!(mapped.program_name(), "Consent");
+        assert_eq!(mapped.path(), "");
+    }
+
+    #[test]
+    fn mapping_preserves_details_without_guessing_program_or_path_from_position() {
         let value = report(
             "Caption\t",
             &[
@@ -372,11 +434,8 @@ mod tests {
             ],
         );
         let mapped = map_content(&value).unwrap();
-        assert_eq!(
-            mapped.program_name(),
-            "Caption  · First text · C:\\later.exe"
-        );
-        assert_eq!(mapped.path(), "\\\\server\\tool.exe");
+        assert_eq!(mapped.program_name(), "Caption ");
+        assert_eq!(mapped.path(), "");
         assert_eq!(
             mapped.details(),
             "First text\n\\\\server\\tool.exe\nC:\\later.exe\nYes"
@@ -384,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_title_and_an_icon_glyph_never_take_the_naming_places() {
+    fn unlabelled_program_and_icon_remain_details_not_guessed_identity() {
         // The shape the current Windows consent dialog presents: its own title
         // as a text element, then the shield glyph, and only then the question
         // and the program. Both leading labels used to fill the two naming
@@ -402,10 +461,7 @@ mod tests {
             ],
         );
         let mapped = map_content(&value).unwrap();
-        assert_eq!(
-            mapped.program_name(),
-            "User Account Control · Do you want to allow this app? · uac-ci-request.exe"
-        );
+        assert_eq!(mapped.program_name(), "User Account Control");
         assert!(mapped.details().contains("uac-ci-request.exe"));
         assert_eq!(mapped.path(), ""); // A collapsed dialog shows no location.
     }
@@ -443,7 +499,7 @@ mod tests {
     fn absent_path_maps_to_an_empty_legal_path() {
         let value = report("caption", &[("publisher", LabelKind::Text)]);
         let mapped = map_content(&value).unwrap();
-        assert_eq!(mapped.program_name(), "caption · publisher");
+        assert_eq!(mapped.program_name(), "caption");
         assert_eq!(mapped.path(), "");
         assert_eq!(mapped.details(), "publisher");
     }
@@ -456,7 +512,7 @@ mod tests {
             &[(&long, LabelKind::Text), ("C:\\tool.exe", LabelKind::Text)],
         );
         let mapped = map_content(&value).unwrap();
-        assert_eq!(mapped.program_name(), "caption · C:\\tool.exe");
+        assert_eq!(mapped.program_name(), "caption");
         assert_eq!(mapped.details(), format!("{long}\nC:\\tool.exe"));
     }
 }

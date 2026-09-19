@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One clock-correlated, CI-marker-bound, enrolled-key DENIAL roundtrip.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use android_attestation::SyntheticRkp;
 use approval_protocol::{RequestBinding, RequestContent};
@@ -87,13 +87,93 @@ pub(super) async fn deny_next(
         "request_id":hex(binding.request_id().as_bytes()),
         "content_digest":hex(binding.content_digest().as_bytes())
     }))?;
-    // The statement comes ONLY from the verified matching Opened event. There
-    // is no command that supplies a binding, key selector or arbitrary bytes.
+    let first_binding = *binding;
+    let initial_span = binding
+        .expiry()
+        .as_nanos_since_epoch()
+        .checked_sub(issued_at.as_nanos_since_epoch())
+        .ok_or("native_original_lease_rejected")?;
+    if initial_span == 0 || initial_span > 110_000_000_000 {
+        return Err("native_original_lease_rejected");
+    }
+    let mut active_binding = *binding;
+    let mut active_issued = *issued_at;
+    let mut active_event = opened;
+    // Hold this genuine consent past the original 110-second authorization
+    // lease while continuing to service TLS and inspect every signed event.
+    // This is native lease-renewal evidence, not a longer authentication TTL.
+    let began_hold = Instant::now();
+    let hold_until = tokio::time::Instant::now() + Duration::from_secs(115);
+    let mut renewals = 0u32;
+    loop {
+        let wire = match tokio::time::timeout_at(hold_until, next_frame(&mut socket)).await {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
+        let event = VerifiedPcEvent::from_wire(&wire, fields.pc, &key)
+            .map_err(|_| "renewal_signature_rejected")?;
+        let PcEvent::Renewed {
+            previous_binding,
+            previous_issued_at,
+            binding,
+            issued_at,
+            content,
+        } = event.event()
+        else {
+            return Err(if matches!(event.event(), PcEvent::Resolved { .. }) {
+                "request_resolved_during_hold"
+            } else {
+                "expected_renewed_request"
+            });
+        };
+        if *previous_binding != active_binding
+            || *previous_issued_at != active_issued
+            || binding.request_id() != first_binding.request_id()
+            || binding.content_digest() != first_binding.content_digest()
+            || binding.pc() != first_binding.pc()
+            || binding.epoch() != first_binding.epoch()
+            || binding.session() != first_binding.session()
+            || binding.nonce() == active_binding.nonce()
+            || binding.expiry().as_nanos_since_epoch()
+                <= active_binding.expiry().as_nanos_since_epoch()
+            || issued_at.as_nanos_since_epoch() <= active_issued.as_nanos_since_epoch()
+        {
+            return Err("renewal_binding_mismatch");
+        }
+        correlation
+            .map_request(&event, nanos(base)?)
+            .map_err(|_| "renewal_not_fresh")?;
+        match_metadata(
+            content,
+            *binding,
+            expected_program_name,
+            expected_path,
+            expected_details_sha256,
+        )?;
+        active_binding = *binding;
+        active_issued = *issued_at;
+        active_event = event;
+        renewals = renewals
+            .checked_add(1)
+            .filter(|count| *count <= 4)
+            .ok_or("renewal_count_rejected")?;
+    }
+    let held_millis = began_hold.elapsed().as_millis();
+    if !(115000..=150000).contains(&held_millis) || renewals == 0 {
+        return Err("native_hold_renewal_missing");
+    }
+    emit(
+        json!({"state":"lease_renewed","identity":"software_ci_fixture",
+        "request_id":hex(active_binding.request_id().as_bytes()),
+        "content_digest":hex(active_binding.content_digest().as_bytes()),
+        "held_millis":held_millis,"renewals":renewals}),
+    )?;
+    // Sign ONLY the latest independently verified lease, never the old nonce.
     let denial = candidate
-        .sign_denial(*binding, fields.recipient_device)
+        .sign_denial(active_binding, fields.recipient_device)
         .map_err(|_| "denial_signing_failed")?;
     correlation
-        .map_request(&opened, nanos(base)?)
+        .map_request(&active_event, nanos(base)?)
         .map_err(|_| "request_expired_before_send")?;
     queue(&mut socket, &denial.to_wire())?;
     emit(json!({"state":"denial_queued","identity":"software_ci_fixture"}))?;
@@ -108,7 +188,7 @@ pub(super) async fn deny_next(
     else {
         return Err("expected_resolution");
     };
-    if resolved_binding != binding || resolved_issued != issued_at {
+    if *resolved_binding != active_binding || *resolved_issued != active_issued {
         return Err("resolution_binding_mismatch");
     }
     let outcome_name = match outcome {
@@ -121,8 +201,8 @@ pub(super) async fn deny_next(
     emit(json!({
         "state":"pc_resolution",
         "identity":"software_ci_fixture",
-        "request_id":hex(binding.request_id().as_bytes()),
-        "content_digest":hex(binding.content_digest().as_bytes()),
+        "request_id":hex(active_binding.request_id().as_bytes()),
+        "content_digest":hex(active_binding.content_digest().as_bytes()),
         "outcome":outcome_name
     }))?;
     if *outcome != RequestResolution::Denied {

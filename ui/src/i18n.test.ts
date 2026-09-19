@@ -34,5 +34,5 @@ it('changes authored copy while unknown text is not translated', () => {
   expect(tr('UAC 원격 승인')).toBe('UAC Remote Approval');
   expect(tr('unrecognized authored diagnostic')).toBe('unrecognized authored diagnostic');
   setPreviewLanguage('ko');
-  expect(tr('UAC 원격 승인')).toBe('UAC 원격 승인');
+  expect(tr('UAC 원격 승인')).toBe('UAC 원격 승인기');
 });

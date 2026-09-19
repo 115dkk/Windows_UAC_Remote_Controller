@@ -88,7 +88,9 @@ fn opened(id: u8, issued_ms: u64, expiry_ms: u64) -> VerifiedPcEvent {
 }
 fn binding(event: &VerifiedPcEvent) -> RequestBinding {
     match event.event() {
-        PcEvent::Opened { binding, .. } | PcEvent::Resolved { binding, .. } => *binding,
+        PcEvent::Opened { binding, .. }
+        | PcEvent::Renewed { binding, .. }
+        | PcEvent::Resolved { binding, .. } => *binding,
         PcEvent::Clock { .. } => panic!("request fixture required"),
     }
 }

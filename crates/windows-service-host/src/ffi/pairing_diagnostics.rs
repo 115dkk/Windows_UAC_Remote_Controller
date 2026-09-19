@@ -75,6 +75,7 @@ pub(crate) fn launch_failure(point: Point, error: PairingLaunchError) {
             emit(point, "client", "fixed-code", code);
         }
         PairingLaunchError::Protocol => emit(point, "launch", "protocol", 0),
+        PairingLaunchError::UsbUnavailable => emit(point, "launch", "usb-unavailable", 0),
         PairingLaunchError::InvalidPhase => emit(point, "launch", "phase", 0),
         PairingLaunchError::UserCancelled => emit(point, "launch", "user-cancelled", 0),
         PairingLaunchError::LaunchUnconfirmed => emit(point, "launch", "unconfirmed", 0),

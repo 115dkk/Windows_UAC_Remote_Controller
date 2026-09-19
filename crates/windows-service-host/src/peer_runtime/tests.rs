@@ -888,11 +888,8 @@ fn content_mapping_preserves_order_paths_and_allowed_newlines_and_enforces_byte_
         ],
     );
     let mapped = prompt::map_content(&report).unwrap();
-    assert_eq!(
-        mapped.program_name(),
-        "Caption  · First line\ncontinued · C:\\later.exe"
-    );
-    assert_eq!(mapped.path(), "\\\\server\\first.exe");
+    assert_eq!(mapped.program_name(), "Caption ");
+    assert_eq!(mapped.path(), "");
     assert_eq!(
         mapped.details(),
         "First line\ncontinued\n\\\\server\\first.exe\nC:\\later.exe\nYes "
@@ -1089,6 +1086,73 @@ fn gone_cancels_and_publishes_cancelled_and_late_signed_decision_has_no_live_tar
             thread::yield_now();
         }
         assert!(apply.calls.is_empty());
+    });
+}
+
+#[test]
+fn fresh_same_prompt_witness_renews_before_expiry_without_resolving_the_prompt() {
+    exercise(|session, _, _, _| {
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(44),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 12,
+                },
+                now,
+            )
+            .unwrap();
+        let original = session.prompt.live().unwrap().binding;
+        let original_deadline = session.prompt.live().unwrap().deadline;
+        let digest = session.prompt.live().unwrap().content_digest;
+        let early = now + Duration::from_secs(79);
+        session
+            .handle_watch_event(
+                crate::WatchEvent::StillPresent { target: target(44) },
+                early,
+            )
+            .unwrap();
+        assert_eq!(session.prompt.live().unwrap().binding, original);
+        let renew_at = now + Duration::from_secs(80);
+        session
+            .handle_watch_event(
+                crate::WatchEvent::StillPresent { target: target(45) },
+                renew_at,
+            )
+            .unwrap();
+        assert_eq!(session.prompt.live().unwrap().binding, original);
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::StillPresent { target: target(44) },
+                renew_at,
+            )
+            .unwrap();
+        assert_eq!(progress, prompt::PromptProgress::default());
+        let renewed = session.prompt.live().unwrap();
+        assert_ne!(renewed.binding, original);
+        assert_eq!(renewed.request_id, original.request_id());
+        assert_eq!(renewed.content_digest, digest);
+        assert!(renewed.deadline > original_deadline);
+        assert_eq!(session.engine.pending_count(), 1);
+        assert!(
+            session
+                .prompt_deadline_step(original_deadline)
+                .unwrap()
+                .is_none()
+        );
+        let progress = session
+            .handle_watch_event(
+                crate::WatchEvent::Gone {
+                    target: target(44),
+                    reason: crate::GoneReason::Closed,
+                },
+                original_deadline,
+            )
+            .unwrap();
+        assert_eq!(progress.result(), Some(prompt::PromptResult::Cancelled));
+        assert!(!session.prompt.is_live());
+        assert_eq!(session.engine.pending_count(), 0);
     });
 }
 

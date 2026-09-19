@@ -119,6 +119,7 @@ fn installed(state: ServiceState) -> ServiceObservation {
 
 fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> ManagementObservation {
     ManagementObservation {
+        activity: None,
         relay_configured,
         relay_status: RelayStatusView {
             mode: RelayMode::External,
@@ -139,6 +140,48 @@ fn management_device(id: &str, revision: u64, connected: bool) -> ManagementDevi
         route_present: true,
         connected,
     }
+}
+
+#[test]
+fn activity_is_available_only_after_a_successful_current_journal_observation() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut observation = management(Vec::new(), false);
+    observation.activity = Some(vec![controller_runtime::ActivityView {
+        id: "pc-1000-0".into(),
+        timestamp_millis: 1000,
+        kind: controller_runtime::ActivityKind::Denied,
+    }]);
+    owner.set_management(Ok(observation));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    let view = runtime.snapshot();
+    assert_eq!(view.data_availability.activity, Availability::Available);
+    assert_eq!(view.activity.len(), 1);
+    assert_eq!(
+        runtime.read_activity().unwrap()[0].kind,
+        controller_runtime::ActivityKind::Denied
+    );
+    assert!(!view.can_clear_activity);
+    owner.set_management(Ok(management(Vec::new(), false)));
+    let unavailable = runtime.snapshot();
+    assert_eq!(
+        unavailable.data_availability.activity,
+        Availability::Unavailable
+    );
+    assert!(unavailable.activity.is_empty());
+    assert!(runtime.read_activity().is_err());
+    let mut empty = management(Vec::new(), false);
+    empty.activity = Some(Vec::new());
+    owner.set_management(Ok(empty));
+    assert_eq!(
+        runtime.snapshot().data_availability.activity,
+        Availability::Available
+    );
+    owner.set_observation(Ok(installed(ServiceState::Stopped)));
+    assert_eq!(
+        runtime.snapshot().data_availability.activity,
+        Availability::Unavailable
+    );
 }
 
 fn windows_runtime(directory: &tempfile::TempDir, owner: SyntheticOwner) -> AppRuntime {
@@ -461,6 +504,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         RelayState::Unknown
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        activity: None,
         relay_configured: false,
         relay_status: RelayStatusView {
             mode: RelayMode::Embedded,
@@ -475,6 +519,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         RelayState::WaitingNetwork
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        activity: None,
         relay_configured: true,
         relay_status: RelayStatusView {
             mode: RelayMode::Embedded,

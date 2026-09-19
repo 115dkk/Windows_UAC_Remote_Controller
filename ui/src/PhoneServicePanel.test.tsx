@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, NotificationPolicy, PhoneServiceView, ServiceAction } from './contracts';
-import { ko, phoneServiceStateText, serviceActionText } from './messages.ko';
+import { ko, phoneServiceStateText, serviceActionText } from './messages';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 import { useController } from './useController';
 
@@ -107,7 +107,7 @@ describe('Android service controls from actual snapshot capabilities', () => {
   it('labels local activation without claiming that phone requests or a PC connection are ready', async () => {
     render(<App bridge={bridgeFor(qaCase('phone-service-ready').snapshot)} initialPage="schedule" />);
     const panel = await screen.findByRole('region', { name: '휴대폰 승인' });
-    expect(within(panel).getByText('휴대폰 승인 켜짐')).toBeInTheDocument();
+    expect(within(panel).getByText('서비스 실행 중')).toBeInTheDocument();
     expect(within(panel).getByText(ko.phoneServiceReadyBody)).toBeInTheDocument();
     expect(within(panel).getByText('휴대폰을 켤 때 자동 실행')).toBeInTheDocument();
     expect(panel).not.toHaveTextContent(/서비스|PC 요청을 휴대폰으로 보낼 준비가 됐어요/u);

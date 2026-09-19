@@ -11,7 +11,9 @@ use approval_protocol::DeviceId;
 
 pub const MAX_MANAGEMENT_FRAME: usize = 16 * 1024;
 const MAGIC: &[u8; 4] = b"UCMG";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
+pub const MAX_ACTIVITY_RECORDS: usize = 64;
+const MAX_ACTIVITY_JSON: usize = 12 * 1024;
 const MAX_IDENTITY_PROVIDER: usize = 256;
 const MAX_REFUSAL: usize = 512;
 const MAX_DIGESTS: usize = 32;
@@ -72,6 +74,9 @@ pub enum ManagementResponse {
         identity_provider: String,
         android_signer_digests: Vec<[u8; 32]>,
         devices: Vec<DeviceRow>,
+        /// Recent records from the service's exclusive journal owner. None is
+        /// unavailable, distinct from a successfully read empty journal.
+        activity: Option<Vec<activity_journal::ActivityRecord>>,
     },
     Done,
     Refused(String),
@@ -143,6 +148,7 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
             identity_provider,
             android_signer_digests,
             devices,
+            activity,
         } => {
             if identity_provider.len() > MAX_IDENTITY_PROVIDER
                 || android_signer_digests.len() > MAX_DIGESTS
@@ -194,6 +200,21 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
                         writer.u64(value);
                     }
                     None => writer.byte(0),
+                }
+            }
+            match activity {
+                None => writer.byte(0),
+                Some(records) => {
+                    if records.len() > MAX_ACTIVITY_RECORDS {
+                        return Err(ManagementCodecError::Oversized);
+                    }
+                    let json = serde_json::to_string(records)
+                        .map_err(|_| ManagementCodecError::Malformed)?;
+                    if json.len() > MAX_ACTIVITY_JSON {
+                        return Err(ManagementCodecError::Oversized);
+                    }
+                    writer.byte(1);
+                    writer.text(&json)?;
                 }
             }
         }
@@ -261,6 +282,19 @@ pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCod
                     enrolled_unix_secs,
                 });
             }
+            let activity = match reader.byte()? {
+                0 => None,
+                1 => {
+                    let json = reader.text(MAX_ACTIVITY_JSON)?;
+                    let records: Vec<activity_journal::ActivityRecord> =
+                        serde_json::from_str(&json).map_err(|_| ManagementCodecError::Malformed)?;
+                    if records.len() > MAX_ACTIVITY_RECORDS {
+                        return Err(ManagementCodecError::Malformed);
+                    }
+                    Some(records)
+                }
+                _ => return Err(ManagementCodecError::Malformed),
+            };
             ManagementResponse::Snapshot {
                 relay,
                 embedded_relay,
@@ -268,6 +302,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCod
                 identity_provider,
                 android_signer_digests,
                 devices,
+                activity,
             }
         }
         0x82 => ManagementResponse::Done,
@@ -455,6 +490,41 @@ mod tests {
     }
 
     #[test]
+    fn journal_projection_round_trips_absence_empty_and_bounded_records() {
+        let record: activity_journal::ActivityRecord = serde_json::from_value(serde_json::json!({
+            "timestamp_unix_ms": 1000,
+            "event": {"category":"request","outcome":{"state":"windows_applied","detail":{"decision":"deny"}}}
+        })).unwrap();
+        let snapshot = |activity| ManagementResponse::Snapshot {
+            relay: None,
+            embedded_relay: false,
+            relay_listening: false,
+            identity_provider: "fixture".into(),
+            android_signer_digests: vec![],
+            devices: vec![],
+            activity,
+        };
+        for records in [None, Some(vec![]), Some(vec![record; MAX_ACTIVITY_RECORDS])] {
+            let response = snapshot(records);
+            let wire = encode_response(&response).unwrap();
+            assert_eq!(decode_response(&wire), Ok(response));
+            for end in 0..wire.len() {
+                assert!(decode_response(&wire[..end]).is_err());
+            }
+        }
+        assert_eq!(
+            encode_response(&snapshot(Some(vec![record; MAX_ACTIVITY_RECORDS + 1]))),
+            Err(ManagementCodecError::Oversized)
+        );
+        let mut invalid = encode_response(&snapshot(None)).unwrap();
+        *invalid.last_mut().unwrap() = 2;
+        assert_eq!(
+            decode_response(&invalid),
+            Err(ManagementCodecError::Malformed)
+        );
+    }
+
+    #[test]
     fn typed_device_removal_validates_identity_and_uses_current_codec() {
         assert_eq!(
             ManagementRequest::remove_device([0; 16]),
@@ -494,6 +564,7 @@ mod tests {
             ManagementResponse::Done,
             ManagementResponse::Refused("요청을 처리할 수 없습니다.".into()),
             ManagementResponse::Snapshot {
+                activity: None,
                 relay: Some(address),
                 embedded_relay: false,
                 relay_listening: false,
@@ -516,8 +587,9 @@ mod tests {
     }
 
     #[test]
-    fn relay_telemetry_v2_has_fixed_boolean_encoding_and_rejects_v1() {
+    fn relay_telemetry_v3_has_fixed_boolean_encoding_and_rejects_v1() {
         let response = ManagementResponse::Snapshot {
+            activity: None,
             relay: None,
             embedded_relay: true,
             relay_listening: false,
@@ -528,7 +600,7 @@ mod tests {
         let wire = encode_response(&response).unwrap();
         assert_eq!(
             wire,
-            b"UCMG\x02\x81\x00\x01\x00\x00\x07fixture\x00\x00\x00\x00"
+            b"UCMG\x03\x81\x00\x01\x00\x00\x07fixture\x00\x00\x00\x00\x00"
         );
         assert_eq!(decode_response(&wire), Ok(response));
         for offset in [7, 8] {
@@ -556,6 +628,7 @@ mod tests {
             for embedded_relay in [false, true] {
                 for relay_listening in [false, true] {
                     let response = ManagementResponse::Snapshot {
+                        activity: None,
                         relay,
                         embedded_relay,
                         relay_listening,
@@ -576,6 +649,7 @@ mod tests {
                             Err(ManagementCodecError::Malformed)
                         );
                         let mut wire = encode_response(&ManagementResponse::Snapshot {
+                            activity: None,
                             relay,
                             embedded_relay: false,
                             relay_listening: false,
@@ -629,6 +703,7 @@ mod tests {
             enrolled_unix_secs: None,
         };
         let response = ManagementResponse::Snapshot {
+            activity: None,
             relay: None,
             embedded_relay: false,
             relay_listening: false,
@@ -641,6 +716,7 @@ mod tests {
             Err(ManagementCodecError::Malformed)
         );
         let mut duplicate_digest_wire = encode_response(&ManagementResponse::Snapshot {
+            activity: None,
             relay: None,
             embedded_relay: false,
             relay_listening: false,
@@ -658,6 +734,7 @@ mod tests {
         );
         assert_eq!(
             encode_response(&ManagementResponse::Snapshot {
+                activity: None,
                 relay: None,
                 embedded_relay: false,
                 relay_listening: false,
@@ -679,6 +756,7 @@ mod tests {
         assert!(encode_response(&ManagementResponse::Refused("bad\nreason".into())).is_err());
         assert!(
             encode_response(&ManagementResponse::Snapshot {
+                activity: None,
                 relay: Some("127.0.0.1:0".parse().unwrap()),
                 embedded_relay: false,
                 relay_listening: false,
@@ -690,6 +768,7 @@ mod tests {
         );
         assert!(
             encode_response(&ManagementResponse::Snapshot {
+                activity: None,
                 relay: None,
                 embedded_relay: false,
                 relay_listening: false,
@@ -701,6 +780,7 @@ mod tests {
         );
         assert!(
             encode_response(&ManagementResponse::Snapshot {
+                activity: None,
                 relay: None,
                 embedded_relay: false,
                 relay_listening: false,
@@ -712,6 +792,7 @@ mod tests {
         );
         assert!(
             encode_response(&ManagementResponse::Snapshot {
+                activity: None,
                 relay: None,
                 embedded_relay: false,
                 relay_listening: false,

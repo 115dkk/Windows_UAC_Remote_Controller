@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge } from './contracts';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 
 function deferred<T>() {

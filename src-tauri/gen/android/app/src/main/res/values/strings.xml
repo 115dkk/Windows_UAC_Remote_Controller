@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 <resources>
+    <string name="pairing_usb_title">Connect PC by USB</string>
+    <string name="pairing_usb_waiting">Connect the cable and choose USB on the PC. Allow access when Android asks. Waiting up to 30 seconds.</string>
+    <string name="pairing_usb_unavailable">Could not read the USB invitation. Check the cable and USB permission, or connect by QR code.</string>
     <string name="app_name">UAC Remote Approval</string>
     <string name="controller_service_channel">Phone approval status</string>
     <string name="controller_service_channel_description">Shows whether phone approval is on and the app is ready.</string>

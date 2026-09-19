@@ -108,6 +108,10 @@ pub enum WatchEvent {
         target: TargetIdentity,
         outcome: ApplyOutcome,
     },
+    /// Fresh provider recapture of the same retained native identity/content.
+    StillPresent {
+        target: TargetIdentity,
+    },
     HelperRestarted {
         attempt: u32,
     },
@@ -116,6 +120,7 @@ pub enum WatchEvent {
 impl fmt::Debug for WatchEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StillPresent { .. } => formatter.write_str("StillPresent([redacted])"),
             Self::Appeared {
                 report, session, ..
             } => formatter

@@ -372,7 +372,7 @@ impl AssociatedPcSocket {
                     }
                     Ok(update)
                 }
-                PcEvent::Opened { .. } => owner
+                PcEvent::Opened { .. } | PcEvent::Renewed { .. } => owner
                     .receive_opened_from(
                         &message.verified,
                         generation,

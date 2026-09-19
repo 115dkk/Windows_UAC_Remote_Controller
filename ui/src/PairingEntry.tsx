@@ -5,10 +5,12 @@ import type { AppSnapshot } from './contracts';
 import { Icon } from './icons';
 import { ko } from './messages';
 import { hasNoPairedPc } from './phoneConnection';
+import { tr } from './i18n';
 
-export function PairingEntry({ snapshot, disabled, onOpenScanner, scannerButtonRef }: {
+export function PairingEntry({ snapshot, disabled, onOpenScanner, onOpenUsb, scannerButtonRef }: {
   snapshot: AppSnapshot; disabled: boolean; onOpenScanner: () => void;
   scannerButtonRef?: Ref<HTMLButtonElement>;
+  onOpenUsb?: () => void;
 }) {
   const heading = useId();
   const description = useId();
@@ -20,6 +22,7 @@ export function PairingEntry({ snapshot, disabled, onOpenScanner, scannerButtonR
     <button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button primary"
       disabled={disabled || !canScan} aria-describedby={`${description}${canScan ? '' : ` ${unavailable}`}`}
       onClick={onOpenScanner}>{ko.openPairingScanner}</button>
+    {onOpenUsb && <button type="button" className="button secondary" disabled={disabled || !canScan} onClick={onOpenUsb}>{tr('USB로 연결')}</button>}
     {!canScan && <p id={unavailable} className="supporting-text">{snapshot.phoneService?.state === 'unavailable' ? ko.policyRestartOwner : ko.pairingScannerNotReady}</p>}
   </section>;
 }

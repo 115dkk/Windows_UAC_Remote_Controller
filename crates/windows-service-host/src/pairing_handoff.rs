@@ -27,6 +27,11 @@ pub(crate) enum Frame {
         pid: u32,
         created: u64,
     },
+    HelperLaunchedUsb {
+        id: PendingElevationId,
+        pid: u32,
+        created: u64,
+    },
     Hello(PendingElevationId),
     Bound(PendingElevationId),
     Close(PendingElevationId),
@@ -44,6 +49,14 @@ pub(crate) enum Frame {
     },
     RendererBound(RendererRequest),
     RendererInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    RendererUsbInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    StarterUsbInvitation {
         invocation: RendererInvocation,
         text: InvitationText,
     },
@@ -169,6 +182,7 @@ impl fmt::Debug for Frame {
         f.write_str(match self {
             Self::Offer(_) => "Offer(redacted)",
             Self::HelperLaunched { .. } => "HelperLaunched(redacted)",
+            Self::HelperLaunchedUsb { .. } => "HelperLaunchedUsb(redacted)",
             Self::Hello(_) => "Hello(redacted)",
             Self::Bound(_) => "Bound(redacted)",
             Self::Close(_) => "Close(redacted)",
@@ -180,6 +194,8 @@ impl fmt::Debug for Frame {
             Self::RendererObjects { .. } => "RendererObjects(redacted)",
             Self::RendererBound(_) => "RendererBound(redacted)",
             Self::RendererInvitation { .. } => "RendererInvitation(redacted)",
+            Self::RendererUsbInvitation { .. } => "RendererUsbInvitation(redacted)",
+            Self::StarterUsbInvitation { .. } => "StarterUsbInvitation(redacted)",
             Self::RendererComparison { .. } => "RendererComparison(redacted)",
             Self::RendererDecision { .. } => "RendererDecision(redacted)",
             Self::RendererOutcome { .. } => "RendererOutcome(redacted)",
@@ -278,6 +294,7 @@ impl ServiceHandoff {
         }
         match (side, frame) {
             (ServiceSide::Starter, Frame::HelperLaunched { id, pid, created })
+            | (ServiceSide::Starter, Frame::HelperLaunchedUsb { id, pid, created })
                 if id == self.id
                     && self.offered
                     && self.launched.is_none()
@@ -381,6 +398,9 @@ impl Frame {
             Self::RendererComparison { .. } => 14,
             Self::RendererDecision { .. } => 15,
             Self::RendererOutcome { .. } => 16,
+            Self::HelperLaunchedUsb { .. } => 17,
+            Self::RendererUsbInvitation { .. } => 18,
+            Self::StarterUsbInvitation { .. } => 19,
         }
     }
     fn id(&self) -> PendingElevationId {
@@ -390,7 +410,8 @@ impl Frame {
             | Self::Bound(id)
             | Self::Close(id)
             | Self::CloseAck(id)
-            | Self::HelperLaunched { id, .. } => *id,
+            | Self::HelperLaunched { id, .. }
+            | Self::HelperLaunchedUsb { id, .. } => *id,
             Self::PrepareRenderer(value)
             | Self::RendererRegistered(value)
             | Self::RendererBound(value)
@@ -400,6 +421,12 @@ impl Frame {
                 invocation: value, ..
             }
             | Self::RendererInvitation {
+                invocation: value, ..
+            }
+            | Self::RendererUsbInvitation {
+                invocation: value, ..
+            }
+            | Self::StarterUsbInvitation {
                 invocation: value, ..
             }
             | Self::RendererComparison {
@@ -418,7 +445,9 @@ impl Frame {
         bytes.extend_from_slice(HEADER);
         bytes.extend_from_slice(&[VERSION, self.kind(), 0, 0]);
         bytes.extend_from_slice(&self.id().bytes());
-        if let Self::HelperLaunched { pid, created, .. } = self {
+        if let Self::HelperLaunched { pid, created, .. }
+        | Self::HelperLaunchedUsb { pid, created, .. } = self
+        {
             if *pid == 0 || *created == 0 {
                 return Err(HandoffError::Frame);
             }
@@ -458,7 +487,9 @@ impl Frame {
                 bytes.extend_from_slice(&objects.station.to_le_bytes());
                 bytes.extend_from_slice(&objects.window.to_le_bytes());
             }
-            Self::RendererInvitation { invocation, text } => {
+            Self::RendererInvitation { invocation, text }
+            | Self::RendererUsbInvitation { invocation, text }
+            | Self::StarterUsbInvitation { invocation, text } => {
                 PairingInvitation::from_qr_text(text.as_str()).map_err(|_| HandoffError::Frame)?;
                 bytes.extend_from_slice(&invocation.display().bytes());
                 let length = u16::try_from(text.as_str().len()).map_err(|_| HandoffError::Frame)?;
@@ -510,7 +541,7 @@ impl Frame {
             bytes[8..40].try_into().map_err(|_| HandoffError::Frame)?,
         )
         .map_err(|_| HandoffError::Frame)?;
-        if (7..=16).contains(&bytes[5]) {
+        if (7..=16).contains(&bytes[5]) || matches!(bytes[5], 18 | 19) {
             if bytes.len() < 72 {
                 return Err(HandoffError::Frame);
             }
@@ -576,7 +607,7 @@ impl Frame {
                         _ => Err(HandoffError::Frame),
                     };
                 }
-                (13, INVITATION_MIN_FRAME | INVITATION_MAX_FRAME) => {
+                (13 | 18 | 19, INVITATION_MIN_FRAME | INVITATION_MAX_FRAME) => {
                     let length = usize::from(u16::from_be_bytes(
                         bytes[72..74].try_into().map_err(|_| HandoffError::Frame)?,
                     ));
@@ -590,9 +621,11 @@ impl Frame {
                         return Err(HandoffError::Frame);
                     }
                     let text = str::from_utf8(&bytes[74..]).map_err(|_| HandoffError::Frame)?;
-                    return Ok(Self::RendererInvitation {
-                        invocation,
-                        text: InvitationText::new(text.to_owned())?,
+                    let text = InvitationText::new(text.to_owned())?;
+                    return Ok(match bytes[5] {
+                        18 => Self::RendererUsbInvitation { invocation, text },
+                        19 => Self::StarterUsbInvitation { invocation, text },
+                        _ => Self::RendererInvitation { invocation, text },
                     });
                 }
                 (14, COMPARISON_FRAME) => {
@@ -628,7 +661,7 @@ impl Frame {
             (4, SHORT_FRAME) => Ok(Self::Bound(id)),
             (5, SHORT_FRAME) => Ok(Self::Close(id)),
             (6, SHORT_FRAME) => Ok(Self::CloseAck(id)),
-            (2, LAUNCH_FRAME) => {
+            (2 | 17, LAUNCH_FRAME) => {
                 let pid =
                     u32::from_le_bytes(bytes[40..44].try_into().map_err(|_| HandoffError::Frame)?);
                 let created =
@@ -636,7 +669,11 @@ impl Frame {
                 if pid == 0 || created == 0 {
                     return Err(HandoffError::Frame);
                 }
-                Ok(Self::HelperLaunched { id, pid, created })
+                Ok(if bytes[5] == 17 {
+                    Self::HelperLaunchedUsb { id, pid, created }
+                } else {
+                    Self::HelperLaunched { id, pid, created }
+                })
             }
             _ => Err(HandoffError::Frame),
         }
@@ -658,7 +695,7 @@ enum Phase {
     RendererWriting,
     RendererAwaitRegistered,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Next {
     Launch(PendingElevationId),
     Read,
@@ -667,6 +704,7 @@ pub(crate) enum Next {
     PeerClosed,
     PrepareRenderer(RendererRequest),
     ResumeRenderer(RendererRequest),
+    UsbInvitation(InvitationText),
 }
 
 /// Private phase state, driven only by the native owner's actual completions.
@@ -677,6 +715,8 @@ pub(crate) struct Handoff {
     failure: Option<HandoffError>,
     helper: bool,
     renderer: Option<RendererRequest>,
+    usb: bool,
+    usb_received: bool,
 }
 impl Handoff {
     /// Only the fixed renderer FFI owner calls this after decoding an exact
@@ -689,6 +729,8 @@ impl Handoff {
             failure: None,
             helper: false,
             renderer: None,
+            usb: false,
+            usb_received: false,
         }
     }
     pub(crate) fn starter() -> Self {
@@ -698,6 +740,8 @@ impl Handoff {
             failure: None,
             helper: false,
             renderer: None,
+            usb: false,
+            usb_received: false,
         }
     }
     pub(crate) fn helper(id: PendingElevationId) -> (Self, Frame) {
@@ -708,6 +752,8 @@ impl Handoff {
                 failure: None,
                 helper: true,
                 renderer: None,
+                usb: false,
+                usb_received: false,
             },
             Frame::Hello(id),
         )
@@ -716,6 +762,13 @@ impl Handoff {
         let first = *self.failure.get_or_insert(error);
         self.phase = Phase::Failed;
         Err(first)
+    }
+    pub(crate) fn enable_usb(&mut self) -> Result<(), HandoffError> {
+        if self.phase != Phase::Offer || self.helper || self.usb {
+            return self.reject(HandoffError::Phase);
+        }
+        self.usb = true;
+        Ok(())
     }
     pub(crate) fn receive(&mut self, frame: Frame) -> Result<Next, HandoffError> {
         if let Some(error) = self.failure {
@@ -730,6 +783,15 @@ impl Handoff {
             (Phase::AwaitBound, Frame::Bound(id)) if self.id == Some(id) => {
                 self.phase = Phase::Bound;
                 Ok(Next::BoundLive)
+            }
+            (Phase::Bound, Frame::StarterUsbInvitation { invocation, text })
+                if !self.helper
+                    && self.usb
+                    && !self.usb_received
+                    && self.id == Some(invocation.pending()) =>
+            {
+                self.usb_received = true;
+                Ok(Next::UsbInvitation(text))
             }
             (Phase::Bound, Frame::PrepareRenderer(request))
                 if self.helper
@@ -768,7 +830,11 @@ impl Handoff {
             return self.reject(HandoffError::Phase);
         };
         self.phase = Phase::Sending;
-        Ok(Frame::HelperLaunched { id, pid, created })
+        Ok(if self.usb {
+            Frame::HelperLaunchedUsb { id, pid, created }
+        } else {
+            Frame::HelperLaunched { id, pid, created }
+        })
     }
     pub(crate) fn written(&mut self) -> Result<Next, HandoffError> {
         if self.phase == Phase::RendererWriting && self.failure.is_none() {
@@ -871,6 +937,89 @@ mod tests {
         helper.written().unwrap();
         helper.receive(Frame::Bound(id(1))).unwrap();
         helper
+    }
+
+    #[test]
+    fn usb_invitation_is_once_only_for_the_explicit_original_medium_starter() {
+        fn bound(usb: bool) -> Handoff {
+            let mut starter = Handoff::starter();
+            if usb {
+                starter.enable_usb().unwrap();
+            }
+            starter.receive(Frame::Offer(id(1))).unwrap();
+            let launch = starter.launched(42, 99).unwrap();
+            assert_eq!(matches!(launch, Frame::HelperLaunchedUsb { .. }), usb);
+            assert_eq!(Frame::decode(&launch.encode().unwrap()), Ok(launch));
+            starter.written().unwrap();
+            starter.receive(Frame::Bound(id(1))).unwrap();
+            starter
+        }
+        let invitation = Frame::StarterUsbInvitation {
+            invocation: renderer_request().invocation,
+            text: invitation_text(),
+        };
+        let mut starter = bound(true);
+        assert!(matches!(
+            starter.receive(invitation.clone()),
+            Ok(Next::UsbInvitation(_))
+        ));
+        assert!(starter.receive(invitation.clone()).is_err());
+        assert!(bound(false).receive(invitation.clone()).is_err());
+        assert!(bound_helper().receive(invitation.clone()).is_err());
+        assert!(Handoff::starter().receive(invitation).is_err());
+        let crossed = Frame::StarterUsbInvitation {
+            invocation: RendererInvocation::new(id(3), id(4)).unwrap(),
+            text: invitation_text(),
+        };
+        assert!(bound(true).receive(crossed).is_err());
+        assert!(bound(true).enable_usb().is_err());
+    }
+
+    #[test]
+    fn usb_handoff_and_bootstrap_frame_are_exact_and_cannot_supply_a_decision() {
+        let text = invitation_text();
+        let invitation = PairingInvitation::from_qr_text(text.as_str()).unwrap();
+        let frame = crate::usb_bootstrap_frame::encode(&invitation).unwrap();
+        assert_eq!(&frame[..9], b"UACUSB\x01\x01\x59");
+        assert_eq!(
+            crate::usb_bootstrap_frame::decode(&frame)
+                .unwrap()
+                .to_wire(),
+            invitation.to_wire()
+        );
+        for cut in 0..frame.len() {
+            assert!(crate::usb_bootstrap_frame::decode(&frame[..cut]).is_err());
+        }
+        let mut extra = frame.clone();
+        extra.push(0);
+        assert!(crate::usb_bootstrap_frame::decode(&extra).is_err());
+        for index in 0..9 {
+            let mut corrupt = frame.clone();
+            corrupt[index] ^= 0xff;
+            assert!(crate::usb_bootstrap_frame::decode(&corrupt).is_err());
+        }
+        let mut corrupt = frame;
+        corrupt[9..].fill(0);
+        assert!(crate::usb_bootstrap_frame::decode(&corrupt).is_err());
+        for handoff in [
+            Frame::RendererUsbInvitation {
+                invocation: renderer_request().invocation,
+                text: text.clone(),
+            },
+            Frame::StarterUsbInvitation {
+                invocation: renderer_request().invocation,
+                text,
+            },
+        ] {
+            let bytes = handoff.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(handoff));
+            for cut in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..cut]).is_err());
+            }
+            let mut wrong = bytes;
+            wrong[5] = 15;
+            assert!(Frame::decode(&wrong).is_err());
+        }
     }
     #[test]
     fn renderer_display_frames_roundtrip_and_reject_bad_payloads() {

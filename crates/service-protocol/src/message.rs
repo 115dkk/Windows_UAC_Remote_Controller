@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::codec;
 
 pub const MAX_REQUEST_LIFETIME_NANOS: u64 = 120_000_000_000;
-pub(crate) const MAX_BODY_BYTES: usize = 3 + 180 + 8 + 12 + MAX_REQUEST_CONTENT_BYTES;
+pub(crate) const MAX_BODY_BYTES: usize = 3 + 2 * (180 + 8) + 12 + MAX_REQUEST_CONTENT_BYTES;
 pub const MAX_PC_EVENT_BYTES: usize = 8 + 4 + MAX_BODY_BYTES + 2 + MAX_DER_SIGNATURE_BYTES;
 pub(crate) const DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pc-event/v1\0";
 pub(crate) const MAGIC: &[u8; 8] = b"WUACSRV\0";
@@ -71,6 +71,16 @@ pub enum PcEvent {
         issued_at: ServiceTick,
         content: Arc<RequestContent>,
     },
+    /// Atomic replacement of one bounded approval lease after the privileged
+    /// watcher freshly verified the same native prompt. Neither binding mutates;
+    /// every decision/authentication for the former lease becomes stale.
+    Renewed {
+        previous_binding: RequestBinding,
+        previous_issued_at: ServiceTick,
+        binding: RequestBinding,
+        issued_at: ServiceTick,
+        content: Arc<RequestContent>,
+    },
     Resolved {
         binding: RequestBinding,
         /// Original REQUEST issuance, never the time of this resolution. Keep
@@ -89,18 +99,50 @@ pub enum PcEvent {
 impl PcEvent {
     pub const fn pc(&self) -> PcIdentity {
         match self {
-            Self::Opened { binding, .. } | Self::Resolved { binding, .. } => binding.pc(),
+            Self::Opened { binding, .. }
+            | Self::Renewed { binding, .. }
+            | Self::Resolved { binding, .. } => binding.pc(),
             Self::Clock { pc, .. } => *pc,
         }
     }
     pub const fn epoch(&self) -> BootEpoch {
         match self {
-            Self::Opened { binding, .. } | Self::Resolved { binding, .. } => binding.epoch(),
+            Self::Opened { binding, .. }
+            | Self::Renewed { binding, .. }
+            | Self::Resolved { binding, .. } => binding.epoch(),
             Self::Clock { epoch, .. } => *epoch,
         }
     }
     fn validate(&self) -> Result<(), PcEventError> {
         match self {
+            Self::Renewed {
+                previous_binding,
+                previous_issued_at,
+                binding,
+                issued_at,
+                content,
+            } => {
+                validate_window(*previous_binding, *previous_issued_at)?;
+                validate_window(*binding, *issued_at)?;
+                if previous_binding.pc() != binding.pc()
+                    || previous_binding.epoch() != binding.epoch()
+                    || previous_binding.session() != binding.session()
+                    || previous_binding.content_digest() != binding.content_digest()
+                    || previous_binding.request_id() != binding.request_id()
+                    || previous_binding.nonce() == binding.nonce()
+                    || issued_at.as_nanos_since_epoch() <= previous_issued_at.as_nanos_since_epoch()
+                    || issued_at.as_nanos_since_epoch()
+                        >= previous_binding.expiry().as_nanos_since_epoch()
+                    || binding.expiry().as_nanos_since_epoch()
+                        <= previous_binding.expiry().as_nanos_since_epoch()
+                {
+                    return Err(PcEventError::InvalidFields);
+                }
+                if binding.content_digest() != content.digest() {
+                    return Err(PcEventError::ContentMismatch);
+                }
+                Ok(())
+            }
             Self::Opened {
                 binding,
                 issued_at,
@@ -136,6 +178,7 @@ impl fmt::Debug for PcEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Opened { .. } => "PcEvent::Opened([redacted])",
+            Self::Renewed { .. } => "PcEvent::Renewed([redacted])",
             Self::Resolved { .. } => "PcEvent::Resolved([redacted])",
             Self::Clock { .. } => "PcEvent::Clock([redacted])",
         })

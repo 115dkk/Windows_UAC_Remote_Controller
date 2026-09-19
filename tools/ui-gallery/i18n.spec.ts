@@ -80,7 +80,7 @@ for (const selected of i18nDesktopCases) {
     await gallery.open(selected, locale);
     await documentLocale(page, locale);
     await recordLocalizedFont(page, info, locale);
-    const pairing = page.getByRole('button', { name: galleryText(locale, 'UAC 원격 승인'), exact: true });
+    const pairing = page.getByRole('button', { name: galleryText(locale, 'QR 코드 보기'), exact: true });
     await expect(pairing).toBeEnabled();
     await readable(pairing);
     await gallery.capture('localized-desktop', `CLIENT/SYNTHETIC · ${locale} desktop pairing entry and typography`);

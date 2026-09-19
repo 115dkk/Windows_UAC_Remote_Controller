@@ -196,6 +196,27 @@ pub(crate) fn open_pairing_scanner(
     }
 }
 
+pub(crate) fn open_pairing_usb(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<(), AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let reply: ScannerLaunchReply = app
+            .state::<DeviceState>()
+            .0
+            .run_mobile_plugin_from_origin(&origin.native, "openPairingUsb", ())
+            .map_err(|_| pairing_scanner_issue())?;
+        reply.opened()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, origin);
+        Err(pairing_scanner_issue())
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]

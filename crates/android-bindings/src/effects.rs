@@ -95,10 +95,26 @@ impl MobileController {
         let counts = owner
             .counts()
             .map_err(|_| BridgeError::StorageUnavailable)?;
-        let configured = owner
+        let associations = owner
             .peer_associations()
-            .map_err(|_| BridgeError::StorageUnavailable)?
-            .len();
+            .map_err(|_| BridgeError::StorageUnavailable)?;
+        let peers: Vec<crate::NativePairedPc> = associations
+            .entries()
+            .map(|association| {
+                use std::fmt::Write;
+                let reference = association.reference();
+                let mut id = String::with_capacity(64);
+                for byte in reference.pc().as_bytes() {
+                    let _ = write!(id, "{byte:02x}");
+                }
+                crate::NativePairedPc {
+                    id,
+                    revision: association.descriptor().pc_registry_revision(),
+                    route_present: association.descriptor().relay().is_some(),
+                    connected: self.intake.has_connected_peer(reference),
+                }
+            })
+            .collect();
         let projections = self.projections.lock().map_err(|_| BridgeError::Closed)?;
         let state = if !projections.initialized {
             NativeRequestCatalogState::Unavailable
@@ -110,15 +126,18 @@ impl MobileController {
         } else {
             NativeRequestCatalogState::Ready
         };
-        let (attached_peers, connected_peers) = self.intake.counts();
+        let (attached_peers, _) = self.intake.counts();
+        let connected_peers = u8::try_from(peers.iter().filter(|peer| peer.connected).count())
+            .map_err(|_| BridgeError::OwnerFaulted)?;
         Ok(NativeRequestCatalogStatus {
             state,
             revision: projections.revision,
             request_count: u8::try_from(projections.count())
                 .map_err(|_| BridgeError::OwnerFaulted)?,
-            configured_peers: u8::try_from(configured).map_err(|_| BridgeError::OwnerFaulted)?,
+            configured_peers: u8::try_from(peers.len()).map_err(|_| BridgeError::OwnerFaulted)?,
             attached_peers,
             connected_peers,
+            peers,
         })
     }
     pub(crate) fn maintain_requests_admitted(&self) -> Result<(), BridgeError> {
@@ -245,6 +264,7 @@ impl MobileController {
                 Effect::Drop { .. } | Effect::RecordOutcome { .. } => (),
             }
         }
+        let explicit_withdrawals = withdrawals.clone();
         withdrawals.extend(note(
             Step::EffectPrune,
             self.projections
@@ -264,7 +284,13 @@ impl MobileController {
         }
         note(Step::EffectReconcile, self.reconcile_terminal_outcomes())?;
         for (key, (intent, alert)) in presentations {
-            if withdrawals.contains(&key) {
+            // Atomic lease replacement revokes the old full-binding projection.
+            // Pruning cancels its native auth/denial handles first, but must not
+            // discard the committed same-key replacement Restore. An explicit
+            // policy/terminal withdrawal still takes precedence over restoration.
+            if explicit_withdrawals.contains(&key)
+                || (withdrawals.contains(&key) && intent != NativeRequestPresentation::Restore)
+            {
                 continue;
             }
             match self.publish_request_key(key, intent, alert) {

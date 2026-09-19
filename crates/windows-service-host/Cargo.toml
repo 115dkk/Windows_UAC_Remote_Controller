@@ -63,6 +63,8 @@ windows = { version = "0.62.2", default-features = false, features = [
     "std",
     "UI_Shell",
     "Win32_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Usb",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_WindowsFirewall",

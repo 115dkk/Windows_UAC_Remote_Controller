@@ -1,5 +1,18 @@
 # Controller interface design
 
+## 2026-09-19 utility-copy and USB delta
+
+The current visible Korean name is **UAC 원격 승인기**. The PC overview keeps its
+existing layout, but its title is the product name and its marketing subtitle is
+removed. Normal surfaces show measured service/connection/request state. Recovery
+instructions appear when action is needed. Korean uses concise state labels and
+formal, actionable sentences, without conversational endings or reassurance.
+Catalog source keys remain stable identifiers; localized values own visible text.
+The PC QR action is `QR 코드 보기`; `USB로 연결` is the adjacent alternate carrier.
+USB uses the existing native comparison UI and existing color/spacing tokens;
+the waiting view has no dummy QR or camera preview. No palette/font/motion change.
+Earlier naming/copy descriptions below are historical and superseded by this delta.
+
 This is the first UI in this repository. These app-owned tokens and rules are
 the visual source of truth; CSS in `ui/src` must stay synchronized. Native window
 chrome, Android permission/authentication dialogs and OS insets remain native.

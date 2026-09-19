@@ -1,5 +1,19 @@
 # Controller UX contract
 
+## 2026-09-19 finalization delta
+
+PC activity and Android device lists now require actual current native owner
+projections; enrolled is distinct from online. Unsupported PC history deletion
+remains disabled. Request leases may renew only for the same live observed UAC
+prompt; renewal is not a completed/cancelled request and old decisions stay invalid.
+
+USB is a public invitation carrier, not authentication. User selects USB on both
+apps, attaches a compatible phone/cable, grants Android USB access, then completes
+the unchanged attestation/TLS/SAS/two-sided confirmation. On incompatible Windows
+drivers or Android accessories, show a bounded failure and QR recovery. No driver
+replacement, ADB requirement, raw USB in SYSTEM or WebView invitation payloads.
+Actual physical USB and phone/UAC acceptance remain separate user/device tests.
+
 Status: new high-consequence installed UI in development. No end-to-end remote
 UAC approval or credential entry is yet proven. Full user scope remains active.
 

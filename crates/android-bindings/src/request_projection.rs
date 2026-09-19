@@ -57,7 +57,7 @@ pub enum NativeRequestCatalogState {
     Reconciling,
     Ready,
 }
-#[derive(Clone, Copy, Debug, uniffi::Record)]
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct NativeRequestCatalogStatus {
     pub state: NativeRequestCatalogState,
     pub revision: u64,
@@ -65,6 +65,23 @@ pub struct NativeRequestCatalogStatus {
     pub configured_peers: u8,
     pub attached_peers: u8,
     pub connected_peers: u8,
+    pub peers: Vec<NativePairedPc>,
+}
+
+/// Public display metadata only. These fields are not accepted by any action API.
+#[derive(Clone, uniffi::Record)]
+pub struct NativePairedPc {
+    pub id: String,
+    pub revision: u64,
+    pub route_present: bool,
+    pub connected: bool,
+}
+impl fmt::Debug for NativePairedPc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativePairedPc")
+            .field("connected", &self.connected)
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Clone, uniffi::Record)]
 pub struct NativeRequestPreview {

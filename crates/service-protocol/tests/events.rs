@@ -72,6 +72,70 @@ fn payload(wire: &[u8]) -> &[u8] {
 }
 
 #[test]
+fn renewed_lease_round_trips_and_rejects_reused_binding_or_changed_content() {
+    let PcEvent::Opened {
+        binding: previous,
+        issued_at: previous_issued_at,
+        content,
+    } = opened()
+    else {
+        unreachable!();
+    };
+    let replacement = RequestBinding::new(
+        previous.pc(),
+        previous.epoch(),
+        previous.session(),
+        previous.request_id(),
+        ChallengeNonce::from_bytes([7; 32]).unwrap(),
+        previous.content_digest(),
+        ExpiryTick::from_nanos_since_epoch(15_000).unwrap(),
+    );
+    let event = PcEvent::Renewed {
+        previous_binding: previous,
+        previous_issued_at,
+        binding: replacement,
+        issued_at: ServiceTick::from_nanos_since_epoch(5_000),
+        content: Arc::clone(&content),
+    };
+    let wire = signed(event.clone()).to_wire();
+    assert_eq!(
+        VerifiedPcEvent::from_wire(&wire, pc(), &public(&key()))
+            .unwrap()
+            .event(),
+        &event
+    );
+    for issued in [0, 10_000, 15_000] {
+        let invalid = PcEvent::Renewed {
+            previous_binding: previous,
+            previous_issued_at,
+            binding: replacement,
+            issued_at: ServiceTick::from_nanos_since_epoch(issued),
+            content: Arc::clone(&content),
+        };
+        assert!(UnsignedPcEvent::new(invalid).is_err());
+    }
+    let reused = PcEvent::Renewed {
+        previous_binding: previous,
+        previous_issued_at,
+        binding: previous,
+        issued_at: ServiceTick::from_nanos_since_epoch(5_000),
+        content: Arc::clone(&content),
+    };
+    assert!(UnsignedPcEvent::new(reused).is_err());
+    let changed = PcEvent::Renewed {
+        previous_binding: previous,
+        previous_issued_at,
+        binding: replacement,
+        issued_at: ServiceTick::from_nanos_since_epoch(5_000),
+        content: Arc::new(RequestContent::new("different", "", "different").unwrap()),
+    };
+    assert_eq!(
+        UnsignedPcEvent::new(changed),
+        Err(PcEventError::ContentMismatch)
+    );
+}
+
+#[test]
 fn exact_request_round_trip_and_owned_verification() {
     let original = opened();
     let signed = signed(original.clone());

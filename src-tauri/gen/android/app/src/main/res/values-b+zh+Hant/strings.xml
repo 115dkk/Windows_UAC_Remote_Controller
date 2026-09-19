@@ -71,4 +71,7 @@
     <string name="main_activity_title">UAC 遠端核准</string>
     <string name="controller_service_title">UAC 遠端核准</string>
     <string name="request_notification_summary">%1$s\n%2$s</string>
+    <string name="pairing_usb_title">透過 USB 連線至 PC</string>
+    <string name="pairing_usb_waiting">連接傳輸線，在 PC 上選擇 USB，並在 Android 上允許存取。最多等待 30 秒。</string>
+    <string name="pairing_usb_unavailable">無法讀取 USB 連線資訊。請檢查傳輸線和 USB 權限，或透過 QR 碼連線。</string>
 </resources>

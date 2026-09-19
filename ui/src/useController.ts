@@ -6,7 +6,7 @@ import { ageRequestPresentation, withoutRequestBodies } from './requestPresentat
 
 export type ClientCommand =
   | { readonly kind: 'service'; readonly action: ServiceAction }
-  | { readonly kind: 'pair' }
+  | { readonly kind: 'pair'; readonly transport?: 'usb' }
   | { readonly kind: 'remove'; readonly deviceId: string }
   | { readonly kind: 'relay'; readonly address: string }
   | { readonly kind: 'clear' }
@@ -14,7 +14,7 @@ export type ClientCommand =
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
   | { readonly kind: 'notification-settings' }
-  | { readonly kind: 'scan_pairing' };
+  | { readonly kind: 'scan_pairing'; readonly transport?: 'usb' };
 
 /** How long before a request's display lease ends to ask for the next one. The
  * lease is clipped to the end of the wall minute, so this has to be a fraction
@@ -82,7 +82,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
 function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
-    case 'pair': return bridge.beginPairing();
+    case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
     case 'remove': return bridge.removeDevice(command.deviceId);
     case 'relay': return bridge.setRelay(command.address);
     case 'clear': return bridge.clearActivity();
@@ -91,9 +91,11 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
   }
 }
 
-function scannerFailure(error: unknown): string {
+function scannerFailure(error: unknown, transport?: 'usb'): string {
   const code = error !== null && typeof error === 'object' && 'code' in error ? error.code : null;
-  return code === 'pairing_scanner_busy' || code === 'app_busy' ? ko.pairingScannerBusy : ko.pairingScannerFailure;
+  return code === 'pairing_scanner_busy' || code === 'app_busy' ? ko.pairingScannerBusy
+    : transport === 'usb' ? 'USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.'
+      : ko.pairingScannerFailure;
 }
 
 export function useController(bridge: ControllerBridge) {
@@ -192,7 +194,8 @@ export function useController(bridge: ControllerBridge) {
         }
       }
       if (command.kind === 'scan_pairing') {
-        await bridge.openPairingScanner();
+        if (command.transport === 'usb') await bridge.openPairingScanner('usb');
+        else await bridge.openPairingScanner();
         scannerOpened = true;
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         scannerReturn.current.opened = true;
@@ -220,7 +223,7 @@ export function useController(bridge: ControllerBridge) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       if (command.kind === 'scan_pairing' && !scannerOpened) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
-        const error = scannerFailure(failure);
+        const error = scannerFailure(failure, command.transport);
         let snapshot: AppSnapshot | null = null;
         try { snapshot = await readSnapshot(bridge); } catch { /* Keep recovery, never raw native errors. */ }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;

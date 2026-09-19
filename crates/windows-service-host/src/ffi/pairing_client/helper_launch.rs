@@ -46,6 +46,8 @@ pub enum PairingLaunchError {
     Client(#[from] ClientError),
     #[error("the pairing helper handoff frame or phase is invalid")]
     Protocol,
+    #[error("USB invitation delivery is unavailable")]
+    UsbUnavailable,
     #[error("the original fresh starter cannot be claimed for launch")]
     InvalidPhase,
     #[error("the pairing helper launch was cancelled by Windows")]
@@ -124,7 +126,7 @@ enum Mode {
     TerminalRead,
     PeerClosed,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Event {
     Pending,
     Launch(PendingElevationId),
@@ -134,6 +136,7 @@ enum Event {
     PeerClosed,
     PrepareRenderer(crate::pairing_handoff::RendererRequest),
     ResumeRenderer(crate::pairing_handoff::RendererRequest),
+    UsbInvitation(crate::pairing_handoff::InvitationText),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalCompletion {
@@ -257,6 +260,10 @@ impl Endpoint {
                     }
                     Next::PrepareRenderer(request) => Ok(Event::PrepareRenderer(request)),
                     Next::ResumeRenderer(request) => Ok(Event::ResumeRenderer(request)),
+                    Next::UsbInvitation(text) => {
+                        self.client.begin_read()?;
+                        Ok(Event::UsbInvitation(text))
+                    }
                     _ => Err(Error::Protocol),
                 }
             }
@@ -472,6 +479,7 @@ struct LaunchInner {
     first_failure: Option<Error>,
     cleanup_failure: Option<Error>,
     drained: bool,
+    usb_broker: Option<crate::ffi::usb_bootstrap::UsbBroker>,
 }
 impl PairingHelperLaunch {
     pub(super) fn from_starter(mut starter: PairingClient) -> Result<Self, Error> {
@@ -505,6 +513,7 @@ impl PairingHelperLaunch {
                 first_failure: None,
                 cleanup_failure: None,
                 drained: false,
+                usb_broker: None,
             })),
         })
     }
@@ -517,6 +526,13 @@ impl PairingHelperLaunch {
             crate::lab_pairing_offer::launch_failure(*error);
         }
         result
+    }
+    pub(super) fn enable_usb(&mut self) -> Result<(), Error> {
+        self.inner_mut()
+            .endpoint
+            .handoff
+            .enable_usb()
+            .map_err(|_| Error::Protocol)
     }
     pub fn cancel(&mut self) {
         self.inner_mut().fail(Error::Cancelled);
@@ -561,6 +577,9 @@ impl LaunchInner {
     fn fail(&mut self, error: Error) -> Error {
         let first = *self.first_failure.get_or_insert(error);
         self.endpoint.cancel();
+        if let Some(broker) = self.usb_broker.as_mut() {
+            broker.cancel();
+        }
         first
     }
     fn launch(&mut self, id: PendingElevationId) -> Result<(), Error> {
@@ -648,37 +667,63 @@ impl LaunchInner {
         if let Some(error) = self.first_failure {
             return Err(error);
         }
-        let result = (|| match self.endpoint.poll()? {
-            Event::Launch(id) => {
-                self.launch(id)?;
-                Ok(PairingLaunchProgress::Pending)
+        let result = (|| {
+            if let Some(broker) = self.usb_broker.as_mut() {
+                broker.poll().map_err(|_| Error::UsbUnavailable)?;
             }
-            Event::Pending => {
-                self.live_helper()?;
-                Ok(PairingLaunchProgress::Pending)
-            }
-            Event::Written => {
-                self.live_helper()?;
-                Ok(PairingLaunchProgress::BindingWritten)
-            }
-            Event::Bound => {
-                self.live_helper()?;
-                Ok(PairingLaunchProgress::Bound)
-            }
-            Event::Closing => Ok(PairingLaunchProgress::Closing),
-            Event::PrepareRenderer(_) | Event::ResumeRenderer(_) => Err(Error::Protocol),
-            Event::PeerClosed => {
-                if !self.drain_resources()? {
-                    return Ok(PairingLaunchProgress::CleanupPending);
+            match self.endpoint.poll()? {
+                Event::Launch(id) => {
+                    self.launch(id)?;
+                    Ok(PairingLaunchProgress::Pending)
                 }
-                self.endpoint.budget()?;
-                if let Some(error) = self.first_failure {
-                    return Err(error);
+                Event::Pending => {
+                    self.live_helper()?;
+                    Ok(PairingLaunchProgress::Pending)
                 }
-                if self.helper_exit != Some(0) {
-                    return Err(Error::LaunchUnconfirmed);
+                Event::Written => {
+                    self.live_helper()?;
+                    Ok(PairingLaunchProgress::BindingWritten)
                 }
-                Ok(PairingLaunchProgress::Closed)
+                Event::Bound => {
+                    self.live_helper()?;
+                    Ok(PairingLaunchProgress::Bound)
+                }
+                Event::UsbInvitation(text) => {
+                    self.live_helper()?;
+                    if self.usb_broker.is_some() {
+                        return Err(Error::Protocol);
+                    }
+                    let connection = self
+                        .endpoint
+                        .client
+                        .inner_ref()
+                        .connection
+                        .as_ref()
+                        .ok_or(Error::Protocol)?;
+                    self.usb_broker = Some(
+                        crate::ffi::usb_bootstrap::UsbBroker::start(
+                            connection.installation.service(),
+                            text.as_str(),
+                        )
+                        .map_err(|_| Error::UsbUnavailable)?,
+                    );
+                    Ok(PairingLaunchProgress::Pending)
+                }
+                Event::Closing => Ok(PairingLaunchProgress::Closing),
+                Event::PrepareRenderer(_) | Event::ResumeRenderer(_) => Err(Error::Protocol),
+                Event::PeerClosed => {
+                    if !self.drain_resources()? {
+                        return Ok(PairingLaunchProgress::CleanupPending);
+                    }
+                    self.endpoint.budget()?;
+                    if let Some(error) = self.first_failure {
+                        return Err(error);
+                    }
+                    if self.helper_exit != Some(0) {
+                        return Err(Error::LaunchUnconfirmed);
+                    }
+                    Ok(PairingLaunchProgress::Closed)
+                }
             }
         })();
         result.map_err(|error| self.fail(error))
@@ -706,6 +751,14 @@ impl LaunchInner {
         if self.unknown_launch {
             return Err(Error::LaunchUnconfirmed);
         }
+        if let Some(broker) = self.usb_broker.as_mut() {
+            if broker.poll().is_err() {
+                self.first_failure.get_or_insert(Error::UsbUnavailable);
+            }
+            if !broker.drained() {
+                return Ok(false);
+            }
+        }
         if let Some(helper) = self.helper.as_ref() {
             match helper.exit() {
                 Ok(Some(code)) => {
@@ -731,6 +784,7 @@ impl LaunchInner {
             return Ok(false);
         }
         drop(self.helper.take());
+        drop(self.usb_broker.take());
         cleanup_state().map_err(|error| {
             let error = Error::Client(error);
             self.cleanup_failure.get_or_insert(error);
@@ -833,7 +887,7 @@ impl HelperRun {
                     inner.drained = true;
                     return Ok(true);
                 }
-                Event::Launch(_) => return Err(Error::Protocol),
+                Event::Launch(_) | Event::UsbInvitation(_) => return Err(Error::Protocol),
                 Event::Pending | Event::Written | Event::Bound => {
                     if !inner.endpoint.handoff.closing()
                         && let Some(renderer) = inner.renderer.as_mut()

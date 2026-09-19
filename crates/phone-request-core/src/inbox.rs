@@ -42,9 +42,15 @@ pub(crate) struct SourceState {
     // Keep the maximum after guards retire; an older correlation cannot undo it.
     pub(crate) watermark: u64,
     pub(crate) quarantine_expiry: Option<u64>,
+    pub(crate) lineage_quarantined: bool,
+    pub(crate) superseded: bool,
 }
 
 pub(crate) struct RetainedRequest {
+    /// Only an associated original native intake in schema4 can be renewed.
+    /// Suppression survives individual lease expiry until authenticated final
+    /// resolution or a fresh current source epoch replaces this lineage.
+    pub(crate) renewable_lineage: bool,
     pub(crate) binding: RequestBinding,
     pub(crate) issued_at: ServiceTick,
     // Captured only on first guard insertion, including discarded/body-free
@@ -52,7 +58,7 @@ pub(crate) struct RetainedRequest {
     pub(crate) receiving_generation: Option<ReceivingGeneration>,
     pub(crate) window: Option<MappedRequestWindow>,
     pub(crate) metadata: Option<AuthenticatedRequestMetadata>,
-    // Original RECEIVE-anchor upper expiry, never recalculated by a new probe.
+    // This lease's RECEIVE-anchor upper expiry, never recalculated on retry.
     pub(crate) guard_until_nanos: u64,
     // Some means a body-ready active request. Recovery can also retain active
     // metadata without a body; closed/suppressed guards can never regain one.
@@ -82,6 +88,8 @@ enum EventKind<'a> {
 /// the original phone upper estimate and a signed source sample at/after the
 /// original service expiry are required for retirement. Source watermarks remain
 /// after retirement so an older correlation cannot resurrect the request.
+/// Associated renewable lineage guards additionally survive lease expiry until
+/// authenticated final resolution or native current-source epoch replacement.
 /// Guards and source slots each have the configured max-retained bound. A full
 /// guard cache quarantines new identities; source-capacity exhaustion faults.
 ///
@@ -284,7 +292,10 @@ impl PhoneInbox {
 
     /// May remain true with no future phone-time wakeup while source proof is missing.
     pub fn is_quarantined(&self) -> bool {
-        self.guard_quarantine_until_nanos.is_some()
+        self.sources
+            .values()
+            .any(|source| source.lineage_quarantined)
+            || self.guard_quarantine_until_nanos.is_some()
             || self
                 .engine
                 .as_ref()
@@ -379,7 +390,10 @@ impl PhoneInbox {
         correlation: &mut ClockCorrelation,
         clock: InboxClock,
     ) -> InboxUpdate {
-        if !matches!(event.event(), PcEvent::Opened { .. }) {
+        if !matches!(
+            event.event(),
+            PcEvent::Opened { .. } | PcEvent::Renewed { .. }
+        ) {
             return self.rejected(InboxIssue::WrongEventKind);
         }
         self.process(event, Some(generation), correlation, clock)
@@ -425,17 +439,54 @@ impl PhoneInbox {
             PcEvent::Opened {
                 binding, issued_at, ..
             }
+            | PcEvent::Renewed {
+                binding, issued_at, ..
+            }
             | PcEvent::Resolved {
                 binding, issued_at, ..
             } => (*binding, *issued_at),
             PcEvent::Clock { .. } => return Err(InboxIssue::WrongEventKind),
         };
         let key = request_key(binding);
+        if matches!(event.event(), PcEvent::Renewed { .. }) && receiving_generation.is_none() {
+            return Err(InboxIssue::ConflictingReceivingSource);
+        }
+        if self
+            .sources
+            .get(&SourceKey::for_binding(binding))
+            .is_some_and(|source| source.superseded)
+        {
+            return Err(InboxIssue::WrongEpoch);
+        }
         if let Some(original) = self.retained.get(&key) {
-            if original.binding != binding {
+            let signed_chain = match event.event() {
+                PcEvent::Renewed {
+                    previous_binding,
+                    previous_issued_at,
+                    ..
+                } => {
+                    (*previous_binding == original.binding
+                        && *previous_issued_at == original.issued_at)
+                        || newer_lease(
+                            original.binding,
+                            original.issued_at,
+                            *previous_binding,
+                            *previous_issued_at,
+                        )
+                }
+                _ => true,
+            };
+            let replacement = original.renewable_lineage
+                && signed_chain
+                && matches!(
+                    event.event(),
+                    PcEvent::Renewed { .. } | PcEvent::Resolved { .. }
+                )
+                && newer_lease(original.binding, original.issued_at, binding, issued_at);
+            if original.binding != binding && !replacement {
                 return Err(InboxIssue::ConflictingBinding);
             }
-            if original.issued_at != issued_at {
+            if original.issued_at != issued_at && !replacement {
                 return Err(InboxIssue::ConflictingIssuedAt);
             }
             if original.receiving_generation != receiving_generation {
@@ -443,10 +494,17 @@ impl PhoneInbox {
             }
         }
         if let Some(pending) = self.pending_outcomes.iter().find(|row| row.key() == key) {
-            if pending.binding() != binding {
+            let replacement =
+                self.retained.get(&key).is_some_and(|row| {
+                    row.renewable_lineage || row.binding == binding && row.issued_at == issued_at
+                }) && matches!(
+                    event.event(),
+                    PcEvent::Renewed { .. } | PcEvent::Resolved { .. }
+                ) && newer_lease(pending.binding(), pending.issued_at(), binding, issued_at);
+            if pending.binding() != binding && !replacement {
                 return Err(InboxIssue::ConflictingBinding);
             }
-            if pending.issued_at() != issued_at {
+            if pending.issued_at() != issued_at && !replacement {
                 return Err(InboxIssue::ConflictingIssuedAt);
             }
         }
@@ -552,6 +610,12 @@ impl PhoneInbox {
                 issued_at,
                 content,
             } => (*binding, *issued_at, EventKind::Opened(content)),
+            PcEvent::Renewed {
+                binding,
+                issued_at,
+                content,
+                ..
+            } => (*binding, *issued_at, EventKind::Opened(content)),
             PcEvent::Resolved {
                 binding,
                 issued_at,
@@ -571,6 +635,13 @@ impl PhoneInbox {
             return self.rejected(InboxIssue::WrongEpoch);
         }
         let key = request_key(binding);
+        if self
+            .retained
+            .get(&key)
+            .is_some_and(|original| original.binding != binding)
+        {
+            return self.replace_lease(event, binding, issued_at, kind, correlation, clock);
+        }
         let mut update = self.begin(clock);
         if self.fault.is_some() {
             return self.finish(update);
@@ -579,12 +650,23 @@ impl PhoneInbox {
             return self.finish(update);
         }
 
+        if matches!(kind, EventKind::Resolved(_))
+            && let Some(entry) = self.retained.get_mut(&key)
+        {
+            entry.renewable_lineage = false;
+        }
+
         // A terminal outcome may outlive its retired replay guard. Never admit
         // another active binding under that still-pending delivery identity.
         if let Some(pending) = self.pending_outcomes.iter().find(|row| row.key() == key) {
-            if pending.binding() != binding {
+            let newer_stored_lease = self.retained.get(&key).is_some_and(|row| {
+                row.binding == binding
+                    && row.issued_at == issued_at
+                    && newer_lease(pending.binding(), pending.issued_at(), binding, issued_at)
+            });
+            if pending.binding() != binding && !newer_stored_lease {
                 update.issue = Some(InboxIssue::ConflictingBinding);
-            } else if pending.issued_at() != issued_at {
+            } else if pending.issued_at() != issued_at && !newer_stored_lease {
                 update.issue = Some(InboxIssue::ConflictingIssuedAt);
             } else {
                 update.effects.push(Effect::Drop {
@@ -669,9 +751,44 @@ impl PhoneInbox {
             return self.finish(update);
         }
 
-        // Retired IDs need no individual entry once their source watermark has
-        // passed expiry. An old correlation must not make them live again.
+        // Associated renewable IDs retain suppression even if the first packet
+        // arrived after this lease expired. A later signed lease is still the
+        // same logical request, not permission to undo this discard.
         if self.source_expired(binding) {
+            if receiving_generation.is_some() && matches!(kind, EventKind::Opened(_)) {
+                let source = SourceKey::for_binding(binding);
+                let guard = match upper_guard(correlation, binding, clock.nanos) {
+                    Ok(value) => value,
+                    Err(fault) => {
+                        self.latch_fault(fault, &mut update);
+                        return self.finish(update);
+                    }
+                };
+                if let Some(issue) = self.guard_admission(
+                    source,
+                    binding.expiry().as_nanos_since_epoch(),
+                    guard,
+                    true,
+                ) {
+                    push_guard_drop(key, issue, &mut update);
+                    return self.finish(update);
+                }
+                self.retained.insert(
+                    key,
+                    RetainedRequest {
+                        renewable_lineage: true,
+                        binding,
+                        issued_at,
+                        receiving_generation,
+                        window: None,
+                        metadata: None,
+                        guard_until_nanos: guard,
+                        content: None,
+                        recovering: false,
+                        recovery_until_nanos: None,
+                    },
+                );
+            }
             update.effects.push(Effect::Drop {
                 key,
                 reason: DropReason::Expired,
@@ -706,14 +823,20 @@ impl PhoneInbox {
                 // A phone-time mapping failure is not source-expiry proof.
                 // Keep a body-free guard even when its phone upper estimate
                 // already passed; a newer probe must not revive this discard.
-                if let Some(issue) = self.guard_admission(source, service_expiry, guard_until_nanos)
-                {
+                if let Some(issue) = self.guard_admission(
+                    source,
+                    service_expiry,
+                    guard_until_nanos,
+                    receiving_generation.is_some(),
+                ) {
                     push_guard_drop(key, issue, &mut update);
                     return self.finish(update);
                 }
                 self.retained.insert(
                     key,
                     RetainedRequest {
+                        renewable_lineage: receiving_generation.is_some()
+                            && matches!(kind, EventKind::Opened(_)),
                         binding,
                         issued_at,
                         receiving_generation,
@@ -735,7 +858,12 @@ impl PhoneInbox {
                 return self.finish(update);
             }
         };
-        if let Some(issue) = self.guard_admission(source, service_expiry, guard_until_nanos) {
+        if let Some(issue) = self.guard_admission(
+            source,
+            service_expiry,
+            guard_until_nanos,
+            receiving_generation.is_some(),
+        ) {
             push_guard_drop(key, issue, &mut update);
             return self.finish(update);
         }
@@ -801,6 +929,8 @@ impl PhoneInbox {
         self.retained.insert(
             key,
             RetainedRequest {
+                renewable_lineage: receiving_generation.is_some()
+                    && matches!(kind, EventKind::Opened(_)),
                 binding,
                 issued_at,
                 receiving_generation,
@@ -814,6 +944,119 @@ impl PhoneInbox {
             },
         );
         self.apply_effects(effects, &mut update);
+        self.finish(update)
+    }
+
+    fn replace_lease(
+        &mut self,
+        event: &VerifiedPcEvent,
+        binding: RequestBinding,
+        issued_at: ServiceTick,
+        kind: EventKind<'_>,
+        correlation: &mut ClockCorrelation,
+        clock: InboxClock,
+    ) -> InboxUpdate {
+        let key = request_key(binding);
+        let mut update = self.begin(clock);
+        if self.fault.is_some() || !self.observe_source(correlation, clock, &mut update) {
+            return self.finish(update);
+        }
+        let guard = match upper_guard(correlation, binding, clock.nanos) {
+            Ok(value) => value,
+            Err(fault) => {
+                self.latch_fault(fault, &mut update);
+                return self.finish(update);
+            }
+        };
+        let Some(original) = self.retained.get(&key) else {
+            self.latch_fault(InboxFault::InconsistentState, &mut update);
+            return self.finish(update);
+        };
+        let old_metadata = original.metadata;
+        // A final authenticated resolution can skip unseen renewals. Resolve the
+        // current logical request once, then retain the final signed guard. Never
+        // require a still-live new display mapping just to withdraw it.
+        if matches!(kind, EventKind::Resolved(_)) {
+            if let Some(metadata) = old_metadata {
+                let effects = self.engine_transition(kind, metadata, clock);
+                self.apply_effects(effects, &mut update);
+            }
+            if let Some(engine) = &mut self.engine {
+                let effects = engine.retire_source_request(key, clock.reading);
+                self.apply_effects(effects, &mut update);
+            }
+            if let Some(entry) = self.retained.get_mut(&key) {
+                entry.binding = binding;
+                entry.issued_at = issued_at;
+                entry.guard_until_nanos = guard;
+                entry.window = None;
+                entry.metadata = None;
+                entry.content = None;
+                entry.recovering = false;
+                entry.recovery_until_nanos = None;
+                entry.renewable_lineage = false;
+            }
+            return self.finish(update);
+        }
+        let window = match correlation.map_request(event, clock.nanos) {
+            Ok(window) => Some(window),
+            Err(ClockError::LocalClockRegressed) => {
+                self.latch_fault(InboxFault::NativeClockRegressed, &mut update);
+                return self.finish(update);
+            }
+            Err(ClockError::CorrelationFaulted) => {
+                self.latch_fault(InboxFault::ClockCorrelationFaulted, &mut update);
+                return self.finish(update);
+            }
+            Err(ClockError::ArithmeticOverflow) => {
+                self.latch_fault(InboxFault::ClockRangeExceeded, &mut update);
+                return self.finish(update);
+            }
+            Err(error) => {
+                update.issue = Some(InboxIssue::Clock(error));
+                None
+            }
+        };
+        let metadata = window.and_then(|window| {
+            AuthenticatedRequestMetadata::new(
+                key,
+                MonotonicTime::from_millis(window.phone_issued_nanos() / NANOS_PER_MILLI),
+                MonotonicTime::from_millis(window.phone_expiry_nanos() / NANOS_PER_MILLI),
+            )
+            .ok()
+        });
+        let effects = match (&mut self.engine, metadata) {
+            (Some(engine), Some(metadata)) => engine.renew(old_metadata, metadata, clock.reading),
+            (Some(engine), None) => engine.retire_source_request(key, clock.reading),
+            _ => {
+                self.latch_fault(InboxFault::InconsistentState, &mut update);
+                return self.finish(update);
+            }
+        };
+        let active = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Restore(row) if row.key == key));
+        // Apply any actual expiry/policy withdrawal against the ORIGINAL binding
+        // before replacing metadata, so old terminal deliveries stay immutable.
+        self.apply_effects(effects, &mut update);
+        if self.fault.is_some() {
+            return self.finish(update);
+        }
+        if let Some(entry) = self.retained.get_mut(&key) {
+            entry.binding = binding;
+            entry.issued_at = issued_at;
+            entry.window = window;
+            entry.metadata = metadata;
+            entry.guard_until_nanos = guard;
+            entry.recovering = false;
+            entry.content = match (active, kind) {
+                (true, EventKind::Opened(content)) => Some(Arc::clone(content)),
+                _ => None,
+            };
+            entry.recovery_until_nanos = window
+                .filter(|_| active)
+                .map(|window| recovery_lease(&self.policy, clock, window.phone_expiry_nanos()));
+        }
         self.finish(update)
     }
 
@@ -910,6 +1153,14 @@ impl PhoneInbox {
             epoch: correlation.epoch(),
         };
         let sample = correlation.service_sample().as_nanos_since_epoch();
+        if self
+            .sources
+            .get(&source)
+            .is_some_and(|state| state.superseded)
+        {
+            update.issue = Some(InboxIssue::WrongEpoch);
+            return false;
+        }
         if let Some(state) = self.sources.get_mut(&source) {
             state.watermark = state.watermark.max(sample);
         } else {
@@ -922,8 +1173,47 @@ impl PhoneInbox {
                 SourceState {
                     watermark: sample,
                     quarantine_expiry: None,
+                    lineage_quarantined: false,
+                    superseded: false,
                 },
             );
+            // The caller supplies the CURRENT enrolled native PC epoch. Retire
+            // older renewable lineages without pretending the PC approved them.
+            let old_sources: Vec<_> = self
+                .sources
+                .iter()
+                .filter_map(|(key, value)| {
+                    (key.pc == source.pc
+                        && *key != source
+                        && !value.superseded
+                        && (value.lineage_quarantined
+                            || self.retained.values().any(|entry| {
+                                entry.renewable_lineage
+                                    && SourceKey::for_binding(entry.binding) == *key
+                            })))
+                    .then_some(*key)
+                })
+                .collect();
+            for old in old_sources {
+                if let Some(state) = self.sources.get_mut(&old) {
+                    state.superseded = true;
+                    state.lineage_quarantined = false;
+                }
+                let keys: Vec<_> = self
+                    .retained
+                    .iter()
+                    .filter_map(|(key, entry)| {
+                        (SourceKey::for_binding(entry.binding) == old).then_some(*key)
+                    })
+                    .collect();
+                for key in keys {
+                    if let Some(engine) = &mut self.engine {
+                        let effects = engine.retire_source_request(key, clock.reading);
+                        self.apply_effects(effects, update);
+                    }
+                    self.retained.remove(&key);
+                }
+            }
         }
 
         // Confirmed PC time can expire an active request before its local clock
@@ -964,9 +1254,10 @@ impl PhoneInbox {
 
     fn quarantine_sources_expired(&self) -> bool {
         self.sources.values().all(|source| {
-            source
-                .quarantine_expiry
-                .is_none_or(|expiry| source.watermark >= expiry)
+            source.superseded
+                || source
+                    .quarantine_expiry
+                    .is_none_or(|expiry| source.watermark >= expiry)
         })
     }
 
@@ -979,7 +1270,8 @@ impl PhoneInbox {
         }
         let sources = &self.sources;
         self.retained.retain(|_, entry| {
-            entry.guard_until_nanos > clock.nanos
+            entry.renewable_lineage
+                || entry.guard_until_nanos > clock.nanos
                 || !sources
                     .get(&SourceKey::for_binding(entry.binding))
                     .is_some_and(|source| {
@@ -1003,12 +1295,26 @@ impl PhoneInbox {
         source: SourceKey,
         service_expiry: u64,
         guard_until_nanos: u64,
+        renewable: bool,
     ) -> Option<InboxIssue> {
+        if self
+            .sources
+            .get(&source)
+            .is_some_and(|state| state.lineage_quarantined)
+        {
+            return Some(InboxIssue::GuardQuarantine);
+        }
         if self.guard_quarantine_until_nanos.is_some() {
+            if renewable && let Some(state) = self.sources.get_mut(&source) {
+                state.lineage_quarantined = true;
+            }
             self.extend_quarantine(source, service_expiry, guard_until_nanos);
             return Some(InboxIssue::GuardQuarantine);
         }
         if self.retained.len() >= self.limits.max_retained() {
+            if renewable && let Some(state) = self.sources.get_mut(&source) {
+                state.lineage_quarantined = true;
+            }
             self.extend_quarantine(source, service_expiry, guard_until_nanos);
             return Some(InboxIssue::GuardCapacity);
         }
@@ -1210,6 +1516,24 @@ impl PhoneInbox {
             }
         }
     }
+}
+
+/// Complete logical lineage, not just an equal RequestKey. No nonce or expiry
+/// is reused; the signed event verifier also validates each bounded lease.
+pub(crate) fn newer_lease(
+    previous: RequestBinding,
+    previous_issued_at: ServiceTick,
+    binding: RequestBinding,
+    issued_at: ServiceTick,
+) -> bool {
+    previous.pc() == binding.pc()
+        && previous.epoch() == binding.epoch()
+        && previous.session() == binding.session()
+        && previous.request_id() == binding.request_id()
+        && previous.content_digest() == binding.content_digest()
+        && previous.nonce() != binding.nonce()
+        && previous.expiry().as_nanos_since_epoch() < binding.expiry().as_nanos_since_epoch()
+        && previous_issued_at.as_nanos_since_epoch() < issued_at.as_nanos_since_epoch()
 }
 
 fn recovery_lease(policy: &NotificationPolicy, clock: InboxClock, expiry: u64) -> u64 {

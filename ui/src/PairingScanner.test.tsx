@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge } from './contracts';
-import { ko } from './messages.ko';
+import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -22,6 +22,15 @@ function deferred() {
 }
 
 describe('native QR-input entry, separate from pairing', () => {
+  it('opens the fixed USB input without a QR payload or PC pairing mutation', async () => {
+    const openPairingScanner = vi.fn<ControllerBridge['openPairingScanner']>(() => Promise.resolve());
+    const beginPairing = vi.fn<ControllerBridge['beginPairing']>();
+    view(available(), { openPairingScanner, beginPairing });
+    fireEvent.click(await screen.findByRole('button', { name: 'USB로 연결' }));
+    await waitFor(() => expect(openPairingScanner).toHaveBeenCalledExactlyOnceWith('usb'));
+    expect(beginPairing).not.toHaveBeenCalled();
+  });
+
   it('requires literal native capability true, including on an unavailable device collection', async () => {
     for (const capability of [false, undefined, null, 'true']) {
       const source = available();
@@ -58,7 +67,7 @@ describe('native QR-input entry, separate from pairing', () => {
     lock.unmount();
     const windows = qaCase('desktop-running').snapshot;
     view({ ...windows, mobile: available().mobile }); // Even a crossed capability cannot create Windows camera UI.
-    await screen.findByRole('heading', { name: 'PC 승인을 휴대폰에서' });
+    await screen.findByRole('heading', { name: 'UAC 원격 승인기' });
     expect(screen.queryByRole('button', { name: ko.openPairingScanner })).not.toBeInTheDocument();
   });
 

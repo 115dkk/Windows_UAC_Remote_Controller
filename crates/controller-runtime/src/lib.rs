@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod contract;
+#[cfg(any(windows, test))]
+mod pc_history;
 mod phone_history;
 mod phone_requests;
 mod runtime;

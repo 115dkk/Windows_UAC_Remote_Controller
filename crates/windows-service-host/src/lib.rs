@@ -12,6 +12,18 @@
 
 #![deny(unsafe_code)]
 
+/// Fixed public invitation transport in a separate unelevated child only.
+pub fn run_usb_bootstrap() -> Result<(), ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        ffi::usb_bootstrap::run().map_err(|_| ServiceError::PairingHandoffUnavailable)
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
 mod build_policy {
     include!(concat!(env!("OUT_DIR"), "/android_signers.rs"));
 }
@@ -84,6 +96,8 @@ mod probe_supervisor;
 #[cfg(any(windows, test))]
 pub mod tls_signer;
 mod trust_registry;
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+mod usb_bootstrap_frame;
 mod watch_session;
 pub use diagnostic::{
     MAX_PROBE_DIAGNOSTIC_BYTES, PROBE_CONTROL_CODE, PROBE_DIAGNOSTIC_FILES, ProbeRequestAccepted,

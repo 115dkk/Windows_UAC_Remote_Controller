@@ -27,7 +27,7 @@ const declarations = (wanted, auxiliary = false) => Object.entries(wanted).map((
 test('closed canary profiles retain both original universal obligations and sixteen normal rows', () => {
   const manifest = JSON.parse(readFileSync(new URL('../security/tamarin/manifest.json', import.meta.url), 'utf8'));
   const model = manifest.models.find(model => model.id === 'request-authorization');
-  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 16);
+  assert.equal(manifest.models.reduce((count, model) => count + Object.keys(model.expected).length + model.canaries.length, 0), 21);
   for (const canary of model.canaries) {
     const profile = counterexampleDischarge(model, canary);
     assert.deepEqual(canary.expected, { [profile.obligation]: { trace: 'all-traces', verdict: 'falsified' } });

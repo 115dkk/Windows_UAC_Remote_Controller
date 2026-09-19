@@ -148,4 +148,12 @@ export class PrivateChild {
     try { this.child.stdin.destroy(); } catch { /* Preserve original failure. */ }
     try { this.child.kill(); } catch { /* Bounded child watchdog remains. */ }
   }
+
+  snapshot() {
+    // reason is set only by this class's fixed fail() call sites, never copied
+    // from child output. Numeric exit + flags distinguish timeout/early exit.
+    return { closed: this.closed, exitCode: Number.isInteger(this.code) ? this.code : null,
+      signaled: this.signal !== null, failure: this.failure?.reason ?? null,
+      queuedReplies: this.queue.length, waiting: this.waiter !== null };
+  }
 }

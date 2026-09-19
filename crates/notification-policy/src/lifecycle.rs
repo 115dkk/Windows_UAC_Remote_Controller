@@ -48,8 +48,9 @@ impl ClockReading {
 
 /// Nonsecret opaque identity scoped to exact PC, service boot epoch and request.
 ///
-/// Upstream must never reuse a key for a different immutable authenticated
-/// lifetime. All three components participate in ordering/equality. No body,
+/// Ordinary delivery must never reuse a key for a different immutable lifetime.
+/// Explicit `renew` requires a separately verified signed lease lineage and an
+/// owner-held persistent suppression marker. All components participate in equality. No body,
 /// credential, executable command, or authentication key is stored here.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RequestKey {
@@ -481,7 +482,9 @@ struct RetainedRequest {
 
 /// Bounded, single-owner notification lifecycle, independent of network/UI code.
 ///
-/// Original deadlines are never extended and live markers are never evicted.
+/// Ordinary retry never extends a deadline and live markers are never evicted.
+/// Only `renew` replaces authenticated metadata after the higher-level owner
+/// validates a fresh signed lease and retains durable logical-lineage suppression.
 /// When retained storage fills, an O(1) quarantine suppresses all untracked new
 /// requests until every untracked drop's deadline has passed. A drop can extend
 /// quarantine by at most five minutes from that observation; continued valid
@@ -672,6 +675,74 @@ impl NotificationEngine {
                 expires_at: metadata.expires_at,
                 alert: self.policy.alert(),
             }));
+        }
+        effects
+    }
+
+    /// Replace one authenticated lease for the SAME logical request. The owner
+    /// must separately verify signed lineage, immutable content, source and
+    /// increasing service issuance/expiry. This method grants no such authority.
+    /// Missing/expired/suppressed old state never becomes active. A surviving
+    /// request is refreshed without a fresh alert or synthetic terminal outcome.
+    pub fn renew(
+        &mut self,
+        previous: Option<AuthenticatedRequestMetadata>,
+        metadata: AuthenticatedRequestMetadata,
+        clock: ClockReading,
+    ) -> Vec<Effect> {
+        let mut effects = self.poll(clock);
+        if !self.validate_arrival(metadata, clock, &mut effects) {
+            return effects;
+        }
+        if let Some(existing) = self.retained.get_mut(&metadata.key) {
+            if previous.is_none_or(|old| {
+                old.key != metadata.key
+                    || old.issued_at != existing.issued_at
+                    || old.expires_at != existing.expires_at
+            }) {
+                effects.push(Self::drop(metadata.key, DropReason::ConflictingDeadline));
+                return effects;
+            }
+            existing.issued_at = metadata.issued_at;
+            existing.expires_at = metadata.expires_at;
+            if existing.state == RetainedState::Active {
+                effects.push(Effect::Restore(PendingNotification {
+                    key: metadata.key,
+                    expires_at: metadata.expires_at,
+                    alert: self.policy.alert(),
+                }));
+            } else {
+                effects.push(Self::drop(metadata.key, DropReason::PreviouslySuppressed));
+            }
+        } else {
+            if let Some(reason) = self.untracked_drop_reason(metadata.expires_at) {
+                effects.push(Self::drop(metadata.key, reason));
+                return effects;
+            }
+            self.retained.insert(
+                metadata.key,
+                RetainedRequest {
+                    issued_at: metadata.issued_at,
+                    expires_at: metadata.expires_at,
+                    state: RetainedState::Suppressed,
+                },
+            );
+            effects.push(Self::drop(metadata.key, DropReason::PreviouslySuppressed));
+        }
+        effects
+    }
+
+    /// Current native source epoch replacement, not a timeout. The owner must
+    /// retain the old epoch rejection marker separately. No outcome is invented.
+    pub fn retire_source_request(&mut self, key: RequestKey, clock: ClockReading) -> Vec<Effect> {
+        let mut effects = self.poll(clock);
+        if let Some(record) = self.retained.remove(&key)
+            && record.state == RetainedState::Active
+        {
+            effects.push(Effect::Withdraw {
+                key,
+                reason: WithdrawalReason::RecoveryRejected,
+            });
         }
         effects
     }

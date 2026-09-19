@@ -2,21 +2,72 @@
   "version": 1,
   "toolVersion": "1.12.0",
   "sourceBindings": [
-    { "path": "crates/secure-channel/src/identity.rs", "sha256": "76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195" },
-    { "path": "crates/secure-channel/src/config.rs", "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d" },
-    { "path": "crates/secure-channel/src/channel.rs", "sha256": "910667dc62db172835763f250227c6690aaa7ca39b43a6ed8237f7e9482ffa80" },
-    { "path": "crates/approval-protocol/src/lib.rs", "sha256": "78fbb6770bca968005d7db1b3a571bdc37c54315ed22ce9e78bdc6ae99aa89c9" },
-    { "path": "crates/approval-core/src/lib.rs", "sha256": "aba41c673fe61f29cf4931aa96c30a281e1c5a1627a78bb9da3bf80d1bb55b2d" }
+    {
+      "path": "crates/secure-channel/src/identity.rs",
+      "sha256": "76ae613b558921d8fb629380a79c7a3c47494cea7964fd873e7b8c657ec1f195"
+    },
+    {
+      "path": "crates/secure-channel/src/config.rs",
+      "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d"
+    },
+    {
+      "path": "crates/secure-channel/src/channel.rs",
+      "sha256": "910667dc62db172835763f250227c6690aaa7ca39b43a6ed8237f7e9482ffa80"
+    },
+    {
+      "path": "crates/approval-protocol/src/lib.rs",
+      "sha256": "78fbb6770bca968005d7db1b3a571bdc37c54315ed22ce9e78bdc6ae99aa89c9"
+    },
+    {
+      "path": "crates/approval-core/src/lib.rs",
+      "sha256": "4ad85955a7c3953c2932c3de7dcd4bcf3929ea412c0638d13d7de9d4d678bb72"
+    },
+    {
+      "path": "crates/service-protocol/src/message.rs",
+      "sha256": "ccabd2f518a44916d49427f2caab8375425b56fb1c04c998200b7355e9efed5a"
+    },
+    {
+      "path": "crates/service-protocol/src/codec.rs",
+      "sha256": "e90c87df3bc0371ba90ece84aa3b876b1974497e080e15b46d9934e5f2fa0b03"
+    },
+    {
+      "path": "crates/windows-service-host/src/peer_runtime.rs",
+      "sha256": "75db621651336f99d434cc890785beeccab201989eed037cfc0f8476f366b9b8"
+    },
+    {
+      "path": "crates/windows-prompt-probe/src/ffi/watch.rs",
+      "sha256": "e7fb41825971e14d88c039510910569737998b7d3abc3fb46f1e2e93165ea190"
+    },
+    {
+      "path": "crates/phone-request-core/src/inbox.rs",
+      "sha256": "98cb0b8f9a5408f58652e8b4db848394a2f9d07b0e3ee505d9dda6bfb44805d0"
+    },
+    {
+      "path": "crates/notification-policy/src/lifecycle.rs",
+      "sha256": "679292988d2805ea8b3280b29318cfbc5ea29345e24b5e055e0f6a44bf9836bf"
+    }
   ],
   "models": [
     {
       "id": "pinned-channel",
       "path": "security/tamarin/PinnedTransport.spthy",
       "expected": {
-        "honest_channel_trace": { "trace": "exists-trace", "verdict": "verified" },
-        "phone_pins_authenticated_pc": { "trace": "all-traces", "verdict": "verified" },
-        "pc_pins_authenticated_phone": { "trace": "all-traces", "verdict": "verified" },
-        "application_secret_confidential": { "trace": "all-traces", "verdict": "verified" }
+        "honest_channel_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "phone_pins_authenticated_pc": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "pc_pins_authenticated_phone": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "application_secret_confidential": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        }
       },
       "canaries": [
         {
@@ -26,8 +77,14 @@
             "to": "Eq(presented_pc_key, presented_pc_key), // CANARY_PC_PIN_DISABLED"
           },
           "expected": {
-            "phone_pins_authenticated_pc": { "trace": "all-traces", "verdict": "falsified" },
-            "application_secret_confidential": { "trace": "all-traces", "verdict": "falsified" }
+            "phone_pins_authenticated_pc": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            },
+            "application_secret_confidential": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
           }
         }
       ]
@@ -36,42 +93,144 @@
       "id": "request-authorization",
       "path": "security/tamarin/RequestAuthorization.spthy",
       "witnessDischarges": {
-        "honest_approve_trace": { "profile": "approval-conjunction-v1", "proof": "security/tamarin/witnesses/Approve.proof" },
-        "honest_deny_without_approval_auth_trace": { "profile": "denial-be8-conjunction-v1", "proof": "security/tamarin/witnesses/Deny.proof" },
-        "honest_two_approvers_single_winner_trace": { "profile": "two-approver-observed-conjunction-v1", "proof": "security/tamarin/witnesses/TwoApprovers.proof" }
+        "honest_approve_trace": {
+          "profile": "approval-conjunction-v1",
+          "proof": "security/tamarin/witnesses/Approve.proof"
+        },
+        "honest_deny_without_approval_auth_trace": {
+          "profile": "denial-be8-conjunction-v1",
+          "proof": "security/tamarin/witnesses/Deny.proof"
+        },
+        "honest_two_approvers_single_winner_trace": {
+          "profile": "two-approver-observed-conjunction-v1",
+          "proof": "security/tamarin/witnesses/TwoApprovers.proof"
+        }
       },
       "helpers": {
-        "enrolled_revision_unique": { "trace": "all-traces", "verdict": "verified" },
-        "building_precedes_open": { "trace": "all-traces", "verdict": "verified" },
-        "request_opened_unique": { "trace": "all-traces", "verdict": "verified" },
-        "active_registry_production_precedes_revocation": { "trace": "all-traces", "verdict": "verified" }
+        "enrolled_revision_unique": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "building_precedes_open": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "request_opened_unique": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "active_registry_production_precedes_revocation": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        }
       },
       "expected": {
-        "honest_approve_trace": { "trace": "exists-trace", "verdict": "verified" },
-        "honest_deny_without_approval_auth_trace": { "trace": "exists-trace", "verdict": "verified" },
-        "honest_two_approvers_single_winner_trace": { "trace": "exists-trace", "verdict": "verified" },
-        "accepted_approval_requires_same_binding_auth": { "trace": "all-traces", "verdict": "verified" },
-        "accepted_decision_matches_opened_request": { "trace": "all-traces", "verdict": "verified" },
-        "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "verified" },
-        "no_accept_after_revision_revoked": { "trace": "all-traces", "verdict": "verified" },
-        "no_accept_after_request_cancelled": { "trace": "all-traces", "verdict": "verified" },
-        "no_accept_after_request_expired": { "trace": "all-traces", "verdict": "verified" }
+        "honest_approve_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "honest_deny_without_approval_auth_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "honest_two_approvers_single_winner_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "accepted_approval_requires_same_binding_auth": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "accepted_decision_matches_opened_request": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "request_accepted_at_most_once": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "no_accept_after_revision_revoked": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "no_accept_after_request_cancelled": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "no_accept_after_request_expired": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        }
       },
       "canaries": [
         {
           "id": "missing-approval-signature",
-          "counterexampleDischarge": { "profile": "signature-attack-existence-v1" },
+          "counterexampleDischarge": {
+            "profile": "signature-attack-existence-v1"
+          },
           "mutation": {
             "from": "Eq(verify(signature, approval_message, approval_key), true), // CANARY_APPROVAL_SIGNATURE",
             "to": "Eq('unchecked-signature', 'unchecked-signature'), // CANARY_APPROVAL_SIGNATURE_DISABLED"
           },
-          "expected": { "accepted_approval_requires_same_binding_auth": { "trace": "all-traces", "verdict": "falsified" } }
+          "expected": {
+            "accepted_approval_requires_same_binding_auth": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
+          }
         },
         {
           "id": "missing-replay-consumption",
-          "counterexampleDischarge": { "profile": "replay-attack-existence-v1" },
-          "mutation": { "from": "// CANARY_REPLAY_GUARD", "to": ", RequestSlot(request_id, pc, binding, 'pending')" },
-          "expected": { "request_accepted_at_most_once": { "trace": "all-traces", "verdict": "falsified" } }
+          "counterexampleDischarge": {
+            "profile": "replay-attack-existence-v1"
+          },
+          "mutation": {
+            "from": "// CANARY_REPLAY_GUARD",
+            "to": ", RequestSlot(request_id, pc, binding, 'pending')"
+          },
+          "expected": {
+            "request_accepted_at_most_once": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "prompt-lease-renewal",
+      "path": "security/tamarin/PromptLeaseRenewal.spthy",
+      "expected": {
+        "honest_renewed_approval_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "retired_lease_never_accepted": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "renewed_approval_needs_new_authentication": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "no_accept_after_prompt_gone": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        }
+      },
+      "canaries": [
+        {
+          "id": "retained-retired-lease",
+          "mutation": {
+            "from": "// CANARY_RETIRED_LEASE",
+            "to": ", Lease(pc, request, old)"
+          },
+          "expected": {
+            "retired_lease_never_accepted": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
+          }
         }
       ]
     }

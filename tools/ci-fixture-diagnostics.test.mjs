@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fixtureDiagnostic } from './ci-fixture-diagnostics.mjs';
+import { awaitQrEnrollment } from './ci-presentation-readiness.mjs';
 
 test('closed operator and phone classifications retain exact fixed cause', () => {
   assert.deepEqual(fixtureDiagnostic({ status: 'failed', source: 'operator', stage: 'initial_consent', gate: 'native_program_location_unbound' }),
@@ -50,4 +51,49 @@ test('private failure topology accepts only complete bounded operator structure'
     { ...value, topologyLines: [header + '\n' + row] }, { ...value, topologyLines: Array(34).fill(header) },
     { ...value, topologyLines: ['CI consent topology summary: textNodes=257'] },
   ]) assert.equal(fixtureDiagnostic(invalid), null);
+});
+
+test('QR readiness retries only a closed zero-grid response before enrollment', async () => {
+  let captures = 0, pauses = 0, clock = 0;
+  await awaitQrEnrollment({
+    capture: async () => { captures++; return { synthetic: true }; },
+    enroll: async () => ({ state: captures < 3 ? 'qr_not_ready' : 'awaiting_comparison' }),
+    now: () => clock, pause: async () => { pauses++; clock += 200; },
+  });
+  assert.equal(captures, 3);
+  assert.equal(pauses, 2);
+  for (const response of [{ state: 'failed' }, { state: 'enrollment_accepted' },
+    { state: 'qr_not_ready', extra: 'forbidden' }]) {
+    let attempted = 0;
+    await assert.rejects(awaitQrEnrollment({
+      capture: async () => { attempted++; return {}; }, enroll: async () => response,
+      pause: async () => assert.fail('Non-presentation failure must not retry'),
+    }));
+    assert.equal(attempted, 1);
+  }
+});
+
+test('QR readiness has both fixed attempt and monotonic time bounds', async () => {
+  for (const tick of [0, 5000]) {
+    let captures = 0, clock = 0;
+    await assert.rejects(awaitQrEnrollment({
+      capture: async () => { captures++; return {}; },
+      enroll: async () => ({ state: 'qr_not_ready' }), now: () => clock,
+      pause: async () => { clock += tick; },
+    }), /readiness exhausted/);
+    assert.equal(captures, tick === 0 ? 25 : 2);
+  }
+});
+
+test('QR readiness does not restart a failed fixture or shorten authentication', async () => {
+  let captures = 0;
+  const terminal = new Error('Synthetic terminal failure');
+  await assert.rejects(awaitQrEnrollment({
+    capture: async () => { captures++; return {}; }, enroll: async () => { throw terminal; },
+  }), error => error === terminal);
+  assert.equal(captures, 1);
+  let clock = 0;
+  await awaitQrEnrollment({ capture: async () => ({}), now: () => clock,
+    enroll: async () => { clock += 20000; return { state: 'awaiting_comparison' }; },
+  });
 });

@@ -18,6 +18,9 @@ use service_protocol::{
 };
 use std::sync::Arc;
 
+#[path = "support/legacy_codec.rs"]
+mod legacy_codec;
+
 const MILLI: u64 = 1_000_000;
 const OUTCOME_BYTES: usize = 32 + 180 + 8 + 1;
 const BODY: &str = "SYNTHETIC_SOURCE_BODY_NOT_CHECKPOINTED";
@@ -123,11 +126,13 @@ fn no_positive(update: &phone_request_core::InboxUpdate) {
 fn some_row_generation_offset(bytes: &[u8], outcome_count: usize) -> usize {
     // These fixtures have EXACTLY one retained Some row; the appended9-byte
     // field precedes the unchanged outcome count/tail. No production parser used.
-    let offset = bytes.len() - (2 + outcome_count * OUTCOME_BYTES) - 9;
+    let offset = bytes.len() - (2 + outcome_count * OUTCOME_BYTES) - 9 - usize::from(bytes[9] == 4);
     assert_eq!(bytes[offset], 1);
     offset
 }
 fn one_row_as_v2(bytes: &[u8], outcome_count: usize) -> Vec<u8> {
+    let converted = legacy_codec::as_v3(bytes);
+    let bytes = converted.as_slice();
     let offset = some_row_generation_offset(bytes, outcome_count);
     let mut old = bytes.to_vec();
     drop(old.drain(offset..offset + 9));
@@ -147,7 +152,7 @@ fn original_generation_roundtrips_and_controls_same_boot_body_rehydration() {
             .any(|effect| matches!(effect, Effect::Show(_)))
     );
     let bytes = original.checkpoint().unwrap().to_bytes().unwrap();
-    assert_eq!(&bytes[8..10], &3u16.to_be_bytes());
+    assert_eq!(&bytes[8..10], &4u16.to_be_bytes());
     assert!(
         !bytes
             .windows(BODY.len())
@@ -279,7 +284,7 @@ fn explicitly_decoded_v2_has_no_source_and_cannot_upgrade_to_a_new_some_generati
     let checkpoint = InboxCheckpoint::from_bytes(&v2).unwrap();
     assert_eq!(checkpoint.receiving_sources().count(), 0);
     let rewritten = checkpoint.to_bytes().unwrap();
-    assert_eq!(rewritten.len(), v2.len() + 1); // Canonical schema3 None tag, not Some.
+    assert_eq!(rewritten.len(), v2.len() + 3); // None generation + lineage + one source flag.
     let (rebooted, reboot_update) =
         PhoneInbox::restore_checkpoint(checkpoint.clone(), boot(8), clock(0)).unwrap();
     no_positive(&reboot_update);
@@ -387,7 +392,7 @@ fn current_generation_tags_zero_values_truncation_and_unknown_versions_are_stric
 }
 
 #[test]
-fn all_retained_source_fields_cost_exactly_4608_bytes_over_the_same_v2_state() {
+fn all_retained_source_fields_and_lineage_bits_have_a_bounded_v4_overhead() {
     const RETAINED: usize = 512;
     // This fixture has mapped, inactive/suppressed guards: the published old row
     // is binding180+issued8+window17+metadata1+guard8+active1+recovery1+engine1=217.
@@ -409,10 +414,11 @@ fn all_retained_source_fields_cost_exactly_4608_bytes_over_the_same_v2_state() {
     assert_eq!(inbox.retained_body_count(), 0);
     assert!(inbox.pending_outcomes().is_empty());
     let bytes = inbox.checkpoint().unwrap().to_bytes().unwrap();
+    let v3 = legacy_codec::as_v3(&bytes);
     let row_bytes = V2_SUPPRESSED_ROW + 9;
-    let start = bytes.len() - 2 - RETAINED * row_bytes;
-    let mut old = bytes[..start].to_vec();
-    for row in bytes[start..bytes.len() - 2].chunks_exact(row_bytes) {
+    let start = v3.len() - 2 - RETAINED * row_bytes;
+    let mut old = v3[..start].to_vec();
+    for row in v3[start..v3.len() - 2].chunks_exact(row_bytes) {
         assert_eq!(row[V2_SUPPRESSED_ROW], 1);
         assert_eq!(&row[V2_SUPPRESSED_ROW + 1..], &31u64.to_be_bytes());
         old.extend_from_slice(&row[..V2_SUPPRESSED_ROW]);
@@ -421,8 +427,8 @@ fn all_retained_source_fields_cost_exactly_4608_bytes_over_the_same_v2_state() {
     old[8..10].copy_from_slice(&2u16.to_be_bytes());
     let legacy = InboxCheckpoint::from_bytes(&old).unwrap();
     assert_eq!(legacy.receiving_sources().count(), 0);
-    assert_eq!(bytes.len() - old.len(), 9 * RETAINED);
-    assert_eq!(9 * RETAINED, 4_608);
+    assert_eq!(bytes.len() - old.len(), 10 * RETAINED + 1);
+    assert_eq!(10 * RETAINED + 1, 5_121);
     let checkpoint = InboxCheckpoint::from_bytes(&bytes).unwrap();
     assert_eq!(checkpoint.receiving_sources().count(), RETAINED);
     assert!(

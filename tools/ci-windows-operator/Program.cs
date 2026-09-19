@@ -91,6 +91,8 @@ internal static class Program
                         try
                         {
                             int phase = 0;
+                            int qrCaptures = 0;
+                            long qrUntilMilliseconds = 0;
                             Stage = "arm_wait";
                             while (true)
                             {
@@ -116,14 +118,21 @@ internal static class Program
                                     Stage = "capture_command_wait";
                                     Reply(writer, new { status = "ready" });
                                 }
-                                else if (phase == 1 && command == "capture_qr")
+                                else if ((phase == 1 || phase == 2) && command == "capture_qr")
                                 {
-                                    Stage = "initial_consent";
-                                    ProtectedUi.ApprovePairingConsent();
-                                    Stage = "introduction";
-                                    ProtectedUi.DismissIntroduction();
+                                    if (phase == 1)
+                                    {
+                                        Stage = "initial_consent";
+                                        ProtectedUi.ApprovePairingConsent();
+                                        Stage = "introduction";
+                                        ProtectedUi.DismissIntroduction();
+                                        qrUntilMilliseconds = Lifetime.ElapsedMilliseconds + 10000;
+                                    }
                                     Stage = "qr_capture";
+                                    Require(++qrCaptures <= 25 && Lifetime.ElapsedMilliseconds < qrUntilMilliseconds,
+                                        "qr_readiness_timeout");
                                     string png = ProtectedUi.CaptureQr();
+                                    Require(Lifetime.ElapsedMilliseconds < qrUntilMilliseconds, "qr_readiness_timeout");
                                     phase = 2;
                                     Stage = "comparison_command_wait";
                                     Reply(writer, new { status = "qr_pixels", pngBase64 = png, rendererPid = RendererPid });
