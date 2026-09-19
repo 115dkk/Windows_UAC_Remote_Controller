@@ -21,6 +21,7 @@ use windows::{
     },
     core::{PCWSTR, w},
 };
+use windows_prompt_probe::supervision::RefusalReason;
 
 /// One prompt's worth of rows, and no more. A consent dialog this product will
 /// act on has a bounded element count, so a dialog needing more than this is not
@@ -74,12 +75,7 @@ pub(crate) fn label(
     automation_id: &str,
     class_name: &str,
 ) {
-    if ROWS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-            (count < MAX_ROWS).then_some(count + 1)
-        })
-        .is_err()
-    {
+    if !admit() {
         return;
     }
     emit(&format!(
@@ -88,6 +84,42 @@ pub(crate) fn label(
         identifier(automation_id),
         identifier(class_name)
     ));
+}
+
+/// Records why Windows refused to carry out a decision the phone already
+/// signed. The reason is a closed enum the probe chose, never a message and
+/// never anything the dialog said.
+///
+/// It was being discarded outside the disposable lab, which is the same shape
+/// of defect as a caught exception with no cause: the product knew exactly why
+/// it refused and told nobody. Somebody who approved on their phone and then
+/// watched nothing happen deserves better than that, and so does whoever has
+/// to find out why.
+pub(crate) fn refusal(reason: RefusalReason) {
+    if !admit() {
+        return;
+    }
+    emit(&format!(
+        "UAC_APPLY_V1 version={} refused={}",
+        env!("CARGO_PKG_VERSION"),
+        match reason {
+            RefusalReason::UnknownTarget => "UnknownTarget",
+            RefusalReason::TargetChanged => "TargetChanged",
+            RefusalReason::ContentChanged => "ContentChanged",
+            RefusalReason::UnrecognizedButtons => "UnrecognizedButtons",
+            RefusalReason::AmbiguousButtons => "AmbiguousButtons",
+            RefusalReason::PatternUnavailable => "PatternUnavailable",
+            RefusalReason::InvokeFailed => "InvokeFailed",
+        }
+    ));
+}
+
+/// Takes one row from the current prompt's budget, or refuses.
+fn admit() -> bool {
+    ROWS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        (count < MAX_ROWS).then_some(count + 1)
+    })
+    .is_ok()
 }
 
 fn emit(message: &str) {
@@ -146,6 +178,28 @@ mod tests {
         assert_eq!(ROWS.load(Ordering::Relaxed), MAX_ROWS);
         PROMPTS.store(0, Ordering::Relaxed);
         ROWS.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn every_refusal_names_itself_and_fits_the_event_log_shape() {
+        // Exhaustive on purpose: a reason added later must be named here or
+        // this stops compiling, rather than quietly logging nothing.
+        for reason in [
+            RefusalReason::UnknownTarget,
+            RefusalReason::TargetChanged,
+            RefusalReason::ContentChanged,
+            RefusalReason::UnrecognizedButtons,
+            RefusalReason::AmbiguousButtons,
+            RefusalReason::PatternUnavailable,
+            RefusalReason::InvokeFailed,
+        ] {
+            let message = format!(
+                "UAC_APPLY_V1 version={} refused={reason:?}",
+                env!("CARGO_PKG_VERSION")
+            );
+            assert!(message.is_ascii(), "{message}");
+            assert!(message.len() <= 256, "{}", message.len());
+        }
     }
 
     #[test]

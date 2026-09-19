@@ -845,8 +845,16 @@ impl<'key> ServiceSession<'key> {
                     },
                     crate::ApplyOutcome::StillPresent => prompt::PromptResult::FailedUnknown,
                     crate::ApplyOutcome::Refused(reason) => {
-                        // The fixed journal outcome carries no reason, and the
-                        // disposable lab is where a refusal has to be readable.
+                        // Somebody approved on their phone and then watched
+                        // nothing happen. The journal's outcome says only that
+                        // Windows refused, and until now the reason went no
+                        // further than a disposable lab build, so on a real
+                        // machine the product knew exactly why it refused and
+                        // told nobody. The reason is a closed enum this product
+                        // chose; it is never a message and never anything the
+                        // dialog said.
+                        #[cfg(windows)]
+                        crate::ffi::prompt_diagnostics::refusal(reason);
                         #[cfg(all(windows, feature = "lab-software-identity"))]
                         crate::lab::record_note(&format!("prompt apply refused: {reason:?}"));
                         let _ = reason;
