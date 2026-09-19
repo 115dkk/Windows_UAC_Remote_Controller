@@ -48,3 +48,8 @@ and gap assertions passed before the full-page overflow check. The adjacent
 external-relay text input lacked any intrinsic-width cap; constrain only that
 input to its form content width and add explicit field containment measurements.
 No input value, validation, submission, color or font changes.
+
+CI0f7fb0d:145/146 browser cases passed; the new input containment and page overflow
+checks passed. The pairing200% case then reached a legacy desktop-wide branch
+that searched for status-page activation buttons. Scope only those action checks
+to desktop-running; retain shared200% navigation checks for both desktop pages.

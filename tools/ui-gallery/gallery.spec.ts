@@ -287,6 +287,9 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         expect(await page.locator('.main-scroll').evaluate((element) => element.scrollTop)).toBe(beforeMain);
         await gallery.capture('text-size-navigation', 'CLIENT 200% 글자 크기 · 30% 이하 탐색 너비와 Tab 초점·독립 스크롤 접근');
       }
+    }
+
+    if (fixture === 'desktop-running' && (selected.id === 'desktop-running-minimum-760' || selected.rootTextSizePercent === 200)) {
       for (const name of ['휴대폰 승인 다시 켜기', '휴대폰 승인 끄기', 'PC 연결 기능 제거']) {
         const action = page.getByRole('button', { name, exact: true });
         await action.scrollIntoViewIfNeeded();
