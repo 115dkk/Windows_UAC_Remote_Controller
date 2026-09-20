@@ -83,7 +83,8 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     await operator.guardStartup(() => bridge.request({ command: 'arm' }, 'ready'));
     stage = 'initial-consent';
     await page.locator('.navigation-item').nth(1).click();
-    const qr = page.locator('.pairing-entry button.primary[aria-describedby$="-qr-purpose"]');
+    const qr = page.locator('.pairing-entry button[aria-describedby$="-qr-purpose"]');
+    await expect(qr).toHaveCount(1);
     await expect(qr).toBeEnabled({ timeout: 15000 });
     await qr.click();
     stage = 'qr-pixels';
