@@ -115,8 +115,17 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('region', { name: '휴대폰 승인 설정이 필요합니다', exact: true }).getByRole('button')).toHaveCount(0);
     }
     if (fixture === 'desktop-unavailable') {
-      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(2);
-      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(1);
+      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(3);
+      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(0);
+      // History may be unavailable while independent diagnostic files remain useful.
+      await page.getByRole('navigation').getByRole('button', { name: '활동 기록', exact: true }).click();
+      await expect(page.getByRole('heading', { name: '활동 기록 확인 불가', exact: true })).toBeVisible();
+      const logs = page.getByRole('button', { name: '로그 폴더 열기', exact: true });
+      await expect(logs).toBeEnabled();
+      await logs.scrollIntoViewIfNeeded();
+      await logs.focus(); await expect(logs).toBeFocused();
+      await gallery.capture('diagnostics-unavailable-history', 'CLIENT/SYNTHETIC · diagnostic folder remains reachable without service history');
+      await page.getByRole('navigation').getByRole('button', { name: 'PC 상태', exact: true }).click();
     }
     if (fixture === 'desktop-running') {
       await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
@@ -143,6 +152,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
+      await expect(page.getByRole('button', { name: '로그 폴더 열기', exact: true })).toBeVisible();
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '승인 요청 없음', exact: true })).toBeVisible();
     const intakeCopy: Record<string, string> = {

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { nextVersion, stableVersion, stampMetadata } from './release-version.mjs';
+import { nextVersion, stableVersion, stampMetadata, verifyTaggedMetadata, VERSION_FILES } from './release-version.mjs';
 import { RELEASE_GATES, selectRun } from './release-gates.mjs';
 import { shouldBeLatest, releaseTagsArguments } from './release-latest.mjs';
 
@@ -52,6 +52,87 @@ test('metadata disagreement rejects before any version file is written', () => {
   writeFileSync(join(root, 'src-tauri', 'tauri.conf.json'), '{"version":"different"}');
   assert.throws(() => stampMetadata(root, '1.0.0'));
   assert.equal(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, '0.1.0-alpha.40');
+});
+
+const metadataBytes = root => VERSION_FILES.map(name => readFileSync(join(root, name)));
+test('tagged verification shares all metadata checks and leaves stable/prerelease bytes untouched', () => {
+  const root = fixture();
+  let before = metadataBytes(root);
+  assert.equal(verifyTaggedMetadata(root, 'v0.1.0-alpha.40'), '0.1.0-alpha.40');
+  assert.deepEqual(metadataBytes(root), before);
+  stampMetadata(root, '1.0.0');
+  before = metadataBytes(root);
+  assert.equal(verifyTaggedMetadata(root, 'v1.0.0'), '1.0.0');
+  assert.deepEqual(metadataBytes(root), before);
+  assert.throws(() => verifyTaggedMetadata(root, 'v1.0.1'));
+  assert.throws(() => stampMetadata(root, '1.0.1-alpha.1'), /Stable version required/u);
+  assert.deepEqual(metadataBytes(root), before);
+});
+
+test('both callers reject metadata disagreement, absent/duplicate owned locks and non-workspace members before writing', () => {
+  const changes = [
+    ['package.json', text => text.replace('0.1.0-alpha.40', 'different')],
+    ['package-lock.json', text => text.replace('0.1.0-alpha.40', 'different')],
+    ['package-lock.json', text => text.replace('"packages":{"":{"version":"0.1.0-alpha.40"}', '"packages":{"":{"version":"different"}')],
+    ['src-tauri/tauri.conf.json', text => text.replace('0.1.0-alpha.40', 'different')],
+    ['Cargo.toml', text => text.replace('0.1.0-alpha.40', 'different')],
+    ['Cargo.lock', text => text.replace('0.1.0-alpha.40', 'different')],
+    ['Cargo.lock', text => text.replace('name = "sample"', 'name = "not-owned"')],
+    ['Cargo.lock', text => text + '\n[[package]]\nname = "sample"\nversion = "0.1.0-alpha.40"\n'],
+    ['crates/sample/Cargo.toml', text => text.replace('version.workspace = true', 'version = "0.1.0-alpha.40"')],
+  ];
+  for (const [name, change] of changes) {
+    const root = fixture();
+    const original = readFileSync(join(root, name), 'utf8');
+    const changed = change(original);
+    assert.notEqual(changed, original, `Negative control must change ${name}`);
+    writeFileSync(join(root, name), changed);
+    const before = metadataBytes(root);
+    assert.throws(() => verifyTaggedMetadata(root, 'v0.1.0-alpha.40'), name);
+    assert.throws(() => stampMetadata(root, '1.0.0'), name);
+    assert.deepEqual(metadataBytes(root), before, `No write after rejecting ${name}`);
+  }
+});
+
+test('tag grammar retains explicit prereleases and rejects payloads or trailing newlines', () => {
+  const root = fixture();
+  for (const tag of ['0.1.0-alpha.40', 'v0.1.0-', 'v0.1.0-alpha.40\n', 'v0.1.0-alpha.40\r', 'v0.1.0+build', '--prepare']) {
+    assert.throws(() => verifyTaggedMetadata(root, tag), /Version tag required/u);
+  }
+});
+
+function releaseCli(root, args) {
+  return spawnSync(process.execPath, [fileURLToPath(new URL('./release-version.mjs', import.meta.url)), ...args], {
+    cwd: root, encoding: 'utf8',
+    env: { ...process.env, GITHUB_ACTIONS: 'true', GITHUB_REF: 'refs/heads/main', GITHUB_OUTPUT: join(root, 'cli-output') },
+  });
+}
+test('read-only CLI verifies prerelease and stable metadata without Git or metadata writes', () => {
+  const root = fixture();
+  for (const tag of ['v0.1.0-alpha.40', 'v1.0.0']) {
+    if (tag === 'v1.0.0') stampMetadata(root, '1.0.0');
+    const before = metadataBytes(root);
+    const result = releaseCli(root, ['--verify-tag', tag]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, tag.slice(1) + '\n');
+    assert.deepEqual(metadataBytes(root), before);
+    assert.equal(existsSync(join(root, 'cli-output')), false, 'Read-only mode never prepares main outputs');
+  }
+  writeFileSync(join(root, 'Cargo.lock'), readFileSync(join(root, 'Cargo.lock'), 'utf8').replace('version = "1.0.0"', 'version = "wrong"'));
+  assert.notEqual(releaseCli(root, ['--verify-tag', 'v1.0.0']).status, 0);
+});
+test('unknown CLI mode or wrong arity rejects before entering mutating main preparation', () => {
+  const root = fixture();
+  const before = metadataBytes(root);
+  for (const args of [['--verify-tag'], ['--verify-tags', 'v0.1.0-alpha.40'], ['--verify-tag', 'v0.1.0-alpha.40', 'extra'], ['--prepare'], ['v1.0.0']]) {
+    const result = releaseCli(root, args);
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Usage: release-version\.mjs/u);
+    assert.deepEqual(metadataBytes(root), before);
+    assert.equal(existsSync(join(root, 'cli-output')), false);
+  }
 });
 test('a fix after failed pre-tag CI reuses correct metadata and gates its new HEAD', () => {
   const root = fixture();
@@ -100,6 +181,8 @@ test('stable publication cannot overwrite assets or silently change the Android 
   assert.match(workflow, /node tools\/release-gates\.mjs/u);
   assert.match(workflow, /group: release-publication/u);
   assert.match(workflow, /node tools\/release-latest\.mjs/u);
+  assert.match(workflow, /node tools\/release-version\.mjs --verify-tag "\$tag"/u);
+  assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/u);
   const main = readFileSync(new URL('../.github/workflows/main-release.yml', import.meta.url), 'utf8');
   assert.match(main, /gh workflow run release\.yml --ref "\$tag"/u);
   assert.doesNotMatch(main, /--force|--no-verify/u);

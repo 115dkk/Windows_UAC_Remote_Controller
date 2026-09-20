@@ -39,7 +39,12 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
-      - name: Compare tag, package.json, tauri.conf.json and Cargo workspace version
+      - name: Set up pinned Node for release metadata verification
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Compare tag with all owned release metadata
         id: check
         shell: bash
         run: |
@@ -48,18 +53,7 @@ jobs:
           # Bind workflow definition/event and checked-out product to one commit.
           # Dispatch an existing tag with --ref <that-tag>, never another branch.
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "tag $tag is not a version tag" >&2; exit 1; }
-          version="${tag#v}"
-          node -e '
-            const fs = require("node:fs");
-            const want = process.argv[1];
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
-            const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
-            const cargo = /\[workspace\.package\][\s\S]*?version = "([^"]+)"/u.exec(fs.readFileSync("Cargo.toml", "utf8"))[1];
-            for (const [name, value] of [["package.json", pkg], ["tauri.conf.json", tauri], ["Cargo.toml", cargo]]) {
-              if (value !== want) { console.error(`${name} version ${value} does not match tag ${want}`); process.exit(1); }
-            }
-          ' "$version"
+          version="$(node tools/release-version.mjs --verify-tag "$tag")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   native-startup:

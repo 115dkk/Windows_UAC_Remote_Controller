@@ -29,11 +29,14 @@ export function nextVersion(latestTag, messages) {
   return next.join('.');
 }
 
-export function stampMetadata(root, version) {
-  assert.ok(stableVersion(version), 'Stable version required');
+// One read-only owner for both stamping and tagged-release consistency checks.
+// The returned representation stays private; callers never repeat file rules.
+function readMetadata(root) {
   const path = name => resolve(root, name);
   const packageJson = JSON.parse(readFileSync(path('package.json'), 'utf8'));
   const previous = packageJson.version;
+  assert.equal(typeof previous, 'string', 'Package version is required');
+  assert.ok(previous.length > 0, 'Package version is required');
   const lock = JSON.parse(readFileSync(path('package-lock.json'), 'utf8'));
   const tauri = JSON.parse(readFileSync(path('src-tauri/tauri.conf.json'), 'utf8'));
   const cargo = readFileSync(path('Cargo.toml'), 'utf8');
@@ -53,16 +56,35 @@ export function stampMetadata(root, version) {
     assert.ok(name);
     return name;
   }));
+  assert.ok(names.size > 0 && names.size === memberPaths.length, 'Workspace package names must be unique and nonempty');
   const found = new Set();
-  const cargoLock = readFileSync(path('Cargo.lock'), 'utf8').replace(/(^\[\[package\]\]\r?\n[\s\S]*?)(?=^\[\[package\]\]|$(?![\s\S]))/gmu, block => {
+  const lockBlocks = readFileSync(path('Cargo.lock'), 'utf8').split(/(?=^\[\[package\]\]\r?$)/mu).map(block => {
     const name = /^name = "([^"]+)"/mu.exec(block)?.[1];
-    if (!names.has(name)) return block;
+    if (!names.has(name)) return { text: block, owned: false };
     assert.ok(!found.has(name), 'Duplicate workspace lock package');
     found.add(name);
     assert.equal(/^version = "([^"]+)"/mu.exec(block)?.[1], previous);
-    return block.replace(/^version = "[^"]+"/mu, `version = "${version}"`);
+    return { text: block, owned: true };
   });
-  assert.equal(found.size, names.size, 'Every owned workspace package must be stamped');
+  assert.equal(found.size, names.size, 'Every owned workspace package must be present');
+  return { previous, packageJson, lock, tauri, cargo, lockBlocks };
+}
+
+export function verifyTaggedMetadata(root, tag) {
+  // Preserve the existing Release tag grammar, including explicit prereleases.
+  // Reject line terminators too: JS $ alone permits a final newline.
+  assert.match(tag, /^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?$(?![\s\S])/u, 'Version tag required');
+  const version = tag.slice(1);
+  assert.equal(readMetadata(root).previous, version, 'Tag must match release metadata');
+  return version;
+}
+
+export function stampMetadata(root, version) {
+  assert.ok(stableVersion(version), 'Stable version required');
+  const { packageJson, lock, tauri, cargo, lockBlocks } = readMetadata(root);
+  const path = name => resolve(root, name);
+  const cargoLock = lockBlocks.map(({ text, owned }) => owned
+    ? text.replace(/^version = "[^"]+"/mu, `version = "${version}"`) : text).join('');
   packageJson.version = lock.version = lock.packages[''].version = tauri.version = version;
   const cargoAfter = cargo.replace(/(\[workspace\.package\][\s\S]*?^version = ")[^"]+(".*$)/mu, (_match, prefix, suffix) => prefix + version + suffix);
   // All parsing/consistency checks finish before the first version-file write.
@@ -129,4 +151,12 @@ function prepareMain() {
   output({ skip: false, version, sha: git('rev-parse', 'HEAD') });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) prepareMain();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    prepareMain(); // The only mutating mode; retains the main/CI/clean-tree guards.
+  } else {
+    assert.ok(args.length === 2 && args[0] === '--verify-tag', 'Usage: release-version.mjs [--verify-tag <tag>]');
+    process.stdout.write(verifyTaggedMetadata(process.cwd(), args[1]) + '\n');
+  }
+}

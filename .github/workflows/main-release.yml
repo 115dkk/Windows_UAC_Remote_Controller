@@ -17,7 +17,8 @@ jobs:
   prepare-and-verify:
     # The metadata commit cannot recursively bump itself, including when a
     # maintainer reruns with a token whose pushes trigger ordinary workflows.
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release): ')
+    if: >-
+      github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release): ')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:

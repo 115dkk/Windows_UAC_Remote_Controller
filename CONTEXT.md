@@ -39,6 +39,11 @@ not a general remote desktop or arbitrary remote execution tool.
 - **Activity journal**: bounded, expiring operational history with typed events.
   It is not an authorization registry or a tamper-proof audit trail. It must not
   contain passwords, private keys, QR secrets or full command lines.
+- **Release metadata**: the common product version in package.json, the root
+  package-lock entries, Tauri configuration, Cargo workspace and owned Cargo.lock
+  packages. Main preparation and tagged publication share its consistency checks;
+  external dependency versions are not release metadata. A matching version is
+  not evidence of a passed release gate or an observed Windows outcome.
 
 ## Confirmed threat scope
 
