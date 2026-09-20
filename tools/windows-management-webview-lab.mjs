@@ -148,12 +148,29 @@ try {
   const logFolder = page.getByRole('button', { name: /^(Open log folder|로그 폴더 열기)$/u });
   await expect(logFolder).toBeEnabled();
   await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-action.png') });
-  const explorerCount = () => Number(ps("@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'UACRemoteController-Logs').Count"));
+  // Explorer can host several windows/tabs in one process. MainWindowTitle is
+  // not a window inventory, so observe the actual accessible folder windows.
+  const explorerWindows = [
+    'Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes',
+    '$top=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)',
+    "$owned=@($top | Where-Object { $_.Current.ClassName -eq 'CabinetWClass' -and $_.Current.Name.Contains('UACRemoteController-Logs') -and (Get-Process -Id $_.Current.ProcessId -ErrorAction Stop).ProcessName -eq 'explorer' })",
+  ].join(';');
+  const explorerCount = () => Number(ps(explorerWindows + ';$owned.Count'));
   assert.equal(explorerCount(), 0, 'No preexisting diagnostic Explorer window may stand in for this click');
   await logFolder.click();
-  await expect.poll(explorerCount, { timeout: 15000, intervals: [500, 1000] }).toBe(1);
-  await expect(page.locator('.notice-box.error')).toHaveCount(0);
-  ps("$owned=@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'UACRemoteController-Logs');if($owned.Count -ne 1){throw 'Diagnostic Explorer identity changed'};[void]$owned[0].CloseMainWindow()");
+  try {
+    await expect.poll(explorerCount, { timeout: 15000, intervals: [500, 1000] }).toBe(1);
+    await expect(page.locator('.notice-box.error')).toHaveCount(0);
+  } finally {
+    // Owned empty/history view only; no pairing/request body exists at this step.
+    await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-after.png') });
+    writeFileSync(resolve(evidence, 'diagnostic-folder-result.json'), JSON.stringify({
+      errorVisible: await page.locator('.notice-box.error').count() > 0,
+      errorText: await page.locator('.notice-box.error').allTextContents(),
+      buttonEnabled: await logFolder.isEnabled(),
+    }, null, 2), { flag: 'wx' });
+  }
+  ps(explorerWindows + ";if($owned.Count -ne 1){throw 'Diagnostic Explorer identity changed'};([Windows.Automation.WindowPattern]$owned[0].GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern)).Close()");
   await page.locator('nav .navigation-item').nth(1).click();
   confirmService();
   writeFileSync(resolve(evidence, 'management-gui-proof.json'), JSON.stringify({
