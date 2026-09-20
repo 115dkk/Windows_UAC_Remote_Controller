@@ -300,6 +300,37 @@ fn with_fixture_deadlines(
     // Keep fixture-owned directory until the actual locked inbox has dropped.
     drop(fixture.temp);
 }
+#[test]
+fn completed_approval_retirement_survives_repeated_admission_contention() {
+    with_fixture(2, |controller, _platform, requests| {
+        for request in requests {
+            let plan = controller.begin_approval(request.clone()).unwrap();
+            let attempt = controller.claim_approval(plan.clone()).unwrap();
+            // Software fixture only: no Android authentication or transport proof.
+            let signature: Signature = SigningKey::from_slice(&[3; 32])
+                .unwrap()
+                .sign(&attempt.signing_bytes().unwrap());
+            let submission = controller
+                .finish_approval(attempt, signature.to_der().as_bytes().to_vec())
+                .unwrap();
+            let admission = controller.enter().unwrap();
+            for _ in 0..12 {
+                assert_eq!(
+                    controller.retire_approval(plan.clone()),
+                    Err(BridgeError::Busy)
+                );
+                assert!(!submission.is_cancelled());
+                assert!(controller.approval_native_plan.lock().unwrap().is_some());
+            }
+            drop(admission);
+            controller.retire_approval(plan.clone()).unwrap();
+            controller.retire_approval(plan).unwrap(); // Exact retirement is idempotent.
+            assert!(controller.approval_native_plan.lock().unwrap().is_none());
+            assert!(!submission.is_cancelled());
+        }
+    });
+}
+
 fn ready(
     controller: &MobileController,
     scope: &Arc<NativeDenialScope>,

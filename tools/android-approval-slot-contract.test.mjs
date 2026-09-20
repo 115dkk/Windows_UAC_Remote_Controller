@@ -36,18 +36,30 @@ test('the worker pass always reaches the retry that frees the approval slot', ()
 // and the worker job that begins it. `advance` orders these two the same way.
 test('an expired session is cancelled once, and never one that has not begun', () => {
   const pass = workerPass();
-  assert.match(pass, /if \(!session\.cancelled\.get\(\) && session\.phase\(\) != Phase\.PREPARING && expired\(session\)\)/u);
+  assert.match(pass, /if \(!session\.prepared\.get\(\) && !session\.cancelled\.get\(\) && session\.phase\(\) != Phase\.PREPARING && expired\(session\)\)/u);
   assert.match(pass, /session\.expiryTraced\.compareAndSet\(false, true\)/u);
 });
 
 test('every guard that refuses a terminal cleanup names itself', () => {
   const body = between('private fun cleanup(session: Session)', 'if (!enqueue {');
   const guards = body.split('\n').filter((line) => /\breturn\b/u.test(line));
-  assert.equal(guards.length, 5);
+  assert.equal(guards.length, 6);
   for (const guard of guards) assert.match(guard, /refused\(session, CleanupRefusal\.[A-Z_]+\)/u);
   const used = new Set([...source.matchAll(/CleanupRefusal\.([A-Z_]+)/gu)].map(([, name]) => name));
   const declared = between('private enum class CleanupRefusal {', '}')
     .replace('private enum class CleanupRefusal {', '').split(',').map((name) => name.trim());
-  assert.equal(declared.length, 5);
+  assert.equal(declared.length, 6);
   for (const name of declared) assert.ok(used.has(name), name);
+});
+
+test('retirement admission contention waits without consuming cleanup failure retries', () => {
+  const cleanup = between('private fun cleanup(session: Session)', 'private fun post(session: Session');
+  const busyStart = cleanup.indexOf('if (cleanupSite == "APPROVAL_RETIRE" && failure is BridgeException.Busy)');
+  assert.ok(busyStart >= 0);
+  const wait = cleanup.slice(busyStart, cleanup.indexOf('} else {', busyStart));
+  assert.match(wait, /cleanupAdmissionWaiting\.set\(true\)/u);
+  assert.match(wait, /main\.postDelayed\(session\.cleanupWake, delay\)/u);
+  assert.doesNotMatch(wait, /cleanupRetries|handleCleanup\.completed|current\.compareAndSet/u);
+  assert.match(cleanup, /val controller = owner\(\) \?: throw BridgeException\.Closed\(\)/u);
+  assert.match(cleanup, /APPROVAL_CLEANUP_COMPLETE/u);
 });

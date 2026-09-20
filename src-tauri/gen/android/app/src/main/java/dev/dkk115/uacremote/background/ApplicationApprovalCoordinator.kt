@@ -183,7 +183,9 @@ internal class ApplicationApprovalCoordinator(
         // cancels a brand-new approval in the window between the tap that
         // claims the slot and the worker job that begins it, and the person
         // pressing approve sees nothing happen at all.
-        if (!session.cancelled.get() && session.phase() != Phase.PREPARING && expired(session)) {
+        // Once handed off, the request/delivery owner enforces the original
+        // deadline. Cleanup contention must not cancel that independent result.
+        if (!session.prepared.get() && !session.cancelled.get() && session.phase() != Phase.PREPARING && expired(session)) {
             // Which phase it died in is the one thing that says why. The value
             // is a fixed enum position, never a request, a selection or a key.
             if (session.expiryTraced.compareAndSet(false, true)) {
@@ -356,7 +358,7 @@ internal class ApplicationApprovalCoordinator(
      *
      * The slot a session holds is what every later approval waits on, so a
      * cleanup that never starts and one that starts and fails look identical
-     * from the phone: approve is grey and nothing says why. Five conditions can
+     * from the phone: approve is grey and nothing says why. The conditions can
      * refuse here and until now none of them left a trace, which is how the
      * same symptom came back twice under two different causes.
      */
@@ -371,9 +373,11 @@ internal class ApplicationApprovalCoordinator(
         if (session.phase() != Phase.TERMINAL) { refused(session, CleanupRefusal.NOT_TERMINAL); return }
         if (session.jobs.get() != 0) { refused(session, CleanupRefusal.JOBS_OUTSTANDING); return }
         if (session.operation?.isQuiescent() == false) { refused(session, CleanupRefusal.OPERATION_BUSY); return }
+        if (session.cleanupAdmissionWaiting.get()) { refused(session, CleanupRefusal.ADMISSION_WAIT); return }
         if (session.cleanupFailed.get()) { refused(session, CleanupRefusal.EARLIER_FAILURE); return }
         if (!session.cleanupQueued.compareAndSet(false, true)) { refused(session, CleanupRefusal.ALREADY_QUEUED); return }
         if (!enqueue {
+            var cleanupSite = "APPROVAL_CLOSE_SUBMISSION"
             try {
                 // Native holder is quiescent; no Signature or live prompt may
                 // use these generated handles after terminal cleanup.
@@ -383,8 +387,17 @@ internal class ApplicationApprovalCoordinator(
                     // remains selected; a retry never repeats a successful close.
                     while (session.handleCleanup.next() != ApprovalHandleCleanupAction.COMPLETE) {
                         val next = session.handleCleanup.next()
+                        cleanupSite = when (next) {
+                            ApprovalHandleCleanupAction.RETIRE -> "APPROVAL_RETIRE"
+                            ApprovalHandleCleanupAction.CLOSE_ATTEMPT -> "APPROVAL_CLOSE_ATTEMPT"
+                            ApprovalHandleCleanupAction.CLOSE_PLAN -> "APPROVAL_CLOSE_PLAN"
+                            ApprovalHandleCleanupAction.COMPLETE -> "APPROVAL_CLEANUP_COMPLETE"
+                        }
                         when (next) {
-                            ApprovalHandleCleanupAction.RETIRE -> session.plan?.let { owner()?.retireApproval(it) }
+                            ApprovalHandleCleanupAction.RETIRE -> session.plan?.let {
+                                val controller = owner() ?: throw BridgeException.Closed()
+                                controller.retireApproval(it)
+                            }
                             ApprovalHandleCleanupAction.CLOSE_ATTEMPT -> session.attempt?.close()
                             ApprovalHandleCleanupAction.CLOSE_PLAN -> session.plan?.close()
                             ApprovalHandleCleanupAction.COMPLETE -> Unit
@@ -394,14 +407,33 @@ internal class ApplicationApprovalCoordinator(
                 }
                 // Publish availability only after every individual close. A
                 // failed close leaves its exact retry obligation in this slot.
-                current.compareAndSet(session, null)
+                if (current.compareAndSet(session, null)) {
+                    main.removeCallbacks(session.cleanupWake)
+                    session.cleanupAdmissionWaiting.set(false)
+                    NativeThrowTrace.measurement("APPROVAL_CLEANUP_COMPLETE", "admission_waits", session.cleanupAdmission.waits().toLong())
+                }
             } catch (failure: Throwable) {
                 rethrowFatal(failure)
-                // Latch failure BEFORE finally runs. Ordinary worker traffic
-                // must not create an endless immediate retry loop.
-                session.cleanupFailed.set(true)
-                session.cleanupQueued.set(false)
-                if (RequestActionFailurePolicy.approvalCleanupRetiresOwner(failure)) ownerFailed(failure)
+                // Only this exact method can return Busy before owner admission.
+                // A Busy/exception while closing a wrapper remains a failure.
+                if (cleanupSite == "APPROVAL_RETIRE" && failure is BridgeException.Busy) {
+                    session.cleanupAdmissionWaiting.set(true)
+                    session.cleanupQueued.set(false)
+                    if (session.cleanupAdmission.waits() == 0) NativeThrowTrace.measurement("APPROVAL_RETIRE_BUSY", "waits", 1)
+                    val delay = session.cleanupAdmission.defer()
+                    if (!main.postDelayed(session.cleanupWake, delay)) {
+                        session.cleanupAdmissionWaiting.set(false)
+                        session.cleanupFailed.set(true)
+                        NativeThrowTrace.measurement("APPROVAL_CLEANUP_WAKE", "posted", 0)
+                    }
+                } else {
+                    if (!session.cleanupFailureTraced.getAndSet(true)) NativeThrowTrace.note(cleanupSite, failure)
+                    // Latch failure BEFORE finally runs. Ordinary worker traffic
+                    // must not create an endless immediate retry loop.
+                    session.cleanupFailed.set(true)
+                    session.cleanupQueued.set(false)
+                    if (RequestActionFailurePolicy.approvalCleanupRetiresOwner(failure)) ownerFailed(failure)
+                }
             } finally { nativeProgress() }
         }) session.cleanupQueued.set(false)
     }
@@ -459,13 +491,19 @@ internal class ApplicationApprovalCoordinator(
 
     private enum class Phase { PREPARING, PREPARED, PROMPT, AUTHENTICATED, CLAIMED, SIGNING, SIGNED, FINISHING, COMPLETED, TERMINAL }
     /** Order is the record. Append only; a reader holds the earlier positions. */
-    private enum class CleanupRefusal { NOT_TERMINAL, JOBS_OUTSTANDING, OPERATION_BUSY, EARLIER_FAILURE, ALREADY_QUEUED }
+    private enum class CleanupRefusal { NOT_TERMINAL, JOBS_OUTSTANDING, OPERATION_BUSY, EARLIER_FAILURE, ALREADY_QUEUED, ADMISSION_WAIT }
     private inner class Session(val selection: NativeRequestSelection, val host: Activity, val callback: (NativeApprovalReply) -> Unit) {
         val lease = ApprovalHostLease(host)
         val cancelled = AtomicBoolean(false)
         val delivered = AtomicBoolean(false)
         val cleanupQueued = AtomicBoolean(false)
         val cleanupFailed = AtomicBoolean(false)
+        val cleanupAdmissionWaiting = AtomicBoolean(false)
+        val cleanupAdmission = ApprovalCleanupAdmission()
+        val cleanupFailureTraced = AtomicBoolean(false)
+        val cleanupWake = Runnable {
+            if (current.get() === this && cleanupAdmissionWaiting.compareAndSet(true, false)) cleanup(this)
+        }
         // Diagnostics only, and bounded here rather than at the sink: the
         // worker pass runs on ordinary traffic, so an unbounded line writes the
         // same answer hundreds of times and buries the record it was meant to
