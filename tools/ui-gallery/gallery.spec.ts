@@ -120,8 +120,9 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture === 'desktop-running') {
       await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
-      await expect(page.getByText('요청 전송 준비 안 됨', { exact: true })).toBeVisible();
-      await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toBeVisible();
+      await expect(page.getByText('휴대폰 연결 안 됨', { exact: true })).toBeVisible();
+      await expect(page.getByText('요청 전송 준비 안 됨', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toHaveCount(0);
       await expect(page.getByText('요청 전송 준비됨', { exact: true })).toHaveCount(0);
       await expect(page.getByRole('button', { name: '휴대폰 승인 끄기', exact: true })).toBeEnabled();
     }
@@ -216,7 +217,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       const status = card.getByRole('status');
       const expected: Record<string, string> = {
         'desktop-relay-stopped': '내장 중계 중지됨 · 수신 대기하지 않습니다.',
-        'desktop-relay-listening': '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인하십시오.',
+        'desktop-relay-listening': '내장 중계 수신 대기 중',
         'desktop-relay-waiting': '내장 중계: 네트워크 연결 대기 중',
         'desktop-relay-unknown': '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.',
         'desktop-relay-external': '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았습니다.',
