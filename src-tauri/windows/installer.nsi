@@ -166,7 +166,12 @@ Var UacTaskbarCheckbox
 ; Display-only name also feeds NSIS's localized setup/uninstall captions.
 ; PRODUCTNAME/INSTALLATIONID remain fixed for matching and registry identities.
 Name "$(UacProductName)"
-BrandingText "${COPYRIGHT}"
+; The bundler's absent optional copyright can render as literal "Null".
+!if "${COPYRIGHT}" == "" || "${COPYRIGHT}" == "Null" || "${COPYRIGHT}" == "null"
+  BrandingText " "
+!else
+  BrandingText "${COPYRIGHT}"
+!endif
 OutFile "${OUTFILE}"
 
 ; We don't actually use this value as default install path,
@@ -283,6 +288,8 @@ Var AppStartMenuFolder
 Page custom UacShortcutPage UacShortcutPageLeave
 
 ; 7. Installation page
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW UacFitInstallProgress
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE UacFitInstallProgress
 !insertmacro MUI_PAGE_INSTFILES
 
 ; 8. Finish page
@@ -303,7 +310,12 @@ Page custom UacShortcutPage UacShortcutPageLeave
 !insertmacro MUI_UNPAGE_CONFIRM
 
 ; 2. Uninstalling Page
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.UacFitInstallProgress
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.UacFitInstallProgress
 !insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro UAC_PROGRESS_LAYOUT ""
+!insertmacro UAC_PROGRESS_LAYOUT "un."
 
 ;Languages
 {{#each languages}}

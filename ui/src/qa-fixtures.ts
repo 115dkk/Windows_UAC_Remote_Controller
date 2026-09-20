@@ -172,6 +172,8 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
         remainingSeconds: request.remainingSeconds, refreshAfterMillis: request.refreshAfterMillis });
     },
     clearActivity: () => reply({ ...value, activity: [] }),
+    // Synthetic client acknowledgement, never a native Explorer claim.
+    openDiagnosticsFolder: () => Promise.resolve(),
     openLockSettings: () => Promise.resolve(),
     openNotificationSettings: () => Promise.resolve(),
     // Client/synthetic acknowledgement only; no camera surface or pairing result.

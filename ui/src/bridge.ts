@@ -24,6 +24,7 @@ export const controllerBridge: ControllerBridge = {
     return () => listener.unregister();
   },
   clearActivity: () => native<AppSnapshot>('clear_activity'),
+  openDiagnosticsFolder: () => native<void>('open_diagnostics_folder'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),
   openPairingScanner: (transport) => native<void>(transport === 'usb' ? 'open_pairing_usb' : 'open_pairing_scanner'),

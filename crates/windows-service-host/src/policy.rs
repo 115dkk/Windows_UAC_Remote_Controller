@@ -13,6 +13,8 @@ pub(crate) enum ObjectPolicy {
     AnchoredAncestor,
     Installation,
     PrivateData,
+    /// Fixed diagnostic output may be read, never changed, by ordinary users.
+    PublicDiagnostics,
     Service,
 }
 
@@ -99,7 +101,9 @@ fn forbidden_mask(policy: ObjectPolicy) -> u32 {
         // Unknown rights, delete-child, DELETE, WRITE_DAC/OWNER and generic
         // ALL/WRITE remain forbidden to untrusted principals.
         ObjectPolicy::AnchoredAncestor => !0xA012_01BF_u32,
-        ObjectPolicy::Installation => GENERIC_ALL | GENERIC_WRITE | OWNER_OR_DACL_OR_DELETE | 0x156,
+        ObjectPolicy::Installation | ObjectPolicy::PublicDiagnostics => {
+            GENERIC_ALL | GENERIC_WRITE | OWNER_OR_DACL_OR_DELETE | 0x156
+        }
         ObjectPolicy::PrivateData => u32::MAX,
         // Only QUERY_CONFIG, QUERY_STATUS, ENUMERATE_DEPENDENTS, INTERROGATE,
         // READ_CONTROL are allowed to unprivileged principals. No generic
@@ -181,6 +185,53 @@ mod tests {
         bytes.extend(mask.to_le_bytes());
         bytes.extend(principal);
         bytes
+    }
+
+    #[test]
+    fn public_diagnostics_allow_read_but_never_untrusted_write_or_ownership() {
+        let owner = sid(&[18]);
+        let users = sid(&[32, 545]);
+        let trusted = trusted_system_sids();
+        assert!(
+            check_acl(
+                &owner,
+                &acl(&users, 0xA012_0089, 0, 0),
+                &trusted,
+                ObjectPolicy::PublicDiagnostics
+            )
+            .is_ok()
+        );
+        for mask in [
+            0x2, 0x4, 0x10, 0x40, 0x100, 0x10000, 0x40000, 0x80000, 0x40000000,
+        ] {
+            assert!(
+                check_acl(
+                    &owner,
+                    &acl(&users, mask, 0, 0),
+                    &trusted,
+                    ObjectPolicy::PublicDiagnostics
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            check_acl(
+                &users,
+                &acl(&users, 0x80000000, 0, 0),
+                &trusted,
+                ObjectPolicy::PublicDiagnostics
+            )
+            .is_err()
+        );
+        assert!(
+            check_acl(
+                &owner,
+                &acl(&users, 0x80000000, 0, 0),
+                &trusted,
+                ObjectPolicy::PrivateData
+            )
+            .is_err()
+        );
     }
 
     #[test]

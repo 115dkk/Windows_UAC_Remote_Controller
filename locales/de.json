@@ -1,4 +1,6 @@
 {
+  "로그 폴더 열기": "Protokollordner öffnen",
+  "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Der Protokollordner konnte nicht geöffnet werden. Prüfen Sie die Installation und die Zugriffsrechte.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Das Entfernen der PC-Registrierung konnte nicht bestätigt werden. Prüfen Sie erneut.",
   "요청 전송 실패": "Anfrage konnte nicht gesendet werden",
   "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.": "Die PC-Registrierung konnte nicht entfernt werden. Prüfen Sie erneut.",

@@ -129,6 +129,8 @@ export const ko = {
   removeTitle: '기기 연결을 해제할까요?',
   removeBody: '이 기기로 원격 요청을 주고받으려면 다시 연결해야 해요.',
   clearActivity: '기록 지우기',
+  openDiagnosticsFolder: '로그 폴더 열기',
+  diagnosticsFolderFailure: '로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.',
   clearTitle: '활동 기록을 지울까요?',
   clearBody: '표시된 활동 기록을 지웁니다. 지운 기록은 이 화면에서 되돌릴 수 없어요.',
   noActivity: '표시할 활동 기록이 없어요',

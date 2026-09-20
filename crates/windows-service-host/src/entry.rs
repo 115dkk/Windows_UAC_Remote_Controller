@@ -138,6 +138,16 @@ impl Reporter {
         if let Some(failure) = &failure {
             crate::lab::record_failure(failure);
         }
+        if let Some(error) = failure {
+            let (stage, code) = match error {
+                ServiceError::StartupFailure { stage, detail } => (stage, detail),
+                other => (0, other.service_diagnostic_code()),
+            };
+            crate::public_diagnostics::record(crate::public_diagnostics::Event::StartupFailure {
+                stage,
+                code,
+            });
+        }
         let status = Self::status_for(phase, checkpoint, failure);
         self.send_status(&status)?;
         // Interrogation/progress repeat only a status actually accepted by SCM.

@@ -115,6 +115,7 @@ fn append(journal: &mut Journal, event: ActivityEvent) -> Result<(), ServiceErro
     journal
         .append(now()?, event)
         .map_err(|_| ServiceError::JournalUnavailable)?;
+    crate::public_diagnostics::record(crate::public_diagnostics::Event::Activity { event });
     Ok(())
 }
 

@@ -121,6 +121,7 @@ export interface ControllerBridge {
   requestDetails(requestId: string): Promise<RequestDetailsView>;
   watchRequests?(notify: () => void): Promise<() => Promise<void>>;
   clearActivity(): Promise<AppSnapshot>;
+  openDiagnosticsFolder(): Promise<void>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;
   openPairingScanner(transport?: 'usb'): Promise<void>;

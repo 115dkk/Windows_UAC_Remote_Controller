@@ -1,7 +1,8 @@
 name: Release
 
 # Builds the Windows installer, the Android APK and the relay binaries for one
-# tag and publishes them as a GitHub PRERELEASE with checksums. Publication is a
+# tag and publishes a stable release (or an explicitly prerelease-tagged build).
+# Main automation begins at1.0.0. Checksums are included. Publication is a
 # packaging fact only: it does not claim working UAC approval, phone
 # authentication or pairing on any real device. Those are user-verified.
 
@@ -44,6 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
+          # Bind workflow definition/event and checked-out product to one commit.
+          # Dispatch an existing tag with --ref <that-tag>, never another branch.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "tag $tag is not a version tag" >&2; exit 1; }
           version="${tag#v}"
           node -e '
@@ -59,10 +63,10 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   native-startup:
-    name: Require the tagged minified Android startup proof
+    name: Require every exact-commit release gate
     needs: version
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -72,19 +76,19 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
-      - name: Require successful old-build control and actual release startup
+      - name: Set up pinned Node for the release gate driver
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Require exact-SHA quality, package, lifecycle and native control proofs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
-          run="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$sha" --workflow android-release-startup.yml --event push --limit 10 --json databaseId --jq '.[0].databaseId')"
-          [[ "$run" =~ ^[0-9]+$ ]] || { echo 'No startup proof registered for the tagged commit.' >&2; exit 1; }
-          gh run watch "$run" --repo "$GITHUB_REPOSITORY" --compact --exit-status --interval 10
-          native="$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$sha" --workflow windows-uac-lab.yml --event push --limit 10 --json databaseId --jq '.[0].databaseId')"
-          [[ "$native" =~ ^[0-9]+$ ]] || { echo 'No native QR pairing/denial proof registered for the tagged commit.' >&2; exit 1; }
-          gh run watch "$native" --repo "$GITHUB_REPOSITORY" --compact --exit-status --interval 10
+          node tools/release-gates.mjs "$sha"
 
   android:
     name: Android arm64 release APK (signed)
@@ -131,7 +135,7 @@ jobs:
           sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           export NDK_HOME="$sdk/ndk/28.2.13676358"
           npm run tauri -- android build --target aarch64 --apk --ci
-      - name: Sign the APK with the release keystore, or with a documented ephemeral one
+      - name: Sign with the persistent keystore (ephemeral allowed only for prereleases)
         id: sign
         shell: bash
         env:
@@ -143,6 +147,12 @@ jobs:
           set -euo pipefail
           sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           tools="$sdk/build-tools/36.0.0"
+          if [[ "$RELEASE_TAG" != *-* ]]; then
+            [[ -n "$ANDROID_KEYSTORE_BASE64" && -n "$ANDROID_KEYSTORE_PASSWORD" && -n "$ANDROID_KEY_ALIAS" && -n "$ANDROID_KEY_PASSWORD" ]] || {
+              echo 'Stable releases require the complete persistent Android signer configuration.' >&2
+              exit 1
+            }
+          fi
           mapfile -t unsigned < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*unsigned*.apk')
           [[ ${#unsigned[@]} -eq 1 ]] || { echo "expected exactly one unsigned release APK, found ${#unsigned[@]}" >&2; exit 1; }
           mkdir -p release-out
@@ -167,6 +177,13 @@ jobs:
           "$tools/apksigner" verify --print-certs release-out/uac-remote-controller-android-arm64.apk > release-out/apk-signer.txt
           digest="$(grep -i 'certificate SHA-256 digest' release-out/apk-signer.txt | head -1 | awk '{print tolower($NF)}')"
           [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "could not read the signer digest" >&2; exit 1; }
+          if [[ "$RELEASE_TAG" != *-* ]]; then
+            expected="$(tr -d '\r\n' < security/android-release-signer.sha256)"
+            [[ "$expected" =~ ^[0-9a-f]{64}$ && "$digest" == "$expected" ]] || {
+              echo 'Stable signer changed; an explicit signing-key migration is required.' >&2
+              exit 1
+            }
+          fi
           echo "signer_sha256=$digest" >> "$GITHUB_OUTPUT"
           echo "signer_source=$source" >> "$GITHUB_OUTPUT"
           echo "$source" > release-out/apk-signer-source.txt
@@ -266,10 +283,13 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Publish the GitHub prerelease
+    name: Publish the immutable GitHub release
     needs: [version, android, windows, relay-linux, native-startup]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    concurrency:
+      group: release-publication
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -297,7 +317,7 @@ jobs:
           sha256sum uac-remote-controller-windows-x64-setup.exe uac-remote-controller-android-arm64.apk uac-relay-windows-x64.exe uac-relay-linux-x64 > SHA256SUMS.txt
           cd ..
           node tools/release-notes.mjs docs/RELEASE_NOTES_TEMPLATE.md assets/SHA256SUMS.txt > notes.md
-      - name: Create or update the prerelease
+      - name: Create the stable release or explicitly tagged prerelease
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -307,8 +327,17 @@ jobs:
           set -euo pipefail
           files=(assets/uac-remote-controller-windows-x64-setup.exe assets/uac-remote-controller-android-arm64.apk assets/uac-relay-windows-x64.exe assets/uac-relay-linux-x64 assets/SHA256SUMS.txt assets/windows-package-manifest.json assets/windows-package-inspection.json assets/apk-inspection.json assets/apk-boot-inspection.json assets/apk-signer.txt assets/apk-signer-source.txt)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$TAG" --prerelease --notes-file notes.md --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG" "${files[@]}" --prerelease --verify-tag --title "UAC 원격 승인기 $VERSION (프리릴리즈)" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+            echo 'Release already exists; published tags/assets are immutable.' >&2
+            exit 1
           fi
+          kind='정식 릴리즈'
+          flags=()
+          if [[ "$VERSION" == *-* ]]; then
+            kind='프리릴리즈'
+            flags=(--prerelease)
+          else
+            latest="$(node tools/release-latest.mjs "$VERSION")"
+            [[ "$latest" == true || "$latest" == false ]]
+            flags=("--latest=$latest")
+          fi
+          gh release create "$TAG" "${files[@]}" "${flags[@]}" --verify-tag --title "UAC 원격 승인기 $VERSION ($kind)" --notes-file notes.md --repo "$GITHUB_REPOSITORY"

@@ -63,6 +63,14 @@ impl SecurityDescriptor {
 }
 
 pub(crate) fn require_elevated() -> Result<(), ServiceError> {
+    require_elevation(true)
+}
+
+pub(super) fn require_unelevated() -> Result<(), ServiceError> {
+    require_elevation(false)
+}
+
+fn require_elevation(expected: bool) -> Result<(), ServiceError> {
     reject_thread_impersonation()?;
     let mut token = HANDLE::default();
     // SAFETY: current-process pseudo-handle is borrowed only for this call;
@@ -84,7 +92,9 @@ pub(crate) fn require_elevated() -> Result<(), ServiceError> {
         )
     }
     .map_err(|e| win_error(ServiceOperation::QueryToken, e))?;
-    if returned != size_of::<TOKEN_ELEVATION>() as u32 || elevation.TokenIsElevated == 0 {
+    if returned != size_of::<TOKEN_ELEVATION>() as u32
+        || (elevation.TokenIsElevated != 0) != expected
+    {
         return Err(ServiceError::ElevationRequired);
     }
     reject_thread_impersonation()

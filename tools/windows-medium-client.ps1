@@ -216,6 +216,35 @@ namespace UacCiMedium {
         }
 
         public Launcher() : this(false, false) {}
+        [DllImport("advapi32.dll", SetLastError=true)] private static extern bool ImpersonateLoggedOnUser(IntPtr token);
+        [DllImport("advapi32.dll", SetLastError=true)] private static extern bool RevertToSelf();
+
+        public void RequirePublicDiagnosticsReadOnly() {
+            TokenFacts facts = Inspect(logonToken);
+            Require(facts.elevation == 0 && !facts.adminEnabled && !facts.isSystem,
+                "Real standard-user diagnostic observation required");
+            string root = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            string publicPath = Path.Combine(root, "UACRemoteController-Logs", "diagnostics.jsonl");
+            string privatePath = Path.Combine(root, "\uD734\uB300\uD3F0 \uC2B9\uC778", "activity", "activity.jsonl");
+            if (!ImpersonateLoggedOnUser(logonToken)) throw Error("ImpersonateLogReader");
+            try {
+                using (FileStream readable = new FileStream(publicPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                    Require(readable.Length > 0 && readable.Length <= 1048576, "Readable bounded public diagnostic file required");
+                    Require(readable.ReadByte() == (int)'{', "Read actual public diagnostic bytes");
+                }
+                bool publicWriteDenied = false;
+                try { using (FileStream writable = new FileStream(publicPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) {} }
+                catch (UnauthorizedAccessException) { publicWriteDenied = true; }
+                Require(publicWriteDenied, "Ordinary user must not write public diagnostics");
+                bool privateReadDenied = false;
+                try { using (FileStream privateFile = new FileStream(privatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {} }
+                catch (UnauthorizedAccessException) { privateReadDenied = true; }
+                Require(privateReadDenied, "Protected journal remains private");
+            } finally {
+                if (!RevertToSelf()) Environment.FailFast("Unable to end diagnostic-only test impersonation");
+            }
+        }
+
         public Launcher(bool pairingE2e, bool requester) {
             this.pairingE2e = pairingE2e;
             try {
@@ -928,6 +957,11 @@ try {
     Set-Acl -LiteralPath $profileDirectory -AclObject $profileAcl
     # Kept only on this ephemeral hosted VM. Never upload or recursively delete.
     $launcher.Launch($profileDirectory)
+    # PairingE2e deliberately uses an administrator with a filtered GUI token.
+    # File ACL evidence uses a DIFFERENT account which never joins that group.
+    $logReader = [UacCiMedium.Launcher]::new($false, $false)
+    try { $logReader.RequirePublicDiagnosticsReadOnly() } finally { $logReader.Dispose() }
+    @{ publicRead=$true; publicWriteDenied=$true; privateJournalReadDenied=$true; realStandardUser=$true; commit=$env:GITHUB_SHA } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidenceRoot 'public-diagnostics-access.json') -Encoding UTF8
     $receipt = [ordered]@{
         clientPid = $launcher.ClientPid
         debugPort = 19225

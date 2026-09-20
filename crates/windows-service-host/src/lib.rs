@@ -41,6 +41,8 @@ mod lab_client_notes;
     feature = "lab-client-diagnostics"
 ))]
 mod lab_pairing_offer;
+#[cfg(any(windows, test))]
+mod public_diagnostics;
 #[cfg(all(
     windows,
     target_pointer_width = "64",
@@ -145,6 +147,25 @@ pub use ffi::{
 };
 
 pub const SERVICE_NAME: &str = "UacRemoteController";
+
+/// Open only the fixed, protected public diagnostic folder; no path argument.
+pub fn open_diagnostics_folder() -> Result<(), ServiceError> {
+    #[cfg(windows)]
+    {
+        // A dedicated thread owns its STA apartment; a reused Tauri worker may
+        // already have incompatible COM state. No handles cross this seam.
+        std::thread::Builder::new()
+            .name("diagnostic-folder".into())
+            .spawn(ffi::public_diagnostics::open_folder)
+            .map_err(|_| ServiceError::OutputUnavailable)?
+            .join()
+            .map_err(|_| ServiceError::OutputUnavailable)?
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
 #[cfg(windows)]
 pub use ffi::{LanguageError, get_language_settings, set_language_preference};
 #[cfg(windows)]

@@ -92,6 +92,11 @@ impl Trace {
         if REPORTED.swap(true, Ordering::Relaxed) {
             return;
         }
+        crate::public_diagnostics::record(crate::public_diagnostics::Event::StartupGuard {
+            phase: self.phase as u8,
+            policy: self.policy as u8,
+            code: classification(error).1,
+        });
         let Some(text) = record(self.phase, self.policy, error) else {
             return;
         };

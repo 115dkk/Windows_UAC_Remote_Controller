@@ -39,7 +39,8 @@ describe('native snapshot truth in the client', () => {
     render(<App bridge={bridgeFor(snapshot)} />);
     expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: ko.phones })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: ko.activity })).not.toBeInTheDocument();
+    // Diagnostic file access stays reachable even when history is unavailable.
+    expect(screen.getByRole('button', { name: ko.activity })).toBeEnabled();
     expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.install })).not.toBeInTheDocument();
     expect(screen.queryByText(ko.noPhones)).not.toBeInTheDocument();

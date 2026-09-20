@@ -4,6 +4,8 @@
 ; pointer below originates in a checked Win32 allocation/handle; no caller data.
 ; Parent directory handles deny delete sharing until the final installer exit.
 !include LogicLib.nsh
+!include "${__FILEDIR__}\progress-layout.nsh"
+
 !if ${NSIS_PTR_SIZE} != 4
   !error "The reviewed native structures require the x86 NSIS engine."
 !endif

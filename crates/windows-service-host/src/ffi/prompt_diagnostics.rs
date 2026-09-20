@@ -96,6 +96,9 @@ pub(crate) fn label(
 /// watched nothing happen deserves better than that, and so does whoever has
 /// to find out why.
 pub(crate) fn refusal(reason: RefusalReason) {
+    crate::public_diagnostics::record(crate::public_diagnostics::Event::PromptRefused {
+        reason: reason.into(),
+    });
     if !admit() {
         return;
     }

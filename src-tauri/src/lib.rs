@@ -131,6 +131,7 @@ pub fn run() {
             commands::decide_request,
             commands::request_details,
             commands::clear_activity,
+            commands::open_diagnostics_folder,
             commands::open_lock_settings,
             commands::open_notification_settings,
         ])

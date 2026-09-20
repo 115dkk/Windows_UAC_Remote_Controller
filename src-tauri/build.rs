@@ -12,6 +12,7 @@ fn main() {
         "remove_device",
         "decide_request",
         "clear_activity",
+        "open_diagnostics_folder",
         "open_lock_settings",
         "open_notification_settings",
         "open_pairing_scanner",

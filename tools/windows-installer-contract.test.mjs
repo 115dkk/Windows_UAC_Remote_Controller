@@ -17,6 +17,21 @@ test('shortcut controls and localized help stay inside the native 140u page', ()
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const read = (name) => readFileSync(resolve(root, name), 'utf8').replace(/\r\n?/gu, '\n');
+test('installer progress is fitted from observed geometry at show and completion', () => {
+  const source = read('src-tauri/windows/installer.nsi');
+  const layout = read('src-tauri/windows/progress-layout.nsh');
+  for (const prefix of ['', 'un.']) {
+    assert.ok(source.includes(`!define MUI_PAGE_CUSTOMFUNCTION_SHOW ${prefix}UacFitInstallProgress`));
+    assert.ok(source.includes(`!define MUI_PAGE_CUSTOMFUNCTION_LEAVE ${prefix}UacFitInstallProgress`));
+  }
+  assert.match(layout, /GetClientRect.*\$HWNDPARENT/u);
+  assert.match(layout, /GetWindowRect.*\$mui\.InstFilesPage\.ProgressBar/u);
+  assert.match(layout, /MapWindowPoints/u);
+  assert.match(layout, /IntOp \$7 \$3 - \$7/u);
+  assert.match(layout, /SetWindowPos/u);
+  assert.doesNotMatch(layout, /\b(?:ExecWait|ExecShell|WriteRegStr|FileOpen)\b/u);
+  assert.match(source, /BrandingText " "/u);
+});
 // Ignore whole-line source comments, not quoted SDDL/text or executable lines.
 const instructions = (source) => source.split('\n').map((line) => line.trim())
   .filter((line) => line && !line.startsWith(';') && !line.startsWith('# '));

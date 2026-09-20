@@ -10,6 +10,7 @@ export type ClientCommand =
   | { readonly kind: 'remove'; readonly deviceId: string }
   | { readonly kind: 'relay'; readonly address: string }
   | { readonly kind: 'clear' }
+  | { readonly kind: 'diagnostics-folder' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
@@ -67,6 +68,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
         || snapshot.service.state === 'stopped'
         || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
+    case 'diagnostics-folder': return snapshot.platform === 'windows';
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
       return snapshot.dataAvailability.requests === 'available' && request !== undefined
@@ -79,7 +81,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
@@ -213,6 +215,12 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
+      if (command.kind === 'diagnostics-folder') {
+        await bridge.openDiagnosticsFolder();
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        publish({ ...previous, refreshing: false, busy: null, error: null, notice: null });
+        return null;
+      }
       const started = performance.now();
       const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -221,6 +229,11 @@ export function useController(bridge: ControllerBridge) {
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+      if (command.kind === 'diagnostics-folder') {
+        // A failed shell handoff does not invalidate an otherwise usable snapshot.
+        publish({ ...previous, refreshing: false, busy: null, error: ko.diagnosticsFolderFailure, notice: null });
+        return null;
+      }
       if (command.kind === 'scan_pairing' && !scannerOpened) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
         const error = scannerFailure(failure, command.transport);

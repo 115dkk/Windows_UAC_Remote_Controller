@@ -7,7 +7,7 @@
     "allow-get-language", "allow-set-language",
     "allow-app-snapshot", "allow-save-notification-policy", "allow-control-service",
     "allow-begin-pairing", "allow-begin-pairing-usb", "allow-remove-device", "allow-decide-request",
-    "allow-clear-activity", "allow-open-lock-settings", "allow-open-notification-settings",
+    "allow-clear-activity", "allow-open-diagnostics-folder", "allow-open-lock-settings", "allow-open-notification-settings",
     "allow-open-pairing-scanner", "allow-open-pairing-usb", "allow-request-details", "allow-set-relay",
     "allow-taskbar-offer", "allow-request-taskbar-pin"
   ]

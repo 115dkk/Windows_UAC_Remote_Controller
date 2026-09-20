@@ -1,4 +1,6 @@
 {
+  "로그 폴더 열기": "Abrir pasta de logs",
+  "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Não foi possível abrir a pasta de logs. Verifique a instalação e as permissões de acesso.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Não foi possível confirmar a remoção do registro do PC. Verifique novamente.",
   "요청 전송 실패": "Falha no envio da solicitação",
   "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.": "Não foi possível remover o registro do PC. Verifique novamente.",

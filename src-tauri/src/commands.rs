@@ -323,6 +323,30 @@ pub(crate) async fn clear_activity(
 }
 
 #[tauri::command]
+pub(crate) async fn open_diagnostics_folder(
+    state: tauri::State<'_, ControllerState>,
+) -> Result<(), AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        #[cfg(windows)]
+        let opened = windows_service_host::open_diagnostics_folder().is_ok();
+        #[cfg(not(windows))]
+        let opened = false;
+        if opened {
+            return Ok(());
+        }
+        Err(AppIssue {
+            code: "diagnostics_folder_unavailable",
+            message: "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.",
+            next_action: None,
+        })
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}
+
+#[tauri::command]
 pub(crate) async fn open_lock_settings(
     app: tauri::AppHandle,
     origin: crate::mobile::CommandOrigin,

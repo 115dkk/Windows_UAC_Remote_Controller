@@ -1,4 +1,6 @@
 {
+  "로그 폴더 열기": "Open log folder",
+  "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Could not open the log folder. Check the installation and folder access permissions.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Could not confirm PC registration removal. Check again.",
   "요청 전송 실패": "Request delivery failed",
   "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.": "Could not remove the PC registration. Check again.",

@@ -1,4 +1,6 @@
 {
+  "로그 폴더 열기": "Ouvrir le dossier des journaux",
+  "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Impossible d’ouvrir le dossier des journaux. Vérifiez l’installation et les autorisations d’accès.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Impossible de confirmer la suppression de l’enregistrement du PC. Vérifiez à nouveau.",
   "요청 전송 실패": "Échec de l’envoi de la demande",
   "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.": "Impossible de supprimer l’enregistrement du PC. Vérifiez à nouveau.",

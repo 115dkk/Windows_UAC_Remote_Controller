@@ -22,6 +22,7 @@ pub(crate) mod probe_supervisor;
 #[cfg(target_pointer_width = "64")]
 mod process_observer;
 pub(crate) mod prompt_diagnostics;
+pub(crate) mod public_diagnostics;
 mod security;
 mod taskbar;
 mod trust_store;
