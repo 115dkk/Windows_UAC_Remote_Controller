@@ -1,0 +1,177 @@
+name: Windows lab emulator spike
+
+# Measurement, not a gate. The UAC lab pairs the real Windows side against a
+# synthetic phone fixture, and both crashes that reached real hardware lived on
+# the phone side, where no CI job goes. Putting a real Android emulator on the
+# lab's own runner would close that, and the runner probe already showed WHPX
+# installed and usable there. What it did not show is whether an emulator
+# actually boots on that runner, how long it costs, and whether the guest can
+# reach a listener on the host, which is where the relay lives.
+#
+# This job answers those three and nothing else. It installs a system image and
+# creates a disposable AVD on a throwaway runner. It touches no product code, no
+# service, no policy and no UAC surface.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'codex/native-runtime']
+    paths: ['.github/workflows/windows-emulator-spike.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-emulator-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spike:
+    name: Can the lab runner boot an accelerated emulator
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Report the starting facts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          Write-Output "sdk=$sdk"
+          "ANDROID_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "$sdk\emulator\emulator.exe" -accel-check 2>&1 | ForEach-Object { $_ }
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object TotalVisibleMemorySize, FreePhysicalMemory | Format-List | Out-String
+          exit 0
+      - name: Install the system image the product's own emulator job uses
+        shell: pwsh
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $started = Get-Date
+          $sdkmanager = "$env:ANDROID_SDK\cmdline-tools\latest\bin\sdkmanager.bat"
+          # The image must match the lifecycle job, or a later phase would be
+          # measuring a different Android than the product is already tested on.
+          $image = 'system-images;android-36;google_apis;x86_64'
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Used -ne $null } |
+            Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} |
+            Format-Table -AutoSize | Out-String
+          $yes = (1..30 | ForEach-Object { 'y' }) -join "`n"
+          $yes | & $sdkmanager --licenses 2>&1 | Select-Object -Last 3
+          # The first attempt unzipped a truncated archive. A partial download is
+          # the ordinary way this fails, so clear what was left and ask again
+          # rather than reading a broken zip as a verdict about the runner.
+          $installed = $false
+          foreach ($attempt in 1..3) {
+            & $sdkmanager --install $image 'platform-tools' 2>&1 | Select-Object -Last 4
+            if ($LASTEXITCODE -eq 0 -and (Test-Path "$env:ANDROID_SDK\system-images\android-36\google_apis\x86_64\system.img")) {
+              $installed = $true; break
+            }
+            Write-Output "attempt $attempt did not leave a usable image; clearing the partial download"
+            Remove-Item -Recurse -Force "$env:ANDROID_SDK\system-images\android-36" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$env:ANDROID_SDK\.downloadIntermediates" -ErrorAction SilentlyContinue
+          }
+          if (-not $installed) { throw 'The system image never downloaded intact after three attempts.' }
+          Write-Output ("image install took {0:n1} minutes" -f ((Get-Date) - $started).TotalMinutes)
+      - name: Create a disposable AVD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $avdmanager = "$env:ANDROID_SDK\cmdline-tools\latest\bin\avdmanager.bat"
+          'no' | & $avdmanager create avd --force --name uac-lab-spike --package 'system-images;android-36;google_apis;x86_64' --device pixel_6
+          if ($LASTEXITCODE -ne 0) { throw "avdmanager failed: $LASTEXITCODE" }
+          Get-ChildItem "$env:USERPROFILE\.android\avd" | Select-Object -ExpandProperty Name
+      - name: Boot it headless on WHPX and time the boot
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $started = Get-Date
+          $emulator = "$env:ANDROID_SDK\emulator\emulator.exe"
+          $adb = "$env:ANDROID_SDK\platform-tools\adb.exe"
+          # A QR has to reach the camera eventually, and the virtual scene is the
+          # only way in without touching the app. Whether the flag is accepted is
+          # worth knowing now; whether the app can read the poster is a question
+          # only the app can answer, in a later phase.
+          $poster = Join-Path $env:RUNNER_TEMP 'wall.png'
+          Add-Type -AssemblyName System.Drawing
+          $bitmap = New-Object System.Drawing.Bitmap 512, 512
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.Clear([System.Drawing.Color]::White)
+          $graphics.FillRectangle([System.Drawing.Brushes]::Black, 64, 64, 384, 384)
+          $graphics.Dispose(); $bitmap.Save($poster); $bitmap.Dispose()
+          $arguments = @('-avd','uac-lab-spike','-no-window','-no-snapshot','-noaudio','-no-boot-anim',
+            '-gpu','swiftshader_indirect','-accel','on','-camera-back','virtualscene',
+            '-virtualscene-poster',"wall=$poster",'-port','5554')
+          Write-Output "emulator $($arguments -join ' ')"
+          $log = Join-Path $env:RUNNER_TEMP 'emulator.log'
+          $process = Start-Process -FilePath $emulator -ArgumentList $arguments -PassThru -NoNewWindow `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+          & $adb start-server | Out-Null
+          $booted = $false
+          for ($i = 0; $i -lt 120; $i++) {
+            Start-Sleep -Seconds 10
+            $state = (& $adb -s emulator-5554 shell getprop sys.boot_completed 2>&1) -join ''
+            if ($state -match '1') { $booted = $true; break }
+            if ($process.HasExited) { Write-Output "emulator exited early: $($process.ExitCode)"; break }
+          }
+          Write-Output ("boot wait took {0:n1} minutes, booted={1}" -f ((Get-Date) - $started).TotalMinutes, $booted)
+          Write-Output '--- emulator stdout (tail) ---'
+          if (Test-Path $log) { Get-Content $log -Tail 30 }
+          Write-Output '--- emulator stderr (tail) ---'
+          if (Test-Path "$log.err") { Get-Content "$log.err" -Tail 30 }
+          if (-not $booted) { throw 'The lab runner did not boot an emulator; the fixture cannot be replaced there.' }
+          & $adb -s emulator-5554 shell getprop ro.build.version.sdk
+          & $adb -s emulator-5554 shell getprop ro.product.cpu.abi
+      - name: Can the guest reach a listener on the host, where the relay lives
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $adb = "$env:ANDROID_SDK\platform-tools\adb.exe"
+          # The lab binds its relay to the runner's own address and refuses one
+          # that is not this runner's, so the guest has to reach that address
+          # rather than the 10.0.2.2 loopback alias. Prove it with a listener the
+          # spike owns: it speaks one fixed word and holds no secret.
+          $socket = [Net.Sockets.UdpClient]::new()
+          try { $socket.Connect('192.0.2.1', 9); $ip = $socket.Client.LocalEndPoint.Address.ToString() } finally { $socket.Dispose() }
+          Write-Output "host address=$ip"
+          # What the guest has to work with, before asking it to reach anything.
+          # The first attempt reported a bare exit 1 with no output, which cannot
+          # tell a blocked route from a missing tool.
+          Write-Output '--- guest tools and addressing ---'
+          & $adb -s emulator-5554 shell 'toybox --version' 2>&1 | ForEach-Object { $_ }
+          & $adb -s emulator-5554 shell 'ls -l /system/bin/nc /system/bin/toybox 2>&1' 2>&1 | ForEach-Object { $_ }
+          & $adb -s emulator-5554 shell 'ip -4 addr show; ip route' 2>&1 | ForEach-Object { $_ }
+          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 17443)
+          $listener.Start()
+          New-NetFirewallRule -DisplayName 'uac-emulator-spike' -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort 17443 -ErrorAction SilentlyContinue | Out-Null
+          # Three addresses, one listener, so a failure says which route failed
+          # rather than that something failed. The runner's own address is the
+          # one the lab's relay binds. 10.0.2.2 is the emulator's alias for the
+          # host loopback. adb reverse is the control: if even that does not
+          # arrive, the listener or the firewall is what is wrong, not the route.
+          & $adb -s emulator-5554 reverse tcp:17443 tcp:17443 2>&1 | ForEach-Object { $_ }
+          foreach ($case in @(@{ name = 'runner address'; target = $ip },
+                              @{ name = 'host loopback alias'; target = '10.0.2.2' },
+                              @{ name = 'adb reverse control'; target = '127.0.0.1' })) {
+            $accept = $listener.BeginAcceptTcpClient($null, $null)
+            $output = & $adb -s emulator-5554 shell "echo probe | toybox nc -w 5 $($case.target) 17443" 2>&1
+            $guestExit = $LASTEXITCODE
+            $reached = $accept.AsyncWaitHandle.WaitOne(12000)
+            if ($reached) { $listener.EndAcceptTcpClient($accept).Close() }
+            Write-Output ("{0} ({1}): guest_exit={2} host_saw_connection={3} guest_output={4}" -f `
+              $case.name, $case.target, $guestExit, $reached, (($output -join ' ').Trim()))
+          }
+          & $adb -s emulator-5554 reverse --remove-all 2>&1 | ForEach-Object { $_ }
+          $listener.Stop()
+          Remove-NetFirewallRule -DisplayName 'uac-emulator-spike' -ErrorAction SilentlyContinue
+          exit 0
+      - name: Stop the disposable emulator
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & "$env:ANDROID_SDK\platform-tools\adb.exe" -s emulator-5554 emu kill 2>&1 | ForEach-Object { $_ }
+          exit 0

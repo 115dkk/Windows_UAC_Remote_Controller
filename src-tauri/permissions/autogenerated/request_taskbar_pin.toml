@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-taskbar-pin"
+description = "Enables the request_taskbar_pin command without any pre-configured scope."
+commands.allow = ["request_taskbar_pin"]
+
+[[permission]]
+identifier = "deny-request-taskbar-pin"
+description = "Denies the request_taskbar_pin command without any pre-configured scope."
+commands.deny = ["request_taskbar_pin"]

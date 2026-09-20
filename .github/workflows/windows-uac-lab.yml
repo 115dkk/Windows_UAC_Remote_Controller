@@ -1,0 +1,414 @@
+name: Windows UAC lab (disposable runner)
+
+# Stage 1 of the hosted native lab (ADR 0027). Everything here happens on a
+# throwaway GitHub-hosted Windows runner, never on a developer PC:
+#   1. build the service with the compile-time `lab-software-identity` feature
+#      (the runner has no TPM: probe run 34591263436),
+#   2. install all three real binaries and start the service through its fixed CLI,
+#   3. switch the runner's UAC admin consent policy to "prompt on the secure
+#      desktop", request elevation from a limited-token process so a real
+#      consent.exe prompt appears, and run the read-only `probe-once` diagnostic,
+#   4. retain the service journal, diagnostics and SCM facts as evidence.
+# It additionally runs a fixed CI-only SYSTEM operator for the actual initial
+# pairing consent and protected QR pixels; a separate software phone registers,
+# receives a real harmless UAC request and signs Deny. The target must not run.
+# Synthetic CA/KSP never ship. No developer-PC or phone-hardware proof is implied.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'codex/native-runtime']
+    # Release requires native proof for the exact tagged SHA, including commits
+    # that change only Android/shared code or packaging. Path-filtered evidence
+    # from a previous commit cannot satisfy that publication gate.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-uac-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-contract:
+    name: Native desktop inspection access contract
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Compare native access using only owned scratch processes and desktops
+        shell: pwsh
+        run: ./tools/ci-desktop-inspection-contract.ps1 -OutputDirectory target/desktop-inspection-contract
+      - name: Retain bounded access-contract observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: desktop-inspection-contract-${{ github.sha }}
+          path: |
+            target/desktop-inspection-contract/contract.json
+            target/desktop-inspection-contract/**/compile.*.txt
+          if-no-files-found: error
+          retention-days: 14
+  lab:
+    name: Native QR pairing and signed UAC denial (CI identities)
+    needs: desktop-contract
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      WUAC_CI_E2E: '1'
+      UAC_ANDROID_SIGNER_SHA256: '0808080808080808080808080808080808080808080808080808080808080808'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/uac-lab-build
+      LAB_DIR: C:\Program Files\휴대폰 승인
+      LAB_EVIDENCE: ${{ github.workspace }}/target/uac-lab-evidence
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-pc-windows-msvc
+      - name: Verify a genuine medium-token fixture without changing product admission
+        shell: powershell
+        run: |
+          Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord
+          ./tools/windows-medium-client.ps1 -InspectOnly -PairingE2e
+      - name: Prepare official per-machine WebView2 for the fresh standard user
+        shell: pwsh
+        run: ./tools/windows-webview-runtime-lab.ps1
+      - name: Install pinned Node and build the actual desktop client assets
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Build desktop assets for the real installed management client
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile native CI fixtures before the long product build
+        shell: powershell
+        run: ./tools/prepare-pairing-e2e.ps1 -CompileOnly
+      - name: Check private fixture lifecycle and closed diagnostics
+        run: node --test tools/ci-private-child.test.mjs tools/ci-fixture-diagnostics.test.mjs tools/windows-ci-powershell.test.mjs tools/ci-operator-process.test.mjs
+      - name: Restore compilation inputs for the lab profile only
+        id: lab-compile-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        timeout-minutes: 5
+        with:
+          path: target/uac-lab-build
+          key: ${{ runner.os }}-uac-lab-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-uac-lab-v1-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+      - name: Build the lab service (software KSP) and the prompt helper with lab notes
+        shell: pwsh
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-service-host --bin uac-service --features lab-e2e
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The helper's lab-diagnostics feature appends fixed-token census facts (counts, desktop names,
+          # enum names; never prompt text) to the product data directory. Release builds never enable it.
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p windows-prompt-probe --bin uac-prompt-probe --features lab-diagnostics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p controller-app --bin controller-app --features custom-protocol,lab-startup-notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p ci-phone-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $service = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/uac-service.exe"
+          $bytes = [IO.File]::ReadAllBytes($service)
+          $text = [Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -notmatch 'lab-software-ksp-do-not-ship') { throw 'The lab build does not carry the lab identity marker; refusing to install a production-profile service in the lab.' }
+          Write-Output 'Lab identity marker present.'
+      - name: Retain compiled dependencies before the fresh native experiment
+        if: steps.lab-compile-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        timeout-minutes: 5
+        with:
+          # No ProgramData, profiles, operator metadata, QR pixels, generated
+          # keys or native evidence. Cargo always checks this exact checkout;
+          # every native experiment still starts fresh and must pass in full.
+          path: target/uac-lab-build
+          key: ${{ steps.lab-compile-cache.outputs.cache-primary-key }}
+      - name: Install the protected product directory and both executables
+        # Windows PowerShell 5.1 (.NET Framework) has the security-descriptor-at-creation overloads.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+          function New-LabSecurity([bool]$Directory) {
+            $security = if ($Directory) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
+            $security.SetOwner($admin); $security.SetGroup($admin)
+            $security.SetAccessRuleProtection($true, $false)
+            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+            if ($Directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit }
+            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')) {
+              $rights = if ($sid -eq 'S-1-5-32-545') { [System.Security.AccessControl.FileSystemRights]::ReadAndExecute } else { [System.Security.AccessControl.FileSystemRights]::FullControl }
+              $security.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($sid), $rights, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow))
+            }
+            return $security
+          }
+          if (Test-Path -LiteralPath $env:LAB_DIR) { throw 'Product directory already exists on this runner.' }
+          [IO.Directory]::CreateDirectory($env:LAB_DIR, (New-LabSecurity $true)) | Out-Null
+          foreach ($leaf in 'uac-service.exe', 'uac-prompt-probe.exe', 'controller-app.exe') {
+            $source = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/$leaf"
+            $target = Join-Path $env:LAB_DIR $leaf
+            $stream = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-LabSecurity $false))
+            try { $bytes = [IO.File]::ReadAllBytes($source); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+            Write-Output ("{0}: {1} bytes, sha256 {2}" -f $leaf, $bytes.Length, (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant())
+          }
+          (Get-Acl -LiteralPath $env:LAB_DIR).Sddl
+      - name: Prepare isolated native operator and harmless request fixture
+        shell: powershell
+        run: ./tools/prepare-pairing-e2e.ps1
+      - name: Record the software KSP provider facts (read-only property queries)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:LAB_EVIDENCE | Out-Null
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LabNcrypt {
+              [DllImport("ncrypt.dll")] public static extern int NCryptOpenStorageProvider(out IntPtr provider, [MarshalAs(UnmanagedType.LPWStr)] string name, uint flags);
+              [DllImport("ncrypt.dll")] public static extern int NCryptGetProperty(IntPtr handle, [MarshalAs(UnmanagedType.LPWStr)] string property, byte[] output, uint size, out uint written, uint flags);
+              [DllImport("ncrypt.dll")] public static extern int NCryptFreeObject(IntPtr handle);
+          }
+          '@
+          $lines = foreach ($name in 'Microsoft Software Key Storage Provider', 'Microsoft Platform Crypto Provider') {
+            $handle = [IntPtr]::Zero
+            $rc = [LabNcrypt]::NCryptOpenStorageProvider([ref]$handle, $name, 0)
+            if ($rc -ne 0) { '{0}: open failed 0x{1:X8}' -f $name, $rc; continue }
+            foreach ($property in 'Impl Type', 'Security Descr Support') {
+              $buffer = New-Object byte[] 4; $written = [uint32]0
+              $rc = [LabNcrypt]::NCryptGetProperty($handle, $property, $buffer, 4, [ref]$written, 0)
+              if ($rc -eq 0) { '{0}: {1} = {2}' -f $name, $property, [BitConverter]::ToUInt32($buffer, 0) } else { '{0}: {1} query failed 0x{2:X8}' -f $name, $property, $rc }
+            }
+            $buffer = New-Object byte[] 512; $written = [uint32]0
+            $rc = [LabNcrypt]::NCryptGetProperty($handle, 'Name', $buffer, 512, [ref]$written, 0)
+            if ($rc -eq 0) { '{0}: Name = {1}' -f $name, [Text.Encoding]::Unicode.GetString($buffer, 0, [Math]::Max(0, [int]$written - 2)) } else { '{0}: Name query failed 0x{1:X8}' -f $name, $rc }
+            [void][LabNcrypt]::NCryptFreeObject($handle)
+          }
+          $lines | Tee-Object -FilePath "$env:LAB_EVIDENCE/ksp-provider-facts.txt"
+      - name: Register and start the service through its fixed CLI, then wait for product Running
+        id: start
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force $env:LAB_EVIDENCE | Out-Null
+          $exe = Join-Path $env:LAB_DIR 'uac-service.exe'
+          & $exe install | Tee-Object -FilePath "$env:LAB_EVIDENCE/install.json"
+          Write-Output "install exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe start | Tee-Object -FilePath "$env:LAB_EVIDENCE/start.json"
+          Write-Output "start exit=$LASTEXITCODE"
+          $startExit = $LASTEXITCODE
+          $running = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            $status = & $exe status
+            $status | Set-Content -Path "$env:LAB_EVIDENCE/status-$i.json"
+            if ($status -match '"state":"running"') { $running = $true; Write-Output $status; break }
+            Start-Sleep -Seconds 2
+          }
+          sc.exe qc UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-qc.txt"
+          sc.exe query UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-query.txt"
+          sc.exe qsidtype UacRemoteController | Set-Content -Path "$env:LAB_EVIDENCE/sc-qsidtype.txt"
+          "product_running=$($running.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          if (-not $running) {
+            Get-WinEvent -LogName System -MaxEvents 200 | Where-Object { $_.ProviderName -eq 'Service Control Manager' } | Format-List TimeCreated, Id, Message | Out-String -Width 200 | Set-Content -Path "$env:LAB_EVIDENCE/scm-events.txt"
+            Write-Output 'Service did not reach product Running (the job is failed by the last step; the experiment below runs first).'
+            exit 0
+          }
+          if ($startExit -ne 0) { Write-Output 'start returned nonzero although the service is running; recorded.' }
+          exit 0
+      - name: Exercise service-owned embedded relay and exact firewall rule
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          ./tools/windows-embedded-relay-lab.ps1 -ServiceExecutable (Join-Path $env:LAB_DIR 'uac-service.exe') | Tee-Object -FilePath "$env:LAB_EVIDENCE/embedded-relay.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real medium GUI management reads and rejected clients preserve the service
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          ./tools/windows-medium-client.ps1 -PairingE2e | Tee-Object -FilePath "$env:LAB_EVIDENCE/management-recovery.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $proof = Get-Content "$env:LAB_EVIDENCE/pairing-e2e-proof.json" -Raw | ConvertFrom-Json
+          if ($proof.commit -ne $env:GITHUB_SHA -or $proof.passed -ne $true -or $proof.nativeWindowsDenied -ne $true) { throw 'Full native pairing and denial proof missing' }
+      - name: Record user-deferred local folder-opening acceptance
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          # User decision 2026-09-21: only ordinary Explorer opening moves to
+          # post-install acceptance. Run35519124260 observed an elevated hosted
+          # shell, not a genuine medium shell. This record is NOT a native pass.
+          # Keep the actual ACL, management, pairing/denial and probe gates below.
+          @{
+            commit = $env:GITHUB_SHA
+            status = 'deferred_by_user'
+            verified = $false
+            scope = 'ordinary_user_diagnostic_folder_opening'
+            reason = 'hosted_shell_elevated'
+            observedRun = 35519124260
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:LAB_EVIDENCE 'diagnostic-shell-acceptance.json') -Encoding utf8
+      - name: Verify bounded pairing event diagnostics on the actual service
+        # Failure diagnostics must survive even when the end-to-end stage fails.
+        if: ${{ always() && steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          $result = ./tools/read-pairing-events.ps1 -Since ([DateTimeOffset]::UtcNow.AddMinutes(-29)) | ConvertFrom-Json
+          if ($result.invalidRecords -ne 0 -or @($result.records).Count -eq 0) { throw 'Pairing diagnostic records missing or malformed' }
+          $result | ConvertTo-Json -Depth 5 | Tee-Object -FilePath "$env:LAB_EVIDENCE/pairing-events.json"
+      - name: Lab experiment (evidence only) - start the same service with an unrestricted service SID
+        id: experiment
+        if: ${{ steps.start.outputs.product_running != 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failureFile = Join-Path (Join-Path $env:ProgramData '휴대폰 승인') 'lab-failure.txt'
+          if (Test-Path -LiteralPath $failureFile) { Copy-Item -LiteralPath $failureFile -Destination "$env:LAB_EVIDENCE/lab-failure-restricted.txt"; Get-Content -LiteralPath $failureFile } else { Write-Output 'no lab-failure.txt after the restricted start' }
+          # Hypothesis under test: SERVICE_SID_TYPE_RESTRICTED (write-restricted token) blocks key persistence.
+          # The product CLI refuses non-restricted services on purpose, so sc.exe drives this experiment.
+          sc.exe sidtype UacRemoteController unrestricted | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-sidtype.txt"
+          sc.exe start UacRemoteController | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-start.txt"
+          $running = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            $query = sc.exe query UacRemoteController | Out-String
+            if ($query -match 'RUNNING') { $running = $true }
+            if ($query -match 'STOPPED') { break }
+            if ($running -and $i -ge 5) { break }
+            Start-Sleep -Seconds 2
+          }
+          sc.exe query UacRemoteController | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/experiment-sc-query.txt"
+          if (Test-Path -LiteralPath $failureFile) { Copy-Item -LiteralPath $failureFile -Destination "$env:LAB_EVIDENCE/lab-failure-unrestricted.txt" }
+          "running=$($running.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          Write-Output "experiment running=$running"
+          exit 0
+      - name: Show a real consent prompt from a limited-token process and run the read-only probe
+        id: probe
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $exe = Join-Path $env:LAB_DIR 'uac-service.exe'
+          # Disposable runner only: ask Windows to prompt administrators for consent on the secure desktop.
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' | Select-Object EnableLUA, ConsentPromptBehaviorAdmin, PromptOnSecureDesktop | Format-List | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/uac-policy.txt"
+          # A LIMITED scheduled task in the interactive session gives a filtered (medium) token; its elevation request
+          # produces the actual consent.exe prompt. The elevated child would only sleep; it is never approved here.
+          # The runner's interactive administrator has no filtered token (run 34615972812: elevated=True under a LIMITED
+          # scheduled task) and a SAFER basic-user token of that same account elevates silently (run 34616687635: cmd
+          # started, no consent.exe). A real prompt therefore comes from a separate standard user: the runner creates one
+          # for this disposable machine and starts the request script through Secondary Logon in this interactive
+          # session, so the script's ShellExecute runas reaches AppInfo and consent.exe on the secure desktop.
+          $publicDir = Join-Path $env:SystemDrive 'Users\Public'
+          $requestScript = Join-Path $publicDir 'uac-lab-elevation-request.ps1'
+          $requestLog = Join-Path $publicDir 'uac-lab-elevation-request.log'
+          $labUser = 'uaclabuser'
+          $labPassword = -join ((1..20) | ForEach-Object { [char](Get-Random -InputObject ([int[]](48..57) + [int[]](65..90) + [int[]](97..122))) }) + 'aZ9!'
+          net.exe user $labUser $labPassword /add /y | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/lab-user-create.txt"
+          net.exe localgroup Administrators $labUser /delete 2>$null | Out-Null
+          net.exe user $labUser | Select-String 'Local Group Memberships' | Out-String | Tee-Object -FilePath "$env:LAB_EVIDENCE/lab-user-groups.txt"
+          $labCredential = New-Object System.Management.Automation.PSCredential($labUser, (ConvertTo-SecureString $labPassword -AsPlainText -Force))
+          @(
+            '$ErrorActionPreference = ''Stop''',
+            ('$log = ''{0}''' -f $requestLog),
+            '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()',
+            '$principal = New-Object Security.Principal.WindowsPrincipal($identity)',
+            '"user={0} elevated={1} session={2}" -f $identity.Name, $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator), (Get-Process -Id $PID).SessionId | Out-File -FilePath $log -Append -Encoding utf8',
+            'try {',
+            '  $child = Start-Process -FilePath cmd.exe -ArgumentList ''/c'', ''timeout'', ''/t'', ''100'', ''/nobreak'' -Verb RunAs -PassThru',
+            '  "started elevated child pid={0}" -f $child.Id | Out-File -FilePath $log -Append -Encoding utf8',
+            '} catch {',
+            '  "request failed: {0}" -f $_.Exception.Message | Out-File -FilePath $log -Append -Encoding utf8',
+            '  exit 3',
+            '}'
+          ) | Set-Content -Path $requestScript -Encoding ascii
+          try {
+            $request = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $requestScript -Credential $labCredential -WorkingDirectory $publicDir -PassThru
+            "secondary logon started powershell pid={0}" -f $request.Id | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
+          } catch {
+            "secondary logon failed: {0}" -f $_.Exception.Message | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
+          }
+          $consent = $null
+          $timeline = @()
+          for ($i = 0; $i -lt 80; $i++) {
+            $consent = Get-Process -Name consent -ErrorAction SilentlyContinue
+            $timeline += ('{0,5} ms: {1}' -f ($i * 500), ((Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'svchost' -and ($_.Name -ne 'svchost' -or $_.SessionId -ne 0) } | ForEach-Object { '{0}:{1}/s{2}' -f $_.Name, $_.Id, $_.SessionId }) -join ' '))
+            if ($consent) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          $timeline | Set-Content -Path "$env:LAB_EVIDENCE/consent-timeline.txt"
+          if (Test-Path -LiteralPath $requestLog) { Copy-Item -LiteralPath $requestLog -Destination "$env:LAB_EVIDENCE/elevation-request.log"; Get-Content -LiteralPath $requestLog } else { Write-Output 'elevation request script left no log' }
+          if ($consent) { Write-Output ("consent.exe present: pid {0} session {1}" -f $consent.Id, $consent.SessionId) } else { Write-Output 'consent.exe did not appear within 40 s.' }
+          Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-before-probe.txt"
+          Start-Sleep -Seconds 2
+          & $exe probe-once | Tee-Object -FilePath "$env:LAB_EVIDENCE/probe-once-request.json"
+          Write-Output "probe-once exit=$LASTEXITCODE"
+          Start-Sleep -Seconds 12
+          & $exe status | Tee-Object -FilePath "$env:LAB_EVIDENCE/status-after-probe.json"
+          $helperNotes = Join-Path $env:windir 'Temp\uac-lab-helper.txt'
+          if (Test-Path -LiteralPath $helperNotes) { Copy-Item -LiteralPath $helperNotes -Destination "$env:LAB_EVIDENCE/lab-helper.txt"; Write-Output '--- helper notes (last 80 lines) ---'; Get-Content -LiteralPath $helperNotes | Select-Object -Last 80 } else { Write-Output 'no helper notes' }
+          # The running service owns the prompt watcher (probe-once answers Busy while it does). The
+          # watcher journals fixed kinds only: watcher_started, watcher_alive (first heartbeat), then an
+          # observed request when it saw the consent window. Only that observed record passes.
+          $observed = 'false'
+          $journal = Join-Path $env:ProgramData '휴대폰 승인\activity\activity.jsonl'
+          if (Test-Path -LiteralPath $journal) {
+            $lines = Get-Content -LiteralPath $journal
+            $lines | Select-String -Pattern 'watcher_|"observed"|notification_sent|platform_unavailable' | ForEach-Object { Write-Output $_.Line }
+            if ($lines | Select-String -Pattern '"category":"request".*"observed"' -Quiet) { $observed = 'true' }
+          } else { Write-Output 'no activity journal' }
+          "probe_observed=$observed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-after-probe.txt"
+          # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
+          Get-Process -Name consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          exit 0
+      - name: Collect service data, journal and diagnostics (read-only copies)
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force $env:LAB_EVIDENCE | Out-Null
+          $data = Join-Path $env:ProgramData '휴대폰 승인'
+          if (Test-Path -LiteralPath $data) {
+            (Get-Acl -LiteralPath $data).Sddl | Set-Content -Path "$env:LAB_EVIDENCE/programdata-acl.txt"
+            Get-ChildItem -LiteralPath $data -Recurse -Force | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/programdata-listing.txt"
+            Get-ChildItem -LiteralPath $data -Recurse -Force -File | Where-Object { $_.Length -le 4MB -and $_.Extension -in '.json', '.jsonl', '.txt' } | ForEach-Object {
+              $relative = $_.FullName.Substring($data.Length).TrimStart('\')
+              $destination = Join-Path "$env:LAB_EVIDENCE/programdata" $relative
+              New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
+              Copy-Item -LiteralPath $_.FullName -Destination $destination -ErrorAction Continue
+            }
+          } else { Write-Output 'No product data directory.' | Set-Content -Path "$env:LAB_EVIDENCE/programdata-listing.txt" }
+          # The inspector child has no ProgramData, so its notes land here. Keep
+          # them even when an earlier step failed before the consent probe ran.
+          $helperNotes = Join-Path $env:windir 'Temp\uac-lab-helper.txt'
+          if (Test-Path -LiteralPath $helperNotes) { Copy-Item -LiteralPath $helperNotes -Destination "$env:LAB_EVIDENCE/lab-helper-collected.txt" -ErrorAction Continue }
+          Get-WinEvent -LogName System -MaxEvents 300 -ErrorAction SilentlyContinue | Where-Object { $_.ProviderName -eq 'Service Control Manager' -or $_.Message -match 'UacRemoteController' } | Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/scm-events.txt"
+          Get-WinEvent -LogName Application -MaxEvents 300 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'uac-|UacRemote|consent' } | Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 220 | Set-Content -Path "$env:LAB_EVIDENCE/application-events.txt"
+          $exe = Join-Path $env:LAB_DIR 'uac-service.exe'
+          if (Test-Path -LiteralPath $exe) { & $exe stop | Set-Content -Path "$env:LAB_EVIDENCE/stop.json"; & $exe status | Set-Content -Path "$env:LAB_EVIDENCE/status-final.json" }
+          sc.exe stop UacRemoteController | Out-Null
+          exit 0
+      - name: Fail the job unless the product reached Running and the watcher observed the consent prompt
+        if: ${{ always() && (steps.start.outputs.product_running != 'true' || steps.probe.outputs.probe_observed != 'true') }}
+        shell: pwsh
+        run: |
+          Write-Output "product_running=${{ steps.start.outputs.product_running }} probe_observed=${{ steps.probe.outputs.probe_observed }} experiment_running=${{ steps.experiment.outputs.running }}"
+          exit 1
+      - name: Retain the lab evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: windows-uac-lab-${{ github.sha }}
+          path: target/uac-lab-evidence/
+          if-no-files-found: warn
+          retention-days: 14

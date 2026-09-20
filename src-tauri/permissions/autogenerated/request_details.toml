@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-details"
+description = "Enables the request_details command without any pre-configured scope."
+commands.allow = ["request_details"]
+
+[[permission]]
+identifier = "deny-request-details"
+description = "Denies the request_details command without any pre-configured scope."
+commands.deny = ["request_details"]

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "family": "IBM Plex Sans KR",
+  "package": "@ibm/plex-sans-kr@1.1.0",
+  "upstreamRepository": "https://github.com/IBM/plex",
+  "upstreamCommit": "1da12f02587b630c07e92692d21492d722f53614",
+  "upstreamDirectory": "packages/plex-sans-kr/fonts/complete/woff2/hinted",
+  "modified": false,
+  "license": {
+    "spdx": "OFL-1.1",
+    "reservedFontName": "Plex",
+    "file": "LICENSE.txt",
+    "sha256": "d741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f",
+    "upstreamSha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da",
+    "normalization": "LF line endings and trailing-space removal only; notice text unchanged"
+  },
+  "files": [
+    {
+      "file": "IBMPlexSansKR-Regular.woff2",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 438540,
+      "sha256": "055a35664c3c3965161c92292504c5633ba9604ec904edc1ed799bf2a436276d"
+    },
+    {
+      "file": "IBMPlexSansKR-Medium.woff2",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 439816,
+      "sha256": "c00dcd8a9c32a6b6ab8c6b3119e68b3d7aa6eba6f4441d5493019cc019dcdd1e"
+    },
+    {
+      "file": "IBMPlexSansKR-SemiBold.woff2",
+      "weight": 600,
+      "style": "normal",
+      "bytes": 434484,
+      "sha256": "5ad7db28ba74d59fe14c260205c62ddb701320f4f098d8a45ef2757bebc29666"
+    },
+    {
+      "file": "IBMPlexSansKR-Bold.woff2",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 370492,
+      "sha256": "cf874a368dc2c2c0e4d1933c35611b849e48942023bfdd1fa11128475dbc4860"
+    }
+  ],
+  "coverageObservation": {
+    "observer": "ROOT",
+    "date": "2026-09-10",
+    "tools": "fontTools 4.63 / Brotli 1.2",
+    "scope": "All four exact files above; ROOT-provided binary inspection, not decoded by the Node contract or gallery",
+    "cmapEntriesPerFile": 12183,
+    "modernHangul": { "first": "U+AC00", "last": "U+D7A3", "covered": 11172, "total": 11172 },
+    "printableAscii": { "first": "U+0020", "last": "U+007E", "covered": 95, "total": 95 },
+    "digitAdvance": 600,
+    "unitsPerEm": 1000,
+    "renderingVerifiedByThisObservation": false
+  }
+}

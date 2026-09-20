@@ -1,0 +1,40 @@
+[package]
+name = "controller-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Thin Tauri presentation shell for Windows and Android"
+
+[lib]
+name = "controller_app_lib"
+# Windows uses the executable/rlib and Android loads the cdylib. No iOS static
+# archive is shipped; generating that unused archive duplicates the full engine.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "controller-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", default-features = false, features = ["wry", "compression", "common-controls-v6", "x11", "dbus"] }
+controller-runtime = { path = "../crates/controller-runtime" }
+presentation-i18n = { path = "../crates/presentation-i18n" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service-host = { path = "../crates/windows-service-host" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+# Disposable native CI diagnostics only; never enable in client packaging.
+lab-startup-notes = ["windows-service-host/lab-client-diagnostics"]
+
+[lints]
+workspace = true

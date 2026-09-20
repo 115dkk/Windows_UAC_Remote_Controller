@@ -1,0 +1,93 @@
+package dev.dkk115.uacremote
+
+import android.os.Bundle
+import android.Manifest
+import android.content.Intent
+import android.content.res.Configuration
+import android.webkit.WebView
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import dev.dkk115.uacremote.background.ControllerForegroundService
+import dev.dkk115.uacremote.pairing.PairingScannerDialog
+
+class MainActivity : TauriActivity() {
+  private var webDialogBack: WebDialogBackHandler? = null
+  private var presentationLanguage: String? = null
+  private var pairingPermissionOwner: PairingScannerDialog? = null
+  private val pairingPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val original = pairingPermissionOwner
+    pairingPermissionOwner = null
+    original?.permissionCompleted(granted)
+  }
+  internal fun pairingPermissionPending(): Boolean = pairingPermissionOwner != null
+  internal fun requestPairingCameraPermission(original: PairingScannerDialog): Boolean {
+    if (pairingPermissionOwner != null || original.activity !== this || isDestroyed || isFinishing) return false
+    pairingPermissionOwner = original
+    return try { pairingPermission.launch(Manifest.permission.CAMERA); true }
+    catch (_: Exception) { pairingPermissionOwner = null; false }
+  }
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    DeviceStatePlugin.actualWebViewCreated(this, webView)
+    webDialogBack?.retire()
+    webDialogBack = WebDialogBackHandler(this, webView)
+  }
+
+  override fun onDestroy() {
+    webDialogBack?.retire()
+    webDialogBack = null
+    (application as? ControllerApplication)?.pairingScannerHostStopped(this)
+    DeviceStatePlugin.actualActivityDestroyed(this)
+    super.onDestroy()
+  }
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+    try { AppLanguage.migrateLegacyPreference(this) } catch (_: Exception) { /* Keep the current Android choice if migration is unavailable. */ }
+    (application as? ControllerApplication)?.receiveRequestIntent(this, intent, savedInstanceState != null)
+  }
+
+  override fun onStart() {
+    super.onStart()
+    refreshPresentationLanguage()
+    // Opening/rotating the Activity must not undo an explicit service stop.
+    ControllerForegroundService.startIfEnabled(this)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    (application as? ControllerApplication)?.receiveRequestIntent(this, intent, false)
+  }
+
+  override fun onStop() {
+    webDialogBack?.invalidate()
+    (application as? ControllerApplication)?.pairingScannerHostStopped(this)
+    super.onStop()
+  }
+
+  override fun onPause() {
+    webDialogBack?.invalidate()
+    super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    if (!hasFocus) webDialogBack?.invalidate()
+    super.onWindowFocusChanged(hasFocus)
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    refreshPresentationLanguage()
+    (application as? ControllerApplication)?.pairingScannerRotationChanged(this)
+  }
+
+  private fun refreshPresentationLanguage() {
+    val current = try { AppLanguage.effective(this) } catch (_: Exception) { return }
+    val previous = presentationLanguage
+    presentationLanguage = current
+    if (previous != null && previous != current) {
+      (application as? ControllerApplication)?.presentationLanguageChanged()
+    }
+  }
+}

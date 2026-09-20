@@ -1,0 +1,69 @@
+name: Android notification renderer gallery
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/native-runtime']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-renderer-gallery-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  renderer:
+    name: Test-only shared notification renderer (Android 36)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Set up repository-pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0, Node 24
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Test evidence and emulator-only restrictions
+        run: node --test tools/android-notification-gallery.test.mjs
+      - name: Install Android build inputs on disposable CI only
+        shell: bash
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$sdk"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" --install 'platforms;android-36' 'build-tools;36.0.0' --channel=0 </dev/null
+      - name: Build only the isolated shared-renderer APK
+        run: bash src-tauri/gen/android/gradlew -p tools/android-notification-gallery assembleDebug --no-daemon
+      - name: Allow this disposable runner to use its emulator accelerator
+        run: sudo chmod 0666 /dev/kvm
+      - name: Capture real notification templates in the isolated emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0, Node 24
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          script: node tools/android-notification-gallery.mjs
+      - name: Retain actual captures and renderer-only receipts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, Node 24
+        with:
+          name: android-notification-renderer-${{ github.sha }}
+          path: |
+            target/android-notification-gallery/
+            tools/android-notification-gallery/build/outputs/apk/debug/
+          if-no-files-found: error
+          retention-days: 14

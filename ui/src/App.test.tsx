@@ -1,0 +1,568 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Client tests use explicitly synthetic data. They do not exercise Windows/Android owners.
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import { App } from './App';
+import { DevicesPanel } from './CollectionPanels';
+import type { AppSnapshot, ControllerBridge, PairingView, ServiceAction } from './contracts';
+import { ko, serviceActionText, serviceStateText } from './messages';
+import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function bridgeFor(snapshot: AppSnapshot, overrides: Partial<ControllerBridge> = {}): ControllerBridge {
+  return { ...createQaBridge(snapshot), ...overrides };
+}
+const serviceActions: readonly ServiceAction[] = ['install', 'start', 'restart', 'stop', 'uninstall'];
+
+describe('native snapshot truth in the client', () => {
+  it('starts with neutral loading, not a missing-lock warning', async () => {
+    const pending = deferred<AppSnapshot>();
+    const bridge = bridgeFor(exampleSnapshot('android'), { snapshot: () => pending.promise });
+    render(<App bridge={bridge} />);
+    expect(screen.getByRole('heading', { name: ko.loadingTitle })).toBeInTheDocument();
+    expect(screen.queryByText(ko.lockMissing)).not.toBeInTheDocument();
+    await act(async () => { pending.resolve(exampleSnapshot('android')); await pending.promise; });
+    expect(await screen.findByRole('heading', { name: ko.requestEmpty })).toBeInTheDocument();
+    expect(screen.queryByText(ko.lockMissing)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.lockUnknown)).not.toBeInTheDocument();
+  });
+
+  it('does not make unavailable data into empty data or enabled placeholder navigation', async () => {
+    const snapshot = qaCase('desktop-unavailable').snapshot;
+    render(<App bridge={bridgeFor(snapshot)} />);
+    expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.phones })).toBeEnabled();
+    // Diagnostic file access stays reachable even when history is unavailable.
+    expect(screen.getByRole('button', { name: ko.activity })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: ko.pairPhone })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: serviceActionText.install })).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.noPhones)).not.toBeInTheDocument();
+    expect(screen.getByText(ko.devicesUnavailableBody)).toBeInTheDocument();
+  });
+
+  it('does not equate a running service with remote readiness', async () => {
+    render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
+    expect(await screen.findByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'UAC 원격 승인기' })).toBeInTheDocument();
+    expect(screen.queryByText(ko.homePurpose)).not.toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
+    expect(screen.getByText('휴대폰 연결 안 됨')).toBeInTheDocument();
+    expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
+  });
+
+  it('uses the actual device connection instead of the legacy readiness flag', async () => {
+    const fixture = qaCase('desktop-running').snapshot;
+    const ready: AppSnapshot = { ...fixture, service: { ...fixture.service!, remoteRequestsReady: true } };
+    render(<App bridge={bridgeFor(ready)} />);
+    expect(await screen.findByText('휴대폰 연결 안 됨')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
+    expect(screen.queryByText(ko.remoteReadyBody)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
+  });
+
+  it('shows a connected phone even when the legacy readiness flag is false', async () => {
+    render(<App bridge={bridgeFor(qaCase('desktop-connected').snapshot)} />);
+    expect(await screen.findByText('휴대폰 연결됨')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
+    expect(screen.queryByText(/별도로 확인/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/지금은 PC의 관리자 권한 창에서/)).not.toBeInTheDocument();
+  });
+
+  it.each(serviceActions)('renames %s without adding an action beyond the native list', async (action) => {
+    const snapshot: AppSnapshot = { ...exampleSnapshot(), service: {
+      installed: action !== 'install', state: action === 'install' ? null : action === 'start' ? 'stopped' : 'running',
+      allowedActions: [action], controlHint: 'available', remoteRequestsReady: false,
+    } };
+    render(<App bridge={bridgeFor(snapshot)} />);
+    expect(await screen.findByRole('button', { name: serviceActionText[action] })).toBeEnabled();
+    for (const other of (['install', 'start', 'restart', 'stop', 'uninstall'] as const).filter((item) => item !== action)) {
+      expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
+    }
+    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨' : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
+  });
+
+  it('offers lock setup only for an explicitly missing lock with native capability', async () => {
+    const openLockSettings = vi.fn<ControllerBridge['openLockSettings']>(() => Promise.resolve());
+    const bridge = bridgeFor(qaCase('phone-lock-missing').snapshot, { openLockSettings });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await user.click(await screen.findByRole('button', { name: ko.openLockSettings }));
+    expect(openLockSettings).toHaveBeenCalledOnce();
+    expect(await screen.findByText(ko.returnFromSettings)).toBeInTheDocument();
+  });
+
+  it('explains unknown readiness without asking a configured user to create a lock', async () => {
+    render(<App bridge={bridgeFor(qaCase('phone-lock-unknown').snapshot)} />);
+    expect(await screen.findByRole('heading', { name: ko.lockUnknown })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.openLockSettings })).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.lockMissingBody)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.openNotificationSettings })).not.toBeInTheDocument();
+  });
+
+  it('opens notification settings once without claiming the permission was granted', async () => {
+    const pending = deferred<void>();
+    const openNotificationSettings = vi.fn<ControllerBridge['openNotificationSettings']>(() => pending.promise);
+    const fixture = qaCase('phone-notifications-denied');
+    const user = userEvent.setup();
+    render(<App bridge={bridgeFor(fixture.snapshot, { openNotificationSettings })} initialPage={fixture.page} />);
+    const button = await screen.findByRole('button', { name: ko.openNotificationSettings });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(openNotificationSettings).toHaveBeenCalledOnce();
+    expect(button).toBeDisabled();
+    await act(async () => { pending.resolve(); await pending.promise; });
+    expect(await screen.findByText(ko.returnFromSettings)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: ko.notificationsDenied })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    expect(screen.getByRole('heading', { name: ko.notificationsDenied })).toBeInTheDocument();
+  });
+
+  it('keeps manual notification directions when the native settings destination is unavailable', async () => {
+    const fixture = qaCase('phone-notifications-denied');
+    const snapshot = { ...fixture.snapshot, mobile: { ...fixture.snapshot.mobile!, canOpenNotificationSettings: false } };
+    render(<App bridge={bridgeFor(snapshot)} initialPage={fixture.page} />);
+    expect(await screen.findByText(ko.notificationsDeniedBody)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.openNotificationSettings })).not.toBeInTheDocument();
+  });
+
+  it('reports a failed settings handoff without exposing a native exception', async () => {
+    const fixture = qaCase('phone-notifications-denied');
+    const openNotificationSettings = () => Promise.reject(new Error('RAW_SETTINGS_COMPONENT synthetic-private-detail'));
+    const user = userEvent.setup();
+    render(<App bridge={bridgeFor(fixture.snapshot, { openNotificationSettings })} initialPage={fixture.page} />);
+    await user.click(await screen.findByRole('button', { name: ko.openNotificationSettings }));
+    expect(await screen.findByText(ko.actionFailure)).toBeInTheDocument();
+    expect(screen.queryByText(/RAW_SETTINGS_COMPONENT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.returnFromSettings)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.openNotificationSettings })).toBeDisabled();
+  });
+
+  it('shows native cancellation copy without raw codes or fabricated success', async () => {
+    const user = userEvent.setup();
+    const snapshot = qaCase('phone-pending').snapshot;
+    const bridge = bridgeFor(snapshot, { decide: vi.fn(() => Promise.resolve({ ...snapshot, issue: { code: 'RAW_NATIVE_CANCEL_0123', message: '본인 확인을 취소했어요.', nextAction: '승인하려면 다시 선택해 주세요.' } })) });
+    render(<App bridge={bridge} />);
+    await user.click(await screen.findByRole('button', { name: ko.approve }));
+    expect(await screen.findByText('본인 확인을 취소했어요.')).toBeInTheDocument();
+    expect(screen.queryByText('RAW_NATIVE_CANCEL_0123')).not.toBeInTheDocument();
+    expect(screen.queryByText('요청 승인됨')).not.toBeInTheDocument();
+  });
+
+  it('uses fixed Korean recovery for unexpected bridge exceptions', async () => {
+    render(<App bridge={bridgeFor(exampleSnapshot(), { snapshot: () => Promise.reject(new Error('INTERNAL_CODE C:\\private-path stack trace')) })} />);
+    expect(await screen.findByRole('heading', { name: ko.unexpectedTitle })).toBeInTheDocument();
+    expect(screen.getByText(ko.loadFailure)).toBeInTheDocument();
+    expect(screen.queryByText(/INTERNAL_CODE/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.refresh })).toBeEnabled();
+  });
+});
+
+describe('pairing progress in the device collection', () => {
+  it.each(['connecting', 'waiting_for_admin', 'helper_running'] as const)('shows %s progress and blocks another attempt', (phase) => {
+    const pairing: PairingView = { phase, message: '기기 연결을 준비하고 있어요.', failure: null };
+    for (const devices of ['available', 'unavailable'] as const) {
+      for (const canPair of [true, false]) {
+        const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair,
+          dataAvailability: { devices, requests: 'available', activity: 'available' } };
+        const onPair = vi.fn();
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+        expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
+        expect(screen.queryByText(ko.pairingUnavailable)).not.toBeInTheDocument();
+        if (devices === 'unavailable') expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
+        const button = screen.getByRole('button', { name: ko.pairPhone });
+        expect(button).toBeDisabled(); fireEvent.click(button);
+        expect(onPair).not.toHaveBeenCalled();
+        view.unmount();
+      }
+    }
+  });
+
+  it.each(['finished', 'failed'] as const)('shows %s text and permits retry only when otherwise enabled', (phase) => {
+    const pairing: PairingView = { phase, message: '기기 연결 화면을 닫았어요.', failure: phase === 'failed' ? 'user_cancelled' : null };
+    for (const devices of ['available', 'unavailable'] as const) {
+      const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair: true, relayConfigured: true,
+        dataAvailability: { devices, requests: 'available', activity: 'available' } };
+      const onPair = vi.fn(), onRemove = vi.fn();
+      const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
+      expect(screen.queryByText('user_cancelled')).not.toBeInTheDocument();
+      const button = screen.getByRole('button', { name: ko.pairPhone });
+      expect(button).toBeEnabled(); fireEvent.click(button);
+      expect(onPair).toHaveBeenCalledOnce();
+      view.rerender(<DevicesPanel snapshot={snapshot} disabled onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      expect(button).toBeDisabled(); fireEvent.click(button);
+      expect(onPair).toHaveBeenCalledOnce();
+      view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
+      expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
+      view.unmount();
+    }
+  });
+
+  it('keeps unavailable collections honest while exposing only the Windows pairing capability', () => {
+    for (const platform of ['windows', 'android'] as const) {
+      for (const canPair of [true, false]) {
+        const snapshot: AppSnapshot = { ...exampleSnapshot(platform), schemaVersion: 4, pairing: null, canPair, relayConfigured: true,
+          dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' } };
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+        expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: ko.noPhones })).not.toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: ko.noComputers })).not.toBeInTheDocument();
+        if (platform === 'windows' && canPair) expect(screen.getByRole('button', { name: ko.pairPhone })).toBeEnabled();
+        else if (platform === 'windows') expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
+        else expect(screen.queryByRole('button', { name: ko.pairComputer })).not.toBeInTheDocument();
+        if (platform === 'windows') expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+        else expect(screen.queryByRole('button')).not.toBeInTheDocument();
+        view.unmount();
+      }
+    }
+  });
+});
+
+describe('Windows relay address settings', () => {
+  it('selects the bundled relay without requiring an address field', async () => {
+    const snapshot = qaCase('desktop-running').snapshot;
+    const onSetRelay = vi.fn().mockResolvedValue(snapshot);
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    fireEvent.click(screen.getByRole('button', { name: '이 PC의 내장 중계 사용' }));
+    await waitFor(() => expect(onSetRelay).toHaveBeenCalledWith('embedded'));
+    expect(screen.getByRole('textbox', { name: ko.relayAddress })).toHaveValue('');
+  });
+  function managementSnapshot(): AppSnapshot {
+    return qaCase('desktop-running').snapshot;
+  }
+
+  it.each([false, true])('shows configured=%s without loading an invented address', (relayConfigured) => {
+    const snapshot = { ...managementSnapshot(), relayConfigured };
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+    const input = screen.getByRole('textbox', { name: ko.relayAddress });
+    expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress)).toBe(input);
+    expect(input).toHaveValue('');
+    expect(input).not.toHaveAttribute('placeholder');
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(screen.getByText(relayConfigured ? ko.relayConfigured : ko.relayUnconfigured)).toBeInTheDocument();
+    expect(screen.queryByText(relayConfigured ? ko.relayUnconfigured : ko.relayConfigured)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.connected)).not.toBeInTheDocument();
+  });
+
+  it('rejects empty and whitespace-only form submissions', () => {
+    const onSetRelay = vi.fn();
+    render(<DevicesPanel snapshot={managementSnapshot()} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    const form = screen.getByRole('form', { name: ko.relayAddress });
+    fireEvent.submit(form);
+    fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(form);
+    expect(onSetRelay).not.toHaveBeenCalled();
+  });
+
+  it('sends the exact numeric address once and clears the draft only after native confirmation', async () => {
+    const user = userEvent.setup();
+    const snapshot = managementSnapshot();
+    const pending = deferred<AppSnapshot>();
+    const setRelay = vi.fn<ControllerBridge['setRelay']>(() => pending.promise);
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    const input = await screen.findByRole('textbox', { name: ko.relayAddress });
+    await user.type(input, '203.0.113.10:443');
+    await user.keyboard('{Enter}');
+    expect(setRelay).toHaveBeenCalledExactlyOnceWith('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.saving })).toBeDisabled();
+    expect(input).toBeDisabled();
+    expect(input).toHaveValue('203.0.113.10:443');
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(setRelay).toHaveBeenCalledOnce();
+    expect(screen.getByText(ko.relayUnconfigured)).toBeInTheDocument();
+    await act(async () => { pending.resolve({ ...snapshot, relayConfigured: true }); await pending.promise; });
+    expect(screen.getByText(ko.relayConfigured)).toBeInTheDocument();
+    expect(input).toHaveValue('');
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+  });
+
+  it('keeps the local draft across refreshes and blocks globally disabled submissions', () => {
+    const snapshot = managementSnapshot();
+    const onSetRelay = vi.fn();
+    const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    const input = within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress);
+    fireEvent.change(input, { target: { value: '203.0.113.10:443' } });
+    view.rerender(<DevicesPanel snapshot={{ ...snapshot, relayConfigured: true }} disabled onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    expect(input).toHaveValue('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(onSetRelay).not.toHaveBeenCalled();
+  });
+
+  it('blocks a running-service save when management inventory is unavailable', () => {
+    const initial = managementSnapshot();
+    const snapshot: AppSnapshot = { ...initial,
+      dataAvailability: { ...initial.dataAvailability, devices: 'unavailable' } };
+    const onSetRelay = vi.fn();
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(onSetRelay).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { installed: true, state: 'stopped' as const },
+    { installed: false, state: null },
+  ])('allows the protected relay fallback for a verified $state service', ({ installed, state }) => {
+    const initial = managementSnapshot();
+    const snapshot: AppSnapshot = { ...initial,
+      service: { ...initial.service!, installed, state },
+      dataAvailability: { ...initial.dataAvailability, devices: 'unavailable' } };
+    const onSetRelay = vi.fn(() => Promise.resolve({ ...snapshot, relayConfigured: true }));
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
+    expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(onSetRelay).toHaveBeenCalledExactlyOnceWith('203.0.113.10:443');
+  });
+
+  it('blocks saving when the installed helper cannot be verified', () => {
+    const initial = managementSnapshot();
+    const snapshot: AppSnapshot = { ...initial,
+      service: { ...initial.service!, controlHint: 'needs_installer' } };
+    const onSetRelay = vi.fn();
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(onSetRelay).not.toHaveBeenCalled();
+  });
+
+  it('uses fixed save failure copy, keeps the draft and blocks stale retries', async () => {
+    const user = userEvent.setup();
+    const snapshot = managementSnapshot();
+    const setRelay = vi.fn<ControllerBridge['setRelay']>(() => Promise.reject(new Error('RAW_RELAY_ERROR private endpoint')));
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    const input = await screen.findByRole('textbox', { name: ko.relayAddress });
+    await user.type(input, '203.0.113.10:443');
+    await user.click(screen.getByRole('button', { name: ko.save }));
+    expect(await screen.findByText(ko.saveFailure)).toBeInTheDocument();
+    expect(screen.queryByText(/RAW_RELAY_ERROR/)).not.toBeInTheDocument();
+    expect(screen.getByText(ko.stale)).toBeInTheDocument();
+    expect(input).toHaveValue('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
+    expect(setRelay).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the draft when the native owner refuses the save', async () => {
+    const user = userEvent.setup();
+    const snapshot = { ...managementSnapshot(), relayConfigured: true };
+    const setRelay = vi.fn<ControllerBridge['setRelay']>(() => Promise.resolve({ ...snapshot,
+      issue: { code: 'synthetic_relay_cancelled', message: '주소 저장을 취소했어요.', nextAction: null } }));
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    const input = await screen.findByRole('textbox', { name: ko.relayAddress });
+    await user.type(input, '203.0.113.10:443');
+    await user.click(screen.getByRole('button', { name: ko.save }));
+    expect(await screen.findByText('주소 저장을 취소했어요.')).toBeInTheDocument();
+    expect(input).toHaveValue('203.0.113.10:443');
+    expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
+  });
+
+  it('does not show relay controls on Android', () => {
+    render(<DevicesPanel snapshot={exampleSnapshot('android')} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+    expect(screen.queryByLabelText(ko.relayAddress)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.relayConfigured)).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.relayUnconfigured)).not.toBeInTheDocument();
+  });
+});
+
+describe('request interaction boundaries', () => {
+  it('preserves the service word when it belongs to original request or terminal text', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-pending').snapshot;
+    const original = '서비스 확인.exe';
+    const path = 'C:\\서비스 원문\\서비스 확인.exe';
+    const details = 'Write-Output "서비스 원문 그대로"';
+    const snapshot = { ...fixture, requests: fixture.requests.map((request) => ({ ...request, programName: original, executablePath: path, details })) };
+    render(<App bridge={bridgeFor(snapshot)} />);
+    expect(await screen.findByRole('heading', { name: original })).toBeInTheDocument();
+    expect(screen.getByText(path)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.details }));
+    expect(screen.getByRole('region', { name: ko.commandDetails })).toHaveTextContent(details);
+  });
+
+  it('reveals untrusted details as inert text and respects per-decision availability', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-pending').snapshot;
+    const unsafeText = '<img src=x onerror="alert(1)"><script>exampleOnly()</script>';
+    const snapshot = { ...fixture, requests: fixture.requests.map((request) => ({ ...request, details: unsafeText, canApprove: false })) };
+    const decide = vi.fn<ControllerBridge['decide']>(() => Promise.resolve(snapshot));
+    const bridge = bridgeFor(snapshot, { decide });
+    const { container } = render(<App bridge={bridge} />);
+    expect(await screen.findByRole('button', { name: ko.approve })).toBeDisabled();
+    expect(screen.getByRole('button', { name: ko.deny })).toBeEnabled();
+    expect(screen.queryByText(unsafeText)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.details }));
+    expect(screen.getByRole('button', { name: ko.fewerDetails })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('region', { name: ko.commandDetails })).toHaveTextContent(unsafeText);
+    expect(screen.getByRole('region', { name: ko.commandDetails }).querySelector('img')).toBeNull();
+    expect([...container.querySelectorAll('img')].every(image => image.getAttribute('src') === '/app-logo.svg')).toBe(true);
+    expect(container.querySelector('script')).toBeNull();
+    await user.click(screen.getByRole('button', { name: ko.deny }));
+    expect(decide).toHaveBeenCalledWith('synthetic-request-1', 'deny');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('suppresses duplicate decisions and ignores an older refresh result', async () => {
+    const user = userEvent.setup();
+    const initial = qaCase('phone-pending').snapshot;
+    const oldRead = deferred<AppSnapshot>();
+    const decision = deferred<AppSnapshot>();
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(initial).mockImplementation(() => oldRead.promise);
+    const decide = vi.fn<ControllerBridge['decide']>(() => decision.promise);
+    render(<App bridge={bridgeFor(initial, { snapshot: read, decide })} />);
+    const approve = await screen.findByRole('button', { name: ko.approve });
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    fireEvent.click(approve);
+    fireEvent.click(approve);
+    expect(decide).toHaveBeenCalledOnce();
+    expect(approve).toBeDisabled();
+    const confirmed = { ...initial, requests: [] };
+    await act(async () => { decision.resolve(confirmed); await decision.promise; });
+    expect(await screen.findByRole('heading', { name: ko.requestEmpty })).toBeInTheDocument();
+    await act(async () => { oldRead.resolve(initial); await oldRead.promise; });
+    expect(screen.queryByRole('button', { name: ko.approve })).not.toBeInTheDocument();
+  });
+
+  it('keeps recovery but withdraws request bodies and decisions after refresh failure', async () => {
+    const user = userEvent.setup();
+    const initial = qaCase('phone-pending').snapshot;
+    const snapshot = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(initial).mockRejectedValue(new Error('network internals'));
+    render(<App bridge={bridgeFor(initial, { snapshot })} />);
+    await screen.findByRole('button', { name: ko.approve });
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    expect(await screen.findByText(ko.stale)).toBeInTheDocument();
+    expect(screen.queryByText('설정 도우미.exe')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.approve })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: ko.deny })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: ko.requestUnavailable })).toBeInTheDocument();
+  });
+
+  it('ignores a previous bridge response after a new bridge takes ownership', async () => {
+    const firstRead = deferred<AppSnapshot>();
+    const firstBridge = bridgeFor(exampleSnapshot(), { snapshot: () => firstRead.promise });
+    const secondSnapshot = { ...exampleSnapshot(), computerName: '새 화면 예시 PC' };
+    const secondBridge = bridgeFor(secondSnapshot);
+    const view = render(<App bridge={firstBridge} />);
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(<App bridge={secondBridge} />);
+    expect(await screen.findByText('새 화면 예시 PC')).toBeInTheDocument();
+    await act(async () => { firstRead.resolve({ ...exampleSnapshot(), computerName: '이전 화면 예시 PC' }); await firstRead.promise; });
+    expect(screen.queryByText('이전 화면 예시 PC')).not.toBeInTheDocument();
+  });
+});
+
+describe('destructive action confirmation', () => {
+  it('removes an offline PC only after confirmation and a committed native reply', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-devices-offline');
+    const result = deferred<AppSnapshot>();
+    const removeDevice = vi.fn<ControllerBridge['removeDevice']>(() => result.promise);
+    render(<App bridge={bridgeFor(fixture.snapshot, { removeDevice })} initialPage={fixture.page} />);
+    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 연결 해제' });
+    await user.click(trigger);
+    let dialog = screen.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?' });
+    expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(removeDevice).not.toHaveBeenCalled();
+    await user.click(trigger);
+    dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: ko.removeDevice }));
+    expect(removeDevice).toHaveBeenCalledExactlyOnceWith('ab'.repeat(32));
+    expect(screen.getByRole('heading', { name: '화면 예시 PC' })).toBeInTheDocument();
+    await act(async () => {
+      result.resolve({ ...fixture.snapshot, devices: [], canUnpair: false,
+        requestCatalog: { status: 'ready', revision: '2', peerCount: 0, connectedPeerCount: 0 } });
+      await result.promise;
+    });
+    expect(screen.queryByRole('heading', { name: '화면 예시 PC' })).not.toBeInTheDocument();
+  });
+  it('shows coarse PC completion without claiming approval and clears only after the owner confirms', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-history');
+    const cleared = deferred<AppSnapshot>();
+    const clearActivity = vi.fn<ControllerBridge['clearActivity']>(() => cleared.promise);
+    render(<App bridge={bridgeFor(fixture.snapshot, { clearActivity })} initialPage={fixture.page} />);
+    expect(await screen.findByRole('heading', { name: 'PC에서 요청 종료됨' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '요청 승인됨' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.clearActivity }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: ko.cancel }));
+    expect(clearActivity).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: ko.clearActivity }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: ko.clearActivity }));
+    expect(clearActivity).toHaveBeenCalledOnce();
+    expect(screen.getByRole('heading', { name: 'PC에서 요청 종료됨' })).toBeInTheDocument();
+    await act(async () => { cleared.resolve({ ...fixture.snapshot, activity: [], canClearActivity: false }); await cleared.promise; });
+    expect(await screen.findByRole('heading', { name: ko.noActivity })).toBeInTheDocument();
+  });
+
+  it('supports cancel, Escape, focus return and a single confirmed service command', async () => {
+    const user = userEvent.setup();
+    const snapshot = qaCase('desktop-running').snapshot;
+    const pending = deferred<AppSnapshot>();
+    const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
+    render(<App bridge={bridgeFor(snapshot, { controlService })} />);
+    const stop = await screen.findByRole('button', { name: serviceActionText.stop });
+    await user.click(stop);
+    let dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('자동 실행 설정은 바뀌지 않습니다.');
+    expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: ko.cancel }));
+    expect(stop).toHaveFocus();
+    expect(controlService).not.toHaveBeenCalled();
+    await user.click(stop);
+    dialog = screen.getByRole('dialog');
+    fireEvent(dialog, new Event('cancel', { bubbles: true, cancelable: true }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(stop).toHaveFocus();
+    await user.click(stop);
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: serviceActionText.stop }));
+    expect(controlService).toHaveBeenCalledExactlyOnceWith('stop');
+    expect(stop).toBeDisabled();
+    await act(async () => { pending.resolve({ ...snapshot, service: { installed: true, state: 'stopped', allowedActions: ['start'], controlHint: 'available', remoteRequestsReady: false } }); await pending.promise; });
+    await waitFor(() => { expect(screen.getByRole('button', { name: serviceActionText.start })).toBeEnabled(); });
+  });
+
+  it('explains that removing the PC connection feature leaves the settings app, and waits for the owner', async () => {
+    const user = userEvent.setup();
+    const snapshot = qaCase('desktop-running').snapshot;
+    const pending = deferred<AppSnapshot>();
+    const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
+    render(<App bridge={bridgeFor(snapshot, { controlService })} />);
+    await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능 제거' });
+    expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
+    expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
+    expect(controlService).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'PC 연결 기능 제거' }));
+    expect(controlService).toHaveBeenCalledExactlyOnceWith('uninstall');
+    expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'PC 연결 기능 제거' })).toBeDisabled();
+    await act(async () => {
+      pending.resolve({ ...snapshot, service: { installed: false, state: null, allowedActions: ['install'], controlHint: 'available', remoteRequestsReady: false } });
+      await pending.promise;
+    });
+    expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'PC 연결 기능 설치' })).toBeEnabled();
+  });
+});

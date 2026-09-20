@@ -1,0 +1,41 @@
+name: Attestation status interoperability
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'codex/native-runtime']
+    paths:
+      - 'crates/android-attestation/**'
+      - 'Cargo.lock'
+      - '.github/workflows/attestation-status.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: attestation-status-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixed-public-status:
+    name: Fixed Google status (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust
+        run: rustup show active-toolchain
+      - name: Fetch the fixed public status using the actual library
+        # No credentials/device/enrollment/native action. An outage fails this
+        # separate interoperability job; it never fabricates an empty snapshot.
+        run: cargo run -p android-attestation --example check-google-status --locked

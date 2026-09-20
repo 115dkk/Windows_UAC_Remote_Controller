@@ -1,0 +1,50 @@
+{
+  "sourceCommit": "256a1aea61bc5fd8a70b1a73863f726c098b08f0",
+  "run": "https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/35042956322",
+  "scope": "Actual Chromium renders of a client drawing of the native Windows pairing ceremony. Not a native GDI capture, not a private desktop, and no pairing happened. The QR encodes a meaningless sample sentence, not an invitation.",
+  "renderer": "Playwright 1.63.0 / Chromium 153.0.8010.12",
+  "images": [
+    {
+      "file": "ceremony-introduction.png",
+      "case": "pairing-ceremony-introduction-ko-1280x800",
+      "stage": "introduction",
+      "runner": "windows-2025",
+      "sha256": "5E8EA08F67FB20E2C44BC0BC4073D3C7A03C34C087660485CC9707BB06BDC876"
+    },
+    {
+      "file": "ceremony-qr.png",
+      "case": "pairing-ceremony-invitation-ko-1280x800",
+      "stage": "invitation",
+      "runner": "windows-2025",
+      "sha256": "55F9D322302EF98B6E1039840F1BE880D722959307ADA533D21B2402339C0470"
+    },
+    {
+      "file": "ceremony-comparison.png",
+      "case": "pairing-ceremony-comparison-ko-1280x800",
+      "stage": "comparison",
+      "runner": "windows-2025",
+      "sha256": "88B7D0EB34F0AE01C9D5C69F094EBC604D5B33F2123414B9C4D0B09AF25BF4AC"
+    },
+    {
+      "file": "ceremony-introduction-de.png",
+      "case": "pairing-ceremony-introduction-de-1280x800",
+      "stage": "introduction",
+      "runner": "windows-2025",
+      "sha256": "06FAB04953455DB6D39364EA8B269D4214335D9A14D93D8EF522B7C867081919"
+    },
+    {
+      "file": "ceremony-comparison-pt-PT.png",
+      "case": "pairing-ceremony-comparison-pt-PT-1280x800",
+      "stage": "comparison",
+      "runner": "windows-2025",
+      "sha256": "D7A9666E013B98EC850A167B8E856E12A7435A40D1E7CB918FD2C2E1DB6151D6"
+    },
+    {
+      "file": "ceremony-introduction-ar.png",
+      "case": "pairing-ceremony-introduction-ar-1280x800",
+      "stage": "introduction",
+      "runner": "windows-2025",
+      "sha256": "D18D0284490D1C0EE71931E4780DD4653720C840662ADAAC8CFDFDF5E318A944"
+    }
+  ]
+}

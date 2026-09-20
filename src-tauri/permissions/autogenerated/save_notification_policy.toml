@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-notification-policy"
+description = "Enables the save_notification_policy command without any pre-configured scope."
+commands.allow = ["save_notification_policy"]
+
+[[permission]]
+identifier = "deny-save-notification-policy"
+description = "Denies the save_notification_policy command without any pre-configured scope."
+commands.deny = ["save_notification_policy"]

@@ -1,0 +1,1478 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Closed rendezvous/terminal grammar only. None of these frames is a grant.
+#![forbid(unsafe_code)]
+
+use crate::{PendingElevationId, RendererInvocation};
+use service_protocol::{
+    MAX_PAIRING_INVITATION_QR_TEXT_BYTES, MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
+    PairingComparisonCode, PairingInvitation,
+};
+use std::{fmt, str};
+
+const HEADER: &[u8; 4] = b"UCPH";
+const VERSION: u8 = 2;
+const SHORT_FRAME: usize = 40;
+const LAUNCH_FRAME: usize = 52;
+const RENDERER_PREFIX: usize = 72;
+const INVITATION_MIN_FRAME: usize = RENDERER_PREFIX + 2 + MIN_PAIRING_INVITATION_QR_TEXT_BYTES;
+const INVITATION_MAX_FRAME: usize = RENDERER_PREFIX + 2 + MAX_PAIRING_INVITATION_QR_TEXT_BYTES;
+const COMPARISON_FRAME: usize = RENDERER_PREFIX + 6;
+const BOOLEAN_FRAME: usize = RENDERER_PREFIX + 1;
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum Frame {
+    Offer(PendingElevationId),
+    HelperLaunched {
+        id: PendingElevationId,
+        pid: u32,
+        created: u64,
+    },
+    HelperLaunchedUsb {
+        id: PendingElevationId,
+        pid: u32,
+        created: u64,
+    },
+    Hello(PendingElevationId),
+    Bound(PendingElevationId),
+    Close(PendingElevationId),
+    CloseAck(PendingElevationId),
+    PrepareRenderer(RendererRequest),
+    RendererLaunched {
+        request: RendererRequest,
+        process: RendererProcess,
+    },
+    RendererRegistered(RendererRequest),
+    RendererHello(RendererRequest),
+    RendererObjects {
+        invocation: RendererInvocation,
+        objects: RendererObjects,
+    },
+    RendererBound(RendererRequest),
+    RendererInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    RendererUsbInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    StarterUsbInvitation {
+        invocation: RendererInvocation,
+        text: InvitationText,
+    },
+    RendererComparison {
+        invocation: RendererInvocation,
+        code: ComparisonDigits,
+    },
+    RendererDecision {
+        invocation: RendererInvocation,
+        confirmed: bool,
+    },
+    RendererOutcome {
+        invocation: RendererInvocation,
+        enrolled: bool,
+    },
+}
+
+pub(crate) struct InvitationText(String);
+impl InvitationText {
+    pub(crate) fn new(text: String) -> Result<Self, HandoffError> {
+        PairingInvitation::from_qr_text(&text).map_err(|_| HandoffError::Frame)?;
+        Ok(Self(text))
+    }
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Clone for InvitationText {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl Eq for InvitationText {}
+impl PartialEq for InvitationText {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl fmt::Debug for InvitationText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InvitationText(redacted)")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ComparisonDigits([u8; 6]);
+impl ComparisonDigits {
+    // Called by the enrollment orchestration (ADR 0027, W3); unused until then.
+    #[allow(dead_code)]
+    pub(crate) fn from_code(code: &PairingComparisonCode) -> Result<Self, HandoffError> {
+        let bytes: [u8; 6] = code
+            .as_str()
+            .as_bytes()
+            .try_into()
+            .map_err(|_| HandoffError::Frame)?;
+        Self::new(bytes)
+    }
+    fn new(bytes: [u8; 6]) -> Result<Self, HandoffError> {
+        if !bytes.iter().all(u8::is_ascii_digit) {
+            return Err(HandoffError::Frame);
+        }
+        Ok(Self(bytes))
+    }
+    pub(crate) fn as_str(&self) -> &str {
+        str::from_utf8(&self.0).expect("comparison digits are validated ASCII")
+    }
+}
+impl fmt::Debug for ComparisonDigits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ComparisonDigits(redacted)")
+    }
+}
+
+/// Shape-only, public-correlation fields. Only original native owners interpret
+/// these fixed phases; none is a grant or a generic PID/handle import request.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RendererRequest {
+    pub(crate) invocation: RendererInvocation,
+    pub(crate) cutoff: u64,
+}
+impl RendererRequest {
+    pub(crate) fn new(invocation: RendererInvocation, cutoff: u64) -> Result<Self, HandoffError> {
+        if cutoff == 0 {
+            return Err(HandoffError::Frame);
+        }
+        Ok(Self { invocation, cutoff })
+    }
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RendererProcess {
+    pub(crate) pid: u32,
+    pub(crate) created: u64,
+    pub(crate) thread: u32,
+}
+impl RendererProcess {
+    pub(crate) fn valid(self) -> bool {
+        self.pid != 0 && self.created != 0 && self.thread != 0
+    }
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RendererObjects {
+    pub(crate) thread: u32,
+    pub(crate) desktop: u64,
+    pub(crate) station: u64,
+    pub(crate) window: u64,
+}
+impl RendererObjects {
+    fn valid(self) -> bool {
+        self.thread != 0
+            && ![0, u64::MAX].contains(&self.desktop)
+            && ![0, u64::MAX].contains(&self.station)
+            && ![0, u64::MAX].contains(&self.window)
+    }
+}
+macro_rules! renderer_debug {
+    ($($kind:ty),+ $(,)?) => { $(impl fmt::Debug for $kind {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(concat!(stringify!($kind), "(redacted, not_authority)")) }
+    })+ };
+}
+renderer_debug!(RendererRequest, RendererProcess, RendererObjects);
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Offer(_) => "Offer(redacted)",
+            Self::HelperLaunched { .. } => "HelperLaunched(redacted)",
+            Self::HelperLaunchedUsb { .. } => "HelperLaunchedUsb(redacted)",
+            Self::Hello(_) => "Hello(redacted)",
+            Self::Bound(_) => "Bound(redacted)",
+            Self::Close(_) => "Close(redacted)",
+            Self::CloseAck(_) => "CloseAck(redacted)",
+            Self::PrepareRenderer(_) => "PrepareRenderer(redacted)",
+            Self::RendererLaunched { .. } => "RendererLaunched(redacted)",
+            Self::RendererRegistered(_) => "RendererRegistered(redacted)",
+            Self::RendererHello(_) => "RendererHello(redacted)",
+            Self::RendererObjects { .. } => "RendererObjects(redacted)",
+            Self::RendererBound(_) => "RendererBound(redacted)",
+            Self::RendererInvitation { .. } => "RendererInvitation(redacted)",
+            Self::RendererUsbInvitation { .. } => "RendererUsbInvitation(redacted)",
+            Self::StarterUsbInvitation { .. } => "StarterUsbInvitation(redacted)",
+            Self::RendererComparison { .. } => "RendererComparison(redacted)",
+            Self::RendererDecision { .. } => "RendererDecision(redacted)",
+            Self::RendererOutcome { .. } => "RendererOutcome(redacted)",
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandoffError {
+    Frame,
+    Phase,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServiceSide {
+    Starter,
+    Helper,
+}
+impl ServiceSide {
+    fn index(self) -> usize {
+        match self {
+            Self::Starter => 0,
+            Self::Helper => 1,
+        }
+    }
+}
+
+/// Server FRAME phases only. The ServiceSession's actual native peer comparator
+/// must succeed before confirm_match, each Bound write and Bound publication.
+/// This pure structure is neither an authorization object nor a second engine.
+pub(crate) struct ServiceHandoff {
+    id: PendingElevationId,
+    offered: bool,
+    hello: bool,
+    launched: Option<(u32, u64)>,
+    matched: bool,
+    bound: [bool; 2],
+    closing: bool,
+    close_written: [bool; 2],
+    acknowledgements: [bool; 2],
+    failed: bool,
+}
+impl fmt::Debug for ServiceHandoff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ServiceHandoff(rendezvous_only)")
+    }
+}
+impl ServiceHandoff {
+    pub(crate) fn new(id: PendingElevationId) -> Self {
+        Self {
+            id,
+            offered: false,
+            hello: false,
+            launched: None,
+            matched: false,
+            bound: [false; 2],
+            closing: false,
+            close_written: [false; 2],
+            acknowledgements: [false; 2],
+            failed: false,
+        }
+    }
+    fn reject<T>(&mut self) -> Result<T, HandoffError> {
+        self.failed = true;
+        Err(HandoffError::Phase)
+    }
+    pub(crate) fn offer(&self) -> Result<Frame, HandoffError> {
+        if self.failed || self.offered || self.closing {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Offer(self.id))
+        }
+    }
+    pub(crate) fn offer_written(&mut self) -> Result<(), HandoffError> {
+        if self.failed || self.offered || self.closing {
+            return self.reject();
+        }
+        self.offered = true;
+        Ok(())
+    }
+    pub(crate) fn receive(&mut self, side: ServiceSide, frame: Frame) -> Result<(), HandoffError> {
+        if self.failed {
+            return Err(HandoffError::Phase);
+        }
+        if self.closing {
+            let index = side.index();
+            return if frame == Frame::CloseAck(self.id)
+                && self.close_written[index]
+                && !self.acknowledgements[index]
+            {
+                self.acknowledgements[index] = true;
+                Ok(())
+            } else {
+                self.reject()
+            };
+        }
+        match (side, frame) {
+            (ServiceSide::Starter, Frame::HelperLaunched { id, pid, created })
+            | (ServiceSide::Starter, Frame::HelperLaunchedUsb { id, pid, created })
+                if id == self.id
+                    && self.offered
+                    && self.launched.is_none()
+                    && !self.matched
+                    && pid != 0
+                    && created != 0 =>
+            {
+                self.launched = Some((pid, created));
+                Ok(())
+            }
+            (ServiceSide::Helper, Frame::Hello(id))
+                if id == self.id && !self.hello && !self.matched =>
+            {
+                self.hello = true;
+                Ok(())
+            }
+            _ => self.reject(),
+        }
+    }
+    pub(crate) fn candidate(&self) -> Option<(u32, u64)> {
+        if self.failed || self.closing || !self.offered || !self.hello {
+            None
+        } else {
+            self.launched
+        }
+    }
+    pub(crate) fn confirm_match(&mut self) -> Result<(), HandoffError> {
+        if self.matched || self.candidate().is_none() {
+            return self.reject();
+        }
+        self.matched = true;
+        Ok(())
+    }
+    pub(crate) fn is_matched(&self) -> bool {
+        self.matched && !self.failed
+    }
+    pub(crate) fn bound_frame(&self, side: ServiceSide) -> Result<Frame, HandoffError> {
+        if self.failed || self.closing || !self.matched || self.bound[side.index()] {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Bound(self.id))
+        }
+    }
+    pub(crate) fn bound_written(&mut self, side: ServiceSide) -> Result<(), HandoffError> {
+        if self.bound_frame(side).is_err() {
+            return self.reject();
+        }
+        self.bound[side.index()] = true;
+        Ok(())
+    }
+    pub(crate) fn is_bound(&self) -> bool {
+        !self.failed && !self.closing && self.bound == [true; 2]
+    }
+    pub(crate) fn start_close(&mut self) -> Result<(), HandoffError> {
+        if !self.is_bound() {
+            return self.reject();
+        }
+        self.closing = true;
+        Ok(())
+    }
+    pub(crate) fn close_frame(&self, side: ServiceSide) -> Result<Frame, HandoffError> {
+        if self.failed || !self.closing || self.close_written[side.index()] {
+            Err(HandoffError::Phase)
+        } else {
+            Ok(Frame::Close(self.id))
+        }
+    }
+    pub(crate) fn close_written(&mut self, side: ServiceSide) -> Result<(), HandoffError> {
+        if self.close_frame(side).is_err() {
+            return self.reject();
+        }
+        self.close_written[side.index()] = true;
+        Ok(())
+    }
+    pub(crate) fn both_acknowledged(&self) -> bool {
+        !self.failed && self.closing && self.acknowledgements == [true; 2]
+    }
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing
+    }
+    pub(crate) fn cancel(&mut self) {
+        self.failed = true;
+    }
+}
+impl Frame {
+    fn kind(&self) -> u8 {
+        match self {
+            Self::Offer(_) => 1,
+            Self::HelperLaunched { .. } => 2,
+            Self::Hello(_) => 3,
+            Self::Bound(_) => 4,
+            Self::Close(_) => 5,
+            Self::CloseAck(_) => 6,
+            Self::PrepareRenderer(_) => 7,
+            Self::RendererLaunched { .. } => 8,
+            Self::RendererRegistered(_) => 9,
+            Self::RendererHello(_) => 10,
+            Self::RendererObjects { .. } => 11,
+            Self::RendererBound(_) => 12,
+            Self::RendererInvitation { .. } => 13,
+            Self::RendererComparison { .. } => 14,
+            Self::RendererDecision { .. } => 15,
+            Self::RendererOutcome { .. } => 16,
+            Self::HelperLaunchedUsb { .. } => 17,
+            Self::RendererUsbInvitation { .. } => 18,
+            Self::StarterUsbInvitation { .. } => 19,
+        }
+    }
+    fn id(&self) -> PendingElevationId {
+        match self {
+            Self::Offer(id)
+            | Self::Hello(id)
+            | Self::Bound(id)
+            | Self::Close(id)
+            | Self::CloseAck(id)
+            | Self::HelperLaunched { id, .. }
+            | Self::HelperLaunchedUsb { id, .. } => *id,
+            Self::PrepareRenderer(value)
+            | Self::RendererRegistered(value)
+            | Self::RendererBound(value)
+            | Self::RendererLaunched { request: value, .. }
+            | Self::RendererHello(value) => value.invocation.pending(),
+            Self::RendererObjects {
+                invocation: value, ..
+            }
+            | Self::RendererInvitation {
+                invocation: value, ..
+            }
+            | Self::RendererUsbInvitation {
+                invocation: value, ..
+            }
+            | Self::StarterUsbInvitation {
+                invocation: value, ..
+            }
+            | Self::RendererComparison {
+                invocation: value, ..
+            }
+            | Self::RendererDecision {
+                invocation: value, ..
+            }
+            | Self::RendererOutcome {
+                invocation: value, ..
+            } => value.pending(),
+        }
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, HandoffError> {
+        let mut bytes = Vec::with_capacity(LAUNCH_FRAME);
+        bytes.extend_from_slice(HEADER);
+        bytes.extend_from_slice(&[VERSION, self.kind(), 0, 0]);
+        bytes.extend_from_slice(&self.id().bytes());
+        if let Self::HelperLaunched { pid, created, .. }
+        | Self::HelperLaunchedUsb { pid, created, .. } = self
+        {
+            if *pid == 0 || *created == 0 {
+                return Err(HandoffError::Frame);
+            }
+            bytes.extend_from_slice(&pid.to_le_bytes());
+            bytes.extend_from_slice(&created.to_le_bytes());
+        }
+        match self {
+            Self::PrepareRenderer(value)
+            | Self::RendererRegistered(value)
+            | Self::RendererBound(value)
+            | Self::RendererLaunched { request: value, .. }
+            | Self::RendererHello(value) => {
+                if value.cutoff == 0 {
+                    return Err(HandoffError::Frame);
+                }
+                bytes.extend_from_slice(&value.invocation.display().bytes());
+                bytes.extend_from_slice(&value.cutoff.to_le_bytes());
+                if let Self::RendererLaunched { process, .. } = self {
+                    if !process.valid() {
+                        return Err(HandoffError::Frame);
+                    }
+                    bytes.extend_from_slice(&process.pid.to_le_bytes());
+                    bytes.extend_from_slice(&process.created.to_le_bytes());
+                    bytes.extend_from_slice(&process.thread.to_le_bytes());
+                }
+            }
+            Self::RendererObjects {
+                invocation: value,
+                objects,
+            } => {
+                bytes.extend_from_slice(&value.display().bytes());
+                if !objects.valid() {
+                    return Err(HandoffError::Frame);
+                }
+                bytes.extend_from_slice(&objects.thread.to_le_bytes());
+                bytes.extend_from_slice(&objects.desktop.to_le_bytes());
+                bytes.extend_from_slice(&objects.station.to_le_bytes());
+                bytes.extend_from_slice(&objects.window.to_le_bytes());
+            }
+            Self::RendererInvitation { invocation, text }
+            | Self::RendererUsbInvitation { invocation, text }
+            | Self::StarterUsbInvitation { invocation, text } => {
+                PairingInvitation::from_qr_text(text.as_str()).map_err(|_| HandoffError::Frame)?;
+                bytes.extend_from_slice(&invocation.display().bytes());
+                let length = u16::try_from(text.as_str().len()).map_err(|_| HandoffError::Frame)?;
+                bytes.extend_from_slice(&length.to_be_bytes());
+                bytes.extend_from_slice(text.as_str().as_bytes());
+            }
+            Self::RendererComparison { invocation, code } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.extend_from_slice(code.as_str().as_bytes());
+            }
+            Self::RendererDecision {
+                invocation,
+                confirmed,
+            } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.push(u8::from(*confirmed));
+            }
+            Self::RendererOutcome {
+                invocation,
+                enrolled,
+            } => {
+                bytes.extend_from_slice(&invocation.display().bytes());
+                bytes.push(u8::from(*enrolled));
+            }
+            _ => (),
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, HandoffError> {
+        if ![
+            SHORT_FRAME,
+            LAUNCH_FRAME,
+            80,
+            100,
+            96,
+            INVITATION_MIN_FRAME,
+            INVITATION_MAX_FRAME,
+            COMPARISON_FRAME,
+            BOOLEAN_FRAME,
+        ]
+        .contains(&bytes.len())
+            || !bytes.starts_with(HEADER)
+            || bytes[4] != VERSION
+            || bytes[6..8] != [0, 0]
+        {
+            return Err(HandoffError::Frame);
+        }
+        let id = PendingElevationId::from_bytes(
+            bytes[8..40].try_into().map_err(|_| HandoffError::Frame)?,
+        )
+        .map_err(|_| HandoffError::Frame)?;
+        if (7..=16).contains(&bytes[5]) || matches!(bytes[5], 18 | 19) {
+            if bytes.len() < 72 {
+                return Err(HandoffError::Frame);
+            }
+            let display = PendingElevationId::from_bytes(
+                bytes[40..72].try_into().map_err(|_| HandoffError::Frame)?,
+            )
+            .map_err(|_| HandoffError::Frame)?;
+            let invocation =
+                RendererInvocation::new(id, display).map_err(|_| HandoffError::Frame)?;
+            match (bytes[5], bytes.len()) {
+                (11, 100) => {
+                    let objects = RendererObjects {
+                        thread: u32::from_le_bytes(
+                            bytes[72..76].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                        desktop: u64::from_le_bytes(
+                            bytes[76..84].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                        station: u64::from_le_bytes(
+                            bytes[84..92].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                        window: u64::from_le_bytes(
+                            bytes[92..100].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                    };
+                    if !objects.valid() {
+                        return Err(HandoffError::Frame);
+                    }
+                    return Ok(Self::RendererObjects {
+                        invocation,
+                        objects,
+                    });
+                }
+                (7 | 9 | 10 | 12, 80) | (8, 96) => {
+                    let request = RendererRequest::new(
+                        invocation,
+                        u64::from_le_bytes(
+                            bytes[72..80].try_into().map_err(|_| HandoffError::Frame)?,
+                        ),
+                    )?;
+                    return match bytes[5] {
+                        7 => Ok(Self::PrepareRenderer(request)),
+                        9 => Ok(Self::RendererRegistered(request)),
+                        10 => Ok(Self::RendererHello(request)),
+                        12 => Ok(Self::RendererBound(request)),
+                        8 => {
+                            let process = RendererProcess {
+                                pid: u32::from_le_bytes(
+                                    bytes[80..84].try_into().map_err(|_| HandoffError::Frame)?,
+                                ),
+                                created: u64::from_le_bytes(
+                                    bytes[84..92].try_into().map_err(|_| HandoffError::Frame)?,
+                                ),
+                                thread: u32::from_le_bytes(
+                                    bytes[92..96].try_into().map_err(|_| HandoffError::Frame)?,
+                                ),
+                            };
+                            if !process.valid() {
+                                return Err(HandoffError::Frame);
+                            }
+                            Ok(Self::RendererLaunched { request, process })
+                        }
+                        _ => Err(HandoffError::Frame),
+                    };
+                }
+                (13 | 18 | 19, INVITATION_MIN_FRAME | INVITATION_MAX_FRAME) => {
+                    let length = usize::from(u16::from_be_bytes(
+                        bytes[72..74].try_into().map_err(|_| HandoffError::Frame)?,
+                    ));
+                    if length + 74 != bytes.len()
+                        || ![
+                            MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
+                            MAX_PAIRING_INVITATION_QR_TEXT_BYTES,
+                        ]
+                        .contains(&length)
+                    {
+                        return Err(HandoffError::Frame);
+                    }
+                    let text = str::from_utf8(&bytes[74..]).map_err(|_| HandoffError::Frame)?;
+                    let text = InvitationText::new(text.to_owned())?;
+                    return Ok(match bytes[5] {
+                        18 => Self::RendererUsbInvitation { invocation, text },
+                        19 => Self::StarterUsbInvitation { invocation, text },
+                        _ => Self::RendererInvitation { invocation, text },
+                    });
+                }
+                (14, COMPARISON_FRAME) => {
+                    let code = ComparisonDigits::new(
+                        bytes[72..78].try_into().map_err(|_| HandoffError::Frame)?,
+                    )?;
+                    return Ok(Self::RendererComparison { invocation, code });
+                }
+                (15 | 16, BOOLEAN_FRAME) => {
+                    let value = match bytes[72] {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(HandoffError::Frame),
+                    };
+                    return if bytes[5] == 15 {
+                        Ok(Self::RendererDecision {
+                            invocation,
+                            confirmed: value,
+                        })
+                    } else {
+                        Ok(Self::RendererOutcome {
+                            invocation,
+                            enrolled: value,
+                        })
+                    };
+                }
+                _ => return Err(HandoffError::Frame),
+            }
+        }
+        match (bytes[5], bytes.len()) {
+            (1, SHORT_FRAME) => Ok(Self::Offer(id)),
+            (3, SHORT_FRAME) => Ok(Self::Hello(id)),
+            (4, SHORT_FRAME) => Ok(Self::Bound(id)),
+            (5, SHORT_FRAME) => Ok(Self::Close(id)),
+            (6, SHORT_FRAME) => Ok(Self::CloseAck(id)),
+            (2 | 17, LAUNCH_FRAME) => {
+                let pid =
+                    u32::from_le_bytes(bytes[40..44].try_into().map_err(|_| HandoffError::Frame)?);
+                let created =
+                    u64::from_le_bytes(bytes[44..52].try_into().map_err(|_| HandoffError::Frame)?);
+                if pid == 0 || created == 0 {
+                    return Err(HandoffError::Frame);
+                }
+                Ok(if bytes[5] == 17 {
+                    Self::HelperLaunchedUsb { id, pid, created }
+                } else {
+                    Self::HelperLaunched { id, pid, created }
+                })
+            }
+            _ => Err(HandoffError::Frame),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Phase {
+    Offer,
+    LaunchClaimed,
+    Sending,
+    AwaitBound,
+    Bound,
+    Ack,
+    PeerClose,
+    Closed,
+    Failed,
+    RendererPreparing,
+    RendererWriting,
+    RendererAwaitRegistered,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Next {
+    Launch(PendingElevationId),
+    Read,
+    BoundLive,
+    CloseAck(PendingElevationId),
+    PeerClosed,
+    PrepareRenderer(RendererRequest),
+    ResumeRenderer(RendererRequest),
+    UsbInvitation(InvitationText),
+}
+
+/// Private phase state, driven only by the native owner's actual completions.
+/// Bound is LIVE information; only authenticated Close -> Ack -> peer EOF closes.
+pub(crate) struct Handoff {
+    phase: Phase,
+    id: Option<PendingElevationId>,
+    failure: Option<HandoffError>,
+    helper: bool,
+    renderer: Option<RendererRequest>,
+    usb: bool,
+    usb_received: bool,
+}
+impl Handoff {
+    /// Only the fixed renderer FFI owner calls this after decoding an exact
+    /// Close on its original normally authenticated completion. Cleanup-only;
+    /// this does not synthesize a Bound/grant or accept a caller authority flag.
+    pub(crate) fn renderer_close(id: PendingElevationId) -> Self {
+        Self {
+            phase: Phase::Ack,
+            id: Some(id),
+            failure: None,
+            helper: false,
+            renderer: None,
+            usb: false,
+            usb_received: false,
+        }
+    }
+    pub(crate) fn starter() -> Self {
+        Self {
+            phase: Phase::Offer,
+            id: None,
+            failure: None,
+            helper: false,
+            renderer: None,
+            usb: false,
+            usb_received: false,
+        }
+    }
+    pub(crate) fn helper(id: PendingElevationId) -> (Self, Frame) {
+        (
+            Self {
+                phase: Phase::Sending,
+                id: Some(id),
+                failure: None,
+                helper: true,
+                renderer: None,
+                usb: false,
+                usb_received: false,
+            },
+            Frame::Hello(id),
+        )
+    }
+    fn reject<T>(&mut self, error: HandoffError) -> Result<T, HandoffError> {
+        let first = *self.failure.get_or_insert(error);
+        self.phase = Phase::Failed;
+        Err(first)
+    }
+    pub(crate) fn enable_usb(&mut self) -> Result<(), HandoffError> {
+        if self.phase != Phase::Offer || self.helper || self.usb {
+            return self.reject(HandoffError::Phase);
+        }
+        self.usb = true;
+        Ok(())
+    }
+    pub(crate) fn receive(&mut self, frame: Frame) -> Result<Next, HandoffError> {
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        match (self.phase, frame) {
+            (Phase::Offer, Frame::Offer(id)) => {
+                self.id = Some(id);
+                self.phase = Phase::LaunchClaimed;
+                Ok(Next::Launch(id))
+            }
+            (Phase::AwaitBound, Frame::Bound(id)) if self.id == Some(id) => {
+                self.phase = Phase::Bound;
+                Ok(Next::BoundLive)
+            }
+            (Phase::Bound, Frame::StarterUsbInvitation { invocation, text })
+                if !self.helper
+                    && self.usb
+                    && !self.usb_received
+                    && self.id == Some(invocation.pending()) =>
+            {
+                self.usb_received = true;
+                Ok(Next::UsbInvitation(text))
+            }
+            (Phase::Bound, Frame::PrepareRenderer(request))
+                if self.helper
+                    && self.renderer.is_none()
+                    && self.id == Some(request.invocation.pending()) =>
+            {
+                self.renderer = Some(request);
+                self.phase = Phase::RendererPreparing;
+                Ok(Next::PrepareRenderer(request))
+            }
+            (Phase::RendererAwaitRegistered, Frame::RendererRegistered(request))
+                if self.helper && self.renderer == Some(request) =>
+            {
+                self.phase = Phase::Bound; // Native owner must still resume exactly once.
+                Ok(Next::ResumeRenderer(request))
+            }
+            (
+                Phase::AwaitBound
+                | Phase::Bound
+                | Phase::RendererPreparing
+                | Phase::RendererAwaitRegistered,
+                Frame::Close(id),
+            ) if self.id == Some(id) => {
+                self.phase = Phase::Ack;
+                Ok(Next::CloseAck(id))
+            }
+            _ => self.reject(HandoffError::Phase),
+        }
+    }
+    pub(crate) fn launched(&mut self, pid: u32, created: u64) -> Result<Frame, HandoffError> {
+        if self.phase != Phase::LaunchClaimed || self.failure.is_some() || pid == 0 || created == 0
+        {
+            return self.reject(HandoffError::Phase);
+        }
+        let Some(id) = self.id else {
+            return self.reject(HandoffError::Phase);
+        };
+        self.phase = Phase::Sending;
+        Ok(if self.usb {
+            Frame::HelperLaunchedUsb { id, pid, created }
+        } else {
+            Frame::HelperLaunched { id, pid, created }
+        })
+    }
+    pub(crate) fn written(&mut self) -> Result<Next, HandoffError> {
+        if self.phase == Phase::RendererWriting && self.failure.is_none() {
+            self.phase = Phase::RendererAwaitRegistered;
+            return Ok(Next::Read);
+        }
+        if self.phase != Phase::Sending || self.failure.is_some() {
+            return self.reject(HandoffError::Phase);
+        }
+        self.phase = Phase::AwaitBound;
+        Ok(Next::Read)
+    }
+    pub(crate) fn renderer_launched(
+        &mut self,
+        request: RendererRequest,
+        process: RendererProcess,
+    ) -> Result<Frame, HandoffError> {
+        let Some(original) = self.renderer else {
+            return self.reject(HandoffError::Phase);
+        };
+        if self.phase != Phase::RendererPreparing
+            || self.failure.is_some()
+            || !process.valid()
+            || request.invocation != original.invocation
+            || request.cutoff == 0
+            || request.cutoff > original.cutoff
+        {
+            return self.reject(HandoffError::Phase);
+        }
+        self.renderer = Some(request); // Narrowing once, never a renewed deadline.
+        self.phase = Phase::RendererWriting;
+        Ok(Frame::RendererLaunched { request, process })
+    }
+    pub(crate) fn ack_written(&mut self) -> Result<(), HandoffError> {
+        if self.phase != Phase::Ack || self.failure.is_some() {
+            return self.reject(HandoffError::Phase);
+        }
+        self.phase = Phase::PeerClose;
+        Ok(())
+    }
+    pub(crate) fn peer_closed(&mut self) -> Result<Next, HandoffError> {
+        if self.phase != Phase::PeerClose || self.failure.is_some() {
+            return self.reject(HandoffError::Phase);
+        }
+        self.phase = Phase::Closed;
+        Ok(Next::PeerClosed)
+    }
+    pub(crate) fn cancel(&mut self) {
+        let _: Result<(), _> = self.reject(HandoffError::Cancelled);
+    }
+    pub(crate) fn closing(&self) -> bool {
+        matches!(self.phase, Phase::Ack | Phase::PeerClose | Phase::Closed)
+    }
+    pub(crate) fn closed(&self) -> bool {
+        self.phase == Phase::Closed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approval_protocol::{DeviceId, PcIdentity};
+    use p256::{ecdsa::SigningKey, pkcs8::EncodePublicKey};
+    use service_protocol::{PairingChallenge, PairingInvitationFields, PairingNonce};
+    use std::net::SocketAddr;
+
+    fn invitation_text() -> InvitationText {
+        let public = |seed: u8| {
+            let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
+            let public = p256::PublicKey::from_sec1_bytes(
+                signing.verifying_key().to_encoded_point(false).as_bytes(),
+            )
+            .unwrap();
+            secure_channel::TlsPublicKey::from_spki_der(
+                public.to_public_key_der().unwrap().as_bytes(),
+            )
+            .unwrap()
+        };
+        let invitation = PairingInvitation::new(PairingInvitationFields {
+            ceremony_nonce: PairingNonce::from_bytes([1; 32]).unwrap(),
+            attestation_challenge: PairingChallenge::from_bytes([2; 32]).unwrap(),
+            pc: PcIdentity::from_bytes([3; 32]).unwrap(),
+            recipient_device: DeviceId::from_bytes([4; 16]).unwrap(),
+            pc_signing_key: public(5),
+            pc_transport_key: public(6),
+            relay_address: SocketAddr::from(([192, 0, 2, 42], 7443)),
+            route: [7; 32],
+        })
+        .unwrap();
+        InvitationText::new(invitation.to_qr_text()).unwrap()
+    }
+    fn id(value: u8) -> PendingElevationId {
+        PendingElevationId::from_bytes([value; 32]).unwrap()
+    }
+    fn renderer_request() -> RendererRequest {
+        RendererRequest::new(RendererInvocation::new(id(1), id(2)).unwrap(), 1000).unwrap()
+    }
+    fn bound_helper() -> Handoff {
+        let (mut helper, _) = Handoff::helper(id(1));
+        helper.written().unwrap();
+        helper.receive(Frame::Bound(id(1))).unwrap();
+        helper
+    }
+
+    #[test]
+    fn usb_invitation_is_once_only_for_the_explicit_original_medium_starter() {
+        fn bound(usb: bool) -> Handoff {
+            let mut starter = Handoff::starter();
+            if usb {
+                starter.enable_usb().unwrap();
+            }
+            starter.receive(Frame::Offer(id(1))).unwrap();
+            let launch = starter.launched(42, 99).unwrap();
+            assert_eq!(matches!(launch, Frame::HelperLaunchedUsb { .. }), usb);
+            assert_eq!(Frame::decode(&launch.encode().unwrap()), Ok(launch));
+            starter.written().unwrap();
+            starter.receive(Frame::Bound(id(1))).unwrap();
+            starter
+        }
+        let invitation = Frame::StarterUsbInvitation {
+            invocation: renderer_request().invocation,
+            text: invitation_text(),
+        };
+        let mut starter = bound(true);
+        assert!(matches!(
+            starter.receive(invitation.clone()),
+            Ok(Next::UsbInvitation(_))
+        ));
+        assert!(starter.receive(invitation.clone()).is_err());
+        assert!(bound(false).receive(invitation.clone()).is_err());
+        assert!(bound_helper().receive(invitation.clone()).is_err());
+        assert!(Handoff::starter().receive(invitation).is_err());
+        let crossed = Frame::StarterUsbInvitation {
+            invocation: RendererInvocation::new(id(3), id(4)).unwrap(),
+            text: invitation_text(),
+        };
+        assert!(bound(true).receive(crossed).is_err());
+        assert!(bound(true).enable_usb().is_err());
+    }
+
+    #[test]
+    fn usb_handoff_and_bootstrap_frame_are_exact_and_cannot_supply_a_decision() {
+        let text = invitation_text();
+        let invitation = PairingInvitation::from_qr_text(text.as_str()).unwrap();
+        let frame = crate::usb_bootstrap_frame::encode(&invitation).unwrap();
+        assert_eq!(&frame[..9], b"UACUSB\x01\x01\x59");
+        assert_eq!(
+            crate::usb_bootstrap_frame::decode(&frame)
+                .unwrap()
+                .to_wire(),
+            invitation.to_wire()
+        );
+        for cut in 0..frame.len() {
+            assert!(crate::usb_bootstrap_frame::decode(&frame[..cut]).is_err());
+        }
+        let mut extra = frame.clone();
+        extra.push(0);
+        assert!(crate::usb_bootstrap_frame::decode(&extra).is_err());
+        for index in 0..9 {
+            let mut corrupt = frame.clone();
+            corrupt[index] ^= 0xff;
+            assert!(crate::usb_bootstrap_frame::decode(&corrupt).is_err());
+        }
+        let mut corrupt = frame;
+        corrupt[9..].fill(0);
+        assert!(crate::usb_bootstrap_frame::decode(&corrupt).is_err());
+        for handoff in [
+            Frame::RendererUsbInvitation {
+                invocation: renderer_request().invocation,
+                text: text.clone(),
+            },
+            Frame::StarterUsbInvitation {
+                invocation: renderer_request().invocation,
+                text,
+            },
+        ] {
+            let bytes = handoff.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(handoff));
+            for cut in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..cut]).is_err());
+            }
+            let mut wrong = bytes;
+            wrong[5] = 15;
+            assert!(Frame::decode(&wrong).is_err());
+        }
+    }
+    #[test]
+    fn renderer_display_frames_roundtrip_and_reject_bad_payloads() {
+        let invocation = renderer_request().invocation;
+        let text = invitation_text();
+        let frames = [
+            Frame::RendererInvitation {
+                invocation,
+                text: text.clone(),
+            },
+            Frame::RendererComparison {
+                invocation,
+                code: ComparisonDigits::new(*b"123456").unwrap(),
+            },
+            Frame::RendererDecision {
+                invocation,
+                confirmed: true,
+            },
+            Frame::RendererOutcome {
+                invocation,
+                enrolled: false,
+            },
+        ];
+        for frame in frames {
+            let bytes = frame.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
+            for length in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..length]).is_err());
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(Frame::decode(&extra).is_err());
+            assert!(!format!("{frame:?}").contains("123456"));
+        }
+        let mut bad_text = Frame::RendererInvitation { invocation, text }
+            .encode()
+            .unwrap();
+        bad_text[74] = b'!';
+        assert!(Frame::decode(&bad_text).is_err());
+        let mut bad_length = bad_text;
+        bad_length[72..74].copy_from_slice(&473u16.to_be_bytes());
+        assert!(Frame::decode(&bad_length).is_err());
+        let mut bad_digits = Frame::RendererComparison {
+            invocation,
+            code: ComparisonDigits::new(*b"123456").unwrap(),
+        }
+        .encode()
+        .unwrap();
+        bad_digits[77] = b'x';
+        assert!(Frame::decode(&bad_digits).is_err());
+        for frame in [
+            Frame::RendererDecision {
+                invocation,
+                confirmed: false,
+            },
+            Frame::RendererOutcome {
+                invocation,
+                enrolled: true,
+            },
+        ] {
+            let mut bytes = frame.encode().unwrap();
+            bytes[72] = 2;
+            assert!(Frame::decode(&bytes).is_err());
+        }
+    }
+    #[test]
+    fn renderer_frames_are_exact_bounded_and_never_accept_crossed_shapes() {
+        let request = renderer_request();
+        let frames = [
+            Frame::PrepareRenderer(request),
+            Frame::RendererRegistered(request),
+            Frame::RendererHello(request),
+            Frame::RendererBound(request),
+            Frame::RendererLaunched {
+                request,
+                process: RendererProcess {
+                    pid: 42,
+                    created: 99,
+                    thread: 43,
+                },
+            },
+            Frame::RendererObjects {
+                invocation: request.invocation,
+                objects: RendererObjects {
+                    thread: 43,
+                    desktop: 100,
+                    station: 101,
+                    window: 102,
+                },
+            },
+        ];
+        for frame in frames {
+            let bytes = frame.encode().unwrap();
+            let mut old = bytes.clone();
+            old[4] = 1;
+            assert!(Frame::decode(&old).is_err());
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
+            assert!([80, 100, 96].contains(&bytes.len()));
+            for length in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..length]).is_err());
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(Frame::decode(&extra).is_err());
+            let mut crossed = bytes.clone();
+            crossed[40..72].copy_from_slice(&id(1).bytes());
+            assert!(Frame::decode(&crossed).is_err());
+            for at in [0, 4, 6, 7] {
+                let mut changed = bytes.clone();
+                changed[at] = 255;
+                assert!(Frame::decode(&changed).is_err());
+            }
+            assert!(!format!("{frame:?}").contains(&id(2).argument()));
+        }
+        let mut forged = request;
+        forged.cutoff += 1;
+        assert_ne!(Frame::RendererHello(forged), Frame::RendererHello(request));
+        let mut zero = Frame::RendererHello(request).encode().unwrap();
+        zero[72..80].fill(0);
+        assert!(Frame::decode(&zero).is_err());
+    }
+
+    #[test]
+    fn renderer_object_frame_requires_the_hidden_native_window_candidate() {
+        let frame = Frame::RendererObjects {
+            invocation: renderer_request().invocation,
+            objects: RendererObjects {
+                thread: 43,
+                desktop: 100,
+                station: 101,
+                window: 102,
+            },
+        };
+        let mut bytes = frame.encode().unwrap();
+        assert_eq!(bytes.len(), 100);
+        bytes[92..100].fill(0);
+        assert!(Frame::decode(&bytes).is_err());
+        assert!(Frame::decode(&bytes[..92]).is_err());
+    }
+    #[test]
+    fn only_original_helper_can_claim_one_launch_and_exact_registration_resume() {
+        let request = renderer_request();
+        let process = RendererProcess {
+            pid: 42,
+            created: 99,
+            thread: 43,
+        };
+        let mut helper = bound_helper();
+        assert_eq!(
+            helper.receive(Frame::PrepareRenderer(request)),
+            Ok(Next::PrepareRenderer(request))
+        );
+        let narrowed = RendererRequest {
+            cutoff: 900,
+            ..request
+        };
+        assert_eq!(
+            helper.renderer_launched(narrowed, process),
+            Ok(Frame::RendererLaunched {
+                request: narrowed,
+                process
+            })
+        );
+        helper.written().unwrap();
+        assert_eq!(
+            helper.receive(Frame::RendererRegistered(narrowed)),
+            Ok(Next::ResumeRenderer(narrowed))
+        );
+        assert!(helper.receive(Frame::RendererRegistered(narrowed)).is_err());
+        let mut larger = bound_helper();
+        larger.receive(Frame::PrepareRenderer(request)).unwrap();
+        assert!(
+            larger
+                .renderer_launched(
+                    RendererRequest {
+                        cutoff: 1001,
+                        ..request
+                    },
+                    process
+                )
+                .is_err()
+        );
+        assert!(larger.renderer_launched(request, process).is_err());
+        let mut crossed = bound_helper();
+        crossed.receive(Frame::PrepareRenderer(request)).unwrap();
+        crossed.renderer_launched(narrowed, process).unwrap();
+        crossed.written().unwrap();
+        assert!(crossed.receive(Frame::RendererRegistered(request)).is_err());
+        let mut starter = Handoff::starter();
+        starter.receive(Frame::Offer(id(1))).unwrap();
+        starter.launched(42, 99).unwrap();
+        starter.written().unwrap();
+        starter.receive(Frame::Bound(id(1))).unwrap();
+        assert!(starter.receive(Frame::PrepareRenderer(request)).is_err());
+    }
+    #[test]
+    fn close_cancels_renderer_registration_without_an_implied_resume_or_grant() {
+        let request = renderer_request();
+        let mut helper = bound_helper();
+        helper.receive(Frame::PrepareRenderer(request)).unwrap();
+        helper
+            .renderer_launched(
+                request,
+                RendererProcess {
+                    pid: 42,
+                    created: 99,
+                    thread: 43,
+                },
+            )
+            .unwrap();
+        helper.written().unwrap();
+        assert_eq!(
+            helper.receive(Frame::Close(id(1))),
+            Ok(Next::CloseAck(id(1)))
+        );
+        assert!(helper.receive(Frame::RendererRegistered(request)).is_err());
+        let mut terminal = Handoff::renderer_close(id(1));
+        assert!(!terminal.closed());
+        terminal.ack_written().unwrap();
+        assert_eq!(terminal.peer_closed(), Ok(Next::PeerClosed));
+        assert!(terminal.closed());
+    }
+    #[test]
+    fn exact_six_frames_roundtrip_and_reject_all_size_header_mutations() {
+        for frame in [
+            Frame::Offer(id(1)),
+            Frame::HelperLaunched {
+                id: id(1),
+                pid: 42,
+                created: 99,
+            },
+            Frame::Hello(id(1)),
+            Frame::Bound(id(1)),
+            Frame::Close(id(1)),
+            Frame::CloseAck(id(1)),
+        ] {
+            let bytes = frame.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(frame.clone()));
+            for length in 0..bytes.len() {
+                assert!(Frame::decode(&bytes[..length]).is_err());
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(Frame::decode(&extra).is_err());
+            for at in [0, 4, 5, 6, 7] {
+                let mut changed = bytes.clone();
+                changed[at] = 255;
+                assert!(Frame::decode(&changed).is_err());
+            }
+            let mut zero = bytes.clone();
+            zero[8..40].fill(0);
+            assert!(Frame::decode(&zero).is_err());
+            assert!(!format!("{frame:?}").contains(&id(1).argument()));
+        }
+        assert!(
+            Frame::HelperLaunched {
+                id: id(1),
+                pid: 0,
+                created: 1
+            }
+            .encode()
+            .is_err()
+        );
+    }
+    #[test]
+    fn launch_is_claimed_once_and_identity_write_precedes_bound() {
+        let mut value = Handoff::starter();
+        assert_eq!(value.receive(Frame::Offer(id(1))), Ok(Next::Launch(id(1))));
+        assert_eq!(
+            value.launched(42, 99),
+            Ok(Frame::HelperLaunched {
+                id: id(1),
+                pid: 42,
+                created: 99
+            })
+        );
+        assert_eq!(value.written(), Ok(Next::Read));
+        assert_eq!(value.receive(Frame::Bound(id(1))), Ok(Next::BoundLive));
+        assert!(!value.closed());
+        assert!(!value.closing());
+        assert!(value.launched(43, 100).is_err());
+        assert!(value.receive(Frame::Offer(id(1))).is_err());
+    }
+    #[test]
+    fn helper_remains_live_after_bound_and_ack_until_actual_peer_close() {
+        let (mut value, hello) = Handoff::helper(id(1));
+        assert_eq!(hello, Frame::Hello(id(1)));
+        value.written().unwrap();
+        value.receive(Frame::Bound(id(1))).unwrap();
+        assert!(!value.closed());
+        assert_eq!(
+            value.receive(Frame::Close(id(1))),
+            Ok(Next::CloseAck(id(1)))
+        );
+        assert!(value.closing());
+        assert!(!value.closed());
+        value.ack_written().unwrap();
+        assert!(!value.closed());
+        assert_eq!(value.peer_closed(), Ok(Next::PeerClosed));
+        assert!(value.closed());
+    }
+    #[test]
+    fn eof_without_close_or_before_ack_and_crossed_ids_are_failures() {
+        let (mut no_close, _) = Handoff::helper(id(1));
+        no_close.written().unwrap();
+        assert!(no_close.peer_closed().is_err());
+        let (mut early, _) = Handoff::helper(id(1));
+        early.written().unwrap();
+        early.receive(Frame::Close(id(1))).unwrap();
+        assert!(early.peer_closed().is_err());
+        let (mut crossed, _) = Handoff::helper(id(1));
+        crossed.written().unwrap();
+        assert!(crossed.receive(Frame::Bound(id(2))).is_err());
+        let (mut wrong_kind, _) = Handoff::helper(id(1));
+        wrong_kind.written().unwrap();
+        assert!(wrong_kind.receive(Frame::CloseAck(id(1))).is_err());
+    }
+    #[test]
+    fn cancellation_cannot_be_repaired_by_late_offer_bound_or_close() {
+        let mut value = Handoff::starter();
+        value.cancel();
+        for frame in [
+            Frame::Offer(id(1)),
+            Frame::Bound(id(1)),
+            Frame::Close(id(1)),
+        ] {
+            assert_eq!(value.receive(frame), Err(HandoffError::Cancelled));
+        }
+        assert!(value.launched(42, 99).is_err());
+        assert!(!value.closed());
+    }
+    #[test]
+    fn authenticated_rejection_can_close_without_ever_emitting_bound() {
+        let (mut value, _) = Handoff::helper(id(1));
+        value.written().unwrap();
+        assert_eq!(
+            value.receive(Frame::Close(id(1))),
+            Ok(Next::CloseAck(id(1)))
+        );
+        value.ack_written().unwrap();
+        assert_eq!(value.peer_closed(), Ok(Next::PeerClosed));
+        assert!(value.closed());
+        assert!(value.receive(Frame::Bound(id(1))).is_err());
+    }
+    #[test]
+    fn failed_or_cancelled_launch_claim_cannot_retry_with_later_metadata() {
+        let mut failed = Handoff::starter();
+        failed.receive(Frame::Offer(id(1))).unwrap();
+        assert!(failed.launched(0, 99).is_err());
+        assert!(failed.launched(42, 99).is_err());
+        let mut cancelled = Handoff::starter();
+        cancelled.receive(Frame::Offer(id(1))).unwrap();
+        cancelled.cancel();
+        assert!(cancelled.launched(42, 99).is_err());
+        assert!(cancelled.receive(Frame::Offer(id(2))).is_err());
+    }
+    fn matched_server(hello_first: bool) -> ServiceHandoff {
+        let mut server = ServiceHandoff::new(id(1));
+        assert_eq!(server.offer(), Ok(Frame::Offer(id(1))));
+        if hello_first {
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .unwrap();
+        }
+        server.offer_written().unwrap();
+        server
+            .receive(
+                ServiceSide::Starter,
+                Frame::HelperLaunched {
+                    id: id(1),
+                    pid: 42,
+                    created: 99,
+                },
+            )
+            .unwrap();
+        if !hello_first {
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .unwrap();
+        }
+        assert_eq!(server.candidate(), Some((42, 99)));
+        assert!(server.bound_frame(ServiceSide::Starter).is_err());
+        // Synthetic native-match success only. Production calls the original
+        // peer comparator before this phase transition and every Bound operation.
+        server.confirm_match().unwrap();
+        server
+    }
+    #[test]
+    fn server_accepts_both_message_orders_but_never_publishes_one_sided_bound() {
+        for hello_first in [true, false] {
+            let mut server = matched_server(hello_first);
+            assert!(server.is_matched());
+            assert!(!server.is_bound());
+            server.bound_written(ServiceSide::Starter).unwrap();
+            assert!(!server.is_bound());
+            server.bound_written(ServiceSide::Helper).unwrap();
+            assert!(server.is_bound());
+            assert!(server.candidate().is_some());
+            server.cancel();
+            assert!(!server.is_bound());
+            assert!(server.bound_frame(ServiceSide::Starter).is_err());
+        }
+    }
+    #[test]
+    fn server_cannot_close_either_peer_until_both_exact_acknowledgements() {
+        let mut server = matched_server(true);
+        server.bound_written(ServiceSide::Starter).unwrap();
+        server.bound_written(ServiceSide::Helper).unwrap();
+        server.start_close().unwrap();
+        assert!(!server.is_bound());
+        assert!(server.is_closing());
+        server.close_written(ServiceSide::Starter).unwrap();
+        server
+            .receive(ServiceSide::Starter, Frame::CloseAck(id(1)))
+            .unwrap();
+        assert!(!server.both_acknowledged());
+        server.close_written(ServiceSide::Helper).unwrap();
+        assert!(!server.both_acknowledged());
+        server
+            .receive(ServiceSide::Helper, Frame::CloseAck(id(1)))
+            .unwrap();
+        assert!(server.both_acknowledged());
+    }
+    #[test]
+    fn server_rejects_crossed_ids_duplicate_hello_and_ack_without_close() {
+        let mut server = ServiceHandoff::new(id(1));
+        server.offer_written().unwrap();
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(2)))
+                .is_err()
+        );
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .is_err()
+        );
+        let mut server = ServiceHandoff::new(id(1));
+        server
+            .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+            .unwrap();
+        assert!(
+            server
+                .receive(ServiceSide::Helper, Frame::Hello(id(1)))
+                .is_err()
+        );
+        let mut server = matched_server(false);
+        assert!(
+            server
+                .receive(ServiceSide::Starter, Frame::CloseAck(id(1)))
+                .is_err()
+        );
+        assert!(!server.both_acknowledged());
+        assert!(!server.is_bound());
+    }
+}

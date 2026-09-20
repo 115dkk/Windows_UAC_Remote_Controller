@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pairing_scanner_bg">#f2f6f7</color>
+    <color name="pairing_scanner_surface">#eaf1f3</color>
+    <color name="pairing_scanner_text">#152c35</color>
+    <color name="pairing_scanner_muted">#536971</color>
+    <color name="pairing_scanner_accent">#0b7285</color>
+    <color name="pairing_scanner_on_accent">#f7fdfd</color>
+    <color name="pairing_scanner_ripple">#330b7285</color>
+    <item type="id" name="pairing_scanner_root" />
+    <item type="id" name="pairing_scanner_message" />
+    <item type="id" name="pairing_scanner_close" />
+    <item type="id" name="pairing_scanner_confirm" />
+    <item type="id" name="pairing_scanner_reject" />
+    <item type="id" name="pairing_scanner_code" />
+    <style name="Theme.PairingScanner" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">@color/pairing_scanner_bg</item>
+        <item name="colorAccent">@color/pairing_scanner_accent</item>
+        <item name="colorPrimary">@color/pairing_scanner_accent</item>
+        <item name="colorPrimaryVariant">@color/pairing_scanner_accent</item>
+        <item name="colorPrimaryDark">@color/pairing_scanner_accent</item>
+        <item name="colorSecondary">@color/pairing_scanner_accent</item>
+        <item name="colorSecondaryVariant">@color/pairing_scanner_accent</item>
+        <item name="colorOnPrimary">@color/pairing_scanner_on_accent</item>
+        <item name="colorOnSecondary">@color/pairing_scanner_on_accent</item>
+        <item name="colorSurface">@color/pairing_scanner_bg</item>
+        <item name="colorOnSurface">@color/pairing_scanner_text</item>
+        <item name="colorControlHighlight">@color/pairing_scanner_ripple</item>
+        <item name="colorControlActivated">@color/pairing_scanner_accent</item>
+        <item name="colorControlNormal">@color/pairing_scanner_muted</item>
+        <item name="android:colorAccent">@color/pairing_scanner_accent</item>
+        <item name="android:statusBarColor">@color/pairing_scanner_bg</item>
+        <item name="android:navigationBarColor">@color/pairing_scanner_bg</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

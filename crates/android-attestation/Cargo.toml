@@ -1,0 +1,33 @@
+[package]
+name = "android-attestation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Bounded PC-side Android key evidence verification, not enrollment authority"
+
+[features]
+test-attestation-anchors = ["dep:approval-protocol"]
+
+[dependencies]
+approval-protocol = { path = "../approval-protocol", optional = true }
+der = { version = "=0.8.2", features = ["std", "derive", "oid"] }
+x509-cert = { version = "=0.3.0", default-features = false, features = ["std", "pem"] }
+ring = "=0.17.14"
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+ureq = { version = "=3.4.1", default-features = false, features = ["rustls"] }
+httpdate = "=1.0.3"
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+secure-channel = { path = "../secure-channel" }
+
+[dev-dependencies]
+approval-protocol = { path = "../approval-protocol" }
+p256 = { workspace = true, features = ["pkcs8"] }
+
+[lints]
+workspace = true

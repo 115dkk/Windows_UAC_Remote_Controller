@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Authored/unverified contract abstraction, NOT an exact TLS 1.3 wire model.
+// Every flight uses the active Dolev-Yao network. No private channel is assumed.
+theory PinnedTransport
+begin
+
+builtins: diffie-hellman, signing, symmetric-encryption, hashing
+
+// This restriction implements explicit equality/verification checks only. It
+// does not assume peer authentication, secrecy or one-shot execution.
+restriction Equality:
+  "All left right #i. Eq(left, right) @i ==> left = right"
+
+// A PC key is created once and reused by every phone enrolled below. No fresh
+// PC signing key is manufactured per routing pair or per connection.
+rule CreatePc:
+  [ Fr(~pc), Fr(~pc_sk) ]
+  -->
+  [ !PcKey(~pc, ~pc_sk), Out(<~pc, pk(~pc_sk)>) ]
+
+// Explicit TCB premise: a trusted enrollment ceremony installed these pins.
+// Fresh model keys DO NOT prove native hardware policy or enrollment. Routes
+// are public, attacker-relabelable selectors, never authenticated transcript
+// fields. Repeated enrollments can use the SAME PC key with distinct phones.
+rule TrustedEnrollment:
+  [ !PcKey(pc, pc_sk), Fr(~route), Fr(~phone_sk) ]
+  --[ TrustedPins(pc, ~route, pk(~phone_sk), pk(pc_sk)) ]->
+  [ !PhoneIdentity(~route, ~phone_sk, pk(pc_sk)),
+    !PcPeerPin(pc, ~route, pk(~phone_sk)),
+    Out(<~route, pc, pk(~phone_sk), pk(pc_sk)>) ]
+
+rule PhoneStarts:
+  let phone_share = 'g'^~phone_ephemeral
+  in
+  [ !PhoneIdentity(route, phone_sk, pinned_pc_key),
+    Fr(~sid), Fr(~phone_ephemeral), Fr(~application_secret) ]
+  --[ PhoneStarted(~sid, pk(phone_sk), pinned_pc_key, phone_share) ]->
+  [ PhoneWaiting(route, ~sid, phone_sk, pinned_pc_key, ~phone_ephemeral,
+      phone_share, ~application_secret),
+    Out(<'client-hello', route, ~sid, phone_share>) ]
+
+rule PcOffersAuthenticatedShare:
+  let pc_share = 'g'^~pc_ephemeral
+      server_transcript = <'wuac-server-transcript-v1', sid,
+        pk(pc_sk), phone_share, pc_share>
+      traffic_key = h(<'channel-key-v1', phone_share^~pc_ephemeral, server_transcript>)
+  in
+  [ !PcKey(pc, pc_sk), !PcPeerPin(pc, route, pinned_phone_key),
+    In(<'client-hello', route, sid, phone_share>),
+    Fr(~pc_ephemeral) ]
+  --[ PcOffered(pk(pc_sk), sid, server_transcript) ]->
+  [ PcWaiting(route, sid, pc_sk, pinned_phone_key, server_transcript, traffic_key),
+    Out(<'server-flight', route, sid, pk(pc_sk), pc_share,
+      sign(<'server-certificate-verify-v1', server_transcript>, pc_sk),
+      senc(<'server-finished-v1', server_transcript>, traffic_key)>) ]
+
+rule PhoneChecksPinSignatureAndConfirmation:
+  let server_transcript = <'wuac-server-transcript-v1', sid,
+        presented_pc_key, phone_share, pc_share>
+      client_transcript = <'wuac-client-transcript-v1', server_transcript, pk(phone_sk)>
+      traffic_key = h(<'channel-key-v1', pc_share^phone_ephemeral, server_transcript>)
+  in
+  [ PhoneWaiting(route, sid, phone_sk, pinned_pc_key, phone_ephemeral,
+      phone_share, application_secret),
+    In(<'server-flight', route, sid, presented_pc_key, pc_share,
+      server_signature, server_confirmation>) ]
+  --[ Eq(presented_pc_key, pinned_pc_key), // CANARY_PC_PIN
+      Eq(verify(server_signature, <'server-certificate-verify-v1', server_transcript>, presented_pc_key), true),
+      Eq(sdec(server_confirmation, traffic_key), <'server-finished-v1', server_transcript>),
+      PhoneAuthenticatedPc(pinned_pc_key, sid, server_transcript),
+      PhoneFinished(pinned_pc_key, pk(phone_sk), sid, client_transcript) ]->
+  [ PhoneWaitingReady(route, sid, pinned_pc_key, pk(phone_sk), client_transcript,
+      traffic_key, application_secret),
+    Out(<'client-finish', route, sid, pk(phone_sk),
+      sign(<'client-certificate-verify-v1', client_transcript>, phone_sk),
+      senc(<'client-finished-v1', client_transcript>, traffic_key)>) ]
+
+// Client identity is first presented here. The PC checks its selected pin NOW,
+// not as fictitious data authenticated by the earlier server CertificateVerify.
+rule PcChecksPhoneAndConfirmsReady:
+  let client_transcript = <'wuac-client-transcript-v1', server_transcript, presented_phone_key>
+  in
+  [ PcWaiting(route, sid, pc_sk, pinned_phone_key, server_transcript, traffic_key),
+    In(<'client-finish', route, sid, presented_phone_key, phone_signature, phone_confirmation>) ]
+  --[ Eq(presented_phone_key, pinned_phone_key),
+      Eq(verify(phone_signature, <'client-certificate-verify-v1', client_transcript>, presented_phone_key), true),
+      Eq(sdec(phone_confirmation, traffic_key), <'client-finished-v1', client_transcript>),
+      PcReady(pk(pc_sk), pinned_phone_key, sid, client_transcript) ]->
+  [ Out(<'pc-ready', route, sid, senc(<'ready-v1', client_transcript>, traffic_key)>) ]
+
+rule PhoneReleasesEncryptedApplicationSecret:
+  [ PhoneWaitingReady(route, sid, pinned_pc_key, phone_key, client_transcript,
+      traffic_key, application_secret),
+    In(<'pc-ready', route, sid, senc(<'ready-v1', client_transcript>, traffic_key)>) ]
+  --[ PhoneReady(pinned_pc_key, phone_key, sid, client_transcript),
+      ApplicationSecret(pinned_pc_key, phone_key, sid, application_secret) ]->
+  [ Out(senc(<'application-v1', sid, application_secret>, traffic_key)) ]
+
+lemma honest_channel_trace:
+  exists-trace
+  "Ex sid pc_key phone_key client_transcript secret #p #a.
+    PcReady(pc_key, phone_key, sid, client_transcript) @p
+    & PhoneReady(pc_key, phone_key, sid, client_transcript) @a
+    & ApplicationSecret(pc_key, phone_key, sid, secret) @a
+    & p < a"
+
+lemma phone_pins_authenticated_pc:
+  "All sid pc_key server_transcript #i.
+    PhoneAuthenticatedPc(pc_key, sid, server_transcript) @i
+    ==> (Ex #j. PcOffered(pc_key, sid, server_transcript) @j & j < i)"
+
+lemma pc_pins_authenticated_phone:
+  "All sid pc_key phone_key client_transcript #i.
+    PcReady(pc_key, phone_key, sid, client_transcript) @i
+    ==> (Ex #j. PhoneFinished(pc_key, phone_key, sid, client_transcript) @j & j < i)"
+
+lemma application_secret_confidential:
+  "All pc_key phone_key sid secret #i.
+    ApplicationSecret(pc_key, phone_key, sid, secret) @i
+    ==> not (Ex #j. K(secret) @j)"
+
+end

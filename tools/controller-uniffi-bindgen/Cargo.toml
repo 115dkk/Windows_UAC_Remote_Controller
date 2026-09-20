@@ -1,0 +1,15 @@
+[package]
+name = "controller-uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Pinned host-only Kotlin bindings generator for the Android controller"
+
+[dependencies]
+uniffi = { version = "=0.32.0", features = ["cli"] }
+
+[lints]
+workspace = true

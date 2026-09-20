@@ -1,0 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+    <!-- DESIGN.md dark accent token. -->
+    <color name="request_notification_accent">#75d6df</color>
+</resources>

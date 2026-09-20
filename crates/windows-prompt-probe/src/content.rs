@@ -1,0 +1,1038 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Exact bounded provider observations. Button metadata supports later same-content
+//! verification, but does not establish authorization, target identity or provenance.
+#![forbid(unsafe_code)]
+
+use std::fmt;
+
+use sha2::{Digest, Sha256};
+
+use crate::{MAX_TOP_LEVEL_WINDOWS, MAX_UIA_DEPTH, MAX_UIA_ELEMENTS, ProbeCounts};
+
+pub const MAX_RUNTIME_ID_VALUES: usize = 32;
+pub const MAX_PROMPT_FIELD_UTF16_UNITS: usize = 32_768;
+pub const MAX_PROMPT_CONTENT_UTF8_BYTES: usize = 384 * 1024;
+pub const MAX_PROMPT_LABELS: usize = MAX_UIA_ELEMENTS;
+pub const MAX_LABEL_METADATA_UTF16_UNITS: usize = 256;
+const MAX_FIELD_UTF8_BYTES: usize = MAX_PROMPT_FIELD_UTF16_UNITS * 3;
+const MAX_LABEL_METADATA_UTF8_BYTES: usize = MAX_LABEL_METADATA_UTF16_UNITS * 3;
+
+/// Closed read-only label kinds, not a UI action or operation classifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LabelKind {
+    Text,
+    Button,
+    Hyperlink,
+}
+
+/// Scoped native ancestry, not a global deduplication set. Every visited node
+/// (including unnamed layout containers) closes ancestors at its own depth.
+/// Ordinals/counts still describe the complete traversal used by action lookup.
+#[derive(Default)]
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+pub(crate) struct ButtonCaptions(Vec<(u8, String)>);
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+impl ButtonCaptions {
+    pub(crate) fn enter(&mut self, depth: u8) {
+        while self.0.last().is_some_and(|(parent, _)| *parent >= depth) {
+            self.0.pop();
+        }
+    }
+
+    pub(crate) fn observe(&mut self, depth: u8, kind: LabelKind, text: &str) -> bool {
+        let echo = kind == LabelKind::Text && self.0.iter().any(|(_, caption)| caption == text);
+        if kind == LabelKind::Button && !text.is_empty() {
+            self.0.push((depth, text.to_owned()));
+        }
+        echo
+    }
+}
+
+/// A producer-selected nonpassword, on-screen label. These fields do not prove
+/// native visibility/origin; the supervised native reader must establish that.
+/// Ordinal is zero-based traversal order, including skipped/other visited nodes.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PromptLabel {
+    ordinal: u16,
+    depth: u8,
+    kind: LabelKind,
+    enabled: bool,
+    text: String,
+    automation_id: String,
+    class_name: String,
+    provider_label: String,
+}
+impl PromptLabel {
+    pub fn new(
+        ordinal: u16,
+        depth: u8,
+        kind: LabelKind,
+        enabled: bool,
+        text: String,
+    ) -> Result<Self, PromptContentError> {
+        Self::new_with_metadata(
+            ordinal,
+            depth,
+            kind,
+            enabled,
+            text,
+            String::new(),
+            String::new(),
+        )
+    }
+    pub fn new_with_metadata(
+        ordinal: u16,
+        depth: u8,
+        kind: LabelKind,
+        enabled: bool,
+        text: String,
+        automation_id: String,
+        class_name: String,
+    ) -> Result<Self, PromptContentError> {
+        if usize::from(ordinal) >= MAX_UIA_ELEMENTS || depth == 0 || depth > MAX_UIA_DEPTH {
+            return Err(PromptContentError::InvalidLabel);
+        }
+        validate_text(&text)?;
+        validate_metadata(&automation_id)?;
+        validate_metadata(&class_name)?;
+        // Every kind may carry these, not only the buttons. Which label holds
+        // the program, which holds the publisher and which opens the details is
+        // a question about the dialog's structure, and the only answer that does
+        // not depend on reading the language the dialog is written in is the
+        // identifiers its own author chose. Both are bounded and validated just
+        // above, both are counted against the same total as the text, and
+        // neither is ever forwarded to a phone.
+        Ok(Self {
+            ordinal,
+            depth,
+            kind,
+            enabled,
+            text,
+            automation_id,
+            class_name,
+            provider_label: String::new(),
+        })
+    }
+    pub const fn ordinal(&self) -> u16 {
+        self.ordinal
+    }
+    pub const fn depth(&self) -> u8 {
+        self.depth
+    }
+    pub const fn kind(&self) -> LabelKind {
+        self.kind
+    }
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn automation_id(&self) -> &str {
+        &self.automation_id
+    }
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+    /// Exact Name of this element's UIA LabeledBy relationship, never inferred
+    /// from a preceding/sibling text element or from the displayed field value.
+    pub fn with_provider_label(mut self, label: String) -> Result<Self, PromptContentError> {
+        validate_metadata(&label)?;
+        self.provider_label = label;
+        Ok(self)
+    }
+    pub fn provider_label(&self) -> &str {
+        &self.provider_label
+    }
+}
+impl fmt::Debug for PromptLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromptLabel")
+            .field("ordinal", &self.ordinal)
+            .field("depth", &self.depth)
+            .field("kind", &self.kind)
+            .field("enabled", &self.enabled)
+            .field("text", &"[redacted]")
+            .field("automation_id", &"[redacted]")
+            .field("class_name", &"[redacted]")
+            .field("provider_label", &"[redacted]")
+            .finish()
+    }
+}
+
+/// One owned exact snapshot. RuntimeId is opaque comparison data and can be
+/// reused by Windows; equality is change detection, NOT atomic UAC identity.
+/// No caption/label is interpreted as program/path/publisher/command or trusted
+/// Windows outcome. The caller must not persist these potentially sensitive
+/// strings as activity history or expose Debug/Display text. No Display/serde
+/// implementation is provided. Native capture must skip password/edit/value
+/// content and compare two observations with target rechecks before reporting.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PromptContentObservation {
+    root_runtime_id: Vec<i32>,
+    caption: String,
+    labels: Vec<PromptLabel>,
+}
+impl PromptContentObservation {
+    pub fn from_parts(
+        root_runtime_id: Vec<i32>,
+        caption: String,
+        labels: Vec<PromptLabel>,
+    ) -> Result<Self, PromptContentError> {
+        if root_runtime_id.is_empty() || root_runtime_id.len() > MAX_RUNTIME_ID_VALUES {
+            return Err(PromptContentError::InvalidRuntimeId);
+        }
+        if labels.len() > MAX_PROMPT_LABELS {
+            return Err(PromptContentError::LabelLimit);
+        }
+        validate_text(&caption)?;
+        let mut total = caption.len();
+        let mut previous = None;
+        let mut nonempty = false;
+        for label in &labels {
+            if previous.is_some_and(|ordinal| label.ordinal <= ordinal) {
+                return Err(PromptContentError::LabelOrder);
+            }
+            previous = Some(label.ordinal);
+            // PromptLabel fields are immutable/validated; no text is normalized.
+            total = total
+                .checked_add(label.text.len())
+                .and_then(|value| value.checked_add(label.automation_id.len()))
+                .and_then(|value| value.checked_add(label.class_name.len()))
+                .and_then(|value| value.checked_add(label.provider_label.len()))
+                .ok_or(PromptContentError::TotalLimit)?;
+            if total > MAX_PROMPT_CONTENT_UTF8_BYTES {
+                return Err(PromptContentError::TotalLimit);
+            }
+            nonempty |= !label.text.is_empty();
+        }
+        if !nonempty {
+            return Err(PromptContentError::NoVisibleLabel);
+        }
+        Ok(Self {
+            root_runtime_id,
+            caption,
+            labels,
+        })
+    }
+    pub fn root_runtime_id(&self) -> &[i32] {
+        &self.root_runtime_id
+    }
+    pub fn caption(&self) -> &str {
+        &self.caption
+    }
+    pub fn labels(&self) -> &[PromptLabel] {
+        &self.labels
+    }
+    pub fn utf8_bytes(&self) -> usize {
+        self.caption.len()
+            + self
+                .labels
+                .iter()
+                .map(|label| {
+                    label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
+                })
+                .sum::<usize>()
+    }
+
+    /// SHA-256 over a fixed version tag, the caption and ordered label fields.
+    /// Root RuntimeId is intentionally excluded because this is a content digest.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut canonical = Vec::with_capacity(self.canonical_len());
+        canonical.extend_from_slice(b"UACPC002");
+        append_text(&mut canonical, &self.caption);
+        canonical.extend_from_slice(&(self.labels.len() as u16).to_be_bytes());
+        for label in &self.labels {
+            canonical.extend_from_slice(&label.ordinal.to_be_bytes());
+            canonical.push(label.depth);
+            canonical.push(match label.kind {
+                LabelKind::Text => 1,
+                LabelKind::Button => 2,
+                LabelKind::Hyperlink => 3,
+            });
+            canonical.push(u8::from(label.enabled));
+            append_text(&mut canonical, &label.text);
+            append_text(&mut canonical, &label.automation_id);
+            append_text(&mut canonical, &label.class_name);
+            append_text(&mut canonical, &label.provider_label);
+        }
+        Sha256::digest(canonical).into()
+    }
+
+    pub(crate) fn validate_counts(&self, counts: ProbeCounts) -> Result<(), PromptContentError> {
+        if !valid_counts(counts) {
+            return Err(PromptContentError::InvalidCounts);
+        }
+        let visible = counts.elements - counts.password_nodes_skipped - counts.offscreen_elements;
+        if self.labels.len() > usize::from(visible)
+            || self
+                .labels
+                .iter()
+                .any(|label| label.ordinal >= counts.elements || label.depth > counts.maximum_depth)
+            || self.labels.iter().filter(|label| label.enabled).count()
+                > usize::from(counts.enabled_elements)
+            || self.labels.iter().filter(|label| !label.enabled).count()
+                > usize::from(
+                    counts.elements - counts.password_nodes_skipped - counts.enabled_elements,
+                )
+            || self
+                .labels
+                .iter()
+                .filter(|label| label.kind == LabelKind::Button)
+                .count()
+                > usize::from(counts.button_elements)
+            || self
+                .labels
+                .iter()
+                .filter(|label| label.kind != LabelKind::Button)
+                .count()
+                > usize::from(
+                    counts.elements - counts.password_nodes_skipped - counts.button_elements,
+                )
+        {
+            return Err(PromptContentError::CountsMismatch);
+        }
+        Ok(())
+    }
+
+    fn canonical_len(&self) -> usize {
+        8 + 4
+            + self.caption.len()
+            + 2
+            + self
+                .labels
+                .iter()
+                .map(|label| {
+                    21 + label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn encoded_len(&self) -> usize {
+        1 + self.root_runtime_id.len() * 4
+            + 4
+            + self.caption.len()
+            + 2
+            + self
+                .labels
+                .iter()
+                .map(|label| {
+                    21 + label.text.len()
+                        + label.automation_id.len()
+                        + label.class_name.len()
+                        + label.provider_label.len()
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn append_encoded(&self, bytes: &mut Vec<u8>) {
+        bytes.push(self.root_runtime_id.len() as u8);
+        for value in &self.root_runtime_id {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        append_text(bytes, &self.caption);
+        bytes.extend_from_slice(&(self.labels.len() as u16).to_be_bytes());
+        for label in &self.labels {
+            bytes.extend_from_slice(&label.ordinal.to_be_bytes());
+            bytes.push(label.depth);
+            bytes.push(match label.kind {
+                LabelKind::Text => 1,
+                LabelKind::Button => 2,
+                LabelKind::Hyperlink => 3,
+            });
+            bytes.push(u8::from(label.enabled));
+            append_text(bytes, &label.text);
+            append_text(bytes, &label.automation_id);
+            append_text(bytes, &label.class_name);
+            append_text(bytes, &label.provider_label);
+        }
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, PromptContentError> {
+        let mut input = Input {
+            bytes,
+            offset: 0,
+            text_bytes: 0,
+        };
+        let runtime_count = usize::from(input.take::<1>()?[0]);
+        if runtime_count == 0 || runtime_count > MAX_RUNTIME_ID_VALUES {
+            return Err(PromptContentError::InvalidRuntimeId);
+        }
+        let mut runtime = Vec::with_capacity(runtime_count);
+        for _ in 0..runtime_count {
+            runtime.push(i32::from_be_bytes(input.take()?));
+        }
+        let caption = input.text()?;
+        let count = usize::from(u16::from_be_bytes(input.take()?));
+        if count > MAX_PROMPT_LABELS {
+            return Err(PromptContentError::LabelLimit);
+        }
+        let mut labels = Vec::with_capacity(count);
+        for _ in 0..count {
+            let ordinal = u16::from_be_bytes(input.take()?);
+            let depth = input.take::<1>()?[0];
+            let kind = match input.take::<1>()?[0] {
+                1 => LabelKind::Text,
+                2 => LabelKind::Button,
+                3 => LabelKind::Hyperlink,
+                _ => return Err(PromptContentError::InvalidEncoding),
+            };
+            let enabled = match input.take::<1>()?[0] {
+                0 => false,
+                1 => true,
+                _ => return Err(PromptContentError::InvalidEncoding),
+            };
+            let text = input.text()?;
+            let automation_id = input.metadata()?;
+            let class_name = input.metadata()?;
+            let provider_label = input.metadata()?;
+            labels.push(
+                PromptLabel::new_with_metadata(
+                    ordinal,
+                    depth,
+                    kind,
+                    enabled,
+                    text,
+                    automation_id,
+                    class_name,
+                )?
+                .with_provider_label(provider_label)?,
+            );
+        }
+        if input.offset != bytes.len() {
+            return Err(PromptContentError::InvalidEncoding);
+        }
+        Self::from_parts(runtime, caption, labels)
+    }
+}
+impl fmt::Debug for PromptContentObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromptContentObservation")
+            .field("runtime_id_values", &self.root_runtime_id.len())
+            .field("label_count", &self.labels.len())
+            .field("utf8_bytes", &self.utf8_bytes())
+            .field("content", &"[redacted], observation_not_operation")
+            .finish()
+    }
+}
+
+/// Strict native UTF-16 conversion after the native owner bounds its allocation.
+/// No replacement characters, trimming, truncation or NUL acceptance. Rust String
+/// constructors use the same field limit; invalid UTF-8 is rejected by the codec.
+pub fn prompt_text_from_utf16(value: &[u16]) -> Result<String, PromptContentError> {
+    if value.len() > MAX_PROMPT_FIELD_UTF16_UNITS {
+        return Err(PromptContentError::FieldLimit);
+    }
+    if value.contains(&0) {
+        return Err(PromptContentError::InvalidText);
+    }
+    String::from_utf16(value).map_err(|_| PromptContentError::InvalidText)
+}
+
+fn validate_text(value: &str) -> Result<(), PromptContentError> {
+    validate_bounded_text(value, MAX_FIELD_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS)
+}
+
+fn validate_metadata(value: &str) -> Result<(), PromptContentError> {
+    validate_bounded_text(
+        value,
+        MAX_LABEL_METADATA_UTF8_BYTES,
+        MAX_LABEL_METADATA_UTF16_UNITS,
+    )
+}
+
+fn validate_bounded_text(
+    value: &str,
+    maximum_utf8: usize,
+    maximum_utf16: usize,
+) -> Result<(), PromptContentError> {
+    if value.len() > maximum_utf8 || value.encode_utf16().count() > maximum_utf16 {
+        return Err(PromptContentError::FieldLimit);
+    }
+    if value.contains('\0') {
+        return Err(PromptContentError::InvalidText);
+    }
+    Ok(())
+}
+
+pub(crate) fn valid_counts(c: ProbeCounts) -> bool {
+    c.top_level_windows > 0
+        && usize::from(c.top_level_windows) <= MAX_TOP_LEVEL_WINDOWS
+        && c.qualified_candidates == 1
+        && c.elements > 0
+        && usize::from(c.elements) <= MAX_UIA_ELEMENTS
+        && c.maximum_depth > 0
+        && c.maximum_depth <= MAX_UIA_DEPTH
+        && u16::from(c.maximum_depth) <= c.elements
+        && c.password_nodes_skipped <= c.elements
+        && [
+            c.enabled_elements,
+            c.offscreen_elements,
+            c.native_window_elements,
+            c.button_elements,
+            c.invoke_pattern_available,
+            c.value_pattern_available,
+            c.legacy_accessible_pattern_available,
+        ]
+        .iter()
+        .all(|count| *count <= c.elements - c.password_nodes_skipped)
+}
+
+fn append_text(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+struct Input<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    text_bytes: usize,
+}
+impl Input<'_> {
+    fn take<const N: usize>(&mut self) -> Result<[u8; N], PromptContentError> {
+        let end = self
+            .offset
+            .checked_add(N)
+            .ok_or(PromptContentError::InvalidEncoding)?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(PromptContentError::InvalidEncoding)?
+            .try_into()
+            .map_err(|_| PromptContentError::InvalidEncoding)?;
+        self.offset = end;
+        Ok(value)
+    }
+    fn text(&mut self) -> Result<String, PromptContentError> {
+        self.bounded_text(MAX_FIELD_UTF8_BYTES, MAX_PROMPT_FIELD_UTF16_UNITS)
+    }
+    fn metadata(&mut self) -> Result<String, PromptContentError> {
+        self.bounded_text(
+            MAX_LABEL_METADATA_UTF8_BYTES,
+            MAX_LABEL_METADATA_UTF16_UNITS,
+        )
+    }
+    fn bounded_text(
+        &mut self,
+        maximum_utf8: usize,
+        maximum_utf16: usize,
+    ) -> Result<String, PromptContentError> {
+        let count = usize::try_from(u32::from_be_bytes(self.take()?))
+            .map_err(|_| PromptContentError::FieldLimit)?;
+        if count > maximum_utf8 {
+            return Err(PromptContentError::FieldLimit);
+        }
+        self.text_bytes = self
+            .text_bytes
+            .checked_add(count)
+            .ok_or(PromptContentError::TotalLimit)?;
+        if self.text_bytes > MAX_PROMPT_CONTENT_UTF8_BYTES {
+            return Err(PromptContentError::TotalLimit);
+        }
+        let end = self
+            .offset
+            .checked_add(count)
+            .ok_or(PromptContentError::InvalidEncoding)?;
+        let value = std::str::from_utf8(
+            self.bytes
+                .get(self.offset..end)
+                .ok_or(PromptContentError::InvalidEncoding)?,
+        )
+        .map_err(|_| PromptContentError::InvalidText)?;
+        validate_bounded_text(value, maximum_utf8, maximum_utf16)?;
+        self.offset = end;
+        Ok(value.to_owned())
+    }
+}
+
+/// Fixed categories only; no provider text or original encoding-error payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptContentError {
+    InvalidRuntimeId,
+    InvalidLabel,
+    LabelLimit,
+    LabelOrder,
+    InvalidText,
+    FieldLimit,
+    TotalLimit,
+    NoVisibleLabel,
+    InvalidEncoding,
+    InvalidCounts,
+    CountsMismatch,
+}
+impl fmt::Display for PromptContentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid bounded prompt observation: {self:?}")
+    }
+}
+impl std::error::Error for PromptContentError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_relationship_is_bounded_round_tripped_and_digest_bound() {
+        let original = PromptLabel::new(0, 1, LabelKind::Text, true, "synthetic".into()).unwrap();
+        let labeled = original
+            .clone()
+            .with_provider_label("Program name:".into())
+            .unwrap();
+        let plain = PromptContentObservation::from_parts(vec![1], "Consent".into(), vec![original])
+            .unwrap();
+        let observed =
+            PromptContentObservation::from_parts(vec![1], "Consent".into(), vec![labeled.clone()])
+                .unwrap();
+        assert_ne!(plain.digest(), observed.digest());
+        let mut bytes = Vec::new();
+        observed.append_encoded(&mut bytes);
+        assert_eq!(PromptContentObservation::decode(&bytes), Ok(observed));
+        assert!(
+            labeled
+                .with_provider_label("x".repeat(MAX_LABEL_METADATA_UTF16_UNITS + 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn button_text_echo_is_scoped_to_actual_traversed_ancestors() {
+        let mut captions = ButtonCaptions::default();
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Button, "예"));
+        captions.enter(3);
+        assert!(captions.observe(3, LabelKind::Text, "예"));
+        assert!(!captions.observe(3, LabelKind::Text, "additional meaning"));
+        // Unnamed sibling containers end ancestry too. Label depths alone
+        // cannot establish whether this text belongs to the previous button.
+        captions.enter(2);
+        captions.enter(3);
+        assert!(!captions.observe(3, LabelKind::Text, "예"));
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Button, "아니요"));
+        captions.enter(3);
+        assert!(captions.observe(3, LabelKind::Text, "아니요"));
+        captions.enter(2);
+        assert!(!captions.observe(2, LabelKind::Text, "아니요"));
+    }
+    use crate::ProbeReport;
+
+    fn label(ordinal: u16, text: &str) -> PromptLabel {
+        PromptLabel::new(ordinal, 2, LabelKind::Text, true, text.into()).unwrap()
+    }
+    fn observation() -> PromptContentObservation {
+        PromptContentObservation::from_parts(
+            vec![1, -2, 3],
+            "synthetic caption".into(),
+            vec![label(1, "synthetic label")],
+        )
+        .unwrap()
+    }
+    fn counts() -> ProbeCounts {
+        ProbeCounts {
+            top_level_windows: 1,
+            qualified_candidates: 1,
+            elements: 8,
+            enabled_elements: 8,
+            maximum_depth: 3,
+            ..ProbeCounts::default()
+        }
+    }
+
+    #[test]
+    fn a_window_appearing_on_the_secure_desktop_is_not_a_changed_prompt_but_every_other_count_is() {
+        let census = counts();
+        let busier_desktop = ProbeCounts {
+            top_level_windows: census.top_level_windows + 9,
+            ..census
+        };
+        // Whole-report equality calls this a changed prompt. That is why it
+        // cannot be the question asked before acting on a user's decision:
+        // winlogon opens and closes hidden windows while a prompt is up, and
+        // none of them is the prompt or a candidate to be one.
+        assert_ne!(
+            ProbeReport::from_observation(census, observation()).unwrap(),
+            ProbeReport::from_observation(busier_desktop, observation()).unwrap()
+        );
+        assert!(census.describes_the_same_prompt(busier_desktop));
+        assert!(busier_desktop.describes_the_same_prompt(census));
+        // Everything else the census counted is about the prompt itself, so a
+        // move in any one of them is a changed prompt and must refuse.
+        let mutations: [fn(ProbeCounts) -> ProbeCounts; 11] = [
+            |c| ProbeCounts {
+                qualified_candidates: c.qualified_candidates + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                elements: c.elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                password_nodes_skipped: c.password_nodes_skipped + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                enabled_elements: c.enabled_elements - 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                offscreen_elements: c.offscreen_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                native_window_elements: c.native_window_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                button_elements: c.button_elements + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                invoke_pattern_available: c.invoke_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                value_pattern_available: c.value_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                legacy_accessible_pattern_available: c.legacy_accessible_pattern_available + 1,
+                ..c
+            },
+            |c| ProbeCounts {
+                maximum_depth: c.maximum_depth + 1,
+                ..c
+            },
+        ];
+        for mutate in mutations {
+            let moved = mutate(census);
+            assert_ne!(moved, census);
+            assert!(!census.describes_the_same_prompt(moved));
+            assert!(!moved.describes_the_same_prompt(census));
+        }
+    }
+
+    #[test]
+    fn empty_caption_and_exact_whitespace_are_preserved_but_a_nonempty_label_is_required() {
+        let value =
+            PromptContentObservation::from_parts(vec![0], String::new(), vec![label(1, " \t ")])
+                .unwrap();
+        assert_eq!(value.caption(), "");
+        assert_eq!(value.labels()[0].text(), " \t ");
+        assert_eq!(value.utf8_bytes(), 3);
+        for labels in [vec![], vec![label(1, "")]] {
+            assert_eq!(
+                PromptContentObservation::from_parts(vec![1], "caption alone".into(), labels),
+                Err(PromptContentError::NoVisibleLabel)
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_ids_are_bounded_opaque_integers_not_semantically_interpreted_identifiers() {
+        for runtime in [vec![], vec![1; MAX_RUNTIME_ID_VALUES + 1]] {
+            assert_eq!(
+                PromptContentObservation::from_parts(runtime, String::new(), vec![label(1, "x")]),
+                Err(PromptContentError::InvalidRuntimeId)
+            );
+        }
+        let runtime = vec![i32::MIN; MAX_RUNTIME_ID_VALUES];
+        let value = PromptContentObservation::from_parts(
+            runtime.clone(),
+            String::new(),
+            vec![label(1, "x")],
+        )
+        .unwrap();
+        assert_eq!(value.root_runtime_id(), runtime);
+    }
+
+    #[test]
+    fn label_bounds_and_order_are_strict_without_reordering_or_duplicate_elision() {
+        for (ordinal, depth) in [(128, 1), (0, 0), (0, 17)] {
+            assert_eq!(
+                PromptLabel::new(ordinal, depth, LabelKind::Text, true, "x".into()),
+                Err(PromptContentError::InvalidLabel)
+            );
+        }
+        assert!(PromptLabel::new(127, 16, LabelKind::Hyperlink, false, "x".into()).is_ok());
+        for labels in [
+            vec![label(3, "x"), label(1, "y")],
+            vec![label(1, "x"), label(1, "y")],
+        ] {
+            assert_eq!(
+                PromptContentObservation::from_parts(vec![1], String::new(), labels),
+                Err(PromptContentError::LabelOrder)
+            );
+        }
+        let oversized = (0..129).map(|_| label(1, "x")).collect();
+        assert_eq!(
+            PromptContentObservation::from_parts(vec![1], String::new(), oversized),
+            Err(PromptContentError::LabelLimit)
+        );
+    }
+
+    #[test]
+    fn utf16_conversion_is_strict_and_limits_count_code_units_not_utf8_or_scalars() {
+        assert_eq!(
+            prompt_text_from_utf16(&[0xd800]),
+            Err(PromptContentError::InvalidText)
+        );
+        assert_eq!(
+            prompt_text_from_utf16(&[0xdc00]),
+            Err(PromptContentError::InvalidText)
+        );
+        assert_eq!(
+            prompt_text_from_utf16(&[65, 0, 66]),
+            Err(PromptContentError::InvalidText)
+        );
+        assert_eq!(
+            prompt_text_from_utf16(&vec![65; MAX_PROMPT_FIELD_UTF16_UNITS + 1]),
+            Err(PromptContentError::FieldLimit)
+        );
+        let exact = "🔒".repeat(MAX_PROMPT_FIELD_UTF16_UNITS / 2);
+        let units: Vec<_> = exact.encode_utf16().collect();
+        assert_eq!(prompt_text_from_utf16(&units).unwrap(), exact);
+        assert!(PromptLabel::new(1, 2, LabelKind::Text, true, exact.clone()).is_ok());
+        assert_eq!(
+            PromptLabel::new(1, 2, LabelKind::Text, true, format!("{exact}a")),
+            Err(PromptContentError::FieldLimit)
+        );
+        assert_eq!(
+            PromptLabel::new(1, 2, LabelKind::Text, true, "x\0y".into()),
+            Err(PromptContentError::InvalidText)
+        );
+        assert_eq!(
+            PromptContentObservation::from_parts(vec![1], "x\0y".into(), vec![label(1, "x")]),
+            Err(PromptContentError::InvalidText)
+        );
+    }
+
+    #[test]
+    fn aggregate_utf8_budget_accepts_exact_boundary_and_rejects_one_extra_byte() {
+        let field = "界".repeat(MAX_PROMPT_FIELD_UTF16_UNITS);
+        let labels: Vec<_> = (1..=3).map(|ordinal| label(ordinal, &field)).collect();
+        let exact =
+            PromptContentObservation::from_parts(vec![1], field.clone(), labels.clone()).unwrap();
+        assert_eq!(exact.utf8_bytes(), MAX_PROMPT_CONTENT_UTF8_BYTES);
+        let mut over = labels;
+        over.push(label(4, "a"));
+        assert_eq!(
+            PromptContentObservation::from_parts(vec![1], field, over),
+            Err(PromptContentError::TotalLimit)
+        );
+    }
+
+    #[test]
+    fn maximum_label_count_remains_owned_and_ordered() {
+        let labels = (0..128)
+            .map(|ordinal| PromptLabel::new(ordinal, 1, LabelKind::Text, true, "x".into()).unwrap())
+            .collect();
+        let value = PromptContentObservation::from_parts(vec![1], String::new(), labels).unwrap();
+        assert_eq!(value.labels().len(), MAX_PROMPT_LABELS);
+        let c = ProbeCounts {
+            top_level_windows: 1,
+            qualified_candidates: 1,
+            elements: 128,
+            enabled_elements: 128,
+            maximum_depth: 1,
+            ..ProbeCounts::default()
+        };
+        assert!(ProbeReport::from_observation(c, value).is_ok());
+    }
+
+    #[test]
+    fn report_rejects_label_and_counter_inconsistency_before_any_success_can_be_encoded() {
+        let content = observation();
+        assert!(ProbeReport::from_observation(counts(), content.clone()).is_ok());
+        for c in [
+            ProbeCounts::default(),
+            ProbeCounts {
+                maximum_depth: 1,
+                ..counts()
+            },
+            ProbeCounts {
+                elements: 1,
+                enabled_elements: 1,
+                maximum_depth: 1,
+                ..counts()
+            },
+            ProbeCounts {
+                offscreen_elements: 8,
+                ..counts()
+            },
+            ProbeCounts {
+                enabled_elements: 0,
+                ..counts()
+            },
+            ProbeCounts {
+                button_elements: 8,
+                ..counts()
+            },
+        ] {
+            assert!(ProbeReport::from_observation(c, content.clone()).is_err());
+        }
+        let disabled = PromptContentObservation::from_parts(
+            vec![1],
+            String::new(),
+            vec![PromptLabel::new(1, 2, LabelKind::Text, false, "x".into()).unwrap()],
+        )
+        .unwrap();
+        assert!(ProbeReport::from_observation(counts(), disabled).is_err());
+        let button = PromptContentObservation::from_parts(
+            vec![1],
+            String::new(),
+            vec![PromptLabel::new(1, 2, LabelKind::Button, true, "x".into()).unwrap()],
+        )
+        .unwrap();
+        assert!(ProbeReport::from_observation(counts(), button).is_err());
+    }
+
+    #[test]
+    fn snapshot_equality_includes_caption_runtime_order_kind_depth_enabled_and_exact_text() {
+        let original = observation();
+        let mut variants = vec![
+            PromptContentObservation::from_parts(
+                vec![1, -2, 4],
+                original.caption().into(),
+                original.labels().to_vec(),
+            )
+            .unwrap(),
+            PromptContentObservation::from_parts(
+                original.root_runtime_id().to_vec(),
+                "different caption".into(),
+                original.labels().to_vec(),
+            )
+            .unwrap(),
+        ];
+        for changed in [
+            PromptLabel::new(2, 2, LabelKind::Text, true, "synthetic label".into()).unwrap(),
+            PromptLabel::new(1, 3, LabelKind::Text, true, "synthetic label".into()).unwrap(),
+            PromptLabel::new(1, 2, LabelKind::Hyperlink, true, "synthetic label".into()).unwrap(),
+            PromptLabel::new(1, 2, LabelKind::Text, false, "synthetic label".into()).unwrap(),
+            label(1, "synthetic label "),
+        ] {
+            variants.push(
+                PromptContentObservation::from_parts(
+                    original.root_runtime_id().to_vec(),
+                    original.caption().into(),
+                    vec![changed],
+                )
+                .unwrap(),
+            );
+        }
+        for changed in variants {
+            assert_ne!(original, changed);
+        }
+        assert_eq!(original, original.clone());
+    }
+
+    #[test]
+    fn label_metadata_is_bounded_and_part_of_equality_and_digest() {
+        let button = PromptLabel::new_with_metadata(
+            1,
+            2,
+            LabelKind::Button,
+            true,
+            "Yes".into(),
+            "CommandButton_1".into(),
+            "Button".into(),
+        )
+        .unwrap();
+        assert_eq!(button.automation_id(), "CommandButton_1");
+        assert_eq!(button.class_name(), "Button");
+        // A text label may carry them too. Naming which one holds the program
+        // and which holds the publisher is the reason this crate reads them.
+        let text = PromptLabel::new_with_metadata(
+            2,
+            2,
+            LabelKind::Text,
+            true,
+            "text".into(),
+            "ProgramName".into(),
+            "Static".into(),
+        )
+        .unwrap();
+        assert_eq!(text.automation_id(), "ProgramName");
+        assert_eq!(text.class_name(), "Static");
+        assert_eq!(
+            PromptLabel::new_with_metadata(
+                2,
+                2,
+                LabelKind::Button,
+                true,
+                "Yes".into(),
+                "a".repeat(MAX_LABEL_METADATA_UTF16_UNITS + 1),
+                String::new(),
+            ),
+            Err(PromptContentError::FieldLimit)
+        );
+        let original =
+            PromptContentObservation::from_parts(vec![7], "caption".into(), vec![button.clone()])
+                .unwrap();
+        let changed = PromptContentObservation::from_parts(
+            vec![7],
+            "caption".into(),
+            vec![
+                PromptLabel::new_with_metadata(
+                    1,
+                    2,
+                    LabelKind::Button,
+                    true,
+                    "Yes".into(),
+                    "CommandButton_2".into(),
+                    "Button".into(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_ne!(original, changed);
+        assert_ne!(original.digest(), changed.digest());
+        assert_eq!(original.digest(), original.clone().digest());
+        let mut encoded = Vec::new();
+        original.append_encoded(&mut encoded);
+        assert_eq!(PromptContentObservation::decode(&encoded), Ok(original));
+    }
+
+    #[test]
+    fn content_digest_excludes_root_runtime_id_but_covers_ordered_label_fields() {
+        let first = PromptContentObservation::from_parts(
+            vec![1],
+            "caption".into(),
+            vec![label(1, "label")],
+        )
+        .unwrap();
+        let other_runtime = PromptContentObservation::from_parts(
+            vec![99, -4],
+            "caption".into(),
+            vec![label(1, "label")],
+        )
+        .unwrap();
+        let changed_ordinal = PromptContentObservation::from_parts(
+            vec![1],
+            "caption".into(),
+            vec![label(2, "label")],
+        )
+        .unwrap();
+        assert_eq!(first.digest(), other_runtime.digest());
+        assert_ne!(first.digest(), changed_ordinal.digest());
+    }
+
+    #[test]
+    fn debug_output_contains_no_caption_label_or_runtime_identifier_values() {
+        let value = observation();
+        let report = ProbeReport::from_observation(counts(), value.clone()).unwrap();
+        let text = format!("{report:?} {value:?} {:?}", value.labels()[0]);
+        assert!(!text.contains("synthetic caption"));
+        assert!(!text.contains("synthetic label"));
+        assert!(!text.contains("[1, -2, 3]"));
+    }
+}

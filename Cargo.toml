@@ -1,0 +1,81 @@
+[workspace]
+resolver = "3"
+exclude = ["vendor/tauri-codegen", "vendor/wry"]
+members = [
+    "crates/approval-protocol",
+    "crates/approval-core",
+    "crates/notification-policy",
+    "crates/activity-journal",
+    "crates/windows-observer",
+    "crates/windows-prompt-probe",
+    "crates/windows-service-host",
+    "crates/windows-identity",
+    "crates/controller-runtime",
+    "crates/presentation-i18n",
+    "crates/service-protocol",
+    "crates/secure-channel",
+    "crates/phone-request-core",
+    "crates/phone-state-store",
+    "crates/android-controller",
+    "crates/android-bindings",
+    "crates/android-attestation",
+    "crates/android-log-sink",
+    "tools/controller-uniffi-bindgen",
+    "tools/ci-phone-fixture",
+    "crates/relay-service",
+    "crates/framed-transport",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.40"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/115dkk/Windows_UAC_Remote_Controller"
+publish = false
+
+[workspace.dependencies]
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+getrandom = "0.3.4"
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Debug info goes; the symbol table stays. UniFFI's binding generator reads the
+# Android library's exported metadata symbols, and `strip = true` removed them
+# (release run 34642055338: "No UniFFI metadata found").
+strip = "debuginfo"
+overflow-checks = true
+
+[profile.dev]
+debug = 1
+debug-assertions = true
+
+[patch.crates-io]
+# Upstream context generation with an explicit cached-icon array length; see
+# vendor/tauri-codegen/LOCAL_PATCH.md. No runtime/security behavior is replaced.
+tauri-codegen = { path = "vendor/tauri-codegen" }
+# Android template API compatibility only; see vendor/wry/LOCAL_PATCH.md.
+wry = { path = "vendor/wry" }
+# Exact existing-Activity attachment and physical-view IPC ownership on Android.
+# The pinned upstream sources and patch scope are recorded alongside these crates.
+tao = { path = "vendor/tao-0.35.3" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.11.4" }
+tauri = { path = "vendor/tauri-2.11.5" }

@@ -1,0 +1,46 @@
+[package]
+name = "android-bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Generated-only ABI boundary for the headless native phone owner"
+
+[lib]
+name = "uac_android_controller"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+activity-journal = { path = "../activity-journal" }
+android-controller = { path = "../android-controller" }
+android-log-sink = { path = "../android-log-sink" }
+approval-protocol = { path = "../approval-protocol" }
+framed-transport = { path = "../framed-transport" }
+phone-request-core = { path = "../phone-request-core" }
+phone-state-store = { path = "../phone-state-store" }
+notification-policy = { path = "../notification-policy" }
+relay-service = { path = "../relay-service" }
+controller-runtime = { path = "../controller-runtime" }
+secure-channel = { path = "../secure-channel" }
+service-protocol = { path = "../service-protocol" }
+getrandom.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uniffi = { version = "=0.32.0", default-features = false }
+tokio = { version = "=1.53.1", features = ["rt", "sync", "time", "net", "macros"] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+# Constants for safe std no-follow opens; no libc calls or handwritten FFI.
+libc = "0.2.177"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+p256.workspace = true
+secure-channel = { path = "../secure-channel" }
+
+[lints]
+workspace = true

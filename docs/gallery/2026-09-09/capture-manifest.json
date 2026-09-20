@@ -1,0 +1,64 @@
+{
+  "sourceCommit": "37890c71e0a1bf4bbd56ada456b4900c28d1fcb7",
+  "run": "https://github.com/115dkk/Windows_UAC_Remote_Controller/actions/runs/34276434168",
+  "scope": "Actual Chromium renders of synthetic React client state, not native Windows UAC or Android authentication",
+  "renderer": "Playwright 1.63.0 / Chromium 153.0.8010.12",
+  "images": [
+    {
+      "file": "phone-request.png",
+      "case": "phone-pending-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "496BF1C2C06B539ADE76CA276748D1F557576A5598C7857AD6DD6CB1BB93BC88"
+    },
+    {
+      "file": "phone-terminal.png",
+      "case": "phone-terminal-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "97144509F34D36BE8065BF002A630BC183BB3384E1503813090DAB5B280D805C"
+    },
+    {
+      "file": "phone-terminal-details.png",
+      "case": "phone-terminal-390",
+      "stage": "gallery-details-keyboard",
+      "runner": "ubuntu-24.04",
+      "sha256": "A3E7D37EFAC6F261EFD2E9F7F92EF1B4D5D65662B3EEB747EC71E9B7F3379D23"
+    },
+    {
+      "file": "phone-schedule.png",
+      "case": "phone-weekly-schedule-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "14670D23994B58CA469127F5F214552636CF4AFD73260D639199A0BA4B38067B"
+    },
+    {
+      "file": "phone-alert-options.png",
+      "case": "phone-weekly-schedule-390",
+      "stage": "gallery-schedule-footer",
+      "runner": "ubuntu-24.04",
+      "sha256": "CD6618C37A231B9D4724A2F7E555D320751350D7B4F4DD2629B893578721E002"
+    },
+    {
+      "file": "phone-lock-required.png",
+      "case": "phone-lock-missing-390",
+      "stage": "gallery-overview",
+      "runner": "ubuntu-24.04",
+      "sha256": "9D6FF00011714C7BD2404C397E09AF3116A57E345F6A24EAAADF037B6A2A5839"
+    },
+    {
+      "file": "pc-status-light.png",
+      "case": "desktop-running-980",
+      "stage": "gallery-overview",
+      "runner": "windows-2025",
+      "sha256": "AB650419573015E8A8819750B2E8B0BD7312370B3F6598A283EFD38260D2039F"
+    },
+    {
+      "file": "pc-status-dark.png",
+      "case": "desktop-running-dark-1280",
+      "stage": "gallery-overview",
+      "runner": "windows-2025",
+      "sha256": "64BCC84CAFCEE29E2D6131BF57D8AA7E0ECA4F37F8B154FD0613714CCC935215"
+    }
+  ]
+}

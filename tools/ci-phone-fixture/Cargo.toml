@@ -1,0 +1,32 @@
+[package]
+name = "ci-phone-fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Non-shipping GitHub Windows CI software phone protocol fixture"
+
+[dependencies]
+android-attestation = { path = "../../crates/android-attestation", features = ["test-attestation-anchors"] }
+approval-protocol = { path = "../../crates/approval-protocol" }
+framed-transport = { path = "../../crates/framed-transport" }
+relay-service = { path = "../../crates/relay-service" }
+secure-channel = { path = "../../crates/secure-channel" }
+service-protocol = { path = "../../crates/service-protocol" }
+base64 = "0.22.1"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+rqrr = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "io-std", "time"] }
+zeroize = "1.8.2"
+
+[dev-dependencies]
+getrandom.workspace = true
+p256.workspace = true
+
+[lints]
+workspace = true

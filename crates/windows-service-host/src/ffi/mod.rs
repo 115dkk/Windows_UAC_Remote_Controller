@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Reviewed Windows FFI boundary. Native handles never cross the public API.
+//! Every borrowed pointer is bounded by an owned OS allocation or stack buffer.
+//! Directory/file handles omit FILE_SHARE_DELETE and stay alive through the
+//! privileged operation, pinning validated paths under the intact-OS model.
+
+mod diagnostic;
+mod elevation;
+mod filesystem;
+mod firewall;
+mod language;
+#[cfg(target_pointer_width = "64")]
+mod overlapped_pipe;
+#[cfg(target_pointer_width = "64")]
+mod pairing_client;
+#[cfg(target_pointer_width = "64")]
+pub(crate) mod pairing_diagnostics;
+#[cfg(target_pointer_width = "64")]
+mod pairing_peer;
+#[cfg(target_pointer_width = "64")]
+pub(crate) mod probe_supervisor;
+#[cfg(target_pointer_width = "64")]
+mod process_observer;
+pub(crate) mod prompt_diagnostics;
+pub(crate) mod public_diagnostics;
+mod security;
+mod taskbar;
+mod trust_store;
+#[cfg(target_pointer_width = "64")]
+pub(crate) mod usb_bootstrap;
+
+pub use language::{LanguageError, get_language_settings, set_language_preference};
+pub use taskbar::{
+    TaskbarOffer, TaskbarStatus, begin_taskbar_offer, begin_taskbar_pin,
+    initialize_desktop_shell_identity, shutdown_desktop_shell,
+};
+
+pub(crate) use elevation::request_elevated_control;
+pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_relay_firewall};
+#[cfg(target_pointer_width = "64")]
+pub(crate) use process_observer::provision_current_process_observer;
+#[cfg(not(target_pointer_width = "64"))]
+pub(crate) fn provision_current_process_observer(
+    _startup_began: std::time::Instant,
+) -> Result<(), ServiceError> {
+    Err(ServiceError::UnsupportedPlatform)
+}
+#[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_client::run_pair_helper;
+#[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_client::run_pair_renderer;
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn run_pair_inspector() -> Result<(), crate::ServiceError> {
+    let inspector = pairing_peer::renderer::inspector::NativeInspector::default();
+    let exit = windows_prompt_probe::run_pairing_inspector(inspector);
+    // The service exit code carries no HRESULT, so the disposable lab keeps the
+    // fixed classification next to the other notes. No payload is recorded.
+    #[cfg(feature = "lab-software-identity")]
+    crate::lab::record_note(&format!("pair inspector exit: {exit:?}"));
+    if exit == windows_prompt_probe::supervision::HelperExit::Observed {
+        Ok(())
+    } else {
+        Err(crate::ServiceError::RendererNative {
+            stage: 23,
+            hresult: 0x8007_000d_u32 as i32,
+        })
+    }
+}
+#[cfg(target_pointer_width = "64")]
+pub use pairing_client::{
+    PairingClient, PairingClientError, PairingClientProgress, PairingClientStage,
+    PairingHelperLaunch, PairingLaunchError, PairingLaunchProgress,
+};
+#[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_peer::renderer::{
+    check_cutoff as check_renderer_cutoff, original_cutoff as renderer_original_cutoff,
+};
+#[cfg(target_pointer_width = "64")]
+pub(crate) use pairing_peer::{
+    AttemptWindow, ListenProgress, ManagementClientClass, ManagementListener, ManagementPipe,
+    RendererRegistration, StarterAdmission, UnboundPairingListener,
+};
+#[cfg(target_pointer_width = "64")]
+pub use pairing_peer::{
+    PairingPeer, PairingPeerError, PairingPeerRole, PairingPeerStage, PairingPipe,
+    PairingPipeProgress, PairingServerEndpoint, PairingServerEndpoints,
+};
+pub(crate) use trust_store::{
+    MAX_TRUST_FILE_BYTES, ServiceTrustFile, TrustDirectory, provision_trust_directory,
+};
+
+pub(crate) use filesystem::{
+    ActivityDirectory, expected_executable, open_activity_directory, provision_activity_directory,
+    validate_installation,
+};
+pub(crate) use security::{harden_service, require_elevated, verify_service_security};
+
+use crate::{ServiceError, ServiceOperation};
+use std::{ffi::OsStr, fmt, os::windows::ffi::OsStrExt};
+use windows::{
+    Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree},
+    core::PCWSTR,
+};
+
+pub(crate) fn win_error(operation: ServiceOperation, error: windows::core::Error) -> ServiceError {
+    ServiceError::WindowsCall {
+        operation,
+        code: error.code().0 as u32,
+    }
+}
+
+struct Wide(Vec<u16>);
+impl Wide {
+    fn new(text: impl AsRef<OsStr>) -> Result<Self, ServiceError> {
+        let mut units: Vec<u16> = text.as_ref().encode_wide().collect();
+        if units.len() > 32_000 || units.contains(&0) {
+            return Err(ServiceError::UnsafePath);
+        }
+        units.push(0);
+        Ok(Self(units))
+    }
+    fn ptr(&self) -> PCWSTR {
+        PCWSTR(self.0.as_ptr())
+    }
+}
+
+struct OwnedHandle(HANDLE);
+impl fmt::Debug for OwnedHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OwnedHandle(redacted)")
+    }
+}
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: constructed only from a successful owning Windows handle
+        // result, never pseudo/null/invalid handles; released exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+struct LocalAllocation(*mut core::ffi::c_void);
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        // SAFETY: only successful LocalAlloc-family API outputs enter this
+        // guard; all borrowed descriptor/SID pointers expire before this drop.
+        let _ = unsafe { LocalFree(Some(HLOCAL(self.0))) };
+    }
+}

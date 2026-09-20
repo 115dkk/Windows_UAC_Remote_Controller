@@ -1,0 +1,25 @@
+[package]
+name = "framed-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Connection-budgeted TLS frame owner with absolute queue deadlines"
+
+[dependencies]
+secure-channel = { path = "../secure-channel" }
+service-protocol = { path = "../service-protocol" }
+thiserror.workspace = true
+tokio = { version = "=1.53.1", features = ["net", "io-util", "time", "macros", "rt"] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+
+[dev-dependencies]
+p256 = { workspace = true, features = ["pkcs8"] }
+approval-protocol = { path = "../approval-protocol" }
+relay-service = { path = "../relay-service" }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

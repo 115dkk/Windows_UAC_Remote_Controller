@@ -1,0 +1,120 @@
+name: Windows runner capability probe
+
+# Read-only, manually dispatched. Reports whether a hosted Windows runner offers
+# the native preconditions (TPM/PCP provider, UAC policy, interactive session)
+# that a later native service/prompt lab would need. It installs, starts or
+# elevates nothing and changes no policy.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'codex/native-runtime']
+    paths: ['.github/workflows/windows-runner-probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Hosted Windows runner facts (read-only)
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Report session, token and desktop facts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Output "UserInteractive=$([Environment]::UserInteractive)"
+          Write-Output "SessionId=$((Get-Process -Id $PID).SessionId)"
+          whoami /groups /fo list | Select-String -Pattern 'Group Name|Mandatory Label|Administrators|Users' | ForEach-Object { $_.Line }
+          query session 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- UAC policy (HKLM\...\Policies\System) ---"
+          $policy = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+          foreach ($name in 'EnableLUA','ConsentPromptBehaviorAdmin','ConsentPromptBehaviorUser','PromptOnSecureDesktop','EnableUIADesktopToggle','FilterAdministratorToken','EnableInstallerDetection') {
+            Write-Output ("{0}={1}" -f $name, $policy.$name)
+          }
+          Write-Output "--- window station / desktops of this session ---"
+          Add-Type -Namespace Probe -Name Desk -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint id); [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId(); [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr h, int index, System.Text.StringBuilder info, uint len, out uint needed);'
+          $sb = New-Object System.Text.StringBuilder 256; $needed = 0
+          [void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $sb, 512, [ref]$needed)
+          Write-Output "ThreadDesktop=$($sb.ToString())"
+          exit 0
+      - name: Report TPM and platform crypto provider facts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try { Get-Tpm | Format-List | Out-String -Width 200 } catch { Write-Output "Get-Tpm failed: $($_.Exception.Message)" }
+          tpmtool getdeviceinformation 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- registered KSPs (certutil -csplist) ---"
+          certutil -csplist 2>&1 | ForEach-Object { $_ }
+          Write-Output "--- Win32_Tpm ---"
+          try { Get-CimInstance -Namespace root/cimv2/Security/MicrosoftTpm -ClassName Win32_Tpm | Format-List | Out-String -Width 200 } catch { Write-Output "Win32_Tpm unavailable: $($_.Exception.Message)" }
+          Write-Output "--- PCP provider open from this admin context (read-only, no key) ---"
+          Add-Type -Namespace Probe -Name Ncrypt -MemberDefinition '[DllImport("ncrypt.dll", CharSet=CharSet.Unicode)] public static extern int NCryptOpenStorageProvider(out IntPtr h, string name, uint flags); [DllImport("ncrypt.dll")] public static extern int NCryptFreeObject(IntPtr h);'
+          foreach ($provider in 'Microsoft Platform Crypto Provider','Microsoft Software Key Storage Provider') {
+            $h = [IntPtr]::Zero
+            $status = [Probe.Ncrypt]::NCryptOpenStorageProvider([ref]$h, $provider, 0)
+            Write-Output ("{0}: 0x{1:X8}" -f $provider, $status)
+            if ($status -eq 0) { [void][Probe.Ncrypt]::NCryptFreeObject($h) }
+          }
+          exit 0
+      - name: Report whether an accelerated Android emulator could ever run here
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The UAC lab pairs against a synthetic phone. Replacing that fixture
+          # with the real product on an emulator is only possible if this runner
+          # can accelerate one, and an API 36 x86_64 image is not usable without
+          # acceleration. Every line below is a read: no feature is installed and
+          # no hypervisor is enabled.
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, VirtualizationFirmwareEnabled, VMMonitorModeExtensions, SecondLevelAddressTranslationExtensions |
+            Format-List | Out-String -Width 200
+          Write-Output "--- Hyper-V requirements as systeminfo reports them ---"
+          systeminfo 2>&1 | Select-String -Pattern 'Hyper-V|하이퍼' | ForEach-Object { $_.Line }
+          Write-Output "--- hypervisor platform features (state only) ---"
+          foreach ($feature in 'HypervisorPlatform','Microsoft-Hyper-V-All','VirtualMachinePlatform','WindowsHypervisorPlatform') {
+            try {
+              $state = (Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop).State
+            } catch { $state = "query failed: $($_.Exception.Message)" }
+            Write-Output ("{0}={1}" -f $feature, $state)
+          }
+          Write-Output "--- services a hypervisor would bring ---"
+          Get-Service -Name vmcompute, HvHost, vmms -ErrorAction SilentlyContinue |
+            Select-Object Name, Status, StartType | Format-Table -AutoSize | Out-String
+          Write-Output "--- Android SDK present on this image at all ---"
+          $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          Write-Output "ANDROID_SDK=$sdk"
+          if ($sdk -and (Test-Path $sdk)) {
+            Get-ChildItem $sdk -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+            Write-Output "emulator binary: $(Test-Path (Join-Path $sdk 'emulator/emulator.exe'))"
+          }
+          exit 0
+      - name: Ask the emulator itself, which is the only answer that counts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The feature states above say a hypervisor is present. Whether the
+          # emulator can actually use it is its own question, and it answers it.
+          # -accel-check starts no virtual device and creates nothing.
+          $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          $emulator = Join-Path $sdk 'emulator/emulator.exe'
+          if (-not (Test-Path $emulator)) { Write-Output 'no emulator on this image'; exit 0 }
+          Write-Output "--- emulator -accel-check ---"
+          & $emulator -accel-check 2>&1 | ForEach-Object { $_ }
+          Write-Output "accel-check exit=$LASTEXITCODE"
+          Write-Output "--- emulator -version ---"
+          & $emulator -version 2>&1 | Select-Object -First 4 | ForEach-Object { $_ }
+          Write-Output "--- system images already on the image ---"
+          $images = Join-Path $sdk 'system-images'
+          if (Test-Path $images) {
+            Get-ChildItem $images -Recurse -Depth 2 -Directory | Select-Object -ExpandProperty FullName
+          } else { Write-Output 'no system-images directory: one would have to be installed' }
+          exit 0
+      - name: Report VM and OS identity
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, TotalPhysicalMemory | Format-List | Out-String
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber | Format-List | Out-String
+          Get-Service -Name TBS, TrustedInstaller -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String
+          exit 0

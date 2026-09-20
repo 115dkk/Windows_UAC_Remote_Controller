@@ -1,0 +1,26 @@
+[package]
+name = "android-log-sink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Bounded closed-token device-log sink for Android, isolating the one liblog call"
+
+[dependencies]
+
+# The shared workspace forbids every unsafe block, and the crate that holds the
+# phone's requests and key references must keep that. One `liblog` call is the
+# entire reason this crate exists, so the opt-out lives here instead, and only
+# src/ffi.rs may override this crate's deny lint.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
