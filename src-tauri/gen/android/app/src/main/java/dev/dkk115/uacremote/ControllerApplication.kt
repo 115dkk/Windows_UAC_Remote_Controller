@@ -557,6 +557,11 @@ class ControllerApplication : Application() {
         if (actor == null) reply(callback, PolicyReply.Failed(preOwnerMutationStatus()))
         else actor.clearHistory(callback)
     }
+    internal fun removeControllerPeer(pcId: String, callback: (PolicyReply) -> Unit) {
+        val actor = policyActor
+        if (actor == null) reply(callback, PolicyReply.Failed(preOwnerMutationStatus()))
+        else actor.removePeer(pcId, callback)
+    }
 
     private fun readWhenStarted(kind: ReadKind, callback: (PolicyReply) -> Unit) {
         val actor = policyActor

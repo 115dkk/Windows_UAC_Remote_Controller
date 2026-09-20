@@ -202,10 +202,12 @@ fn each_existing_terminal_kind_has_a_stable_distinct_delivery_identity() {
             Some(RequestResolution::Expired),
             RequestOutcome::ExpiredByPc,
         ),
+        (Some(RequestResolution::Denied), RequestOutcome::DeniedByPc),
         (
-            Some(RequestResolution::Denied),
-            RequestOutcome::CompletedByPc,
+            Some(RequestResolution::Approved),
+            RequestOutcome::ApprovedByPc,
         ),
+        (Some(RequestResolution::Failed), RequestOutcome::FailedByPc),
         (None, RequestOutcome::ExpiredLocally),
     ] {
         let mut state = inbox(NotificationPolicy::default(), CapacityLimits::default());

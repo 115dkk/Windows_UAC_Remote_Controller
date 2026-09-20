@@ -1044,9 +1044,9 @@ fn each_pc_terminal_resolution_produces_one_outcome_only_for_active_requests() {
     for (resolution_kind, expected) in [
         (RequestResolution::Cancelled, RequestOutcome::CancelledByPc),
         (RequestResolution::Expired, RequestOutcome::ExpiredByPc),
-        (RequestResolution::Approved, RequestOutcome::CompletedByPc),
-        (RequestResolution::Denied, RequestOutcome::CompletedByPc),
-        (RequestResolution::Failed, RequestOutcome::CompletedByPc),
+        (RequestResolution::Approved, RequestOutcome::ApprovedByPc),
+        (RequestResolution::Denied, RequestOutcome::DeniedByPc),
+        (RequestResolution::Failed, RequestOutcome::FailedByPc),
     ] {
         let mut inbox = inbox();
         let mut correlation = correlation();

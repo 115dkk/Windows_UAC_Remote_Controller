@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference
  * projection reads use only callback-free Rust getters and the light clock.
  */
 internal class ApplicationPolicyActor(private val application: Application) {
-    private enum class Operation { READ_POLICY, SAVE_POLICY, READ_HISTORY, CLEAR_HISTORY }
+    private enum class Operation { READ_POLICY, SAVE_POLICY, READ_HISTORY, CLEAR_HISTORY, REMOVE_PEER }
     private val lifecycle = PolicyOwnerLifecycle()
     private val bootTrace = OwnerBootTrace(BootDiagnostics::recordOwner)
     private val main = Handler(Looper.getMainLooper())
@@ -67,9 +67,9 @@ internal class ApplicationPolicyActor(private val application: Application) {
     // This adapter owns only its own in-process references, never aliases.
     private val platform = AndroidNativePlatform(application)
     private val denials = DenialJobs(platform, { controller }, ::enqueueDenial,
-        { lifecycle.phase() == PolicyOwnerPhase.READY }, { failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.DENIAL_OWNER) }, ::nativeCleanupProgress)
+        { lifecycle.phase() == PolicyOwnerPhase.READY }, { failure -> failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.DENIAL_OWNER, failure) }, ::nativeCleanupProgress)
     private val approvals = ApplicationApprovalCoordinator(application, platform, { controller }, ::enqueueApproval,
-        { failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.APPROVAL_OWNER) }, denials::blocksApproval, denials::nativeProgress)
+        { failure -> failOwner(PolicyStatus.STORAGE_UNAVAILABLE, OwnerFailureOrigin.APPROVAL_OWNER, failure) }, denials::blocksApproval, denials::nativeProgress)
     private val requests = NativeRequestCoordinator(application, platform, { controller }, ::enqueueRequest,
         { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
         approvals::canRequest, denials::canRequest, denials::externalProgress,
@@ -441,6 +441,10 @@ internal class ApplicationPolicyActor(private val application: Application) {
     fun readPolicy(callback: (PolicyReply) -> Unit) = submit(Operation.READ_POLICY, null, callback)
     fun readHistory(callback: (PolicyReply) -> Unit) = submit(Operation.READ_HISTORY, null, callback)
     fun clearHistory(callback: (PolicyReply) -> Unit) = submit(Operation.CLEAR_HISTORY, null, callback)
+    fun removePeer(pcId: String, callback: (PolicyReply) -> Unit) {
+        if (!PolicyOwnerBounds.validPcIdentifier(pcId)) { deliverImmediate(callback, PolicyReply.PeerRemoved(false)); return }
+        submit(Operation.REMOVE_PEER, pcId, callback)
+    }
 
     fun savePolicy(policyJson: String, callback: (PolicyReply) -> Unit) {
         if (!PolicyOwnerBounds.validPolicyString(policyJson)) {
@@ -546,11 +550,16 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 return
             }
             val owner = controller ?: throw IllegalStateException("Native policy owner unavailable")
+            if (operation == Operation.REMOVE_PEER) {
+                deliver(call, PolicyReply.PeerRemoved(owner.forgetPc(checkNotNull(policyJson))))
+                return
+            }
             val committed = when (operation) {
                 Operation.READ_POLICY -> owner.notificationPolicyJson()
                 Operation.SAVE_POLICY -> owner.saveNotificationPolicy(checkNotNull(policyJson))
                 Operation.READ_HISTORY -> owner.historyJson()
                 Operation.CLEAR_HISTORY -> owner.clearHistoryJson()
+                Operation.REMOVE_PEER -> error("Removal is handled before policy serialization")
             }
             val history = operation == Operation.READ_HISTORY || operation == Operation.CLEAR_HISTORY
             val valid = if (history) PolicyOwnerBounds.validHistoryString(committed)
@@ -565,7 +574,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
             deliver(call, PolicyReply.Failed(status))
         } finally {
             denials.externalProgress()
-            if (operation == Operation.SAVE_POLICY) requests.progress()
+            if (operation == Operation.SAVE_POLICY || operation == Operation.REMOVE_PEER) requests.progress()
             resumeQueuedWork()
             cleanupIfStopped()
         }

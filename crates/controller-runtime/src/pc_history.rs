@@ -3,7 +3,8 @@
 //! delivery events are not Windows outcomes and must never become approvals.
 use crate::{ActivityKind, ActivityView};
 use activity_journal::{
-    ActivityEvent, ActivityRecord, ConnectionOutcome, Decision, RequestOutcome, ServiceOutcome,
+    ActivityEvent, ActivityRecord, ConnectionOutcome, Decision, FailureKind, RequestOutcome,
+    ServiceOutcome,
 };
 
 pub(crate) fn project(records: Vec<ActivityRecord>) -> Vec<ActivityView> {
@@ -19,6 +20,7 @@ pub(crate) fn project(records: Vec<ActivityRecord>) -> Vec<ActivityView> {
                     ActivityKind::Disconnected
                 }
                 ActivityEvent::Service(ServiceOutcome::Started) => ActivityKind::ServiceStarted,
+                ActivityEvent::Failure(FailureKind::DeliveryFailed) => ActivityKind::DeliveryFailed,
                 ActivityEvent::Failure(_) => ActivityKind::Failure,
                 ActivityEvent::Request(RequestOutcome::WindowsApplied {
                     decision: Decision::Approve,
@@ -84,5 +86,19 @@ mod tests {
             ]
         );
         assert!(rows.windows(2).all(|pair| pair[0].id != pair[1].id));
+    }
+
+    #[test]
+    fn request_delivery_failure_is_distinct_from_other_failures_and_heartbeats() {
+        let rows = project(vec![
+            record(ActivityEvent::Service(ServiceOutcome::WatcherAlive)),
+            record(ActivityEvent::Service(ServiceOutcome::WatcherStarted)),
+            record(ActivityEvent::Failure(FailureKind::DeliveryFailed)),
+            record(ActivityEvent::Failure(FailureKind::TransportUnavailable)),
+        ]);
+        assert_eq!(
+            rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            vec![ActivityKind::DeliveryFailed, ActivityKind::Failure]
+        );
     }
 }

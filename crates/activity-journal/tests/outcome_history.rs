@@ -151,7 +151,28 @@ fn terminal_outcome_roundtrips_without_changing_its_first_recorded_time() {
 }
 
 #[test]
-fn all_terminal_kinds_preserve_the_producers_coarse_meaning() {
+fn legacy_completion_tag_is_preserved_without_guessing_approval() {
+    let mut history = OutcomeHistory::new(OutcomeHistoryLimits::default());
+    history
+        .record_pending(
+            &pending(1, Some(RequestResolution::Approved)),
+            timestamp(1_000),
+        )
+        .unwrap();
+    let mut old = history.to_bytes().unwrap();
+    assert_eq!(*old.last().unwrap(), 5);
+    // Synthetic v1 old-format row. IDs in display history are opaque, not authority.
+    *old.last_mut().unwrap() = 4;
+    let restored = OutcomeHistory::from_bytes(&old).unwrap();
+    assert_eq!(
+        restored.records()[0].outcome(),
+        RequestOutcome::CompletedByPc
+    );
+    assert_eq!(restored.to_bytes().unwrap(), old);
+}
+
+#[test]
+fn all_terminal_kinds_preserve_the_authenticated_pc_result() {
     let mut history = OutcomeHistory::new(OutcomeHistoryLimits::default());
     for (index, (resolution, expected)) in [
         (
@@ -165,16 +186,10 @@ fn all_terminal_kinds_preserve_the_producers_coarse_meaning() {
         (None, RequestOutcome::ExpiredLocally),
         (
             Some(RequestResolution::Approved),
-            RequestOutcome::CompletedByPc,
+            RequestOutcome::ApprovedByPc,
         ),
-        (
-            Some(RequestResolution::Denied),
-            RequestOutcome::CompletedByPc,
-        ),
-        (
-            Some(RequestResolution::Failed),
-            RequestOutcome::CompletedByPc,
-        ),
+        (Some(RequestResolution::Denied), RequestOutcome::DeniedByPc),
+        (Some(RequestResolution::Failed), RequestOutcome::FailedByPc),
     ]
     .into_iter()
     .enumerate()
@@ -396,7 +411,7 @@ fn codec_rejects_unknown_versions_tags_and_out_of_range_timestamps() {
             Err(OutcomeHistoryError::UnsupportedVersion)
         );
     }
-    for tag in [0, 5, u8::MAX] {
+    for tag in [0, 8, u8::MAX] {
         let mut invalid = bytes.clone();
         invalid[HEADER_BYTES + ROW_BYTES - 1] = tag;
         assert_eq!(

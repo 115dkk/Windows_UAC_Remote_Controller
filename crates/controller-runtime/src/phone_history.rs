@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Bounded native-history presentation, never an approval/result assertion.
+//! Bounded presentation of committed native history, never local decision inference.
 use std::collections::BTreeSet;
 
 use activity_journal::{MAX_OUTCOME_HISTORY_RECORDS, OutcomeHistoryRecord, UnixMillis};
@@ -29,6 +29,9 @@ enum HistoryKind {
     Cancelled,
     Expired,
     PcCompleted,
+    Approved,
+    Denied,
+    Failure,
 }
 
 pub const fn phone_history_issue() -> AppIssue {
@@ -64,6 +67,9 @@ pub fn encode_phone_history(records: &[OutcomeHistoryRecord]) -> Result<String, 
                         HistoryKind::Expired
                     }
                     RequestOutcome::CompletedByPc => HistoryKind::PcCompleted,
+                    RequestOutcome::ApprovedByPc => HistoryKind::Approved,
+                    RequestOutcome::DeniedByPc => HistoryKind::Denied,
+                    RequestOutcome::FailedByPc => HistoryKind::Failure,
                 },
             }
         })
@@ -111,6 +117,9 @@ pub fn decode_phone_history_json(bytes: &[u8]) -> Result<Vec<ActivityView>, AppI
                     HistoryKind::Cancelled => ActivityKind::Cancelled,
                     HistoryKind::Expired => ActivityKind::Expired,
                     HistoryKind::PcCompleted => ActivityKind::PcCompleted,
+                    HistoryKind::Approved => ActivityKind::Approved,
+                    HistoryKind::Denied => ActivityKind::Denied,
+                    HistoryKind::Failure => ActivityKind::Failure,
                 },
             })
         })

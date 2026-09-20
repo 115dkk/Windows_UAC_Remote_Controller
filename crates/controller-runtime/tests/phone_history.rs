@@ -36,6 +36,35 @@ fn exact_native_terminal_projection_does_not_invent_windows_approval() {
 }
 
 #[test]
+fn authenticated_pc_outcomes_have_distinct_display_rows_and_legacy_stays_unknown() {
+    let rows: Vec<_> = ["approved", "denied", "failure", "pc_completed"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            json!({
+                "id": format!("{index:064x}"), "timestampMillis": 1000, "kind": kind
+            })
+        })
+        .collect();
+    let projected = decode_phone_history_json(
+        &serde_json::to_vec(&json!({
+            "schemaVersion": 1, "records": rows
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        projected.iter().map(|row| row.kind).collect::<Vec<_>>(),
+        vec![
+            ActivityKind::Approved,
+            ActivityKind::Denied,
+            ActivityKind::Failure,
+            ActivityKind::PcCompleted
+        ]
+    );
+}
+
+#[test]
 fn unavailable_history_is_distinct_from_a_confirmed_empty_native_history() {
     for (input, expected) in [
         (None, Availability::Unavailable),
@@ -68,7 +97,7 @@ fn history_bridge_rejects_unknown_false_success_duplicate_and_excessive_data() {
         json!({"schemaVersion":2,"records":[]}),
         json!({"schemaVersion":1,"records":[],"authenticated":true}),
         json!({"schemaVersion":1,"records":[row.clone(),row.clone()]}),
-        json!({"schemaVersion":1,"records":[{"id":"a".repeat(64),"timestampMillis":1,"kind":"approved"}]}),
+        json!({"schemaVersion":1,"records":[{"id":"a".repeat(64),"timestampMillis":1,"kind":"signature_sent"}]}),
         json!({"schemaVersion":1,"records":[{"id":"x","timestampMillis":1,"kind":"expired"}]}),
         json!({"schemaVersion":1,"records":[{"id":"A".repeat(64),"timestampMillis":1,"kind":"expired"}]}),
         json!({"schemaVersion":1,"records":[{"id":"a".repeat(64),"timestampMillis":u64::MAX,"kind":"expired"}]}),

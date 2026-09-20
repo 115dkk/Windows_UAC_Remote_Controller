@@ -186,17 +186,25 @@ pub(crate) async fn begin_pairing(
 #[tauri::command]
 pub(crate) async fn remove_device(
     device_id: String,
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
     state: tauri::State<'_, ControllerState>,
 ) -> Result<AppSnapshot, AppIssue> {
     check_identifier(&device_id)?;
     #[cfg(not(target_os = "android"))]
     {
+        let _ = (app, origin);
         with_runtime(&state, move |runtime| runtime.remove_device(&device_id)).await
     }
     #[cfg(target_os = "android")]
     {
-        let _ = state;
-        Err(controller_runtime::UnwiredCapability::Unpairing.issue())
+        with_android_owner(
+            app,
+            origin,
+            &state,
+            crate::mobile::OwnerOperation::RemovePeer(device_id),
+        )
+        .await
     }
 }
 

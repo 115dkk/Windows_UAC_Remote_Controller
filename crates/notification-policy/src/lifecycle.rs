@@ -195,6 +195,9 @@ pub enum AuthenticatedPcOutcome {
     Cancelled,
     Expired,
     Completed,
+    Approved,
+    Denied,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,6 +206,9 @@ pub enum RequestOutcome {
     ExpiredByPc,
     ExpiredLocally,
     CompletedByPc,
+    ApprovedByPc,
+    DeniedByPc,
+    FailedByPc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -781,6 +787,16 @@ impl NotificationEngine {
                         WithdrawalReason::CompletedByPc,
                         RequestOutcome::CompletedByPc,
                     ),
+                    AuthenticatedPcOutcome::Approved => (
+                        WithdrawalReason::CompletedByPc,
+                        RequestOutcome::ApprovedByPc,
+                    ),
+                    AuthenticatedPcOutcome::Denied => {
+                        (WithdrawalReason::CompletedByPc, RequestOutcome::DeniedByPc)
+                    }
+                    AuthenticatedPcOutcome::Failed => {
+                        (WithdrawalReason::CompletedByPc, RequestOutcome::FailedByPc)
+                    }
                 };
                 effects.push(Effect::Withdraw {
                     key: metadata.key,

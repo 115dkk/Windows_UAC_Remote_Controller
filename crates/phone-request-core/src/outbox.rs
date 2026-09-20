@@ -125,6 +125,9 @@ pub(crate) const fn outcome_tag(outcome: RequestOutcome) -> u8 {
         RequestOutcome::ExpiredByPc => 2,
         RequestOutcome::ExpiredLocally => 3,
         RequestOutcome::CompletedByPc => 4,
+        RequestOutcome::ApprovedByPc => 5,
+        RequestOutcome::DeniedByPc => 6,
+        RequestOutcome::FailedByPc => 7,
     }
 }
 
@@ -134,6 +137,36 @@ pub(crate) const fn outcome_from_tag(tag: u8) -> Option<RequestOutcome> {
         2 => Some(RequestOutcome::ExpiredByPc),
         3 => Some(RequestOutcome::ExpiredLocally),
         4 => Some(RequestOutcome::CompletedByPc),
+        5 => Some(RequestOutcome::ApprovedByPc),
+        6 => Some(RequestOutcome::DeniedByPc),
+        7 => Some(RequestOutcome::FailedByPc),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_storage_tags_keep_their_meaning_and_new_results_are_distinct() {
+        for (index, outcome) in [
+            RequestOutcome::CancelledByPc,
+            RequestOutcome::ExpiredByPc,
+            RequestOutcome::ExpiredLocally,
+            RequestOutcome::CompletedByPc,
+            RequestOutcome::ApprovedByPc,
+            RequestOutcome::DeniedByPc,
+            RequestOutcome::FailedByPc,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tag = u8::try_from(index + 1).unwrap();
+            assert_eq!(outcome_tag(outcome), tag);
+            assert_eq!(outcome_from_tag(tag), Some(outcome));
+        }
+        assert_eq!(outcome_from_tag(0), None);
+        assert_eq!(outcome_from_tag(8), None);
     }
 }

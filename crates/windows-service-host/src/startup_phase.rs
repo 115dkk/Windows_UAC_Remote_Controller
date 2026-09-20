@@ -11,6 +11,37 @@ use std::{
 
 const ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// SetServiceStatus acknowledgement and QueryServiceStatusEx observation are
+/// separate facts. Only the owner-startup caller may supply false for a still
+/// StartPending or not-yet-published PID, with no controls. Errors, cancellation and the original
+/// deadline are terminal; this never retries a mutation or resets a budget.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub(crate) fn await_startup_observation(
+    began: Instant,
+    cancelled: impl FnMut() -> bool,
+    observe: impl FnMut() -> Result<bool, ServiceError>,
+) -> Result<(), ServiceError> {
+    await_observation_with(|| began.elapsed(), cancelled, observe, std::thread::sleep)
+}
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+fn await_observation_with(
+    mut elapsed: impl FnMut() -> Duration,
+    mut cancelled: impl FnMut() -> bool,
+    mut observe: impl FnMut() -> Result<bool, ServiceError>,
+    mut wait: impl FnMut(Duration),
+) -> Result<(), ServiceError> {
+    loop {
+        within_startup(elapsed(), cancelled())?;
+        let ready = observe()?;
+        let remaining = within_startup(elapsed(), cancelled())?;
+        if ready {
+            return Ok(());
+        }
+        wait(remaining.min(ACK_POLL_INTERVAL));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReportPhase {
     Starting,
@@ -244,6 +275,98 @@ mod tests {
     use super::*;
     use crate::contract::{LIFECYCLE_TIMEOUT, continuing_pending_start};
     use std::cell::Cell;
+
+    #[test]
+    fn startup_observation_waits_for_fresh_state_without_resetting_budget() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let reads = Cell::new(0);
+        assert_eq!(
+            await_observation_with(
+                || elapsed.get(),
+                || false,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(reads.get() == 3)
+                },
+                |delay| elapsed.set(elapsed.get() + delay),
+            ),
+            Ok(())
+        );
+        assert_eq!(reads.get(), 3);
+        assert_eq!(elapsed.get(), ACK_POLL_INTERVAL * 2);
+    }
+
+    #[test]
+    fn startup_observation_never_retries_errors_or_late_success() {
+        let waits = Cell::new(0);
+        assert_eq!(
+            await_observation_with(
+                || Duration::ZERO,
+                || false,
+                || Err(ServiceError::ConfigurationConflict),
+                |_| waits.set(waits.get() + 1),
+            ),
+            Err(ServiceError::ConfigurationConflict)
+        );
+        assert_eq!(waits.get(), 0);
+        let elapsed = Cell::new(Duration::ZERO);
+        assert!(
+            await_observation_with(
+                || elapsed.get(),
+                || false,
+                || {
+                    elapsed.set(LIFECYCLE_TIMEOUT);
+                    Ok(true)
+                },
+                |_| panic!("late success must fail"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_observation_deadline_and_cancellation_close_admission() {
+        let elapsed = Cell::new(LIFECYCLE_TIMEOUT - Duration::from_millis(1));
+        let reads = Cell::new(0);
+        assert!(
+            await_observation_with(
+                || elapsed.get(),
+                || false,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(false)
+                },
+                |delay| {
+                    assert_eq!(delay, Duration::from_millis(1));
+                    elapsed.set(elapsed.get() + delay);
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(reads.get(), 1);
+        let cancelled = Cell::new(false);
+        assert_eq!(
+            await_observation_with(
+                || Duration::ZERO,
+                || cancelled.get(),
+                || {
+                    cancelled.set(true);
+                    Ok(true)
+                },
+                |_| panic!("cancelled observation cannot wait"),
+            ),
+            Err(ServiceError::WorkerFailed)
+        );
+        assert!(
+            await_observation_with(
+                || Duration::ZERO,
+                || true,
+                || panic!("no read after cancellation"),
+                |_| panic!("no wait"),
+            )
+            .is_err()
+        );
+    }
 
     #[derive(Debug, Eq, PartialEq)]
     enum SyntheticNativeError {

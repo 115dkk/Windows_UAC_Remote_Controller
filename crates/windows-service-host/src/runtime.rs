@@ -181,7 +181,7 @@ fn run(
     }
     // Establish this service-owned process's narrow observation contract only
     // after original SCM Running/no-controls, before key opening and Ready.
-    ffi::provision_current_process_observer().map_err(|error| error.at_startup(7))?;
+    ffi::provision_current_process_observer(startup_began).map_err(|error| error.at_startup(7))?;
     // This private disposition is produced only here by the actual key API,
     // never supplied by a renderer, file, phone or caller freshness boolean.
     enum IdentityOrigin {
@@ -252,10 +252,6 @@ fn run(
                 events
                     .send(WorkerEvent::Progress)
                     .map_err(|_| ServiceError::WorkerFailed)?;
-                append(
-                    &mut journal,
-                    ActivityEvent::Service(ServiceOutcome::Started),
-                )?;
                 // Passive fixed-slot inspection only, never a startup probe. Failure/full
                 // storage disables this diagnostic without bypassing identity/registry init.
                 PROBE_REQUESTS.prepare(
@@ -270,6 +266,10 @@ fn run(
                 if cancellation_requested(stop) {
                     return Ok(());
                 }
+                append(
+                    &mut journal,
+                    ActivityEvent::Service(ServiceOutcome::Started),
+                )?;
                 if let Some(reason) = session.activate_pairing(ready).map_err(session_error)? {
                     // Fixed kind only; the reason itself stays out of the journal.
                     append(
@@ -508,6 +508,11 @@ fn journal_prompt_progress(
     }
     if progress.observed() {
         append(journal, ActivityEvent::Request(RequestOutcome::Observed))?;
+        if progress.delivery_failed() {
+            // This specific observed request reached no eligible connected
+            // phone. Do not emit this on periodic clocks/renewals/idle polls.
+            append(journal, ActivityEvent::Failure(FailureKind::DeliveryFailed))?;
+        }
     }
     if progress.queued_opened() != 0 {
         append(

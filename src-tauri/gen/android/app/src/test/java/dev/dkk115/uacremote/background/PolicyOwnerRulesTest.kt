@@ -194,7 +194,7 @@ class PolicyOwnerRulesTest {
             assertFalse(ControllerLibraryPolicy.permitsInitialProperties(listOf(name)))
         }
         assertEquals("uac_android_controller", ControllerLibraryPolicy.LIBRARY)
-        assertEquals(12u, ControllerLibraryPolicy.ABI_VERSION)
+        assertEquals(13u, ControllerLibraryPolicy.ABI_VERSION)
     }
 
     @Test fun loaderPropertyInspectionIsBounded() {
@@ -221,6 +221,13 @@ class PolicyOwnerRulesTest {
         assertEquals("invalid_policy", PolicyStatus.INVALID_POLICY.wireValue)
         assertEquals("storage_unavailable", PolicyStatus.STORAGE_UNAVAILABLE.wireValue)
         assertEquals("history_unavailable", PolicyStatus.HISTORY_UNAVAILABLE.wireValue)
+    }
+
+    @Test fun pcRemovalAcceptsOnlyOneBoundedPublicIdentity() {
+        assertTrue(PolicyOwnerBounds.validPcIdentifier("ab".repeat(32)))
+        for (invalid in listOf("", "ab".repeat(31), "AB".repeat(32), "../file", "g".repeat(64))) {
+            assertFalse(PolicyOwnerBounds.validPcIdentifier(invalid))
+        }
     }
 
     @Test fun historyResultSizeHasItsOwnBoundWithoutRelaxingPolicyInput() {

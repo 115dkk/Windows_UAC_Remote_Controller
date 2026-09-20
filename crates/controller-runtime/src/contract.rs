@@ -267,6 +267,7 @@ pub enum ActivityKind {
     Denied,
     Failure,
     PcCompleted,
+    DeliveryFailed,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]

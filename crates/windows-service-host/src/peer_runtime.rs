@@ -1580,7 +1580,10 @@ impl<'key> ServiceSession<'key> {
                             .iter()
                             .any(|(device, _, _)| *device == entry.device_id()),
                         connected: self.peers.iter().any(|peer| {
-                            peer.state.binding.device == entry.device_id() && peer.state.live()
+                            peer.state.binding.device == entry.device_id()
+                                && peer.ready
+                                && peer.clock_served
+                                && peer.state.live()
                         }),
                         enrolled_unix_secs: None,
                     })

@@ -58,6 +58,10 @@ impl Port {
 }
 
 impl OwnerPort for Port {
+    fn remove_peer(&self, _pc_id: String) -> Result<PeerRemovalReply, AppIssue> {
+        self.calls.borrow_mut().push("remove_peer");
+        Ok(PeerRemovalReply::Ok {})
+    }
     fn requests(&self) -> Result<RequestsReply, AppIssue> {
         self.calls.borrow_mut().push("requests");
         Ok(RequestsReply::Ok {
@@ -365,4 +369,24 @@ fn stopped_owner_rejects_mutations_but_ready_owner_returns_committed_policy() {
     let cleared = snapshot(&port, OwnerOperation::ClearHistory).unwrap();
     assert_eq!(cleared.data_availability.activity, Availability::Available);
     assert_eq!(port.count("clear"), 1);
+}
+
+#[test]
+fn local_pc_removal_needs_the_phone_owner_but_no_connected_pc() {
+    let port = Port::new(&[ready()]);
+    let view = snapshot(&port, OwnerOperation::RemovePeer("ab".repeat(32))).unwrap();
+    assert_eq!(port.count("remove_peer"), 1);
+    assert!(view.issue.is_none());
+    let stopped_port = Port::new(&[stopped()]);
+    assert!(
+        snapshot(&stopped_port, OwnerOperation::RemovePeer("ab".repeat(32)))
+            .unwrap()
+            .issue
+            .is_some()
+    );
+    assert_eq!(stopped_port.count("remove_peer"), 0);
+    for malformed in ["AB".repeat(32), "ab".repeat(31), "../path".into()] {
+        assert!(snapshot(&port, OwnerOperation::RemovePeer(malformed)).is_err());
+    }
+    assert_eq!(port.count("remove_peer"), 1);
 }

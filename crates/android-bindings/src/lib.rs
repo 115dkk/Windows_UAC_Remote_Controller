@@ -21,6 +21,7 @@ mod local_keys;
 mod native_clock;
 mod native_log;
 mod pairing;
+mod peer_removal;
 mod request_projection;
 mod startup_diagnostics;
 mod transport;
@@ -330,7 +331,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    12
+    13
 }
 
 #[uniffi::export]

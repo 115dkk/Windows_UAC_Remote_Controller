@@ -462,6 +462,10 @@ struct Fixture {
 /// admission, so a bare lock-and-unwrap races with maintenance that the
 /// preceding policy save or peer event has just woken (run 34624753189).
 fn admitted_history_len(fixture: &Fixture) -> usize {
+    admitted_history_outcomes(fixture).len()
+}
+
+fn admitted_history_outcomes(fixture: &Fixture) -> Vec<notification_policy::RequestOutcome> {
     let end = Instant::now() + LIMIT;
     loop {
         match fixture.controller.enter() {
@@ -475,7 +479,9 @@ fn admitted_history_len(fixture: &Fixture) -> usize {
                     .expect("an admitted owner has its inbox attached")
                     .history()
                     .unwrap()
-                    .len();
+                    .iter()
+                    .map(|record| record.outcome())
+                    .collect();
             }
             Err(BridgeError::Busy) if Instant::now() < end => std::thread::yield_now(),
             Err(error) => panic!("no admission for the history read: {error:?}"),
@@ -658,73 +664,121 @@ fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one
     let _serial = crate::tests::SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let fixture = fixture();
-    let peer = fixture.connect();
-    let (event, binding) = opened(1);
-    peer.send(event);
-    let view = fixture.projection();
-    let selection = fixture
-        .controller
-        .check_pending_request(view.clone())
-        .unwrap();
-    let preview = view.preview(fixture.platform.observed()).unwrap();
-    assert!(preview.has_details);
-    assert_eq!(preview.pc_identity_hint, "070707070707");
-    let plan = fixture.controller.begin_approval(selection).unwrap();
-    let attempt = fixture.controller.claim_approval(plan.clone()).unwrap();
-    let signature: Signature = key(3).sign(&attempt.signing_bytes().unwrap());
-    let submission = fixture
-        .controller
-        .finish_approval(attempt, signature.to_der().as_bytes().to_vec())
-        .unwrap();
-    fixture.controller.retire_approval(plan).unwrap();
-    let _ = fixture
-        .controller
-        .request_approval_delivery(submission.clone())
-        .unwrap();
-    let received = peer.wait(true).unwrap();
-    assert_eq!(received.statement().binding(), binding);
-    assert_eq!(received.statement().purpose(), DecisionPurpose::Approve);
-    received
-        .verify(
-            &DecisionPublicKey::from_sec1_bytes(
-                key(3).verifying_key().to_encoded_point(false).as_bytes(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    assert_eq!(admitted_history_len(&fixture), 0);
-    peer.send(PcEvent::Resolved {
-        binding,
-        issued_at: ServiceTick::from_nanos_since_epoch(0),
-        outcome: RequestResolution::Denied,
-    });
-    let end = Instant::now() + LIMIT;
-    for _ in 0..64 {
-        let notice = fixture
-            .notices
-            .recv_timeout(end.saturating_duration_since(Instant::now()))
-            .unwrap();
-        if matches!(notice, Notice::Progress) && view.is_revoked() {
-            break;
-        }
-    }
-    assert!(view.is_revoked());
-    assert_eq!(admitted_history_len(&fixture), 1);
-    assert!(
+    for (terminal, expected) in [
+        (
+            RequestResolution::Approved,
+            notification_policy::RequestOutcome::ApprovedByPc,
+        ),
+        (
+            RequestResolution::Denied,
+            notification_policy::RequestOutcome::DeniedByPc,
+        ),
+        (
+            RequestResolution::Failed,
+            notification_policy::RequestOutcome::FailedByPc,
+        ),
+    ] {
+        let fixture = fixture();
+        let peer = fixture.connect();
+        let (event, binding) = opened(1);
+        peer.send(event);
+        let old_view = fixture.projection();
         fixture
             .controller
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .pending_outcomes()
-            .unwrap()
-            .is_empty()
-    );
+            .refresh_native_request(old_view.clone())
+            .unwrap();
+        let view = fixture.projection();
+        assert!(old_view.is_revoked());
+        assert_eq!(old_view.window(), view.window());
+        assert!(fixture.controller.refresh_native_request(old_view).is_err());
+        let selection = fixture
+            .controller
+            .check_pending_request(view.clone())
+            .unwrap();
+        let preview = view.preview(fixture.platform.observed()).unwrap();
+        assert!(preview.has_details);
+        assert_eq!(preview.pc_identity_hint, "070707070707");
+        let plan = fixture.controller.begin_approval(selection).unwrap();
+        let attempt = fixture.controller.claim_approval(plan.clone()).unwrap();
+        let signature: Signature = key(3).sign(&attempt.signing_bytes().unwrap());
+        let submission = fixture
+            .controller
+            .finish_approval(attempt, signature.to_der().as_bytes().to_vec())
+            .unwrap();
+        fixture.controller.retire_approval(plan).unwrap();
+        let _ = fixture
+            .controller
+            .request_approval_delivery(submission.clone())
+            .unwrap();
+        let received = peer.wait(true).unwrap();
+        assert_eq!(received.statement().binding(), binding);
+        assert_eq!(received.statement().purpose(), DecisionPurpose::Approve);
+        received
+            .verify(
+                &DecisionPublicKey::from_sec1_bytes(
+                    key(3).verifying_key().to_encoded_point(false).as_bytes(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(admitted_history_len(&fixture), 0);
+        peer.send(PcEvent::Resolved {
+            binding,
+            issued_at: ServiceTick::from_nanos_since_epoch(0),
+            outcome: terminal,
+        });
+        let end = Instant::now() + LIMIT;
+        for _ in 0..64 {
+            let notice = fixture
+                .notices
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if matches!(notice, Notice::Progress) && view.is_revoked() {
+                break;
+            }
+        }
+        assert!(view.is_revoked());
+        assert_eq!(admitted_history_outcomes(&fixture), vec![expected]);
+        assert!(
+            fixture
+                .controller
+                .state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_outcomes()
+                .unwrap()
+                .is_empty()
+        );
+        fixture.cleanup();
+        drop(peer);
+    }
+}
+
+#[test]
+fn local_forget_removes_an_offline_pc_without_transport_or_signing() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture(); // Deliberately never connect a carrier.
+    for invalid in [String::new(), "GG".repeat(32), "00".repeat(32)] {
+        assert!(!fixture.controller.forget_pc(invalid).unwrap());
+    }
+    assert!(fixture.controller.forget_pc("07".repeat(32)).unwrap());
+    assert!(!fixture.controller.forget_pc("07".repeat(32)).unwrap());
+    {
+        let _admission = fixture.controller.enter().unwrap();
+        assert_eq!(
+            fixture
+                .controller
+                .with_inbox(|owner| Ok(owner.peer_associations().unwrap().entries().count()))
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(fixture.platform.sign_calls.load(Ordering::Acquire), 0);
     fixture.cleanup();
-    drop(peer);
 }
 
 #[test]

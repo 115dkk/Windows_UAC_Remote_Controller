@@ -11,10 +11,37 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
   test(selected.id, async ({ page, gallery }, info) => {
     await gallery.open(selected);
     const fixture = selected.fixture;
+    if (fixture === 'desktop-connected') {
+      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByText('휴대폰 연결됨', { exact: true })).toBeVisible();
+      await expect(page.getByText('PC 서비스', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toHaveCount(0);
+      await expect(page.getByText(/휴대폰 연결 여부는 별도로/)).toHaveCount(0);
+    }
+    if (fixture === 'phone-history-results') {
+      for (const name of ['요청 승인됨', '요청 거부됨', '요청 처리 실패', 'PC에서 요청 종료됨']) {
+        await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+      }
+    }
+    if (fixture === 'phone-devices-offline') {
+      const trigger = page.getByRole('button', { name: '화면 예시 PC 연결 해제', exact: true });
+      await trigger.click();
+      const dialog = page.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?', exact: true });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('button', { name: '취소', exact: true })).toBeFocused();
+      await gallery.capture('offline-removal-confirmation', 'CLIENT/SYNTHETIC · offline local PC registration removal confirmation');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    }
     if (fixture === 'phone-devices-pairing' || fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
       const phone = fixture === 'phone-devices-pairing';
       const qr = page.getByRole('button', { name: phone ? 'PC의 QR 코드 촬영' : 'QR 코드 보기', exact: true });
       const usb = page.getByRole('button', { name: 'USB로 연결', exact: true });
+      await expect(qr).toHaveClass(/\bsecondary\b/);
+      await expect(usb).toHaveClass(/\bsecondary\b/);
+      expect(await qr.evaluate(node => getComputedStyle(node).backgroundColor))
+        .toBe(await usb.evaluate(node => getComputedStyle(node).backgroundColor));
       const a = await qr.boundingBox(), b = await usb.boundingBox();
       expect(a).not.toBeNull(); expect(b).not.toBeNull();
       const rootSize = await page.evaluate(() => Number.parseFloat(getComputedStyle(document.documentElement).fontSize));
@@ -92,7 +119,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(1);
     }
     if (fixture === 'desktop-running') {
-      await expect(page.getByRole('heading', { name: '서비스 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
       await expect(page.getByText('요청 전송 준비 안 됨', { exact: true })).toBeVisible();
       await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toBeVisible();
       await expect(page.getByText('요청 전송 준비됨', { exact: true })).toHaveCount(0);
@@ -112,7 +139,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       }
     }
     if (fixture === 'desktop-history') {
-      await expect(page.getByRole('heading', { name: '서비스 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
     }
@@ -328,7 +355,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
       await expect(trigger).toBeFocused();
-      await expect(page.getByRole('heading', { name: '서비스 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
       await gallery.capture('remove-feature-cancelled', 'Escape 취소와 초점 복귀 · 제거 명령 실행 없음');
     }
 

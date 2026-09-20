@@ -5,11 +5,12 @@ use controller_runtime::{
 };
 
 use super::{
-    HistoryReply, OwnerOperation, PolicyReply, RequestActionReply, RequestReviewReply,
-    RequestsReply, ServiceControlReply, mobile_issue,
+    HistoryReply, OwnerOperation, PeerRemovalReply, PolicyReply, RequestActionReply,
+    RequestReviewReply, RequestsReply, ServiceControlReply, mobile_issue, peer_removal_issue,
 };
 
 pub(super) trait OwnerPort {
+    fn remove_peer(&self, pc_id: String) -> Result<PeerRemovalReply, AppIssue>;
     fn service(&self) -> Result<PhoneServiceView, AppIssue>;
     fn readiness(&self) -> Result<MobileReadiness, AppIssue>;
     fn policy(&self) -> Result<PolicyReply, AppIssue>;
@@ -64,6 +65,20 @@ pub(super) fn snapshot(
     let mut cleared_history = None;
     match operation {
         OwnerOperation::Read => {}
+        OwnerOperation::RemovePeer(pc_id) => {
+            if pc_id.len() != 64
+                || !pc_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(peer_removal_issue());
+            }
+            if !before.as_ref().is_ok_and(|view| view.policy_owner_ready)
+                || !matches!(port.remove_peer(pc_id), Ok(PeerRemovalReply::Ok {}))
+            {
+                operation_issue = Some(peer_removal_issue());
+            }
+        }
         OwnerOperation::Decide(locator, decision) => {
             controller_runtime::check_request_locator(&locator)?;
             if before.as_ref().is_ok_and(|view| view.policy_owner_ready) {
@@ -151,6 +166,7 @@ pub(super) fn snapshot(
             if requests.catalog.status == controller_runtime::RequestCatalogState::Ready {
                 value.data_availability.devices = Availability::Available;
                 value.devices = requests.devices;
+                value.can_unpair = !value.devices.is_empty();
                 value.data_availability.requests = Availability::Available;
                 value.requests = requests.requests;
             }
@@ -176,6 +192,7 @@ pub(super) fn snapshot(
     value.phone_service = Some(current);
     if !current.policy_owner_ready {
         value.devices.clear();
+        value.can_unpair = false;
         value.data_availability.devices = Availability::Unavailable;
         value.policy = None;
         value.activity.clear();

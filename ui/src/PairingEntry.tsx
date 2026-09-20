@@ -19,7 +19,7 @@ export function PairingEntry({ snapshot, disabled, onOpenScanner, onOpenUsb, sca
   return <section className="surface pairing-entry" aria-labelledby={heading}>
     <div className="service-heading-row"><Icon name="pc" /><h2 id={heading}>{hasNoPairedPc(snapshot) ? ko.noComputers : ko.pairComputer}</h2></div>
     <p id={description} className="supporting-text">{ko.pairingGuide}</p>
-    <button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button primary"
+    <button ref={scannerButtonRef} data-pairing-scanner="open" type="button" className="button secondary"
       disabled={disabled || !canScan} aria-describedby={`${description}${canScan ? '' : ` ${unavailable}`}`}
       onClick={onOpenScanner}>{ko.openPairingScanner}</button>
     {onOpenUsb && <button type="button" className="button secondary" disabled={disabled || !canScan} onClick={onOpenUsb}>{tr('USB로 연결')}</button>}

@@ -175,7 +175,7 @@ export const ko = {
 
 export const serviceStateText: Record<ServiceState, string> = {
   stopped: '휴대폰 승인 꺼짐', start_pending: '휴대폰 승인 켜는 중', stop_pending: '휴대폰 승인 끄는 중',
-  running: '휴대폰 승인 켜짐', continue_pending: '휴대폰 승인 다시 켜는 중', pause_pending: '휴대폰 승인 일시 정지 중',
+  running: '승인기 실행 중', continue_pending: '휴대폰 승인 다시 켜는 중', pause_pending: '휴대폰 승인 일시 정지 중',
   paused: '휴대폰 승인 일시 정지됨',
 };
 export const phoneServiceStateText: Record<PhoneServiceView['state'], string> = {
@@ -216,10 +216,11 @@ export const alertModeText: Record<AlertMode, string> = {
   sound: '소리', vibrate_only: '진동만', silent: '무음',
 };
 export const activityText: Record<ActivityView['kind'], string> = {
-  connected: '기기 연결됨', disconnected: '기기 연결 해제됨', service_started: '휴대폰 승인 켜짐',
+  connected: '기기 연결됨', disconnected: '기기 연결 해제됨', service_started: '승인기 실행 중',
   service_stopped: '휴대폰 승인 꺼짐', expired: '요청 시간 만료', cancelled: '요청 취소됨',
   approved: '요청 승인됨', denied: '요청 거부됨', failure: '요청 처리 실패',
   pc_completed: 'PC에서 요청 종료됨',
+  delivery_failed: '요청 전송 실패',
 };
 export const weekdayOptions = [
   { bit: 1, short: '월', label: '월요일' }, { bit: 2, short: '화', label: '화요일' },

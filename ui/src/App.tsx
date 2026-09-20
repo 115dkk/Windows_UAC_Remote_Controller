@@ -85,7 +85,10 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
     else void controller.run({ kind: 'service', action });
   }
   function removeDevice(device: PairedDeviceView) {
-    setConfirmation({ title: ko.removeTitle, body: ko.removeBody, subject: device.name, confirmLabel: ko.removeDevice, onConfirm: () => { void controller.run({ kind: 'remove', deviceId: device.id }); } });
+    setConfirmation({ title: phone ? tr('이 PC의 등록을 휴대폰에서 삭제하시겠습니까?') : ko.removeTitle,
+      body: phone ? tr('이 휴대폰의 PC 등록만 삭제합니다. PC에 연결할 필요는 없습니다. 다시 사용하려면 QR 또는 USB로 등록하십시오.') : ko.removeBody,
+      subject: device.name, confirmLabel: ko.removeDevice,
+      onConfirm: () => { void controller.run({ kind: 'remove', deviceId: device.id }); } });
   }
   function clearActivity() {
     setConfirmation({ title: ko.clearTitle, body: ko.clearBody, confirmLabel: ko.clearActivity, onConfirm: () => { void controller.run({ kind: 'clear' }); } });

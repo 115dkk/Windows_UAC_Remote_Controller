@@ -190,6 +190,19 @@ impl IntakeOwner {
                     && !peer.stop.is_cancelled()
             })
     }
+    pub(crate) fn retire_association(&self, reference: PeerAssociationRef) {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for peer in &inner.peers {
+            if peer.reference == reference {
+                peer.active.store(false, Ordering::Release);
+                peer.connected.store(false, Ordering::Release);
+                peer.stop.cancel();
+            }
+        }
+        drop(inner);
+        self.native_progress_pending.store(true, Ordering::Release);
+        self.wake();
+    }
     pub(crate) fn spawn_dial(
         &self,
         request: crate::connectivity::DialRequest,

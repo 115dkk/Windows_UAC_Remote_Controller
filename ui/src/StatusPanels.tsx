@@ -7,6 +7,7 @@ import { ko, serviceActionText, serviceStateText } from './messages';
 import { tr } from './i18n';
 import { displayText } from './displayText';
 import { RelayStatusLine } from './RelayStatusLine';
+import { useConnectionDisplay } from './useConnectionDisplay';
 
 export function EmptyState({ icon, title, description, children }: {
   icon: IconName; title: string; description: string; children?: ReactNode;
@@ -23,17 +24,21 @@ export function ServicePanel({ snapshot, disabled, onAction }: {
     && snapshot.issue.message === actionIssue.message && snapshot.issue.nextAction === actionIssue.nextAction;
   const serviceTitle = !service ? ko.serviceUnknown : !service.installed ? ko.serviceMissing
     : service.state ? serviceStateText[service.state] : ko.serviceUnknown;
+  const connectionKnown = service?.state === 'running' && snapshot.dataAvailability.devices === 'available';
+  const connected = useConnectionDisplay(connectionKnown ? snapshot.devices.some(device => device.connected) : null,
+    snapshot.devices.map(device => `${device.id}:${device.revision}`).sort().join('|'));
+  const connectionText = connected === true ? tr('휴대폰 연결됨') : connected === false ? tr('휴대폰 연결 안 됨') : tr('휴대폰 연결 상태 확인 불가');
   const description = !service ? ko.serviceUnknownBody : !service.installed ? ko.serviceMissingBody
-    : service.state === 'running' ? (service.remoteRequestsReady ? ko.remoteReadyBody : ko.serviceRunningBody)
+    : service.state === 'running' ? null
       : service.state === 'stopped' ? (service.allowedActions.includes('start') ? ko.serviceStoppedBody : ko.serviceUnknownBody)
       : service.state === 'paused' ? ko.servicePausedBody : service.state ? ko.servicePendingBody : ko.serviceUnknownBody;
   const actions: readonly ServiceAction[] = ['install', 'start', 'restart', 'stop', 'uninstall'];
   const primary = actions.find((action) => service?.allowedActions.includes(action) && (action === 'install' || action === 'start'));
   return <>
     <section className="surface service-card" aria-labelledby="service-heading">
-      <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><p className="eyebrow">{ko.serviceLabel}</p><h2 id="service-heading">{serviceTitle}</h2></div></div>
-      {service && <p className={`state-line ${service.remoteRequestsReady ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{service.remoteRequestsReady ? ko.remoteReady : ko.remoteNotReady}</p>}
-      {!service?.remoteRequestsReady && <p className="service-description">{description}</p>}
+      <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><h2 id="service-heading">{serviceTitle}</h2></div></div>
+      {service && <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connectionText}</p>}
+      {description && <p className="service-description">{description}</p>}
       <RelayStatusLine snapshot={snapshot} />
       {actionIssue && !issueAlreadyGlobal && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(actionIssue.message)}</p>{actionIssue.nextAction && <p className="supporting-text">{tr(actionIssue.nextAction)}</p>}</div></section>}
       <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName || '—')}</bdi></dd></div></dl>

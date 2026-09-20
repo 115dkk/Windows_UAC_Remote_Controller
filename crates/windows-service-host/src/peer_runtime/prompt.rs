@@ -287,6 +287,9 @@ impl PromptProgress {
     pub const fn queued_opened(self) -> usize {
         self.queued_opened
     }
+    pub const fn delivery_failed(self) -> bool {
+        self.observed && self.queued_opened == 0
+    }
 
     pub const fn result(self) -> Option<PromptResult> {
         self.result
@@ -446,6 +449,13 @@ fn is_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_phone_is_one_delivery_failure_not_a_periodic_poll_event() {
+        assert!(super::PromptProgress::opened(0, None).delivery_failed());
+        assert!(!super::PromptProgress::opened(1, None).delivery_failed());
+        assert!(!super::PromptProgress::default().delivery_failed());
+        assert!(!super::PromptProgress::resolved(super::PromptResult::Cancelled).delivery_failed());
+    }
     use super::*;
     use windows_prompt_probe::{ProbeCounts, PromptContentObservation, PromptLabel};
 

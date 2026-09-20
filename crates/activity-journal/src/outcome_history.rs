@@ -84,8 +84,8 @@ impl Default for OutcomeHistoryLimits {
 
 /// Immutable projection of one producer outcome. It intentionally omits request
 /// body, binding, device names, command lines, keys and authentication claims.
-/// `CompletedByPc` is preserved exactly: it is NOT a diagnostic `WindowsApplied`,
-/// nor does it distinguish approval, denial or another PC completion reason.
+/// New rows preserve the authenticated PC resolution. Legacy `CompletedByPc`
+/// remains unknown; it cannot be upgraded to approval from a local phone choice.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct OutcomeHistoryRecord {
     delivery_id: [u8; 32],
@@ -353,6 +353,9 @@ const fn outcome_tag(outcome: RequestOutcome) -> u8 {
         RequestOutcome::ExpiredByPc => 2,
         RequestOutcome::ExpiredLocally => 3,
         RequestOutcome::CompletedByPc => 4,
+        RequestOutcome::ApprovedByPc => 5,
+        RequestOutcome::DeniedByPc => 6,
+        RequestOutcome::FailedByPc => 7,
     }
 }
 
@@ -362,6 +365,9 @@ const fn outcome_from_tag(tag: u8) -> Result<RequestOutcome, OutcomeHistoryError
         2 => Ok(RequestOutcome::ExpiredByPc),
         3 => Ok(RequestOutcome::ExpiredLocally),
         4 => Ok(RequestOutcome::CompletedByPc),
+        5 => Ok(RequestOutcome::ApprovedByPc),
+        6 => Ok(RequestOutcome::DeniedByPc),
+        7 => Ok(RequestOutcome::FailedByPc),
         _ => Err(OutcomeHistoryError::MalformedEncoding),
     }
 }

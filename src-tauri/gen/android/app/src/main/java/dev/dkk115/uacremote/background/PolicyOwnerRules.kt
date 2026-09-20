@@ -10,15 +10,18 @@ internal enum class PolicyStatus(val wireValue: String) {
 internal sealed class PolicyReply {
     class Committed(val policyJson: String) : PolicyReply()
     class HistoryCommitted(val historyJson: String) : PolicyReply()
+    class PeerRemoved(val removed: Boolean) : PolicyReply()
     class Failed(val status: PolicyStatus) : PolicyReply()
     final override fun toString(): String = when (this) {
         is Committed -> "PolicyReply.Committed([redacted])"
         is HistoryCommitted -> "PolicyReply.HistoryCommitted([redacted])"
+        is PeerRemoved -> "PolicyReply.PeerRemoved($removed)"
         is Failed -> "PolicyReply.Failed($status)"
     }
 }
 
 internal object PolicyOwnerBounds {
+    fun validPcIdentifier(value: String): Boolean = value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
     const val MAX_POLICY_BYTES = 16 * 1024
     const val MAX_HISTORY_BYTES = 128 * 1024
     const val MAX_RAW_ARGUMENT_CHARS = MAX_POLICY_BYTES * 6 + 128
@@ -148,7 +151,7 @@ internal class PolicyOwnerLifecycle {
 /** Only property names are inspected; values are never logged or used as paths. */
 internal object ControllerLibraryPolicy {
     const val LIBRARY = "uac_android_controller"
-    const val ABI_VERSION = 12u
+    const val ABI_VERSION = 13u
 
     fun permitsInitialProperties(names: Iterable<String>): Boolean {
         var count = 0

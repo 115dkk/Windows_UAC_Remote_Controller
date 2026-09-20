@@ -253,8 +253,28 @@ pub(crate) enum OwnerOperation {
     Read,
     SavePolicy(String),
     ClearHistory,
+    RemovePeer(String),
     ControlService(controller_runtime::ServiceAction),
     Decide(String, controller_runtime::DecisionIntent),
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum PeerRemovalReply {
+    Ok {},
+    Busy {},
+    Unavailable {},
+    StorageUnavailable {},
+}
+
+#[cfg(any(target_os = "android", test))]
+fn peer_removal_issue() -> AppIssue {
+    AppIssue {
+        code: "peer_removal_unconfirmed",
+        message: "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.",
+        next_action: None,
+    }
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -460,6 +480,15 @@ struct NativeOwnerPort<'a>(
 
 #[cfg(target_os = "android")]
 impl snapshot::OwnerPort for NativeOwnerPort<'_> {
+    fn remove_peer(&self, pc_id: String) -> Result<PeerRemovalReply, AppIssue> {
+        self.0
+            .run_mobile_plugin_from_origin(
+                &self.1.native,
+                "removeControllerPeer",
+                serde_json::json!({"pcId":pc_id}),
+            )
+            .map_err(|_| peer_removal_issue())
+    }
     fn review(&self) -> Result<RequestReviewReply, AppIssue> {
         self.0
             .run_mobile_plugin_from_origin(&self.1.native, "controllerRequestReview", ())

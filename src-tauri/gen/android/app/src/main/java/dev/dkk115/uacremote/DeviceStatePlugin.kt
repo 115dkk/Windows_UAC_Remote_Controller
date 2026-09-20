@@ -90,6 +90,7 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
     @Command fun controllerPolicy(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::controllerPolicy)
     @Command fun controllerHistory(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::controllerHistory)
     @Command fun clearControllerHistory(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::clearControllerHistory)
+    @Command fun removeControllerPeer(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::removeControllerPeer)
     @Command fun saveControllerPolicy(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::saveControllerPolicy)
     @Command fun readiness(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::readiness)
     @Command fun openPairingScanner(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openPairingScanner)

@@ -45,6 +45,9 @@ internal class NativeRequestCoordinator(
     private val tickets = ConcurrentHashMap<ReadTicket, Unit>()
     private val requestAdmission = Any()
     private var actionCount = 0
+    private var presentationRefreshing = false // guarded by requestAdmission
+    private val notificationRefreshes = NotificationRefreshQueue<NativeRequestClaim>()
+    private val notificationRefreshQueued = AtomicBoolean(false)
     private var expiry: Runnable? = null
     private var lastFiredCutoff = 0uL
     private class ReadTicket(val callback: (NativeRequestReadReply) -> Unit, val details: Boolean) {
@@ -53,6 +56,8 @@ internal class NativeRequestCoordinator(
     }
 
     fun progress() {
+        notificationRefreshes.progress() // Actual native/time/lifecycle progress, not a Busy retry.
+        scheduleNotificationRefresh()
         maintenanceWanted.set(true)
         if (!stopped.get() && ready() && maintenanceQueued.compareAndSet(false, true)) {
             if (!enqueue {
@@ -80,7 +85,10 @@ internal class NativeRequestCoordinator(
         }
     }
     /** A previously rejected queue insertion, not a retry of a Busy operation. */
-    fun resumeQueued() { if (maintenanceWanted.get() && !maintenanceQueued.get()) progress() }
+    fun resumeQueued() {
+        if (maintenanceWanted.get() && !maintenanceQueued.get()) progress()
+        scheduleNotificationRefresh() // Only queue-insertion failures remain eligible.
+    }
 
     /**
      * What one failed maintenance pass costs. It used to cost the whole owner,
@@ -163,15 +171,20 @@ internal class NativeRequestCoordinator(
     }
 
     fun action(locator: String, action: NativeRequestAction, host: Activity?, route: NativeNotificationRoute?, callback: (NativeRequestActionResult) -> Unit) {
-        synchronized(requestAdmission) {
-            if (stopped.get() || !ready()) { actionReply(callback, NativeRequestActionResult.UNAVAILABLE); return }
-            if (actionCount >= 8) { actionReply(callback, NativeRequestActionResult.BUSY); return }
-            actionCount += 1
+        val rejected = synchronized(requestAdmission) {
+            if (stopped.get() || !ready()) NativeRequestActionResult.UNAVAILABLE
+            else if (presentationRefreshing || actionCount >= 8) NativeRequestActionResult.BUSY
+            else { actionCount += 1; null }
+        }
+        if (rejected != null) {
+            if (rejected == NativeRequestActionResult.BUSY) retainNotificationRefresh(route)
+            actionReply(callback, rejected); return
         }
         val claim = if (route == null) platform.requests.acquire(locator) else platform.requests.acquireNotification(route)
         if (claim == null) { releaseAction(); actionReply(callback, NativeRequestActionResult.STALE); return }
         if (!enqueue {
             var mainOwns = false
+            var dispatched = false
             try {
                 if (stopped.get() || !ready()) throw BridgeException.Closed()
                 val controller = owner() ?: throw BridgeException.Closed()
@@ -179,6 +192,7 @@ internal class NativeRequestCoordinator(
                 if (!NativeRequestIdentity.same(selected, claim.selection) || !platform.requests.current(claim)) throw BridgeException.RequestUnavailable()
                 if (action == NativeRequestAction.APPROVE && (!canApprove(selected) || claim.entry.phase != NativeRequestPhase.PENDING)) throw BridgeException.Busy()
                 if (action == NativeRequestAction.DENY) {
+                    dispatched = true
                     val admitted = denial(selected) { result ->
                         val phase = when (result) {
                             NativeDenialReply.PREPARED, NativeDenialReply.WAITING, NativeDenialReply.BUSY -> NativeRequestPhase.WAITING
@@ -191,6 +205,7 @@ internal class NativeRequestCoordinator(
                     }
                     actionReply(callback, if (admitted == NativeDenialReply.WAITING) NativeRequestActionResult.QUEUED else if (admitted == NativeDenialReply.BUSY) NativeRequestActionResult.BUSY else NativeRequestActionResult.UNAVAILABLE, claim.entry)
                 } else {
+                    dispatched = true
                     mainOwns = main.post {
                         try {
                             val app = application as? ControllerApplication
@@ -199,6 +214,7 @@ internal class NativeRequestCoordinator(
                             } else if (action == NativeRequestAction.DETAILS) {
                                 platform.requests.openReview(claim); changed(); actionReply(callback, NativeRequestActionResult.QUEUED, claim.entry)
                             } else if (!canApprove(selected) || claim.entry.phase != NativeRequestPhase.PENDING) {
+                                if (claim.entry.phase == NativeRequestPhase.PENDING) retainNotificationRefresh(route, claim)
                                 actionReply(callback, NativeRequestActionResult.BUSY)
                             } else {
                                 platform.requests.openReview(claim)
@@ -211,11 +227,78 @@ internal class NativeRequestCoordinator(
                     }
                     if (!mainOwns) actionReply(callback, NativeRequestActionResult.UNAVAILABLE)
                 }
-            } catch (_: BridgeException.Busy) { actionReply(callback, NativeRequestActionResult.BUSY) }
+            } catch (_: BridgeException.Busy) {
+                // Only a definite pre-dispatch rejection permits a new ticket.
+                // Unknown or partial admission never grants a presentation retry.
+                if (!dispatched) retainNotificationRefresh(route, claim)
+                actionReply(callback, NativeRequestActionResult.BUSY)
+            }
             catch (_: BridgeException.RequestUnavailable) { actionReply(callback, NativeRequestActionResult.STALE) }
+            catch (_: BridgeException.PresentationRefreshRequired) {
+                // A real clock/presentation invalidation asks for maintenance,
+                // never replays the consumed notification or action itself.
+                progress(); actionReply(callback, NativeRequestActionResult.STALE)
+            }
             catch (_: Exception) { actionReply(callback, NativeRequestActionResult.UNAVAILABLE) }
             finally { if (!mainOwns) { claim.close(); releaseAction() } }
-        }) { claim.close(); releaseAction(); actionReply(callback, NativeRequestActionResult.BUSY) }
+        }) {
+            retainNotificationRefresh(route, claim)
+            claim.close(); releaseAction(); actionReply(callback, NativeRequestActionResult.BUSY)
+        }
+    }
+
+    /** A failed notification tap may spend its OS one-shot selector. Retain only
+     * the SAME original handle for a fresh presentation, never repeat its action. */
+    private fun retainNotificationRefresh(route: NativeNotificationRoute?, original: NativeRequestClaim? = null) {
+        if (route == null || route.action == NativeRequestAction.DETAILS || stopped.get() || !ready()) return
+        val held = if (original == null) platform.requests.acquireNotification(route)
+            else platform.requests.acquire(original.locator)
+        if (held == null) return
+        if (held.entry.phase != NativeRequestPhase.PENDING ||
+            (original != null && held.entry !== original.entry) ||
+            !notificationRefreshes.offer(held.entry.key, held)) {
+            held.close(); return
+        }
+        scheduleNotificationRefresh()
+    }
+
+    private fun scheduleNotificationRefresh() {
+        if (stopped.get() || !ready() || !notificationRefreshes.eligible() ||
+            !notificationRefreshQueued.compareAndSet(false, true)) return
+        if (!enqueue {
+            val ticket = notificationRefreshes.take()
+            var busy = false
+            var publicationReserved = false
+            try {
+                if (ticket != null && !stopped.get() && ready() && platform.requests.current(ticket.value) &&
+                    ticket.value.entry.phase == NativeRequestPhase.PENDING) {
+                    // A new presentation changes the locator. Never invalidate a
+                    // queued original Activity callback, auth session or denial
+                    // delivery: wait for their actual admission/cleanup to end.
+                    publicationReserved = synchronized(requestAdmission) {
+                        if (actionCount != 0 || presentationRefreshing) false
+                        else { presentationRefreshing = true; true }
+                    }
+                    if (!publicationReserved || !canApprove(ticket.value.selection) || !canDeny(ticket.value.selection)) busy = true
+                    else {
+                        notificationRefreshes.attempted(ticket)
+                        val controller = owner() ?: throw BridgeException.Closed()
+                        controller.refreshNativeRequest(ticket.value.handle)
+                    }
+                }
+            } catch (_: BridgeException.Busy) { busy = true }
+            catch (_: BridgeException.RequestUnavailable) { }
+            catch (_: BridgeException.PresentationRefreshRequired) { /* Existing real invalidation queues rewarm. */ }
+            catch (failure: Exception) { maintenanceFailure(failure) }
+            finally {
+                if (publicationReserved) synchronized(requestAdmission) { presentationRefreshing = false }
+                if (ticket != null) notificationRefreshes.finish(ticket, busy)?.close()
+                notificationRefreshQueued.set(false)
+                changed()
+            }
+            // No self-retry. Actor queue release may run another eligible ticket;
+            // a native Busy ticket requires new progress and has a two-try cap.
+        }) notificationRefreshQueued.set(false)
     }
 
     private fun approvalResult(locator: String, result: NativeApprovalReply) {
@@ -256,6 +339,7 @@ internal class NativeRequestCoordinator(
     fun validReply(value: NativeRequestPayload): Boolean = !stopped.get() && ready() && platform.requests.validReply(value)
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        for (claim in notificationRefreshes.stop()) claim.close()
         main.post { expiry?.let { main.removeCallbacks(it) }; expiry = null }
         for (ticket in tickets.keys) finishRead(ticket, NativeRequestReadReply.Failed(NativeRequestActionResult.UNAVAILABLE))
         platform.stopRequests()
@@ -289,6 +373,10 @@ internal class NativeRequestCoordinator(
         }
         if (Looper.myLooper() == Looper.getMainLooper()) task.run() else main.post(task)
     }
-    private fun releaseAction() = synchronized(requestAdmission) { check(actionCount > 0); actionCount -= 1 }
+    private fun releaseAction() {
+        synchronized(requestAdmission) { check(actionCount > 0); actionCount -= 1 }
+        notificationRefreshes.progress() // Actual action callback ownership ended.
+        scheduleNotificationRefresh()
+    }
     override fun toString(): String = "NativeRequestCoordinator(single_actor_worker)"
 }

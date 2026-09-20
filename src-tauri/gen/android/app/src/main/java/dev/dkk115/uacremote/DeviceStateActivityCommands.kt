@@ -331,6 +331,34 @@ internal class DeviceStateActivityCommands(
         else owner.clearControllerHistory { result -> resolveHistory(invoke, result) }
     }
 
+    fun removeControllerPeer(invoke: Invoke) {
+        val pcId = try {
+            val raw = invoke.getRawArgs()
+            if (raw.length > 128) null else {
+                val input = JSONTokener(raw)
+                if (input.nextClean() != '{' || input.nextClean() != '"' || input.nextString('"') != "pcId" ||
+                    input.nextClean() != ':' || input.nextClean() != '"') null else {
+                    val value = input.nextString('"')
+                    if (input.nextClean() == '}' && input.nextClean() == '\u0000' && PolicyOwnerBounds.validPcIdentifier(value)) value else null
+                }
+            }
+        } catch (_: Exception) { null }
+        fun complete(reply: PolicyReply) {
+            activity.runOnUiThread {
+                val status = if (!binding.matches(activity, webView) || activity.isDestroyed || activity.isFinishing) "unavailable"
+                    else if (reply is PolicyReply.PeerRemoved && reply.removed) "ok"
+                    else if (reply is PolicyReply.Failed) reply.status.wireValue else "unavailable"
+                val result = JSObject()
+                result.put("status", status)
+                try { invoke.resolve(result) } catch (_: Exception) { }
+            }
+        }
+        if (pcId == null) { complete(PolicyReply.PeerRemoved(false)); return }
+        val owner = activity.application as? ControllerApplication
+        if (owner == null) complete(PolicyReply.Failed(PolicyStatus.UNAVAILABLE))
+        else owner.removeControllerPeer(pcId, ::complete)
+    }
+
     fun saveControllerPolicy(invoke: Invoke) {
         val policy = policyArgument(invoke.getRawArgs())
         if (policy == null) {
@@ -365,7 +393,7 @@ internal class DeviceStateActivityCommands(
                     result.put("status", "ok")
                     result.put("policyJson", reply.policyJson)
                 }
-                is PolicyReply.HistoryCommitted -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
+                is PolicyReply.HistoryCommitted, is PolicyReply.PeerRemoved -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
                 is PolicyReply.Failed -> result.put("status", reply.status.wireValue)
             }
             try { invoke.resolve(result) } catch (_: Exception) {
@@ -384,7 +412,7 @@ internal class DeviceStateActivityCommands(
                     result.put("status", "ok")
                     result.put("historyJson", reply.historyJson)
                 }
-                is PolicyReply.Committed -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
+                is PolicyReply.Committed, is PolicyReply.PeerRemoved -> result.put("status", PolicyStatus.UNAVAILABLE.wireValue)
                 is PolicyReply.Failed -> result.put("status", reply.status.wireValue)
             }
             try { invoke.resolve(result) } catch (_: Exception) {

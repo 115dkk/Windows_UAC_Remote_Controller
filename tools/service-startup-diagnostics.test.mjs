@@ -19,12 +19,16 @@ test('startup diagnostic parser accepts only bounded closed records', { skip: pr
       ('x' * 257)
     )
     $rejected = @($bad | ForEach-Object { if ($null -eq (ConvertFrom-UacStartupDiagnostic $_)) { 1 } })
-    @{ row=$valid; rejected=$rejected.Count } | ConvertTo-Json -Depth 4 -Compress
+    $phases = @('scm_status','scm_state','scm_process','scm_controls') | ForEach-Object {
+      (ConvertFrom-UacStartupDiagnostic ($good -replace 'phase=merge', ('phase=' + $_))).phase
+    }
+    @{ row=$valid; rejected=$rejected.Count; phases=@($phases) } | ConvertTo-Json -Depth 4 -Compress
   `;
   const result = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }));
   assert.equal(result.row.phase, 'merge');
   assert.equal(result.row.policyReason, 10);
   assert.equal(result.row.processId, 42);
   assert.equal(result.rejected, 7);
+  assert.deepEqual(result.phases, ['scm_status', 'scm_state', 'scm_process', 'scm_controls']);
   assert.deepEqual(Object.keys(result.row).sort(), ['schema', 'version', 'processId', 'startupStage', 'phase', 'category', 'nativeCode', 'policyReason'].sort());
 });

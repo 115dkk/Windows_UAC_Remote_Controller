@@ -10,6 +10,7 @@ import { PairingEntry } from './PairingEntry';
 import { hasNoPairedPc, hasPairedPc } from './phoneConnection';
 import { displayText, hasDirectionControls } from './displayText';
 import { tr } from './i18n';
+import { useConnectionDisplay } from './useConnectionDisplay';
 
 function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen }: {
   request: RequestView; disabled: boolean; onDecision: (requestId: string, decision: 'approve' | 'deny') => void;
@@ -46,10 +47,14 @@ interface RequestPanelProps {
 }
 
 function RequestContents({ snapshot, disabled, onDecision, readDetails }: RequestPanelProps) {
+  const connected = useConnectionDisplay(snapshot.requestCatalog?.status === 'ready'
+    ? snapshot.requestCatalog.connectedPeerCount > 0 : null,
+  `${snapshot.requestCatalog?.peerCount ?? 0}:${snapshot.devices.map(device => `${device.id}:${device.revision}`).sort().join('|')}`,
+  snapshot.phoneService?.state === 'local_settings_ready');
   if (snapshot.requestCatalog?.status === 'reconciling') return <EmptyState icon="request" title={ko.requestReconciling} description={ko.requestReconcilingBody} />;
   if (snapshot.dataAvailability.requests !== 'available') return <EmptyState icon="request" title={ko.requestUnavailable} description={ko.requestUnavailableBody} />;
   if (hasNoPairedPc(snapshot)) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
-  if (!snapshot.requests.length && snapshot.requestCatalog?.connectedPeerCount === 0) return <>
+  if (!snapshot.requests.length && connected === false) return <>
     <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />
     <section className="notice-box"><Icon name="pc" /><div><h2>{ko.requestDisconnected}</h2><p>{ko.requestDisconnectedBody}</p></div></section>
   </>;

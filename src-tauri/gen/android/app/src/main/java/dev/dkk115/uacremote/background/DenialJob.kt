@@ -81,7 +81,7 @@ internal class DenialJobs(
     private val owner: () -> MobileController?,
     private val enqueue: (() -> Unit) -> Boolean,
     private val ready: () -> Boolean,
-    private val ownerFailed: () -> Unit,
+    private val ownerFailed: (Throwable) -> Unit,
     private val cleanupProgress: () -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
@@ -193,18 +193,49 @@ internal class DenialJobs(
             }
         } catch (_: BridgeException.Busy) {
             notify(job, NativeDenialReply.WAITING) // Same scope/DER/cursor, no immediate retry.
-        } catch (_: BridgeException.DenialRejected) {
-            job.cancel(); registry.cleanInput(job, false); job.step = DenialStep.SETTLE
-            notify(job, NativeDenialReply.CANCELLED)
-            // Rust guarantees reserve's DenialRejected is pre-insertion. A
-            // post-insertion failure uses a fatal/native/storage category.
-            if (job.scope == null) remove(job) else wake(job)
         } catch (_: DenialSigningException) {
             job.cancel(); registry.cleanInput(job, false); job.step = DenialStep.SETTLE
             notify(job, NativeDenialReply.UNAVAILABLE); wake(job)
         } catch (failure: Throwable) {
             rethrowFatal(failure)
-            job.cancel(); registry.cleanInput(job, false); failCleanup(job); ownerFailed()
+            if (RequestActionFailurePolicy.requestLocal(failure)) {
+                try { rejectRequest(job) }
+                catch (cleanupFailure: Throwable) {
+                    rethrowFatal(cleanupFailure)
+                    failCleanup(job); ownerFailed(cleanupFailure)
+                }
+            } else {
+                try { job.cancel(); registry.cleanInput(job, false) }
+                catch (cleanupFailure: Throwable) { rethrowFatal(cleanupFailure) }
+                // Original exception survives into the actor's redacted trace.
+                // Uncertain cleanup stays attached; nothing is removed here.
+                failCleanup(job); ownerFailed(failure)
+            }
+        }
+    }
+
+    private fun rejectRequest(job: DenialJob) {
+        val reserving = job.step == DenialStep.RESERVE
+        val settling = job.step == DenialStep.SETTLE
+        job.cancel()
+        val cleaned = registry.cleanInput(job, false)
+        val next = DenialRejectionPolicy.cleanup(reserving, job.scope != null, job.scopeClosed,
+            job.attempt != null || job.operation != null || job.der != null || job.registrationUncertain,
+            cleaned && !job.cleanupFailed && registry.temporaryCleanupComplete())
+        when (next) {
+            DenialRejectionCleanup.RELEASE_EMPTY -> {
+                // The known pre-insertion rejection retained no native scope.
+                remove(job); notify(job, NativeDenialReply.CANCELLED)
+            }
+            DenialRejectionCleanup.SETTLE_ORIGINAL -> {
+                job.step = DenialStep.SETTLE
+                notify(job, NativeDenialReply.CANCELLED)
+                // One transition into cleanup, not an immediate retry loop if
+                // settlement itself returns another refresh/stale rejection.
+                // Later genuine native/external progress may resume that scope.
+                if (!settling) wake(job)
+            }
+            DenialRejectionCleanup.RETAIN_FAILED -> failCleanup(job)
         }
     }
 

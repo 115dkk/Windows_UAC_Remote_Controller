@@ -232,6 +232,21 @@ fn authenticated_pc_outcomes_withdraw_once_and_suppress_replays() {
             WithdrawalReason::CompletedByPc,
             RequestOutcome::CompletedByPc,
         ),
+        (
+            AuthenticatedPcOutcome::Approved,
+            WithdrawalReason::CompletedByPc,
+            RequestOutcome::ApprovedByPc,
+        ),
+        (
+            AuthenticatedPcOutcome::Denied,
+            WithdrawalReason::CompletedByPc,
+            RequestOutcome::DeniedByPc,
+        ),
+        (
+            AuthenticatedPcOutcome::Failed,
+            WithdrawalReason::CompletedByPc,
+            RequestOutcome::FailedByPc,
+        ),
     ] {
         let mut state = engine();
         let request = metadata(1, 0, 1000);

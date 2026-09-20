@@ -1079,10 +1079,11 @@ impl PhoneInbox {
                 match outcome {
                     RequestResolution::Cancelled => AuthenticatedPcOutcome::Cancelled,
                     RequestResolution::Expired => AuthenticatedPcOutcome::Expired,
-                    // Completed means terminal PC outcome, NOT successful approval.
-                    RequestResolution::Approved
-                    | RequestResolution::Denied
-                    | RequestResolution::Failed => AuthenticatedPcOutcome::Completed,
+                    // Preserve the authenticated PC result, not the phone's
+                    // local choice or successful signature submission.
+                    RequestResolution::Approved => AuthenticatedPcOutcome::Approved,
+                    RequestResolution::Denied => AuthenticatedPcOutcome::Denied,
+                    RequestResolution::Failed => AuthenticatedPcOutcome::Failed,
                 },
                 clock.reading,
             ),

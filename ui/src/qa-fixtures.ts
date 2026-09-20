@@ -54,6 +54,8 @@ export function qaCase(name: string): QaCase {
     case 'desktop-start-failed': return { page: 'status', snapshot: { ...relayStopped,
       service: { ...relayStopped.service!, actionIssue: { code: 'synthetic_start_failed', message: '작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.', nextAction: null } } } };
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
+    case 'desktop-connected': return { page: 'status', snapshot: { ...relayRunning,
+      devices: [{ id: 'synthetic-connected-phone', name: '화면 예시 휴대폰', revision: 1, connected: true, routePresent: true, lastSeenLabel: null }] } };
     case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
       service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-setup-missing': return { page: 'devices', snapshot: { ...windows,
@@ -105,6 +107,16 @@ export function qaCase(name: string): QaCase {
         { id: 'synthetic-history-1', timestampMillis: Date.UTC(2026, 8, 8, 12, 30), kind: 'pc_completed' },
         { id: 'synthetic-history-2', timestampMillis: Date.UTC(2026, 8, 8, 12, 20), kind: 'expired' },
       ],
+    } };
+    case 'phone-history-results': return { page: 'activity', snapshot: { ...phone,
+      activity: (['approved', 'denied', 'failure', 'pc_completed'] as const).map((kind, index) => ({
+        id: `synthetic-terminal-${index}`, timestampMillis: Date.UTC(2026, 8, 20, 2, 14 - index), kind,
+      })), canClearActivity: true,
+    } };
+    case 'phone-devices-offline': return { page: 'devices', snapshot: { ...phone,
+      devices: [{ id: 'ab'.repeat(32), name: '화면 예시 PC', revision: 1, connected: false, routePresent: true, lastSeenLabel: null }],
+      requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 },
+      canUnpair: true,
     } };
     case 'phone-history-empty': return { page: 'activity', snapshot: { ...phone,
       dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'available' },

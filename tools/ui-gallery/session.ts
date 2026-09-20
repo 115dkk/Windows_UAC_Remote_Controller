@@ -48,9 +48,9 @@ export class GallerySession {
   async open(selected: GalleryCase, locale: GalleryLocale = 'ko'): Promise<void> {
     await this.prepare(selected, locale);
     const heading = selected.fixture.startsWith('desktop-relay-') || ['desktop-devices', 'desktop-pairing-ready', 'desktop-setup-missing'].includes(selected.fixture) ? '휴대폰 관리'
-      : selected.fixture === 'phone-devices-pairing' ? '연결된 PC'
+      : selected.fixture.startsWith('phone-devices-') ? '연결된 PC'
       : selected.fixture === 'desktop-history' ? '활동 기록'
-        : selected.fixture === 'phone-history' || selected.fixture === 'phone-history-empty' ? '기록'
+        : selected.fixture.startsWith('phone-history') ? '기록'
         : selected.fixture.startsWith('desktop-') ? 'UAC 원격 승인'
           : selected.fixture === 'phone-settings' || selected.fixture === 'phone-notifications-denied' || selected.fixture.startsWith('phone-service-') ? '알림 시간' : '요청';
     await expect(this.page.getByRole('heading', { name: galleryText(locale, heading), exact: true, level: 1 })).toBeVisible();

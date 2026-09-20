@@ -39,7 +39,9 @@ pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_rel
 #[cfg(target_pointer_width = "64")]
 pub(crate) use process_observer::provision_current_process_observer;
 #[cfg(not(target_pointer_width = "64"))]
-pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
+pub(crate) fn provision_current_process_observer(
+    _startup_began: std::time::Instant,
+) -> Result<(), ServiceError> {
     Err(ServiceError::UnsupportedPlatform)
 }
 #[cfg(target_pointer_width = "64")]

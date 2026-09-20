@@ -11,7 +11,7 @@ export function RelayStatusLine({ snapshot }: { snapshot: AppSnapshot }) {
   const listening = !stopped && snapshot.service?.state === 'running'
     && relay?.mode === 'embedded' && relay.state === 'listening';
   const message = stopped ? '내장 중계 중지됨 · 수신 대기하지 않아요.'
-    : listening ? '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인해 주세요.'
+    : listening ? '내장 중계 수신 대기 중'
     : relay?.mode === 'external' && relay.state === 'external_configured' ? '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.'
     : relay?.mode === 'embedded' && relay.state === 'waiting_network' ? '내장 중계가 네트워크를 기다리고 있어요.'
     : relay?.mode === 'embedded' && relay.state === 'unavailable' ? '내장 중계를 준비하지 못했어요. PC의 네트워크와 중계 설정을 확인해 주세요.'

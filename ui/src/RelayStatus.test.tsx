@@ -29,7 +29,7 @@ describe('Windows relay observation and service recovery', () => {
 
   it.each([
     ['desktop-relay-stopped', '내장 중계 중지됨 · 수신 대기하지 않습니다.'],
-    ['desktop-relay-listening', '내장 중계 수신 대기 중 · 휴대폰 연결 여부는 별도로 확인하십시오.'],
+    ['desktop-relay-listening', '내장 중계 수신 대기 중'],
     ['desktop-relay-waiting', '내장 중계: 네트워크 연결 대기 중'],
     ['desktop-relay-unknown', '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.'],
     ['desktop-relay-external', '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았습니다.'],

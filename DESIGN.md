@@ -244,3 +244,12 @@ shrinks one spacing step. At 20rem time fields and action groups stack and phone
 navigation becomes two columns. These are app-owned adaptation intentions,
 unverified until root renders and exercises them; they do not change native
 minimum window bounds. Weekday chips wrap instead of shrinking below 48px.
+# 2026-09-20: status and result corrections
+
+Scoped existing-system delta: remove redundant PC-service eyebrow and relay
+disclaimer; preserve truthful phone-connection status and distinct committed PC
+outcomes. QR and USB are equal secondary actions, QR first; existing spacing
+tokens retained. Offline PC removal reuses the existing confirmation dialog,
+cancel-first focus and explicit local-only explanation. No new visual token,
+palette, typography or authorization owner. Connection display continuity is
+bounded to10seconds and never changes raw native action admission.

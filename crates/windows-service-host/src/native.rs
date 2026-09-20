@@ -143,6 +143,21 @@ pub(crate) fn verify_ui_helper_target(executable: &Path) -> Result<(), ServiceEr
 /// elevated or SYSTEM process. No service configuration is changed here.
 #[cfg(target_pointer_width = "64")]
 pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, ServiceError> {
+    let service = registered_service_for_probe(executable)?;
+    let observed = status(&service)?;
+    if observed.current_state != NativeState::Running
+        || observed.process_id != Some(std::process::id())
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(service)
+}
+
+/// Registration proof only, NOT permission to touch a process or open keys.
+/// The owning startup path separately awaits SCM's observed Running/self PID;
+/// every ordinary probe caller still uses the strict function above.
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn registered_service_for_probe(executable: &Path) -> Result<Service, ServiceError> {
     let service = open(
         &manager(false)?,
         ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::READ_CONTROL,
@@ -154,12 +169,6 @@ pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, Se
         .get_config_service_sid_info()
         .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
         != ServiceSidType::Unrestricted
-    {
-        return Err(ServiceError::ConfigurationConflict);
-    }
-    let observed = status(&service)?;
-    if observed.current_state != NativeState::Running
-        || observed.process_id != Some(std::process::id())
     {
         return Err(ServiceError::ConfigurationConflict);
     }

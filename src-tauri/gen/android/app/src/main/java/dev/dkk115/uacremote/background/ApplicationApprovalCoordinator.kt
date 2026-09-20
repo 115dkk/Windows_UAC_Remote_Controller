@@ -45,7 +45,7 @@ internal class ApplicationApprovalCoordinator(
     private val platform: AndroidNativePlatform,
     private val owner: () -> MobileController?,
     private val enqueue: (() -> Unit) -> Boolean,
-    private val ownerFailed: () -> Unit,
+    private val ownerFailed: (Throwable) -> Unit,
     private val denialBlocked: (NativeRequestSelection) -> Boolean,
     private val nativeProgress: () -> Unit,
 ) : Application.ActivityLifecycleCallbacks {
@@ -314,8 +314,15 @@ internal class ApplicationApprovalCoordinator(
             try { if (!session.cancelled.get()) action() }
             catch (failure: Throwable) {
                 rethrowFatal(failure)
-                cancel(session, NativeApprovalReply.Unavailable)
-                if (fatalOwnerFailure(failure)) ownerFailed()
+                val reply = when {
+                    failure is BridgeException.Busy -> NativeApprovalReply.Busy
+                    RequestActionFailurePolicy.requestLocal(failure) -> NativeApprovalReply.Cancelled
+                    else -> NativeApprovalReply.Unavailable
+                }
+                // Reject this attempt without retrying authentication/signing.
+                // Its exact session/handles still own all cancellation cleanup.
+                cancel(session, reply)
+                if (RequestActionFailurePolicy.approvalRetiresOwner(failure)) ownerFailed(failure)
             }
             finally { session.jobs.decrementAndGet(); cleanup(session) }
         }) {
@@ -394,7 +401,7 @@ internal class ApplicationApprovalCoordinator(
                 // must not create an endless immediate retry loop.
                 session.cleanupFailed.set(true)
                 session.cleanupQueued.set(false)
-                if (fatalOwnerFailure(failure)) ownerFailed()
+                if (RequestActionFailurePolicy.approvalCleanupRetiresOwner(failure)) ownerFailed(failure)
             } finally { nativeProgress() }
         }) session.cleanupQueued.set(false)
     }
@@ -490,9 +497,6 @@ internal class ApplicationApprovalCoordinator(
     }
     private fun keyFailure(error: DeviceKeyError?): NativeApprovalReply =
         if (error == DeviceKeyError.LOCK_MISSING) NativeApprovalReply.LockRequired else NativeApprovalReply.Unavailable
-    private fun fatalOwnerFailure(failure: Throwable): Boolean = failure is BridgeException &&
-        failure !is BridgeException.ApprovalRejected && failure !is BridgeException.Busy &&
-        failure !is BridgeException.InvalidPolicy && failure !is BridgeException.HistoryTimeUnavailable
 }
 
 internal object NativeRequestIdentity {

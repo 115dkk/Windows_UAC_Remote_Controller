@@ -76,7 +76,7 @@ export interface ActivityView {
   readonly id: string;
   readonly timestampMillis: number;
   readonly kind: 'connected' | 'disconnected' | 'service_started' | 'service_stopped'
-    | 'expired' | 'cancelled' | 'approved' | 'denied' | 'failure' | 'pc_completed';
+    | 'expired' | 'cancelled' | 'approved' | 'denied' | 'failure' | 'pc_completed' | 'delivery_failed';
 }
 export interface AppIssue { readonly code: string; readonly message: string; readonly nextAction: string | null }
 export interface PairingView {

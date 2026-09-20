@@ -40,6 +40,28 @@ impl MobileController {
         request: Arc<NativePendingRequest>,
     ) -> Result<NativeRequestSelection, BridgeError> {
         let _admission = self.enter()?;
+        self.check_pending_request_admitted(request)
+    }
+
+    /// Reissue display/action tickets after definite no-admission. This accepts
+    /// only the retained native object, never a renderer locator or new binding.
+    /// Original expiry, source, policy and single-consumption guards are unchanged.
+    pub fn refresh_native_request(
+        &self,
+        request: Arc<NativePendingRequest>,
+    ) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        let key = request.key();
+        let _ = self.check_pending_request_admitted(request)?;
+        self.publish_request_key(key, NativeRequestPresentation::Update, None)
+    }
+}
+
+impl MobileController {
+    fn check_pending_request_admitted(
+        &self,
+        request: Arc<NativePendingRequest>,
+    ) -> Result<NativeRequestSelection, BridgeError> {
         if !self
             .projections
             .lock()

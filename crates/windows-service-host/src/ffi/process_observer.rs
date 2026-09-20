@@ -12,7 +12,7 @@
 mod diagnostics;
 mod policy;
 
-use std::mem;
+use std::{mem, time::Instant};
 use windows::Win32::{
     Foundation::{HLOCAL, LocalFree},
     Security::{
@@ -210,9 +210,11 @@ fn recheck_subject(original: &TokenFacts) -> Result<(), ServiceError> {
     Ok(())
 }
 
-pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
+pub(crate) fn provision_current_process_observer(
+    startup_began: Instant,
+) -> Result<(), ServiceError> {
     let mut trace = diagnostics::Trace::new();
-    let result = provision(&mut trace);
+    let result = provision(&mut trace, startup_began);
     // Failure-only, once per service process; no retry or effect on admission.
     if let Err(error) = result {
         trace.report(error);
@@ -220,7 +222,7 @@ pub(crate) fn provision_current_process_observer() -> Result<(), ServiceError> {
     result
 }
 
-fn provision(trace: &mut diagnostics::Trace) -> Result<(), ServiceError> {
+fn provision(trace: &mut diagnostics::Trace, startup_began: Instant) -> Result<(), ServiceError> {
     observe!(
         trace,
         Context,
@@ -230,7 +232,28 @@ fn provision(trace: &mut diagnostics::Trace) -> Result<(), ServiceError> {
     let service = observe!(
         trace,
         Scm,
-        crate::native::running_service_for_probe(installation.executable())
+        crate::native::registered_service_for_probe(installation.executable())
+    )?;
+    // The entry callback has acknowledged SetServiceStatus, but SCM observation
+    // can still lag during automatic boot. Wait ONLY for StartPending or a missing PID with no
+    // controls. No process/ACL/key operation is permitted until Running names
+    // this exact process. All subsequent rechecks remain strict and nonretrying.
+    trace.enter(diagnostics::Phase::ScmStatus);
+    crate::startup_phase::await_startup_observation(
+        startup_began,
+        crate::entry::stop_requested,
+        || {
+            trace.enter(diagnostics::Phase::ScmStatus);
+            let status = service
+                .query_status()
+                .map_err(|error| crate::native::scm_error(ServiceOperation::QueryStatus, error))?;
+            observed_startup_state(
+                status.current_state,
+                status.process_id,
+                status.controls_accepted.is_empty(),
+                trace,
+            )
+        },
     )?;
     observe!(
         trace,
@@ -290,17 +313,21 @@ fn provision(trace: &mut diagnostics::Trace) -> Result<(), ServiceError> {
     // no protected/unprotected or label bits are set. The nonempty validated
     // DWORD-aligned ACL stays live unchanged through the synchronous call.
     trace.enter(diagnostics::Phase::SetDacl);
-    let result = unsafe {
-        SetSecurityInfo(
-            GetCurrentProcess(),
-            SE_KERNEL_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(aligned.as_ptr().cast::<ACL>()),
-            None,
-        )
-    };
+    let result = crate::startup_phase::run_platform_step(
+        startup_began,
+        crate::entry::stop_requested,
+        || unsafe {
+            SetSecurityInfo(
+                GetCurrentProcess(),
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(aligned.as_ptr().cast::<ACL>()),
+                None,
+            )
+        },
+    )?;
     if result.0 != 0 {
         return observe!(
             trace,
@@ -328,5 +355,73 @@ fn provision(trace: &mut diagnostics::Trace) -> Result<(), ServiceError> {
         trace,
         StartupAfter,
         recheck_startup(&installation, &service)
-    )
+    )?;
+    crate::startup_phase::run_platform_step(startup_began, crate::entry::stop_requested, || ())
+}
+
+fn observed_startup_state(
+    state: ServiceState,
+    process_id: Option<u32>,
+    no_controls: bool,
+    trace: &mut diagnostics::Trace,
+) -> Result<bool, ServiceError> {
+    trace.enter(diagnostics::Phase::ScmControls);
+    if !no_controls {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    trace.enter(diagnostics::Phase::ScmState);
+    if state == ServiceState::StartPending {
+        return Ok(false); // PID is not valid in StartPending; never used.
+    }
+    if state != ServiceState::Running {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    trace.enter(diagnostics::Phase::ScmProcess);
+    if process_id.is_none_or(|pid| pid == 0) {
+        return Ok(false); // Missing observation grants no process authority.
+    }
+    if process_id != Some(std::process::id()) {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_pending_is_retryable_and_only_running_self_is_admitted() {
+        let mut trace = diagnostics::Trace::new();
+        let current = Some(std::process::id());
+        assert_eq!(
+            observed_startup_state(ServiceState::StartPending, None, true, &mut trace),
+            Ok(false)
+        );
+        assert_eq!(
+            observed_startup_state(ServiceState::Running, current, true, &mut trace),
+            Ok(true)
+        );
+        assert_eq!(
+            observed_startup_state(ServiceState::Running, None, true, &mut trace),
+            Ok(false)
+        );
+        assert_eq!(
+            observed_startup_state(ServiceState::Running, Some(0), true, &mut trace),
+            Ok(false)
+        );
+        for (state, pid, no_controls) in [
+            (ServiceState::Stopped, None, true),
+            (ServiceState::StopPending, current, true),
+            (ServiceState::Paused, current, true),
+            (ServiceState::Running, Some(std::process::id() + 1), true),
+            (ServiceState::Running, current, false),
+            (ServiceState::StartPending, None, false),
+        ] {
+            assert_eq!(
+                observed_startup_state(state, pid, no_controls, &mut trace),
+                Err(ServiceError::ConfigurationConflict)
+            );
+        }
+    }
 }

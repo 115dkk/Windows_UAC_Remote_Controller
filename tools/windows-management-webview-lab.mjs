@@ -126,6 +126,11 @@ try {
   confirmService();
   // Navigate only the real local client. Never invoke pairing/UAC to measure
   // its entry buttons; native owner, service and bridge admission stay intact.
+  await expect(page.locator('.service-card')).toBeVisible();
+  await expect(page.locator('.service-card .eyebrow')).toHaveCount(0);
+  await expect(page.locator('.service-card .service-description')).toHaveCount(0);
+  await page.evaluate(async () => { await document.fonts.ready; });
+  await page.screenshot({ path: resolve(evidence, 'status-overview.png') });
   await page.locator('nav .navigation-item').nth(1).click();
   await page.evaluate(async () => { await document.fonts.ready; });
   const pairButtons = page.locator('section.pairing-entry').first().locator(':scope > button');

@@ -48,27 +48,36 @@ describe('native snapshot truth in the client', () => {
 
   it('does not equate a running service with remote readiness', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
-    expect(await screen.findByRole('heading', { name: '서비스 실행 중' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: 'UAC 원격 승인기' })).toBeInTheDocument();
     expect(screen.queryByText(ko.homePurpose)).not.toBeInTheDocument();
-    expect(screen.getByText('PC 서비스')).toBeInTheDocument();
-    expect(screen.getByText(ko.remoteNotReady)).toBeInTheDocument();
-    expect(screen.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
+    expect(screen.getByText('휴대폰 연결 안 됨')).toBeInTheDocument();
+    expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
     expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
-    expect(screen.getByText('PC 서비스')).toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
   });
 
-  it('uses the separate native readiness flag, not the renamed on state', async () => {
+  it('uses the actual device connection instead of the legacy readiness flag', async () => {
     const fixture = qaCase('desktop-running').snapshot;
     const ready: AppSnapshot = { ...fixture, service: { ...fixture.service!, remoteRequestsReady: true } };
     render(<App bridge={bridgeFor(ready)} />);
-    expect(await screen.findByText(ko.remoteReady)).toBeInTheDocument();
+    expect(await screen.findByText('휴대폰 연결 안 됨')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
     expect(screen.queryByText(ko.remoteReadyBody)).not.toBeInTheDocument();
     expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
     expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
+  });
+
+  it('shows a connected phone even when the legacy readiness flag is false', async () => {
+    render(<App bridge={bridgeFor(qaCase('desktop-connected').snapshot)} />);
+    expect(await screen.findByText('휴대폰 연결됨')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
+    expect(screen.queryByText(/별도로 확인/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/지금은 PC의 관리자 권한 창에서/)).not.toBeInTheDocument();
   });
 
   it.each(serviceActions)('renames %s without adding an action beyond the native list', async (action) => {
@@ -82,7 +91,7 @@ describe('native snapshot truth in the client', () => {
       expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
     }
     expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
-    expect(screen.getByText(ko.remoteNotReady)).toBeInTheDocument();
+    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨' : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
   });
 
   it('offers lock setup only for an explicitly missing lock with native capability', async () => {
@@ -462,6 +471,30 @@ describe('request interaction boundaries', () => {
 });
 
 describe('destructive action confirmation', () => {
+  it('removes an offline PC only after confirmation and a committed native reply', async () => {
+    const user = userEvent.setup();
+    const fixture = qaCase('phone-devices-offline');
+    const result = deferred<AppSnapshot>();
+    const removeDevice = vi.fn<ControllerBridge['removeDevice']>(() => result.promise);
+    render(<App bridge={bridgeFor(fixture.snapshot, { removeDevice })} initialPage={fixture.page} />);
+    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 연결 해제' });
+    await user.click(trigger);
+    let dialog = screen.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?' });
+    expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(removeDevice).not.toHaveBeenCalled();
+    await user.click(trigger);
+    dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: ko.removeDevice }));
+    expect(removeDevice).toHaveBeenCalledExactlyOnceWith('ab'.repeat(32));
+    expect(screen.getByRole('heading', { name: '화면 예시 PC' })).toBeInTheDocument();
+    await act(async () => {
+      result.resolve({ ...fixture.snapshot, devices: [], canUnpair: false,
+        requestCatalog: { status: 'ready', revision: '2', peerCount: 0, connectedPeerCount: 0 } });
+      await result.promise;
+    });
+    expect(screen.queryByRole('heading', { name: '화면 예시 PC' })).not.toBeInTheDocument();
+  });
   it('shows coarse PC completion without claiming approval and clears only after the owner confirms', async () => {
     const user = userEvent.setup();
     const fixture = qaCase('phone-history');
