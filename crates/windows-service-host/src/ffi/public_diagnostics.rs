@@ -112,15 +112,18 @@ pub(crate) fn open_file() -> Result<OpenedFile, ServiceError> {
 pub(crate) fn open_folder() -> Result<(), ServiceError> {
     // Folder handlers can be user-configured. Never invoke one from an elevated
     // GUI and accidentally elevate an untrusted HKCU shell association.
-    super::security::require_unelevated().map_err(|_| ServiceError::OutputUnavailable)?;
+    super::security::require_unelevated().map_err(|error| folder_failure(1, error))?;
     // Read-only; the UI cannot create a privileged directory or select a target.
-    let (path, _pins) = directory(false)?;
-    let path = Wide::new(path)?;
+    let (path, _pins) = directory(false).map_err(|error| folder_failure(2, error))?;
+    let path = Wide::new(path).map_err(|error| folder_failure(3, error))?;
     // SAFETY: initialize this worker thread's COM apartment and balance even an
     // existing compatible apartment's S_FALSE. Never alter an incompatible one.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
         .ok()
-        .map_err(|_| ServiceError::OutputUnavailable)?;
+        .map_err(|error| ServiceError::DiagnosticsFolderFailure {
+            stage: 4,
+            detail: error.code().0 as u32,
+        })?;
     struct Apartment;
     impl Drop for Apartment {
         fn drop(&mut self) {
@@ -140,5 +143,18 @@ pub(crate) fn open_folder() -> Result<(), ServiceError> {
     // SAFETY: fixed validated directory and static verb, no arguments/elevation.
     // Pins, strings and apartment outlive synchronous shell acceptance. No process
     // handle is requested. Shell errors return to the existing UI error channel.
-    unsafe { ShellExecuteExW(&mut request) }.map_err(|_| ServiceError::OutputUnavailable)
+    unsafe { ShellExecuteExW(&mut request) }.map_err(|error| {
+        ServiceError::DiagnosticsFolderFailure {
+            stage: 5,
+            detail: error.code().0 as u32,
+        }
+    })
+}
+
+fn folder_failure(stage: u8, error: ServiceError) -> ServiceError {
+    let detail = match error {
+        ServiceError::WindowsCall { code, .. } => code,
+        other => other.service_diagnostic_code(),
+    };
+    ServiceError::DiagnosticsFolderFailure { stage, detail }
 }

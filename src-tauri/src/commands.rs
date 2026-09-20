@@ -325,25 +325,56 @@ pub(crate) async fn clear_activity(
 #[tauri::command]
 pub(crate) async fn open_diagnostics_folder(
     state: tauri::State<'_, ControllerState>,
-) -> Result<(), AppIssue> {
+) -> Result<(), DiagnosticFolderIssue> {
     let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
         #[cfg(windows)]
-        let opened = windows_service_host::open_diagnostics_folder().is_ok();
+        let (opened, native_stage, native_code) =
+            match windows_service_host::open_diagnostics_folder() {
+                Ok(()) => (true, None, None),
+                Err(windows_service_host::ServiceError::DiagnosticsFolderFailure {
+                    stage,
+                    detail,
+                }) => (false, Some(stage), Some(detail)),
+                Err(_) => (false, None, None),
+            };
         #[cfg(not(windows))]
-        let opened = false;
+        let (opened, native_stage, native_code) = (false, None, None);
         if opened {
             return Ok(());
         }
-        Err(AppIssue {
-            code: "diagnostics_folder_unavailable",
-            message: "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.",
-            next_action: None,
+        Err(DiagnosticFolderIssue {
+            issue: AppIssue {
+                code: "diagnostics_folder_unavailable",
+                message: "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.",
+                next_action: None,
+            },
+            native_stage,
+            native_code,
         })
     })
     .await
-    .map_err(|_| worker_issue())?
+    .map_err(|_| DiagnosticFolderIssue::from(worker_issue()))?
+}
+
+/// Closed operation stage and numeric OS code only; never native text or paths.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiagnosticFolderIssue {
+    #[serde(flatten)]
+    issue: AppIssue,
+    native_stage: Option<u8>,
+    native_code: Option<u32>,
+}
+impl From<AppIssue> for DiagnosticFolderIssue {
+    fn from(issue: AppIssue) -> Self {
+        Self {
+            issue,
+            native_stage: None,
+            native_code: None,
+        }
+    }
 }
 
 #[tauri::command]

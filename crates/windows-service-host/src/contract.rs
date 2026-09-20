@@ -536,6 +536,8 @@ pub enum ServiceError {
     IdentityHandleAlreadyReleased,
     #[error("service startup failed at fixed stage {stage} (diagnostic {detail:#010x})")]
     StartupFailure { stage: u8, detail: u32 },
+    #[error("diagnostic folder failed at fixed stage {stage} (code {detail:#010x})")]
+    DiagnosticsFolderFailure { stage: u8, detail: u32 },
     #[error("the service clock is outside the supported range")]
     InvalidClock,
     #[error("the service lifecycle worker failed")]

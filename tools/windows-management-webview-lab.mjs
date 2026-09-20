@@ -77,7 +77,7 @@ try {
   const folderReplies = [];
   page.on('console', message => {
     const text = message.text();
-    if (/^UAC_DIAGNOSTIC_FOLDER_V1 outcome=(accepted|failed category=(busy|unavailable|worker|other))$/u.test(text)) folderReplies.push(text);
+    if (/^UAC_DIAGNOSTIC_FOLDER_V1 outcome=(accepted|failed category=(busy|unavailable|worker|other)( stage=\d{1,3} code=\d{1,10})?)$/u.test(text)) folderReplies.push(text);
   });
   const offerFile = resolve(profile, 'pairing-offer.txt');
   const offerStat = lstatSync(offerFile);

@@ -241,8 +241,13 @@ export function useController(bridge: ControllerBridge) {
       if (command.kind === 'diagnostics-folder') {
         const code = failure !== null && typeof failure === 'object' && 'code' in failure ? failure.code : null;
         const category = code === 'app_busy' ? 'busy' : code === 'diagnostics_folder_unavailable' ? 'unavailable' : code === 'app_worker_unavailable' ? 'worker' : 'other';
+        const stage = failure !== null && typeof failure === 'object' && 'nativeStage' in failure ? failure.nativeStage : null;
+        const nativeCode = failure !== null && typeof failure === 'object' && 'nativeCode' in failure ? failure.nativeCode : null;
+        const numeric = typeof stage === 'number' && Number.isInteger(stage) && stage >= 0 && stage <= 255
+          && typeof nativeCode === 'number' && Number.isInteger(nativeCode) && nativeCode >= 0 && nativeCode <= 0xffffffff
+          ? ` stage=${stage} code=${nativeCode}` : '';
         // Closed diagnosis only: no path, exception text or arbitrary native code.
-        console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}`);
+        console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}${numeric}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
         publish({ ...previous, refreshing: false, busy: null, error: ko.diagnosticsFolderFailure, notice: null });
         return null;
