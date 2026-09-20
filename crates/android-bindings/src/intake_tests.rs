@@ -465,6 +465,19 @@ fn admitted_history_len(fixture: &Fixture) -> usize {
     admitted_history_outcomes(fixture).len()
 }
 
+// This fixture's callbacks never return Busy. Only the public admission guard
+// can do so; wait for the maintenance pass started by a committed mutation.
+// Never retry storage/native failures or an uncertain operation result.
+fn admitted_call<T>(mut call: impl FnMut() -> Result<T, BridgeError>) -> T {
+    let end = Instant::now() + LIMIT;
+    loop {
+        match call() {
+            Err(BridgeError::Busy) if Instant::now() < end => std::thread::yield_now(),
+            result => return result.expect("bounded native admission"),
+        }
+    }
+}
+
 fn admitted_history_outcomes(fixture: &Fixture) -> Vec<notification_policy::RequestOutcome> {
     let end = Instant::now() + LIMIT;
     loop {
@@ -775,20 +788,23 @@ fn local_forget_removes_an_offline_pc_without_transport_or_signing() {
         .unwrap_or_else(|error| error.into_inner());
     let fixture = fixture(); // Deliberately never connect a carrier.
     for invalid in [String::new(), "GG".repeat(32), "00".repeat(32)] {
-        assert!(!fixture.controller.forget_pc(invalid).unwrap());
+        assert!(!admitted_call(|| fixture
+            .controller
+            .forget_pc(invalid.clone())));
     }
-    assert!(fixture.controller.forget_pc("07".repeat(32)).unwrap());
-    assert!(!fixture.controller.forget_pc("07".repeat(32)).unwrap());
-    {
-        let _admission = fixture.controller.enter().unwrap();
-        assert_eq!(
-            fixture
-                .controller
-                .with_inbox(|owner| Ok(owner.peer_associations().unwrap().entries().count()))
-                .unwrap(),
-            0
-        );
-    }
+    assert!(admitted_call(|| fixture
+        .controller
+        .forget_pc("07".repeat(32))));
+    assert!(!admitted_call(|| fixture
+        .controller
+        .forget_pc("07".repeat(32))));
+    let remaining = admitted_call(|| {
+        let _admission = fixture.controller.enter()?;
+        fixture
+            .controller
+            .with_inbox(|owner| Ok(owner.peer_associations().unwrap().entries().count()))
+    });
+    assert_eq!(remaining, 0);
     assert_eq!(fixture.platform.sign_calls.load(Ordering::Acquire), 0);
     fixture.cleanup();
 }
