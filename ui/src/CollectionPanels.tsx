@@ -141,13 +141,14 @@ export function ActivityPanel({ snapshot, disabled, onClear, onOpenDiagnostics }
   snapshot: AppSnapshot; disabled: boolean; onClear: () => void; onOpenDiagnostics: () => void;
 }) {
   const available = snapshot.dataAvailability.activity === 'available';
+  const canClear = available && snapshot.canClearActivity && snapshot.activity.length > 0;
   return <>
     {!available ? <EmptyState icon="history" title={ko.activityUnavailable} description={ko.activityUnavailableBody} />
       : snapshot.activity.length ? <ol className="surface activity-list">{snapshot.activity.map((event) => <li key={event.id}><span className={`activity-mark ${event.kind === 'failure' ? 'is-danger' : ''}`}><Icon name={event.kind === 'failure' ? 'alert' : 'history'} /></span><div><h2>{activityText[event.kind]}</h2><ActivityTime timestamp={event.timestampMillis} /></div></li>)}</ol>
       : <EmptyState icon="history" title={ko.noActivity} description={ko.noActivityBody} />}
-    <div className="collection-actions">
+    {(snapshot.platform === 'windows' || canClear) && <div className="collection-actions">
       {snapshot.platform === 'windows' && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenDiagnostics}>{ko.openDiagnosticsFolder}</button>}
-      {available && snapshot.canClearActivity && snapshot.activity.length > 0 && <button type="button" className="button danger-quiet" disabled={disabled} onClick={onClear}>{ko.clearActivity}</button>}
-    </div>
+      {canClear && <button type="button" className="button danger-quiet" disabled={disabled} onClick={onClear}>{ko.clearActivity}</button>}
+    </div>}
   </>;
 }
