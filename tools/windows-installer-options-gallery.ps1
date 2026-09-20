@@ -83,3 +83,8 @@ foreach ($mode in @('fresh','upgrade')) {
     }
 }
 }
+# Every page assertion and owned-process exit observation above completed.
+# taskkill may return nonzero when the wizard exits during its cleanup race;
+# that expected result must not become the whole script's stale LASTEXITCODE.
+# An assertion or unconfirmed exit throws before this success boundary.
+exit 0

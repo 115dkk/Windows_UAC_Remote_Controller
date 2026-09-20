@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # CI-only, Windows PowerShell 5.1 / PowerShell 7, 64-bit. Never shipped.
 [CmdletBinding()]
-param([switch]$InspectOnly, [switch]$PairingE2e)
+param([switch]$InspectOnly, [switch]$PairingE2e, [switch]$ShellFolderOnly)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($ShellFolderOnly -and ($InspectOnly -or $PairingE2e)) { throw 'Shell folder proof is a separate fixed mode.' }
 if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or
     $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
     [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
@@ -77,9 +78,13 @@ namespace UacCiMedium {
     }
 
     // Only this owner's original child handles may be stopped/closed. No
-    // process lookup, external PID adoption, service control or token mutation.
+    // external PID adoption for cleanup, service control or token mutation.
+    // Shell-only proof may QUERY the actual desktop shell to launch the fixed
+    // product as that already-logged-in medium user; it never controls the shell.
     public sealed class Launcher : IDisposable {
         private IntPtr logonToken, password, process, thread, profileProcess, profileThread;
+        private IntPtr shellProcess;
+        private bool shellUser;
         private bool pairingE2e;
         private string userName;
         private bool accountCreated;
@@ -149,6 +154,11 @@ namespace UacCiMedium {
         private static extern bool EnumChildWindows(IntPtr parent, WindowVisitor visitor, IntPtr parameter);
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
+        [DllImport("kernel32.dll", SetLastError=true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
+        [DllImport("advapi32.dll", SetLastError=true)] private static extern bool DuplicateTokenEx(IntPtr existing, uint access, IntPtr attributes, int level, int type, out IntPtr duplicate);
+        [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool CreateProcessWithTokenW(IntPtr token, uint logonFlags, string application, StringBuilder command, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation information);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetClassNameW(IntPtr window, StringBuilder name, int characters);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -245,9 +255,17 @@ namespace UacCiMedium {
             }
         }
 
-        public Launcher(bool pairingE2e, bool requester) {
+        public Launcher(bool pairingE2e, bool requester) : this(pairingE2e, requester, false) {}
+
+        public Launcher(bool pairingE2e, bool requester, bool shellUser) {
             this.pairingE2e = pairingE2e;
+            this.shellUser = shellUser;
             try {
+                if (shellUser) {
+                    Require(!pairingE2e && !requester, "Shell mode cannot start a UAC requester");
+                    BindInteractiveShell();
+                    return;
+                }
                 CreateStandardAccount();
                 if (!LogonUserW(userName, Environment.MachineName, password, 2, 0, out logonToken))
                     throw Error("LogonUserW(owned standard account)");
@@ -267,6 +285,49 @@ namespace UacCiMedium {
                 Dispose();
                 throw;
             }
+        }
+
+        private void BindInteractiveShell() {
+            IntPtr window = GetShellWindow();
+            uint pid = 0;
+            Require(window != IntPtr.Zero && GetWindowThreadProcessId(window, out pid) != 0,
+                "Actual interactive shell required");
+            shellProcess = OpenProcess(0x1000, false, pid); // Query limited only.
+            if (shellProcess == IntPtr.Zero) throw Error("OpenProcess(actual shell query)");
+            StringBuilder image = new StringBuilder(32768);
+            uint size = (uint)image.Capacity;
+            if (!QueryFullProcessImageNameW(shellProcess, 0, image, ref size)) throw Error("QueryShellImage");
+            Require(image.ToString().Equals(Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.Windows), "explorer.exe"), StringComparison.OrdinalIgnoreCase),
+                "System Windows Explorer shell required");
+            IntPtr token;
+            if (!OpenProcessToken(shellProcess, 0xB, out token)) throw Error("OpenShellToken");
+            try {
+                Facts = Inspect(token);
+                Verify(Facts); // No linked-token fallback, filtering or privilege enable.
+                using (System.Diagnostics.Process current = System.Diagnostics.Process.GetCurrentProcess()) {
+                    Require(Scalar(token, 12) == current.SessionId, "Shell must belong to this interactive session");
+                }
+                if (!DuplicateTokenEx(token, 0xB, IntPtr.Zero, 2, 1, out logonToken))
+                    throw Error("DuplicateShellPrimaryToken");
+                Verify(Inspect(logonToken));
+            } finally { if (!CloseHandle(token)) throw Error("CloseShellToken"); }
+        }
+
+        private void RequireShellChildIdentity() {
+            IntPtr token;
+            if (!OpenProcessToken(process, 8, out token)) throw Error("OpenOwnedShellChildToken");
+            try {
+                using (Information expected = new Information(logonToken, 1))
+                using (Information actual = new Information(token, 1)) {
+                    Require(new SecurityIdentifier(expected.Sid(0)).Equals(new SecurityIdentifier(actual.Sid(0))),
+                        "Owned GUI must retain the actual shell user");
+                }
+                Require(Scalar(token, 12) == Scalar(logonToken, 12), "Owned GUI shell session changed");
+                uint pid;
+                Require(GetWindowThreadProcessId(GetShellWindow(), out pid) != 0 && pid == GetProcessId(shellProcess),
+                    "Interactive shell identity changed before GUI resume");
+            } finally { if (!CloseHandle(token)) throw Error("CloseOwnedShellChildToken"); }
         }
 
         private void CreateStandardAccount() {
@@ -323,6 +384,13 @@ namespace UacCiMedium {
             startup.dwFlags = 1; // STARTF_USESHOWWINDOW.
             startup.wShowWindow = 0; // SW_HIDE.
             ProcessInformation information;
+            if (shellUser) {
+                Require(application == Application, "Shell mode launches only the fixed installed GUI");
+                if (!CreateProcessWithTokenW(logonToken, 1, application, new StringBuilder(commandLine),
+                    0x404, environment, Path.GetDirectoryName(application), ref startup, out information))
+                    throw Error("CreateProcessWithTokenW(fixed medium GUI)");
+                return information;
+            }
             if (!CreateProcessWithLogonW(userName, Environment.MachineName, password, 1,
                 application, new StringBuilder(commandLine), 0x404, environment,
                 Path.GetDirectoryName(application), ref startup, out information))
@@ -495,7 +563,8 @@ namespace UacCiMedium {
             values["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] =
                 "--remote-debugging-port=19225 --remote-debugging-address=127.0.0.1";
             values["WEBVIEW2_USER_DATA_FOLDER"] = profile;
-            values["UAC_LAB_PAIRING_OFFER"] = "1";
+            if (!shellUser) values["UAC_LAB_PAIRING_OFFER"] = "1";
+            else values.Remove("UAC_LAB_PAIRING_OFFER");
             StringBuilder block = new StringBuilder();
             foreach (KeyValuePair<string, string> value in values)
                 block.Append(value.Key).Append('=').Append(value.Value).Append('\0');
@@ -506,7 +575,7 @@ namespace UacCiMedium {
         public void Launch(string profile) {
             Verify(Facts);
             if (pairingE2e) Require(Facts.elevationType == "Limited", "Real filtered test-administrator token required");
-            Require(process == IntPtr.Zero && logonToken != IntPtr.Zero && profileProcess != IntPtr.Zero,
+            Require(process == IntPtr.Zero && logonToken != IntPtr.Zero && (shellUser || profileProcess != IntPtr.Zero),
                 "Launcher can own only one child");
             Require(File.Exists(Application), "Fixed installed controller application missing");
             Require(Directory.Exists(profile), "Fresh child profile missing");
@@ -521,6 +590,7 @@ namespace UacCiMedium {
                 ClientPid = information.dwProcessId;
                 Facts = InspectProcess(process);
                 Verify(Facts);
+                if (shellUser) RequireShellChildIdentity();
                 uint previousCount = ResumeThread(thread);
                 int resumeError = previousCount == UInt32.MaxValue ? Marshal.GetLastWin32Error() : 0;
                 ResumePreviousCount = previousCount;
@@ -739,10 +809,11 @@ namespace UacCiMedium {
                         failure = new InvalidOperationException("Owned child termination unconfirmed");
                 } else if (state != 0) failure = Error("WaitForSingleObject(owned child)");
             }
-            foreach (IntPtr handle in new IntPtr[] { thread, process, profileThread, profileProcess, logonToken }) {
+            foreach (IntPtr handle in new IntPtr[] { thread, process, profileThread, profileProcess, logonToken, shellProcess }) {
                 if (handle != IntPtr.Zero && !CloseHandle(handle)) failure = Error("CloseHandle(owned)");
             }
             thread = process = profileThread = profileProcess = logonToken = IntPtr.Zero;
+            shellProcess = IntPtr.Zero; // Query handle only; shell is never terminated.
             if (accountCreated) {
                 uint status = NetUserDel(null, userName);
                 if (status != 0) failure = new InvalidOperationException(
@@ -905,7 +976,7 @@ function Write-OwnedStartupObservation {
 $launcher = $null
 $nodeExit = 1
 try {
-    $launcher = [UacCiMedium.Launcher]::new([bool]$PairingE2e, [bool]($PairingE2e -and -not $InspectOnly))
+    $launcher = [UacCiMedium.Launcher]::new([bool]$PairingE2e, [bool]($PairingE2e -and -not $InspectOnly), [bool]$ShellFolderOnly)
     # Only enum/bool/fixed integrity facts, never account names, SIDs or tokens.
     $launcher.Facts | ConvertTo-Json -Compress | Write-Output
     $launcher.RequireMedium()
@@ -963,6 +1034,7 @@ try {
     try { $logReader.RequirePublicDiagnosticsReadOnly() } finally { $logReader.Dispose() }
     @{ publicRead=$true; publicWriteDenied=$true; privateJournalReadDenied=$true; realStandardUser=$true; commit=$env:GITHUB_SHA } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidenceRoot 'public-diagnostics-access.json') -Encoding UTF8
     $receipt = [ordered]@{
+        shellUser = [bool]$ShellFolderOnly
         clientPid = $launcher.ClientPid
         debugPort = 19225
         profileDirectory = $profileDirectory
@@ -1019,7 +1091,7 @@ try {
     # Parent WEBVIEW2 variables were never mutated: the native explicit child
     # environment is separately allocated/freed, so original values remain.
 }
-if (-not $InspectOnly -and $nodeExit -eq 0) {
+if (-not $InspectOnly -and -not $ShellFolderOnly -and $nodeExit -eq 0) {
     $proofPath = Join-Path $env:LAB_EVIDENCE 'management-gui-proof.json'
     $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json
     $accessProof = Get-Content -LiteralPath (Join-Path $env:LAB_EVIDENCE 'management-client-observation.json') -Raw | ConvertFrom-Json
@@ -1051,5 +1123,12 @@ if (-not $InspectOnly -and $nodeExit -eq 0) {
     }
     $proof | Add-Member -NotePropertyName appClosedServiceRetained -NotePropertyValue $true
     $proof | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $proofPath -Encoding UTF8
+}
+if ($ShellFolderOnly -and $nodeExit -eq 0) {
+    $proof = Get-Content -LiteralPath (Join-Path $env:LAB_EVIDENCE 'diagnostic-shell-proof.json') -Raw | ConvertFrom-Json
+    if ($proof.opened -ne $true -or $proof.actualShellUser -ne $true) { throw 'Native shell-user folder proof missing' }
+    $serviceAfterClose = Get-CimInstance Win32_Service -Filter "Name='UacRemoteController'"
+    if ($serviceAfterClose.State -ne 'Running' -or $serviceAfterClose.ProcessId -ne $proof.originalServicePid) { throw 'Folder GUI changed service lifetime' }
+    if (Get-NetTCPConnection -State Listen -LocalPort 19225 -ErrorAction SilentlyContinue) { throw 'Folder GUI debugger survived cleanup' }
 }
 exit $nodeExit

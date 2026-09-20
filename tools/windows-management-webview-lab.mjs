@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { chromium, expect } from '@playwright/test';
 import { provePairingLaunch } from './windows-pairing-webview-lab.mjs';
 import { proveFullPairing } from './windows-full-pairing-lab.mjs';
+import { proveDiagnosticFolder } from './windows-diagnostic-folder-webview.mjs';
 import { windowsPowerShell as ps } from './windows-ci-powershell.mjs';
 
 if (process.platform !== 'win32' || process.env.CI !== 'true' || process.env.GITHUB_ACTIONS !== 'true'
@@ -22,6 +23,7 @@ assert.equal(launch.token.elevation, 0);
 assert.ok(['Default', 'Limited'].includes(launch.token.elevationType));
 for (const name of ['adminEnabled', 'isSystem', 'isAppContainer', 'uiAccess']) assert.equal(launch.token[name], false);
 assert.equal(launch.token.sessionNonzero, true);
+assert.equal(typeof launch.shellUser, 'boolean');
 const profile = resolve(launch.profileDirectory);
 assert.ok(profile.startsWith(resolve(process.env.RUNNER_TEMP) + '\\'));
 assert.ok(!profile.startsWith(evidence + '\\'));
@@ -79,6 +81,17 @@ try {
     const text = message.text();
     if (/^UAC_DIAGNOSTIC_FOLDER_V1 outcome=(accepted|failed category=(busy|unavailable|worker|other)( stage=\d{1,3} code=\d{1,10})?)$/u.test(text)) folderReplies.push(text);
   });
+  if (launch.shellUser) {
+    await expect(page.locator('.desktop-shell')).toBeVisible({ timeout: 30000 });
+    const opened = await proveDiagnosticFolder({ page, ps, evidence, replies: folderReplies, sameShellUser: true });
+    assert.equal(opened, true);
+    confirmService();
+    writeFileSync(resolve(evidence, 'diagnostic-shell-proof.json'), JSON.stringify({
+      commit: process.env.GITHUB_SHA, opened, actualShellUser: true,
+      actualGuiMedium: true, originalServicePid: original.pid,
+      scope: 'Actual installed GUI and existing interactive medium shell; no UAC or authentication',
+    }, null, 2), { flag: 'wx' });
+  } else {
   const offerFile = resolve(profile, 'pairing-offer.txt');
   const offerStat = lstatSync(offerFile);
   assert.ok(offerStat.isFile() && !offerStat.isSymbolicLink() && offerStat.size < 4096);
@@ -149,36 +162,7 @@ try {
   assert.ok(clearGap >= rootFontSize - 0.5, 'Native PC WebView must retain its stacked1rem button gap');
   writeFileSync(resolve(evidence, 'pairing-action-bounds.json'), JSON.stringify({ qr, usb, clearGap, rootFontSize, engine: browser.version(), owner: 'actual Windows WebView2' }, null, 2), { flag: 'wx' });
   await page.screenshot({ path: resolve(evidence, 'pairing-actions.png') });
-  await page.locator('nav .navigation-item').nth(2).click();
-  const logFolder = page.getByRole('button', { name: /^(Open log folder|로그 폴더 열기)$/u });
-  await expect(logFolder).toBeEnabled();
-  await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-action.png') });
-  // Explorer can host several windows/tabs in one process. MainWindowTitle is
-  // not a window inventory, so observe the actual accessible folder windows.
-  const explorerWindows = [
-    'Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes',
-    '$top=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)',
-    "$owned=@($top | Where-Object { $_.Current.ClassName -eq 'CabinetWClass' -and $_.Current.Name.Contains('UACRemoteController-Logs') -and (Get-Process -Id $_.Current.ProcessId -ErrorAction Stop).ProcessName -eq 'explorer' })",
-  ].join(';');
-  const explorerCount = () => Number(ps(explorerWindows + ';$owned.Count'));
-  assert.equal(explorerCount(), 0, 'No preexisting diagnostic Explorer window may stand in for this click');
-  await logFolder.click();
-  try {
-    await expect.poll(() => folderReplies.length, { timeout: 15000, intervals: [200, 500] }).toBe(1);
-    assert.equal(folderReplies[0], 'UAC_DIAGNOSTIC_FOLDER_V1 outcome=accepted', 'Native folder command must be accepted, not a lost/failed UI action');
-    await expect.poll(explorerCount, { timeout: 15000, intervals: [500, 1000] }).toBe(1);
-    await expect(page.locator('.notice-box.error')).toHaveCount(0);
-  } finally {
-    // Owned empty/history view only; no pairing/request body exists at this step.
-    await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-after.png') });
-    writeFileSync(resolve(evidence, 'diagnostic-folder-result.json'), JSON.stringify({
-      errorVisible: await page.locator('.notice-box.error').count() > 0,
-      errorText: await page.locator('.notice-box.error').allTextContents(),
-      buttonEnabled: await logFolder.isEnabled(),
-      replies: folderReplies,
-    }, null, 2), { flag: 'wx' });
-  }
-  ps(explorerWindows + ";if($owned.Count -ne 1){throw 'Diagnostic Explorer identity changed'};([Windows.Automation.WindowPattern]$owned[0].GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern)).Close()");
+  const folderOpened = await proveDiagnosticFolder({ page, ps, evidence, replies: folderReplies, sameShellUser: false });
   await page.locator('nav .navigation-item').nth(1).click();
   confirmService();
   writeFileSync(resolve(evidence, 'management-gui-proof.json'), JSON.stringify({
@@ -186,12 +170,13 @@ try {
     successfulSnapshotChecks: snapshots, refreshes, rejectedClients: rejected, busyReads, originalServicePid: original.pid,
     originalServicePidRetained: true,
     actualRelayListenerRetained: true, debuggerLoopbackAndOwned: true,
-    publicDiagnosticFolderOpenedByNativeGui: true,
+    crossUserDiagnosticFolderOpened: folderOpened,
     scope: 'Real product GuiMedium reads/rejected-image clients; not CliElevated/UAC consent/phone authentication',
   }, null, 2), { flag: 'wx' });
   process.stdout.write('PASS: 24 real GuiMedium snapshot checks, 16 Refresh actions, 8 rejected pipe clients; original service PID and relay listener retained.\n');
   if (process.env.WUAC_CI_E2E === '1') await proveFullPairing({ page, ps, evidence, confirmService, clientPid: launch.clientPid });
   else await provePairingLaunch({ page, ps, profile, evidence, confirmService, clientPid: launch.clientPid });
+  }
 } finally {
   await browser?.close();
 }

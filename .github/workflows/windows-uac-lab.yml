@@ -242,6 +242,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $proof = Get-Content "$env:LAB_EVIDENCE/pairing-e2e-proof.json" -Raw | ConvertFrom-Json
           if ($proof.commit -ne $env:GITHUB_SHA -or $proof.passed -ne $true -or $proof.nativeWindowsDenied -ne $true) { throw 'Full native pairing and denial proof missing' }
+      - name: Open public diagnostics from the actual interactive shell-user GUI
+        if: ${{ steps.start.outputs.product_running == 'true' }}
+        shell: pwsh
+        run: |
+          # A RunAs foreign-account GUI is valid for service isolation, but not
+          # equivalent to the existing interactive user's Explorer activation.
+          $originalEvidence = $env:LAB_EVIDENCE
+          try {
+            $env:LAB_EVIDENCE = Join-Path $originalEvidence 'diagnostic-shell-user'
+            New-Item -ItemType Directory -Path $env:LAB_EVIDENCE -ErrorAction Stop | Out-Null
+            ./tools/windows-medium-client.ps1 -ShellFolderOnly
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { $env:LAB_EVIDENCE = $originalEvidence }
       - name: Verify bounded pairing event diagnostics on the actual service
         # Failure diagnostics must survive even when the end-to-end stage fails.
         if: ${{ always() && steps.start.outputs.product_running == 'true' }}
