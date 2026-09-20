@@ -25,7 +25,8 @@ interface NavItem { readonly page: ClientPage; readonly label: string; readonly 
 function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
   const phone = snapshot.platform === 'android';
   const devices: NavItem = { page: 'devices', label: phone ? ko.computers : ko.phones, icon: phone ? 'pc' : 'phone', available: !phone || snapshot.dataAvailability.devices === 'available' };
-  const activity: NavItem = { page: 'activity', label: phone ? ko.phoneActivity : ko.activity, icon: 'history', available: !phone || snapshot.dataAvailability.activity === 'available' };
+  // Diagnostics remain reachable even when native activity data is unavailable.
+  const activity: NavItem = { page: 'activity', label: phone ? ko.phoneActivity : ko.activity, icon: 'history', available: true };
   return phone ? [
     // Request recovery remains reachable even while native inventory is unknown.
     { page: 'requests', label: ko.requests, icon: 'request', available: true },
@@ -126,7 +127,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
       {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair' }); }} onPairUsb={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair', transport: 'usb' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
-      {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} onClear={clearActivity} onOpenDiagnostics={() => { void controller.run({ kind: 'diagnostics-folder' }); }} />}
+      {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} exporting={busy === 'diagnostics-export'} onClear={clearActivity} onOpenDiagnostics={() => { void controller.run({ kind: 'diagnostics-folder' }); }} onExportDiagnostics={() => { void controller.run({ kind: 'diagnostics-export' }); }} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableTitle={policyUnavailableTitleText(snapshot.phoneService)} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });
         return result?.policy ?? null;

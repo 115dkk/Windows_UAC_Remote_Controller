@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote
 
-import android.util.Log
 import android.app.Application
 import android.app.Activity
 import android.content.Intent
@@ -106,6 +105,7 @@ class ControllerApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        AndroidDiagnosticStore.initialize(this)
         registerActivityLifecycleCallbacks(controllerHosts)
         BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.APPLICATION_CREATE))
         bootRegistration.initialize()
@@ -149,7 +149,7 @@ class ControllerApplication : Application() {
     internal fun canOpenPairingScanner(activity: MainActivity): Boolean {
         val reason = pairingScannerGateReason(activity)
         // Bounded fixed-token CI diagnostics: the first closed gate, logged only when it changes.
-        if (reason != lastScannerGateReason) { lastScannerGateReason = reason; Log.i("UacScan", "gate=${reason == null} reason=${reason ?: "open"}") }
+        if (reason != lastScannerGateReason) { lastScannerGateReason = reason; AndroidDiagnosticStore.record("UacScan", "gate=${reason == null} reason=${reason ?: "open"}") }
         return reason == null
     }
     /** Fixed-token outcome of the last native open attempt, for CI diagnostics only. */
@@ -184,7 +184,7 @@ class ControllerApplication : Application() {
         // Bounded fixed-token diagnostics for CI: outcome and branch only, never payloads.
         val report = { result: PairingScannerLaunch, reason: String ->
             lastPairingScannerLaunch = "${result.name}:$reason"
-            Log.i("UacScan", "stage=open result=${result.name} reason=$reason"); callback(result)
+            AndroidDiagnosticStore.record("UacScan", "stage=open result=${result.name} reason=$reason"); callback(result)
         }
         if (!isCurrentForegroundControllerHost(activity) || !originCurrent()) { report(PairingScannerLaunch.UNAVAILABLE, "host_or_origin"); return }
         if (pairingScanner != null || activity.pairingPermissionPending() || policyActor?.hasPendingPairingScan() == true) {

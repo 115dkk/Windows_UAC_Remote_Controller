@@ -1,4 +1,7 @@
 {
+  "진단 로그 내보내기": "Exportar logs de diagnóstico",
+  "진단 로그 파일을 저장하고 공유 화면을 열었습니다.": "O arquivo de diagnóstico foi salvo e a tela de compartilhamento foi aberta.",
+  "진단 로그를 내보내지 못했습니다. 잠시 후 다시 시도하십시오.": "Não foi possível exportar os logs de diagnóstico. Tente novamente em instantes.",
   "로그 폴더 열기": "Abrir pasta de logs",
   "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Não foi possível abrir a pasta de logs. Verifique a instalação e as permissões de acesso.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Não foi possível confirmar a remoção do registro do PC. Verifique novamente.",

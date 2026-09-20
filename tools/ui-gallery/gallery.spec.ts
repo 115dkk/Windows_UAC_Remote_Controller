@@ -1,11 +1,78 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { galleryCases } from './cases';
-import { scannerLaunchCases } from './declared-cases';
+import { diagnosticsExportCases, scannerLaunchCases } from './declared-cases';
 import { test, expect } from './session';
 import { registerPhoneServiceGallery } from './phone-service';
 import { recordClientFontProof } from './font-proof';
 
 registerPhoneServiceGallery(test);
+
+for (const selected of diagnosticsExportCases) {
+  test(selected.id, async ({ page, gallery }, info) => {
+    await gallery.open(selected);
+    const unavailable = selected.fixture === 'phone-unavailable';
+    const pending = selected.fixture === 'phone-history-diagnostics-pending';
+    if (unavailable) {
+      const activity = page.getByRole('navigation').getByRole('button', { name: '기록', exact: true });
+      await expect(activity).toBeEnabled();
+      await activity.click();
+      await expect(page.getByRole('heading', { name: '활동 기록 확인 불가', exact: true })).toBeVisible();
+      await expect(page.locator('.activity-list')).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toHaveCount(0);
+    } else {
+      await expect(page.locator('.activity-list li')).toHaveCount(2);
+    }
+    const action = page.getByRole('button', { name: '진단 로그 내보내기', exact: true });
+    await expect(action).toHaveCount(1);
+    await expect(action).toBeEnabled();
+    await expect(action).toHaveAttribute('aria-busy', 'false');
+    await expect(page.getByRole('button', { name: '로그 폴더 열기', exact: true })).toHaveCount(0);
+    await action.scrollIntoViewIfNeeded();
+    await action.focus();
+    await expect(action).toBeFocused();
+    await expect(action).toBeInViewport({ ratio: 1 });
+    const geometry = await action.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      return { x: box.x, width: box.width, height: box.height, clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight };
+    });
+    expect(geometry.width).toBeGreaterThanOrEqual(48);
+    expect(geometry.height).toBeGreaterThanOrEqual(48);
+    expect(geometry.x).toBeGreaterThanOrEqual(0);
+    expect(geometry.x + geometry.width).toBeLessThanOrEqual(selected.viewport.width + 0.5);
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+    expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight + 1);
+    if (selected.rootTextSizePercent === 200) await expect(page.locator('html')).toHaveCSS('font-size', '32px');
+    await info.attach('diagnostics-export-geometry', {
+      body: Buffer.from(JSON.stringify({ scope: 'CLIENT/SYNTHETIC', geometry, rootTextSizePercent: selected.rootTextSizePercent ?? 100 })),
+      contentType: 'application/json',
+    });
+    await gallery.capture('diagnostics-export-ready', 'CLIENT/SYNTHETIC · diagnostic export reachability, touch target and keyboard focus');
+    const history = await page.locator('.activity-list').allTextContents();
+    await page.keyboard.press('Enter');
+    if (pending) {
+      await expect(action).toBeDisabled();
+      await expect(action).toHaveAttribute('aria-busy', 'true');
+      await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toBeDisabled();
+      await expect(page.getByText('진단 로그 파일을 저장하고 공유 화면을 열었습니다.', { exact: true })).toHaveCount(0);
+      await expect(page.locator('.global-feedback')).not.toBeEmpty();
+      await action.scrollIntoViewIfNeeded();
+      await expect(action).toBeInViewport({ ratio: 1 });
+      await gallery.capture('diagnostics-export-pending', 'CLIENT/SYNTHETIC · held export reply, disabled action and unchanged history; no file or Sharesheet');
+      await page.locator('.global-feedback').scrollIntoViewIfNeeded();
+      await expect(page.locator('.global-feedback')).toBeInViewport({ ratio: 1 });
+      await gallery.capture('diagnostics-export-progress', 'CLIENT/SYNTHETIC · pending status; 200% root text is not Android font-scaling evidence');
+    } else {
+      await expect(action).toBeEnabled();
+      await expect(action).toHaveAttribute('aria-busy', 'false');
+      const notice = page.getByText('진단 로그 파일을 저장하고 공유 화면을 열었습니다.', { exact: true });
+      await expect(notice).toBeVisible();
+      await notice.scrollIntoViewIfNeeded();
+      await gallery.capture('diagnostics-export-acknowledged', 'CLIENT/SYNTHETIC · synthetic acknowledgement copy only, no saved-file, attachment or delivery proof');
+    }
+    expect(await page.locator('.activity-list').allTextContents()).toEqual(history);
+  });
+}
 
 for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('phone-service-')), ...scannerLaunchCases]) {
   test(selected.id, async ({ page, gallery }, info) => {
@@ -152,7 +219,14 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
-      await expect(page.getByRole('button', { name: '로그 폴더 열기', exact: true })).toBeVisible();
+      const logs = page.getByRole('button', { name: '로그 폴더 열기', exact: true });
+      await expect(logs).toBeEnabled();
+      await expect(page.getByRole('button', { name: '진단 로그 내보내기', exact: true })).toHaveCount(0);
+      await logs.scrollIntoViewIfNeeded();
+      await logs.focus();
+      await expect(logs).toBeFocused();
+      await expect(logs).toBeInViewport({ ratio: 1 });
+      await gallery.capture('diagnostics-windows-history', 'CLIENT/SYNTHETIC · existing Windows log-folder action retained; no Explorer proof');
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '승인 요청 없음', exact: true })).toBeVisible();
     const intakeCopy: Record<string, string> = {
@@ -182,8 +256,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture === 'phone-unavailable') {
       await expect(page.getByRole('heading', { name: '요청을 받을 준비가 필요합니다', exact: true })).toBeVisible();
-      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(2);
-      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(2);
+      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(3);
+      await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(1);
     }
     if (fixture === 'phone-pending' || fixture === 'phone-long-request' || fixture === 'phone-terminal') {
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeEnabled();

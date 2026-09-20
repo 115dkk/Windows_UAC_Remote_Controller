@@ -52,8 +52,9 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for CommandOrigin {
 
 /// No renderer payload participates in opening the fixed native input surface.
 /// Unlike a Deserialize argument, this checks the entire IPC body and retains none.
-pub(crate) struct ScannerArguments;
-impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ScannerArguments {
+pub(crate) struct EmptyArguments;
+pub(crate) type ScannerArguments = EmptyArguments;
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for EmptyArguments {
     fn from_command(
         command: tauri::ipc::CommandItem<'de, R>,
     ) -> Result<Self, tauri::ipc::InvokeError> {
@@ -137,6 +138,35 @@ pub(crate) fn open_notification_settings(
     {
         let _ = (app, origin);
         Err(mobile_issue())
+    }
+}
+
+pub(crate) fn export_android_diagnostics(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<(), AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let _: serde_json::Value = app
+            .state::<DeviceState>()
+            .0
+            .run_mobile_plugin_from_origin(&origin.native, "exportAndroidDiagnostics", ())
+            .map_err(|_| diagnostics_export_issue())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, origin);
+        Err(diagnostics_export_issue())
+    }
+}
+
+const fn diagnostics_export_issue() -> AppIssue {
+    AppIssue {
+        code: "diagnostics_export_unavailable",
+        message: "진단 로그를 내보내지 못했습니다.",
+        next_action: Some("잠시 후 다시 시도하십시오."),
     }
 }
 
@@ -659,6 +689,39 @@ mod tests {
         assert!(declaration.contains("_arguments: crate::mobile::ScannerArguments"));
         assert!(declaration.contains("state.admission.try_enter()"));
         assert!(declaration.contains("spawn_blocking"));
+    }
+
+    #[test]
+    fn diagnostic_export_accepts_no_renderer_path_contents_or_recipient() {
+        use tauri::ipc::InvokeBody;
+        for body in [
+            InvokeBody::Json(serde_json::Value::Null),
+            InvokeBody::Json(serde_json::json!({})),
+        ] {
+            assert!(super::scanner_arguments_empty(&body));
+        }
+        for body in [
+            InvokeBody::Raw(Vec::new()),
+            InvokeBody::Json(serde_json::json!({"path":"Download/private.txt"})),
+            InvokeBody::Json(serde_json::json!({"contents":"synthetic-secret"})),
+            InvokeBody::Json(serde_json::json!({"recipient":"example.invalid"})),
+        ] {
+            assert!(!super::scanner_arguments_empty(&body));
+        }
+        let commands = include_str!("commands.rs");
+        let declaration = commands
+            .split("pub(crate) async fn export_android_diagnostics(")
+            .nth(1)
+            .unwrap();
+        assert!(declaration.contains("origin: crate::mobile::CommandOrigin"));
+        assert!(declaration.contains("_arguments: crate::mobile::EmptyArguments"));
+        assert!(declaration.contains("state.admission.try_enter()"));
+        assert!(declaration.contains("spawn_blocking"));
+        let native = include_str!(
+            "../gen/android/app/src/main/java/dev/dkk115/uacremote/DeviceStateActivityCommands.kt"
+        );
+        assert!(native.contains("fun exportAndroidDiagnostics(invoke: Invoke)"));
+        assert!(native.contains("AndroidDiagnosticExporter.create(activity)"));
     }
 
     #[test]

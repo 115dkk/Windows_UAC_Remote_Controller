@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.background
 
-import android.util.Log
+import dev.dkk115.uacremote.AndroidDiagnosticStore
 import com.sun.jna.Callback
 import com.sun.jna.CallbackThreadInitializer
 import com.sun.jna.Native
@@ -47,7 +47,7 @@ internal object NativeCallbackThreads {
         val pinned = try { pin(uniffiCallbackInterfaceNativePlatform.vtable) } catch (failure: Throwable) { unpinned(failure) }
         // Fixed-token startup diagnostic, never a payload. A count below the
         // vtable's own slots is the crash risk this object exists to remove.
-        try { Log.i("UacBoot", "stage=CALLBACK_PIN pinned=$pinned") } catch (_: Throwable) { }
+        try { AndroidDiagnosticStore.record("UacBoot", "stage=CALLBACK_PIN pinned=$pinned") } catch (_: Throwable) { }
         return pinned
     }
 

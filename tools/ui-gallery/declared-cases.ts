@@ -15,4 +15,12 @@ export const scannerLaunchCases: readonly GalleryCase[] = [
   { id: 'client-scanner-launch-error-320', fixture: 'phone-scanner-launch-error', viewport: { width: 320, height: 740 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
 ];
 
-export const declaredGalleryCases = [...galleryCases, ...scannerLaunchCases, ...i18nGalleryCases, ...headerCases, ...pairingCeremonyCases];
+// CLIENT/SYNTHETIC export action states only; no Android storage or Sharesheet.
+export const diagnosticsExportCases: readonly GalleryCase[] = [
+  { id: 'client-diagnostics-export-320', fixture: 'phone-history', viewport: { width: 320, height: 740 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
+  { id: 'client-diagnostics-export-unavailable-320', fixture: 'phone-unavailable', viewport: { width: 320, height: 740 }, colorScheme: 'light', forcedColors: 'none', action: 'overview' },
+  { id: 'client-diagnostics-export-pending-320', fixture: 'phone-history-diagnostics-pending', viewport: { width: 320, height: 740 }, colorScheme: 'dark', forcedColors: 'none', action: 'overview' },
+  { id: 'client-diagnostics-export-pending-text-size-200-390', fixture: 'phone-history-diagnostics-pending', viewport: { width: 390, height: 1000 }, colorScheme: 'light', forcedColors: 'none', action: 'overview', rootTextSizePercent: 200 },
+];
+
+export const declaredGalleryCases = [...galleryCases, ...scannerLaunchCases, ...diagnosticsExportCases, ...i18nGalleryCases, ...headerCases, ...pairingCeremonyCases];

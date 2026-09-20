@@ -40,5 +40,15 @@ Get-Content -LiteralPath "$env:ProgramData\UACRemoteController-Logs\diagnostics.
 ```
 
 Windows Event Log diagnostics remain available independently, including when the
-public file cannot be opened. Android diagnostics remain in the existing bounded
-`UacBoot` / `UacNative` logcat streams; the Windows folder button is omitted there.
+public file cannot be opened.
+
+Android keeps bounded `UacBoot` / `UacNative` closed-token diagnostics in its
+device-protected private no-backup storage as well as the existing developer
+logcat stream. The Activity page's **Export diagnostic logs** action creates a
+text file under `Downloads/UAC Remote Approval` and opens the Android Sharesheet.
+The file is user-owned and can be selected later from a file picker. No
+`READ_LOGS` or storage permission is requested: only this app's private bounded
+records and the app's own currently available `UacNative` log buffer are
+considered. The exported file contains no request bodies, program details,
+device identities, keys, credentials or signatures. Export is explicit; the app
+never uploads the file or chooses a recipient.

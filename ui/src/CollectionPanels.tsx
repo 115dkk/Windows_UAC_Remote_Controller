@@ -137,8 +137,9 @@ function ActivityTime({ timestamp }: { timestamp: number }) {
   return <time dateTime={date.toISOString()}>{dateFormatter.format(date)}</time>;
 }
 
-export function ActivityPanel({ snapshot, disabled, onClear, onOpenDiagnostics }: {
-  snapshot: AppSnapshot; disabled: boolean; onClear: () => void; onOpenDiagnostics: () => void;
+export function ActivityPanel({ snapshot, disabled, exporting, onClear, onOpenDiagnostics, onExportDiagnostics }: {
+  snapshot: AppSnapshot; disabled: boolean; exporting: boolean; onClear: () => void;
+  onOpenDiagnostics: () => void; onExportDiagnostics: () => void;
 }) {
   const available = snapshot.dataAvailability.activity === 'available';
   const canClear = available && snapshot.canClearActivity && snapshot.activity.length > 0;
@@ -146,8 +147,9 @@ export function ActivityPanel({ snapshot, disabled, onClear, onOpenDiagnostics }
     {!available ? <EmptyState icon="history" title={ko.activityUnavailable} description={ko.activityUnavailableBody} />
       : snapshot.activity.length ? <ol className="surface activity-list">{snapshot.activity.map((event) => <li key={event.id}><span className={`activity-mark ${event.kind === 'failure' ? 'is-danger' : ''}`}><Icon name={event.kind === 'failure' ? 'alert' : 'history'} /></span><div><h2>{activityText[event.kind]}</h2><ActivityTime timestamp={event.timestampMillis} /></div></li>)}</ol>
       : <EmptyState icon="history" title={ko.noActivity} description={ko.noActivityBody} />}
-    {(snapshot.platform === 'windows' || canClear) && <div className="collection-actions">
+    {(snapshot.platform === 'windows' || snapshot.platform === 'android' || canClear) && <div className="collection-actions">
       {snapshot.platform === 'windows' && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenDiagnostics}>{ko.openDiagnosticsFolder}</button>}
+      {snapshot.platform === 'android' && <button type="button" className="button secondary" disabled={disabled} aria-busy={exporting} onClick={onExportDiagnostics}>{ko.exportDiagnostics}</button>}
       {canClear && <button type="button" className="button danger-quiet" disabled={disabled} onClick={onClear}>{ko.clearActivity}</button>}
     </div>}
   </>;

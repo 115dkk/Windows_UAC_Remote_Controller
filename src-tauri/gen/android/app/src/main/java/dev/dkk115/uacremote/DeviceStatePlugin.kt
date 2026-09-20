@@ -73,7 +73,7 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
         } else null
         if (captured == null) {
             // Fixed-token CI diagnostic: which command was refused and why (thread or origin), never payloads.
-            android.util.Log.i("UacScan", "stage=dispatch rejected command=${invoke.command} main=${Looper.myLooper() == Looper.getMainLooper()} origin=${origin != null} bound=${commands != null}")
+            AndroidDiagnosticStore.record("UacScan", "stage=dispatch rejected command=${invoke.command} main=${Looper.myLooper() == Looper.getMainLooper()} origin=${origin != null} bound=${commands != null}")
             try { invoke.reject("mobile_state_unavailable", "mobile_state_unavailable") } catch (_: Exception) { }
             return
         }
@@ -97,6 +97,7 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
     @Command fun openPairingUsb(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openPairingUsb)
     @Command fun openLockSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openLockSettings)
     @Command fun openNotificationSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openNotificationSettings)
+    @Command fun exportAndroidDiagnostics(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::exportAndroidDiagnostics)
     @Command fun getLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::getLanguage)
     @Command fun setLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::setLanguage)
 

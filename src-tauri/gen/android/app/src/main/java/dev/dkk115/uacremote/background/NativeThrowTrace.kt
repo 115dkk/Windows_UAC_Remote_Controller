@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.background
 
-import android.util.Log
+import dev.dkk115.uacremote.AndroidDiagnosticStore
 
 /**
  * Names where a platform callback threw, and nothing else.
@@ -49,7 +49,7 @@ internal object NativeThrowTrace {
      */
     internal fun measurement(site: String, name: String, value: Long) {
         val line = measurementLine(site, name, value) ?: return
-        try { Log.i(TAG, line) } catch (_: Throwable) { }
+        try { AndroidDiagnosticStore.record(TAG, line) } catch (_: Throwable) { }
     }
 
     /** Separate from [measurement] so the formatting is testable. */
@@ -61,7 +61,7 @@ internal object NativeThrowTrace {
     /** Separate from [named] so the formatting is testable without throwing. */
     internal fun note(site: String, failure: Throwable) {
         val line = line(site, failure) ?: return
-        try { Log.i(TAG, line) } catch (_: Throwable) { }
+        try { AndroidDiagnosticStore.record(TAG, line) } catch (_: Throwable) { }
     }
 
     /**

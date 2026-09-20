@@ -122,6 +122,7 @@ export interface ControllerBridge {
   watchRequests?(notify: () => void): Promise<() => Promise<void>>;
   clearActivity(): Promise<AppSnapshot>;
   openDiagnosticsFolder(): Promise<void>;
+  exportAndroidDiagnostics(): Promise<void>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;
   openPairingScanner(transport?: 'usb'): Promise<void>;

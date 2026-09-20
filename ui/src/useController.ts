@@ -11,6 +11,7 @@ export type ClientCommand =
   | { readonly kind: 'relay'; readonly address: string }
   | { readonly kind: 'clear' }
   | { readonly kind: 'diagnostics-folder' }
+  | { readonly kind: 'diagnostics-export' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
@@ -69,6 +70,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
         || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'diagnostics-folder': return snapshot.platform === 'windows';
+    case 'diagnostics-export': return snapshot.platform === 'android';
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
       return snapshot.dataAvailability.requests === 'available' && request !== undefined
@@ -81,7 +83,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
@@ -166,6 +168,7 @@ export function useController(bridge: ControllerBridge) {
     // its fresh capability. Never queue approval/denial or a generic command.
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const exportRead = command.kind === 'diagnostics-export' && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -216,6 +219,19 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
+      if (command.kind === 'diagnostics-export') {
+        // Native export shares command admission with the current read, but is
+        // independent of service/activity readiness and does not mutate either.
+        if (exportRead) {
+          try { await exportRead.promise; } catch { /* Logs remain useful after a failed service read. */ }
+          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        }
+        await bridge.exportAndroidDiagnostics();
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        // Preserve any request-body withdrawal while the Sharesheet was open.
+        publish({ ...current.current, refreshing: false, busy: null, error: null, notice: ko.diagnosticsExported });
+        return null;
+      }
       if (command.kind === 'diagnostics-folder') {
         // The folder is independent of service readiness, but its native command
         // shares admission with this exact in-flight read. Wait for that read to
@@ -238,6 +254,10 @@ export function useController(bridge: ControllerBridge) {
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+      if (command.kind === 'diagnostics-export') {
+        publish({ ...current.current, refreshing: false, busy: null, error: ko.diagnosticsExportFailure, notice: null });
+        return null;
+      }
       if (command.kind === 'diagnostics-folder') {
         const code = failure !== null && typeof failure === 'object' && 'code' in failure ? failure.code : null;
         const category = code === 'app_busy' ? 'busy' : code === 'diagnostics_folder_unavailable' ? 'unavailable' : code === 'app_worker_unavailable' ? 'worker' : 'other';
