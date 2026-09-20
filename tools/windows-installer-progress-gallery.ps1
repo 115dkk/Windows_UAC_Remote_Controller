@@ -38,8 +38,15 @@ foreach ($language in @('English','Korean')) {
                     Start-Sleep -Milliseconds 200
                 }
                 if (-not $bar) { throw 'Native MUI progress bar missing' }
-                # Wait only for this harmless 200ms fixture section to settle.
-                Start-Sleep -Milliseconds 500
+                # Observe completion inside the original deadline; a fixed delay
+                # is not proof that MUI has finished its page layout transition.
+                $complete = $false
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    $complete = [InstallerProgressNative]::Complete([IntPtr]$window.Current.NativeWindowHandle, [IntPtr]$bar.Current.NativeWindowHandle, [uint32]$window.Current.ProcessId)
+                    if ($complete) { break }
+                    Start-Sleep -Milliseconds 200
+                }
+                if (-not $complete) { throw 'Native fixture completion was not observed' }
                 $geometry = [InstallerProgressNative]::Measure([IntPtr]$window.Current.NativeWindowHandle, [IntPtr]$bar.Current.NativeWindowHandle, [uint32]$window.Current.ProcessId)
                 $fits = $geometry[1] -gt 0 -and $geometry[2] -lt $geometry[0] -and [Math]::Abs(($geometry[0] - $geometry[2]) - $geometry[1]) -le 2
                 if ($fits -ne ($repair -eq 1)) { throw "Unexpected $name geometry: $geometry" }
@@ -50,7 +57,7 @@ foreach ($language in @('English','Korean')) {
                     $graphics.CopyFromScreen([int]$bounds.X,[int]$bounds.Y,0,0,$bitmap.Size)
                     $bitmap.Save((Join-Path $outputRoot "$name.png"),[Drawing.Imaging.ImageFormat]::Png)
                 } finally { $graphics.Dispose(); $bitmap.Dispose() }
-                $results += @{ language=$language; fontSize=$fontSize; repaired=($repair -eq 1); fits=$fits; geometry=$geometry; dpi=[InstallerProgressNative]::GetDpiForWindow([IntPtr]$window.Current.NativeWindowHandle); actualProductInstall=$false }
+                $results += @{ language=$language; fontSize=$fontSize; repaired=($repair -eq 1); fits=$fits; completed=$complete; geometry=$geometry; dpi=[InstallerProgressNative]::GetDpiForWindow([IntPtr]$window.Current.NativeWindowHandle); actualProductInstall=$false }
             } finally {
                 # These are new, test-owned, no-payload fixture processes only.
                 if (-not $process.HasExited) { $process.Kill($true); if (-not $process.WaitForExit(5000)) { throw 'Geometry fixture did not exit' } }

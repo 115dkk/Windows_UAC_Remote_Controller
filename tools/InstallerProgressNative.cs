@@ -11,6 +11,17 @@ public static class InstallerProgressNative {
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassNameW(IntPtr window, StringBuilder value, int count);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int id);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    public static bool Complete(IntPtr window, IntPtr progress, uint pid) {
+        Measure(window, progress, pid); // Establish the same owned native target.
+        UIntPtr maximum, position;
+        if (SendMessageTimeoutW(progress, 0x407, UIntPtr.Zero, IntPtr.Zero, 2, 1000, out maximum) == IntPtr.Zero ||
+            SendMessageTimeoutW(progress, 0x408, UIntPtr.Zero, IntPtr.Zero, 2, 1000, out position) == IntPtr.Zero)
+            throw new InvalidOperationException("Progress state unavailable");
+        return maximum.ToUInt64() > 0 && position.ToUInt64() >= maximum.ToUInt64() && IsWindowEnabled(GetDlgItem(window, 1));
+    }
     public static int[] Measure(IntPtr window, IntPtr progress, uint pid) {
         uint first, second;
         if (GetWindowThreadProcessId(window, out first) == 0 || GetWindowThreadProcessId(progress, out second) == 0 || first != pid || second != pid)
