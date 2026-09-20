@@ -317,6 +317,7 @@ fn map_service_error(error: ServiceError) -> PairingFailure {
         | ServiceError::IdentityCleanupFailed { .. }
         | ServiceError::IdentityHandleAlreadyReleased
         | ServiceError::StartupFailure { .. }
+        | ServiceError::DiagnosticsFolderFailure { .. }
         | ServiceError::InvalidClock
         | ServiceError::WorkerFailed
         | ServiceError::AlreadyDispatched
