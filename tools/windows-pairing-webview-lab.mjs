@@ -11,7 +11,8 @@ export async function provePairingLaunch({ page, ps, profile, evidence, confirmS
   let prompt;
   try {
     await page.locator('.navigation-item').nth(1).click();
-    const button = page.locator('.pairing-entry button.primary[aria-describedby$="-qr-purpose"]');
+    const button = page.locator('.pairing-entry button[aria-describedby$="-qr-purpose"]');
+    await expect(button).toHaveCount(1);
     await expect(button).toHaveCount(1);
     await expect(button).toBeEnabled({ timeout: 15000 });
     await button.click(); // One actual UI action; no mutation retry.
