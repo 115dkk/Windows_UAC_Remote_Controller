@@ -4,7 +4,7 @@ package dev.dkk115.uacremote.background
 import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Intent
 import android.os.Build
-import android.util.Log
+import dev.dkk115.uacremote.AndroidDiagnosticStore
 import dev.dkk115.uacremote.nativecore.BridgeException
 
 internal enum class BootDiagnosticAction { LOCKED_BOOT, BOOT, PACKAGE_REPLACED }
@@ -216,20 +216,20 @@ internal object BootDiagnostics {
         return lines
     }
     internal fun recordContractLinkage(failure: Throwable) {
-        try { for (line in contractLinkageLines(failure)) if (line.length <= MAX_LINE_CHARS) Log.i("UacBoot", line) }
+        try { for (line in contractLinkageLines(failure)) if (line.length <= MAX_LINE_CHARS) AndroidDiagnosticStore.record("UacBoot", line) }
         catch (_: Throwable) { /* Diagnostics never change failure handling. */ }
     }
     fun record(value: BootDiagnosticRecord) {
         try {
             val line = value.line()
-            if (line.length <= MAX_LINE_CHARS) Log.i("UacBoot", line)
+            if (line.length <= MAX_LINE_CHARS) AndroidDiagnosticStore.record("UacBoot", line)
         } catch (_: Exception) { /* Diagnostic delivery never changes admission. */ }
     }
 
     fun recordOwner(value: OwnerDiagnosticRecord) {
         try {
             val line = value.line()
-            if (line.length <= MAX_LINE_CHARS) Log.i("UacBoot", line)
+            if (line.length <= MAX_LINE_CHARS) AndroidDiagnosticStore.record("UacBoot", line)
         } catch (_: Throwable) { /* This diagnostic never changes owner decisions. */ }
     }
 

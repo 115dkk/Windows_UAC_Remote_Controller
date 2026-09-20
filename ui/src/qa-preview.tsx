@@ -36,7 +36,7 @@ if (root && ceremony) {
     offer: () => Promise.resolve({ version: 'synthetic-gallery', status: fixtureName === 'desktop-taskbar-available' ? 'available' : 'unavailable' }),
     request: () => Promise.resolve<TaskbarStatus>('declined'),
   } : undefined;
-  const bridge = createQaBridge(selected.snapshot, selected.scannerFailure);
+  const bridge = createQaBridge(selected.snapshot, selected.scannerFailure, selected.diagnosticsExportPending);
   createRoot(root).render(<div className="qa-frame">{banner}
     <App bridge={bridge} initialPage={selected.page} taskbarClient={taskbarClient} /></div>);
 }

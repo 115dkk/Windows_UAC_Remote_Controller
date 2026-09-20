@@ -15,6 +15,7 @@ fn main() {
         "open_diagnostics_folder",
         "open_lock_settings",
         "open_notification_settings",
+        "export_android_diagnostics",
         "open_pairing_scanner",
         "open_pairing_usb",
         "request_details",

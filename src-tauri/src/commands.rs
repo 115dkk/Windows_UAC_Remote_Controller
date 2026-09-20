@@ -407,6 +407,24 @@ pub(crate) async fn open_notification_settings(
     .map_err(|_| worker_issue())?
 }
 
+/// Saves only the app's bounded closed Android diagnostics to user-visible
+/// Downloads and opens the system Sharesheet. No path or log payload comes from JS.
+#[tauri::command]
+pub(crate) async fn export_android_diagnostics(
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
+    _arguments: crate::mobile::EmptyArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<(), AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        crate::mobile::export_android_diagnostics(&app, &origin)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}
+
 #[tauri::command]
 pub(crate) async fn open_pairing_scanner(
     app: tauri::AppHandle,

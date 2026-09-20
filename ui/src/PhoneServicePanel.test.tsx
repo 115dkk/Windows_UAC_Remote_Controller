@@ -32,7 +32,8 @@ describe('Android service controls from actual snapshot capabilities', () => {
     expect(screen.getByRole('heading', { name: ko.policyStoppedTitle })).toBeInTheDocument();
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: ko.phoneActivity })).not.toBeInTheDocument();
+    // Log export remains reachable; unavailable history is still not invented.
+    expect(screen.getByRole('button', { name: ko.phoneActivity })).toBeEnabled();
     expect(screen.queryByText(ko.noActivity)).not.toBeInTheDocument();
     for (const name of [serviceActionText.install, serviceActionText.uninstall, serviceActionText.restart]) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();

@@ -134,6 +134,7 @@ pub fn run() {
             commands::open_diagnostics_folder,
             commands::open_lock_settings,
             commands::open_notification_settings,
+            commands::export_android_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("native application host could not run");

@@ -455,7 +455,7 @@ internal class DeviceStateActivityCommands(
     }
 
     private fun openPairingInput(invoke: Invoke, usb: Boolean) {
-        android.util.Log.i("UacScan", "stage=command argumentBytes=${invoke.getRawArgs().length}")
+        AndroidDiagnosticStore.record("UacScan", "stage=command argumentBytes=${invoke.getRawArgs().length}")
         if (!acceptsNoArguments(invoke)) return
         activity.runOnUiThread {
             val owner = activity.application as? ControllerApplication
@@ -464,7 +464,7 @@ internal class DeviceStateActivityCommands(
                 val result = JSObject(); result.put("status", value.wireValue)
                 try { invoke.resolve(result) } catch (_: Exception) { }
             }
-            android.util.Log.i("UacScan", "stage=open-request owner=${owner != null} foreground=${isForeground()}")
+            AndroidDiagnosticStore.record("UacScan", "stage=open-request owner=${owner != null} foreground=${isForeground()}")
             if (owner == null || !isForeground()) reply(dev.dkk115.uacremote.pairing.PairingScannerLaunch.UNAVAILABLE)
             else owner.openPairingScanner(activity, binding, ::isForeground, ::reply, usb)
         }
@@ -564,6 +564,23 @@ internal class DeviceStateActivityCommands(
             // notification delivery is inferred from startActivity returning.
             invoke.resolve()
         }
+    }
+
+    fun exportAndroidDiagnostics(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        if (!isForeground()) {
+            invoke.reject("diagnostics_export_unavailable", "diagnostics_export_unavailable")
+            return
+        }
+        fun reject() { try { invoke.reject("diagnostics_export_unavailable", "diagnostics_export_unavailable") } catch (_: Exception) { } }
+        val accepted = AndroidDiagnosticExporter.begin(activity, ::isForeground) { outcome ->
+            if (outcome == DiagnosticExportOutcome.SHARED) {
+                try { invoke.resolve() } catch (_: Exception) { }
+            } else {
+                reject()
+            }
+        }
+        if (!accepted) reject()
     }
 
     private fun deviceSecure(): Boolean? {

@@ -1,4 +1,7 @@
 {
+  "진단 로그 내보내기": "Exporter les journaux de diagnostic",
+  "진단 로그 파일을 저장하고 공유 화면을 열었습니다.": "Le fichier de diagnostic a été enregistré et l’écran de partage a été ouvert.",
+  "진단 로그를 내보내지 못했습니다. 잠시 후 다시 시도하십시오.": "Impossible d’exporter les journaux de diagnostic. Réessayez dans quelques instants.",
   "로그 폴더 열기": "Ouvrir le dossier des journaux",
   "로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.": "Impossible d’ouvrir le dossier des journaux. Vérifiez l’installation et les autorisations d’accès.",
   "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.": "Impossible de confirmer la suppression de l’enregistrement du PC. Vérifiez à nouveau.",

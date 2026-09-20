@@ -4,7 +4,7 @@
 import type { AppSnapshot, ControllerBridge, RequestView, ServiceState } from './contracts';
 import type { ClientPage } from './App';
 
-export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable' }
+export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable'; readonly diagnosticsExportPending?: true }
 
 export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): AppSnapshot {
   return {
@@ -100,6 +100,7 @@ export function qaCase(name: string): QaCase {
     case 'phone-authenticating': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'authenticating', canApprove: false }] } };
     case 'phone-waiting': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'waiting', canApprove: false, canDeny: false }] } };
     case 'phone-awaiting-outcome': return { page: 'requests', snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'awaiting_outcome', canApprove: false, canDeny: false }] } };
+    case 'phone-history-diagnostics-pending': return { ...qaCase('phone-history'), diagnosticsExportPending: true };
     case 'phone-history': return { page: 'activity', snapshot: { ...phone,
       dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'available' },
       canClearActivity: true,
@@ -138,7 +139,7 @@ export function qaCase(name: string): QaCase {
   }
 }
 
-export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure']): ControllerBridge {
+export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure'], diagnosticsExportPending?: QaCase['diagnosticsExportPending']): ControllerBridge {
   let value = initial;
   function reply(next: AppSnapshot): Promise<AppSnapshot> { value = next; return Promise.resolve(value); }
   return {
@@ -174,6 +175,8 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     clearActivity: () => reply({ ...value, activity: [] }),
     // Synthetic client acknowledgement, never a native Explorer claim.
     openDiagnosticsFolder: () => Promise.resolve(),
+    // Synthetic acknowledgement only; does not save or share an Android file.
+    exportAndroidDiagnostics: () => diagnosticsExportPending ? new Promise<void>(() => { /* Held synthetic owner for pending-state gallery only. */ }) : Promise.resolve(),
     openLockSettings: () => Promise.resolve(),
     openNotificationSettings: () => Promise.resolve(),
     // Client/synthetic acknowledgement only; no camera surface or pairing result.
