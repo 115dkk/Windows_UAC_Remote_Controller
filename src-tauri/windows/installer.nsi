@@ -167,7 +167,11 @@ Var UacTaskbarCheckbox
 ; PRODUCTNAME/INSTALLATIONID remain fixed for matching and registry identities.
 Name "$(UacProductName)"
 ; The bundler's absent optional copyright can render as literal "Null".
-!if "${COPYRIGHT}" == "" || "${COPYRIGHT}" == "Null" || "${COPYRIGHT}" == "null"
+!if "${COPYRIGHT}" S== ""
+  BrandingText " "
+!else if "${COPYRIGHT}" S== "Null"
+  BrandingText " "
+!else if "${COPYRIGHT}" S== "null"
   BrandingText " "
 !else
   BrandingText "${COPYRIGHT}"

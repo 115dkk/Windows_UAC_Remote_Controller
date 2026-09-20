@@ -31,6 +31,7 @@ test('installer progress is fitted from observed geometry at show and completion
   assert.match(layout, /SetWindowPos/u);
   assert.doesNotMatch(layout, /\b(?:ExecWait|ExecShell|WriteRegStr|FileOpen)\b/u);
   assert.match(source, /BrandingText " "/u);
+  assert.doesNotMatch(source, /^!if.*COPYRIGHT.*\|\|/mu, 'NSIS preprocessor does not parse chained comparisons');
 });
 // Ignore whole-line source comments, not quoted SDDL/text or executable lines.
 const instructions = (source) => source.split('\n').map((line) => line.trim())

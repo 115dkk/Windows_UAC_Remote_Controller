@@ -145,14 +145,14 @@ try {
   writeFileSync(resolve(evidence, 'pairing-action-bounds.json'), JSON.stringify({ qr, usb, clearGap, rootFontSize, engine: browser.version(), owner: 'actual Windows WebView2' }, null, 2), { flag: 'wx' });
   await page.screenshot({ path: resolve(evidence, 'pairing-actions.png') });
   await page.locator('nav .navigation-item').nth(2).click();
-  const logFolder = page.getByRole('button', { name: '로그 폴더 열기', exact: true });
+  const logFolder = page.getByRole('button', { name: /^(Open log folder|로그 폴더 열기)$/u });
   await expect(logFolder).toBeEnabled();
   await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-action.png') });
   const explorerCount = () => Number(ps("@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'UACRemoteController-Logs').Count"));
   assert.equal(explorerCount(), 0, 'No preexisting diagnostic Explorer window may stand in for this click');
   await logFolder.click();
   await expect.poll(explorerCount, { timeout: 15000, intervals: [500, 1000] }).toBe(1);
-  await expect(page.getByText('로그 폴더를 열지 못했습니다. 설치 상태와 폴더 접근 권한을 확인하십시오.', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.notice-box.error')).toHaveCount(0);
   ps("$owned=@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object MainWindowTitle -eq 'UACRemoteController-Logs');if($owned.Count -ne 1){throw 'Diagnostic Explorer identity changed'};[void]$owned[0].CloseMainWindow()");
   await page.locator('nav .navigation-item').nth(1).click();
   confirmService();
