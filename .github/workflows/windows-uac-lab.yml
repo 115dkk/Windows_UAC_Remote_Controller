@@ -242,19 +242,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $proof = Get-Content "$env:LAB_EVIDENCE/pairing-e2e-proof.json" -Raw | ConvertFrom-Json
           if ($proof.commit -ne $env:GITHUB_SHA -or $proof.passed -ne $true -or $proof.nativeWindowsDenied -ne $true) { throw 'Full native pairing and denial proof missing' }
-      - name: Open public diagnostics from the actual interactive shell-user GUI
+      - name: Record user-deferred local folder-opening acceptance
         if: ${{ steps.start.outputs.product_running == 'true' }}
         shell: pwsh
         run: |
-          # A RunAs foreign-account GUI is valid for service isolation, but not
-          # equivalent to the existing interactive user's Explorer activation.
-          $originalEvidence = $env:LAB_EVIDENCE
-          try {
-            $env:LAB_EVIDENCE = Join-Path $originalEvidence 'diagnostic-shell-user'
-            New-Item -ItemType Directory -Path $env:LAB_EVIDENCE -ErrorAction Stop | Out-Null
-            ./tools/windows-medium-client.ps1 -ShellFolderOnly
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally { $env:LAB_EVIDENCE = $originalEvidence }
+          # User decision 2026-09-21: only ordinary Explorer opening moves to
+          # post-install acceptance. Run35519124260 observed an elevated hosted
+          # shell, not a genuine medium shell. This record is NOT a native pass.
+          # Keep the actual ACL, management, pairing/denial and probe gates below.
+          @{
+            commit = $env:GITHUB_SHA
+            status = 'deferred_by_user'
+            verified = $false
+            scope = 'ordinary_user_diagnostic_folder_opening'
+            reason = 'hosted_shell_elevated'
+            observedRun = 35519124260
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:LAB_EVIDENCE 'diagnostic-shell-acceptance.json') -Encoding utf8
       - name: Verify bounded pairing event diagnostics on the actual service
         # Failure diagnostics must survive even when the end-to-end stage fails.
         if: ${{ always() && steps.start.outputs.product_running == 'true' }}
