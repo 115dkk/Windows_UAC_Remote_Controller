@@ -1,10 +1,12 @@
 {
   "name": "windows-uac-remote-controller",
-  "version": "0.1.0-alpha.40",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "license": "GPL-2.0-or-later",
-  "engines": { "node": ">=24.15.0 <25" },
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "icons:generate": "node tools/generate-app-icons.mjs",
