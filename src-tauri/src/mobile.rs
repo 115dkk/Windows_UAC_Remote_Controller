@@ -721,7 +721,16 @@ mod tests {
             "../gen/android/app/src/main/java/dev/dkk115/uacremote/DeviceStateActivityCommands.kt"
         );
         assert!(native.contains("fun exportAndroidDiagnostics(invoke: Invoke)"));
-        assert!(native.contains("AndroidDiagnosticExporter.create(activity)"));
+        assert!(native.contains("AndroidDiagnosticExporter.begin(activity, ::isForeground)"));
+        for shallow in [
+            ".acquire()",
+            ".execute {",
+            ".create(activity)",
+            ".share(",
+            ".discard(",
+        ] {
+            assert!(!native.contains(&format!("AndroidDiagnosticExporter{shallow}")));
+        }
     }
 
     #[test]
