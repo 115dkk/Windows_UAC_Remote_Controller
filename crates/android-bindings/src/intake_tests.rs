@@ -619,6 +619,13 @@ impl Fixture {
         panic!("bounded accepted-correlation notice count")
     }
     fn projection(&self) -> Arc<NativePendingRequest> {
+        self.projection_with(NativeRequestPresentation::Fresh, true)
+    }
+    fn projection_with(
+        &self,
+        expected: NativeRequestPresentation,
+        wait_for_progress: bool,
+    ) -> Arc<NativePendingRequest> {
         let end = Instant::now() + LIMIT;
         let mut projection = None;
         for _ in 0..128 {
@@ -628,7 +635,12 @@ impl Fixture {
                 .expect("bounded native projection")
             {
                 Notice::Projection(value, intent) => {
-                    assert_eq!(intent, NativeRequestPresentation::Fresh);
+                    assert_eq!(intent, expected);
+                    // A synchronous refresh has already returned and released
+                    // admission; its Update callback needs no unrelated IO wake.
+                    if !wait_for_progress {
+                        return value;
+                    }
                     projection = Some(value);
                 }
                 Notice::Progress if projection.is_some() => return projection.unwrap(),
@@ -687,7 +699,7 @@ fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one
             .controller
             .refresh_native_request(old_view.clone())
             .unwrap();
-        let view = fixture.projection();
+        let view = fixture.projection_with(NativeRequestPresentation::Update, false);
         assert!(old_view.is_revoked());
         assert_eq!(old_view.window(), view.window());
         assert!(fixture.controller.refresh_native_request(old_view).is_err());
