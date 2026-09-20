@@ -154,7 +154,8 @@ fn stopped_owner_still_has_recovery_surface_without_policy_or_history_calls() {
 fn paired_pc_projection_is_available_only_for_a_current_ready_owner() {
     for (observations, status, available) in [
         (vec![ready()], "ready", true),
-        (vec![ready()], "reconciling", false),
+        (vec![ready()], "reconciling", true),
+        (vec![ready()], "unavailable", false),
         (vec![ready(), ready(), stopped()], "ready", false),
     ] {
         let port = Port::new(&observations);
@@ -168,6 +169,11 @@ fn paired_pc_projection_is_available_only_for_a_current_ready_owner() {
             available
         );
         assert_eq!(view.devices.len(), usize::from(available));
+        assert_eq!(view.can_unpair, available);
+        assert_eq!(
+            view.data_availability.requests == Availability::Available,
+            available && status == "ready"
+        );
         if available {
             assert!(view.devices[0].connected);
         }

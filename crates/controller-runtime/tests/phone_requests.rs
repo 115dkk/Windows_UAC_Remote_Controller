@@ -69,6 +69,7 @@ fn nonready_is_not_a_known_empty_inventory_and_zero_peers_is_not_connected() {
         let value = decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).unwrap();
         assert_ne!(value.catalog.status, RequestCatalogState::Ready);
         assert!(value.requests.is_empty());
+        assert_eq!(value.devices.len(), usize::from(status == "reconciling"));
     }
     let mut empty = catalog();
     empty["requests"] = json!([]);

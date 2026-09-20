@@ -188,7 +188,9 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         }
     }
     Ok(PhoneRequestCatalog {
-        devices: if document.status == RequestCatalogState::Ready {
+        // Durable peer inventory is independent of request projection/clock
+        // reconciliation. Unknown inventory still cannot become an empty list.
+        devices: if document.status != RequestCatalogState::Unavailable {
             devices
         } else {
             Vec::new()

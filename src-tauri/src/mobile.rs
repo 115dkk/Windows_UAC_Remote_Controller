@@ -272,7 +272,7 @@ enum PeerRemovalReply {
 fn peer_removal_issue() -> AppIssue {
     AppIssue {
         code: "peer_removal_unconfirmed",
-        message: "PC 등록을 삭제하지 못했습니다. 다시 확인하십시오.",
+        message: "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.",
         next_action: None,
     }
 }

@@ -163,10 +163,12 @@ pub(super) fn snapshot(
     // inventory remain distinct from a known empty ready catalogue.
     match port.requests().and_then(RequestsReply::requests) {
         Ok(requests) => {
-            if requests.catalog.status == controller_runtime::RequestCatalogState::Ready {
+            if requests.catalog.status != controller_runtime::RequestCatalogState::Unavailable {
                 value.data_availability.devices = Availability::Available;
                 value.devices = requests.devices;
                 value.can_unpair = !value.devices.is_empty();
+            }
+            if requests.catalog.status == controller_runtime::RequestCatalogState::Ready {
                 value.data_availability.requests = Availability::Available;
                 value.requests = requests.requests;
             }

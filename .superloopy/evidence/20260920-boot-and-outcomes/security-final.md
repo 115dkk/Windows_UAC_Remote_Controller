@@ -122,3 +122,41 @@ history tests, protocol security gates and actual UI artifacts. Physical USB,
 notification/biometric/UAC acceptance and cold-boot reproduction remain separate
 user-authorized observations. No additional credential/policy relaxation, signing
 surface or privileged execution API was introduced by this reviewed delta.
+
+## Follow-up: independent peer inventory during request reconciliation
+
+Reviewed the proposed bounded decoder/snapshot change against source at
+`95f9a7e0e502924bf03482e5cdfe324871fa6300`. **PASS for this plan**, with the
+following unchanged boundaries; implementation and execution are ROOT-owned.
+
+`android-bindings/src/effects.rs::catalog_status_admitted` reads the healthy
+durable owner and builds the complete peer vector from committed associations
+and real intake observations before deciding request projection status. Request
+recovery/count mismatch/temporal reconciliation therefore does not make a
+successfully delivered peer inventory fabricated or partially authoritative.
+The JSON decoder already verifies all peer identities, revisions, uniqueness,
+bounds and configured/connected count consistency.
+
+It is safe to retain those validated devices for **Ready or Reconciling**, never
+Unavailable, and mark inventory/removal availability independently from request
+readiness. Requests must remain empty/unavailable unless Ready. The final native
+owner readiness recheck must still clear devices and `can_unpair` after stop or
+failure. Removal remains the same downward-only admitted durable operation; a
+rendered inventory does not authorize signatures or bypass native request checks.
+
+Regression coverage should distinguish known-empty Reconciling inventory from
+Unavailable, preserve validated peer rows while withholding request rows, reject
+malformed/count-inconsistent peer data in Reconciling, and clear inventory/removal
+capability when the final owner observation stops or fails.
+
+Availability limit: some actual clock-refresh periods are rejected earlier by
+`NativeRequestRegistry.validReply`, whose existing presentation fence requires
+`!temporalInvalid`. The tiny decoder change fixes delivered Reconciling catalogs;
+it does not prove every clock-refresh flicker is eliminated. That broad clock/
+request fence must not be relaxed merely to expose inventory.
+
+Active forget can retain core suppression/body metadata until its original
+lifecycle retirement while revoking native leases/projections immediately. This
+inventory correction neither needs nor authorizes changing replay guards, signed
+leases, crypto, expiry or suppression semantics. No product files or validators
+were touched in this follow-up.
