@@ -29,7 +29,7 @@ describe('display-only connection continuity', () => {
   it('never invents initial connectivity and immediately invalidates unknown, new identity or stopped owner', () => {
     vi.useFakeTimers();
     type Input = { value: boolean | null; identity: string; active: boolean };
-    const hook = renderHook(({ value, identity, active }: Input) => useConnectionDisplay(value, identity, active),
+    const hook = renderHook<boolean | null, Input>(({ value, identity, active }) => useConnectionDisplay(value, identity, active),
       { initialProps: { value: false, identity: 'peer:1', active: true } });
     expect(hook.result.current).toBe(false);
     hook.rerender({ value: true, identity: 'peer:1', active: true });
