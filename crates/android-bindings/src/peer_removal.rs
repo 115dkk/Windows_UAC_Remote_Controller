@@ -39,9 +39,12 @@ impl MobileController {
             let Some(reference) = reference else {
                 return Ok(None);
             };
-            owner
+            let (_committed, removal) = owner
                 .revoke_peer_association_from_trusted_host(reference)
                 .map_err(|_| BridgeError::StorageUnavailable)?;
+            if removal != android_controller::PeerAssociationRemoval::Removed {
+                return Err(BridgeError::StorageUnavailable);
+            }
             Ok(Some(reference))
         })?;
         let Some(reference) = removed else {

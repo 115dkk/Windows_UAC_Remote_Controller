@@ -32,7 +32,7 @@
     },
     {
       "path": "crates/windows-service-host/src/peer_runtime.rs",
-      "sha256": "d67e3863afcf4921ef4c489cc047dd5463e194d7a43348c95479a840bc83374c"
+      "sha256": "a741e4ed3ce038945fe13eb9abaafa17873b8f23ca4f4bc0262df31a72a59143"
     },
     {
       "path": "crates/windows-prompt-probe/src/ffi/watch.rs",
@@ -40,15 +40,15 @@
     },
     {
       "path": "crates/phone-request-core/src/inbox.rs",
-      "sha256": "dbca58852131599aaf5108d3b64d6e0e3b3bdd9055a3e3cdc68c1156eade6adc"
+      "sha256": "fd7fd2e7aefcc12422ed6b84d95f42a9a33b6ddd52521c23e2365b81f8a0628c"
     },
     {
       "path": "crates/notification-policy/src/lifecycle.rs",
-      "sha256": "679292988d2805ea8b3280b29318cfbc5ea29345e24b5e055e0f6a44bf9836bf"
+      "sha256": "6f5475c68bc8a46a6ae42f15aca8f37472d29f5162b02d0b5f18c27aa46972ad"
     },
     {
       "path": "crates/windows-service-host/src/peer_runtime/prompt.rs",
-      "sha256": "22f4ed5ced15a18f95b7175a430dc6d33a4a0dcc92aedf8e0251766a34e24081"
+      "sha256": "84b352872e7be74e8e0628d346dbe05c44a4f5b6a9de1659440cd1937848ade9"
     }
   ],
   "models": [

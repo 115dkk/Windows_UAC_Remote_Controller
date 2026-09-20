@@ -256,6 +256,21 @@ Revision freshness abstracts the real allocator's no-reuse behavior, not u64 ari
 
 ## Model-to-code mapping
 
+### Alpha39 source binding review (2026-09-20)
+
+ROOT reviewed the four changed bound files over2926af0 before rebinding hashes.
+`peer_runtime.rs` changes only the display-only management connected predicate
+to require actual Ready and a drained initial clock exchange. It does not alter
+peer admission, signed messages or request authorization. `peer_runtime/prompt.rs`
+adds an observation-only delivery-failure query and its tests. `inbox.rs` and
+`notification-policy/lifecycle.rs` retain authenticated PC terminal classifications
+instead of coalescing them into generic completion; suppression, immutable
+binding, deadlines, replay and withdrawal transitions are unchanged. History
+effects are explicitly outside the symbolic authorization model. No theorem,
+rule, canary, proof budget or expected verdict is changed. All current-source
+normal proof rows must still run in CI; this static alignment is not a proof of
+physical boot, native notification behavior or history persistence.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |
