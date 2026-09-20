@@ -7,6 +7,20 @@ import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
 import { ko } from './messages';
 
 describe('fixed Windows diagnostic folder handoff', () => {
+  it('waits for the same native snapshot read to release command admission', async () => {
+    const value = exampleSnapshot('windows');
+    let resolveRead!: (snapshot: typeof value) => void;
+    const pending = new Promise<typeof value>(resolve => { resolveRead = resolve; });
+    const snapshot = vi.fn().mockResolvedValue(value).mockResolvedValueOnce(value).mockImplementationOnce(() => pending);
+    const openDiagnosticsFolder = vi.fn().mockResolvedValue(undefined);
+    render(<App initialPage="activity" bridge={{ ...createQaBridge(value), snapshot, openDiagnosticsFolder }} />);
+    const button = await screen.findByRole('button', { name: ko.openDiagnosticsFolder });
+    fireEvent.click(screen.getByRole('button', { name: ko.refresh }));
+    fireEvent.click(button);
+    expect(openDiagnosticsFolder).not.toHaveBeenCalled();
+    resolveRead(value);
+    await waitFor(() => expect(openDiagnosticsFolder).toHaveBeenCalledExactlyOnceWith());
+  });
   it('remains reachable when the service activity snapshot is unavailable', async () => {
     const snapshot = qaCase('desktop-unavailable').snapshot;
     const openDiagnosticsFolder = vi.fn().mockResolvedValue(undefined);

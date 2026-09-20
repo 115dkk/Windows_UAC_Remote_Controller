@@ -165,6 +165,7 @@ export function useController(bridge: ControllerBridge) {
     // Serialize this camera-entry intent behind that exact read, then recheck
     // its fresh capability. Never queue approval/denial or a generic command.
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -216,7 +217,15 @@ export function useController(bridge: ControllerBridge) {
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
+        // The folder is independent of service readiness, but its native command
+        // shares admission with this exact in-flight read. Wait for that read to
+        // release admission; never queue an approval/denial or start another read.
+        if (folderRead) {
+          try { await folderRead.promise; } catch { /* Diagnostic files can outlive service reads. */ }
+          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        }
         await bridge.openDiagnosticsFolder();
+        console.info('UAC_DIAGNOSTIC_FOLDER_V1 outcome=accepted');
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         publish({ ...previous, refreshing: false, busy: null, error: null, notice: null });
         return null;
@@ -230,6 +239,10 @@ export function useController(bridge: ControllerBridge) {
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       if (command.kind === 'diagnostics-folder') {
+        const code = failure !== null && typeof failure === 'object' && 'code' in failure ? failure.code : null;
+        const category = code === 'app_busy' ? 'busy' : code === 'diagnostics_folder_unavailable' ? 'unavailable' : code === 'app_worker_unavailable' ? 'worker' : 'other';
+        // Closed diagnosis only: no path, exception text or arbitrary native code.
+        console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
         publish({ ...previous, refreshing: false, busy: null, error: ko.diagnosticsFolderFailure, notice: null });
         return null;

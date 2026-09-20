@@ -13,6 +13,13 @@ public static class InstallerProgressNative {
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+    public static bool Capture(IntPtr window, IntPtr progress, uint pid, IntPtr dc) {
+        Measure(window, progress, pid);
+        // Complete native window, including portions outside the small runner
+        // desktop; CopyFromScreen would clip the large-font right margin.
+        return PrintWindow(window, dc, 2);
+    }
     [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
     public static bool Complete(IntPtr window, IntPtr progress, uint pid) {
         Measure(window, progress, pid); // Establish the same owned native target.

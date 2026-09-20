@@ -74,6 +74,11 @@ try {
     return targets.length;
   }, { timeout: 30000 }).toBe(1);
   const page = targets[0];
+  const folderReplies = [];
+  page.on('console', message => {
+    const text = message.text();
+    if (/^UAC_DIAGNOSTIC_FOLDER_V1 outcome=(accepted|failed category=(busy|unavailable|worker|other))$/u.test(text)) folderReplies.push(text);
+  });
   const offerFile = resolve(profile, 'pairing-offer.txt');
   const offerStat = lstatSync(offerFile);
   assert.ok(offerStat.isFile() && !offerStat.isSymbolicLink() && offerStat.size < 4096);
@@ -159,6 +164,8 @@ try {
   assert.equal(explorerCount(), 0, 'No preexisting diagnostic Explorer window may stand in for this click');
   await logFolder.click();
   try {
+    await expect.poll(() => folderReplies.length, { timeout: 15000, intervals: [200, 500] }).toBe(1);
+    assert.equal(folderReplies[0], 'UAC_DIAGNOSTIC_FOLDER_V1 outcome=accepted', 'Native folder command must be accepted, not a lost/failed UI action');
     await expect.poll(explorerCount, { timeout: 15000, intervals: [500, 1000] }).toBe(1);
     await expect(page.locator('.notice-box.error')).toHaveCount(0);
   } finally {
@@ -168,6 +175,7 @@ try {
       errorVisible: await page.locator('.notice-box.error').count() > 0,
       errorText: await page.locator('.notice-box.error').allTextContents(),
       buttonEnabled: await logFolder.isEnabled(),
+      replies: folderReplies,
     }, null, 2), { flag: 'wx' });
   }
   ps(explorerWindows + ";if($owned.Count -ne 1){throw 'Diagnostic Explorer identity changed'};([Windows.Automation.WindowPattern]$owned[0].GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern)).Close()");

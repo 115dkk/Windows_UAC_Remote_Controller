@@ -54,7 +54,10 @@ foreach ($language in @('English','Korean')) {
                 $bitmap = [Drawing.Bitmap]::new([int]$bounds.Width,[int]$bounds.Height)
                 $graphics = [Drawing.Graphics]::FromImage($bitmap)
                 try {
-                    $graphics.CopyFromScreen([int]$bounds.X,[int]$bounds.Y,0,0,$bitmap.Size)
+                    $dc = $graphics.GetHdc()
+                    try {
+                        if (-not [InstallerProgressNative]::Capture([IntPtr]$window.Current.NativeWindowHandle, [IntPtr]$bar.Current.NativeWindowHandle, [uint32]$window.Current.ProcessId, $dc)) { throw 'Complete native window capture failed' }
+                    } finally { $graphics.ReleaseHdc($dc) }
                     $bitmap.Save((Join-Path $outputRoot "$name.png"),[Drawing.Imaging.ImageFormat]::Png)
                 } finally { $graphics.Dispose(); $bitmap.Dispose() }
                 $results += @{ language=$language; fontSize=$fontSize; repaired=($repair -eq 1); fits=$fits; completed=$complete; geometry=$geometry; dpi=[InstallerProgressNative]::GetDpiForWindow([IntPtr]$window.Current.NativeWindowHandle); actualProductInstall=$false }
