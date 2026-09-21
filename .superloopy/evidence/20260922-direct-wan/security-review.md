@@ -16,8 +16,9 @@ delta. Concrete availability/router-protocol findings D1–D5 were sent to ROOT,
 corrected and re-reviewed as recorded below. Public-IPv4 status integration is
 also corrected. This source-level candidate can proceed to ROOT's exact-commit
 CI; no build, prover, artifact, router or physical-device result is asserted.
-The low-priority shutdown cleanup edge remains explicitly limited below. Source
-inspection and synthetic tests are not proof of real off-LAN operation.
+The shutdown cleanup edge was subsequently corrected by the A1 ownership module
+and re-reviewed below. Source inspection and synthetic tests are not proof of
+real off-LAN operation.
 
 ## Findings and required disposition
 
@@ -134,6 +135,19 @@ active lease only. ROOT was notified of the optional one-attempt cleanup
 improvement; this does not authorize contacting an old gateway over another
 route, and unconfirmed mapping disappearance remains explicitly unverified.
 
+Final A1 disposition: corrected by `direct/obligations.rs`, reviewed at the
+current `5063620` source. The same `select_path` transition now governs polling
+and shutdown. It first retires an unmatched active path, restores only an exact
+matching displaced obligation, and keeps restored grants cleanup-only. Shutdown
+selects at most one current matching lease for one bounded cleanup attempt;
+absent/mismatched/expired paths select none. Candidate publication occurs after
+the ordinary poll transition, so a restored obligation cannot briefly reappear
+as a candidate. Maximum ownership count four, actual granted expiry, retry
+backoff, failed-cleanup retention, nonce checks and read-only IGD/NAT-PMP remain
+unchanged. Pure transition tests cover restoration immediately before shutdown;
+the synthetic Lease constructor is `cfg(test)` only. No validation was executed
+by the reviewer.
+
 ### Integration note — public IPv4 candidate
 
 The gateway correction added `PublicIpv4Candidate` for a routing-selected public
@@ -226,6 +240,34 @@ authentication premise may be weakened to accommodate this work. ROOT must run
 the complete exact-source prover and negative controls in CI.
 
 ## Evidence limits and acceptance work
+
+### Final incremental source review
+
+The management status integration retains one verified-pipe connection attempt.
+The optional direct-status call waits 350 ms after the preceding ordinary
+snapshot to accommodate the existing 250 ms listener rearm, then uses a separate
+one-second exchange budget. Normal management operations retain their original
+30-second budget. This is not a retry around identity/ACL denial or uncertain
+cleanup. The Windows adapter still preserves the ordinary snapshot when the
+optional read fails or is unsupported. The one-second budget bounds the
+exchange, not a guaranteed total completion bound for native cancellation/drain;
+the existing cleanup obligation is not skipped. Source inspection cannot prove
+that every real service scheduling delay fits the settling margin.
+
+The `_committed` binding retains the already checked receipt from the same
+fallible durable commit; it neither swallows an error nor skips persistence.
+`COMPOSITE_ROUTING_CANDIDATES` adds one closed diagnostic category matching the
+native error enum, not arbitrary error text or a new authority channel. Removing
+the two Arabic bidirectional control characters preserves executable names and
+permission guidance, and changes no application gate. CONTEXT/ADR additions
+describe the ownership boundary and evidence limits without asserting measured
+WAN/authentication success.
+
+ROOT reported the `3391008` measurement APK and UI-gallery lanes passed while
+quality failures motivated these source corrections. This reviewer did not run
+or independently validate those jobs/artifacts. Fresh exact-commit quality,
+protocol and native/device evidence remains ROOT-owned; earlier lane results
+are not promoted to a passing final gate for `5063620`.
 
 PCP-capable router behavior, native IPv6/firewall reachability, dynamic public-IP
 and gateway changes, off-LAN Android reconnect, Doze/reboot and actual phone

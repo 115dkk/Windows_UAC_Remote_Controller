@@ -206,7 +206,7 @@ impl IntakeOwner {
     pub(crate) fn spawn_dial(
         &self,
         request: crate::connectivity::DialRequest,
-    ) -> Result<(), crate::connectivity::DialRequest> {
+    ) -> Result<(), Box<crate::connectivity::DialRequest>> {
         let sender = self
             .inner
             .lock()
@@ -215,9 +215,11 @@ impl IntakeOwner {
             .as_ref()
             .map(|runtime| runtime.dial_sender.clone());
         let Some(sender) = sender else {
-            return Err(request);
+            return Err(Box::new(request));
         };
-        sender.try_send(request).map_err(|error| error.into_inner())
+        sender
+            .try_send(request)
+            .map_err(|error| Box::new(error.into_inner()))
     }
     pub(crate) fn take_dial_completions(&self) -> Vec<crate::connectivity::DialCompletion> {
         std::mem::take(
