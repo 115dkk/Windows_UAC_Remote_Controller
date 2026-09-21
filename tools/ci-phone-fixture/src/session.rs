@@ -169,12 +169,17 @@ pub(super) async fn deny_next(
         "held_millis":held_millis,"renewals":renewals}),
     )?;
     // Sign ONLY the latest independently verified lease, never the old nonce.
+    // One monotonic clock, excluding the deliberate 115s renewal hold. This is
+    // software-phone -> real Windows -> signed result latency, not Android
+    // biometric, tap-to-frame or mobile-network performance.
+    let decision_started = Instant::now();
     let denial = candidate
         .sign_denial(active_binding, fields.recipient_device)
         .map_err(|_| "denial_signing_failed")?;
     correlation
         .map_request(&active_event, nanos(base)?)
         .map_err(|_| "request_expired_before_send")?;
+    let queue_started = Instant::now();
     queue(&mut socket, &denial.to_wire())?;
     emit(json!({"state":"denial_queued","identity":"software_ci_fixture"}))?;
     let resolved_wire = next_frame(&mut socket).await?;
@@ -198,12 +203,16 @@ pub(super) async fn deny_next(
         RequestResolution::Expired => "expired",
         RequestResolution::Failed => "failed",
     };
+    let queued_to_resolution_micros = queue_started.elapsed().as_micros();
+    let decision_to_resolution_micros = decision_started.elapsed().as_micros();
     emit(json!({
         "state":"pc_resolution",
         "identity":"software_ci_fixture",
         "request_id":hex(active_binding.request_id().as_bytes()),
         "content_digest":hex(active_binding.content_digest().as_bytes()),
-        "outcome":outcome_name
+        "outcome":outcome_name,
+        "queued_to_resolution_micros":queued_to_resolution_micros,
+        "decision_to_resolution_micros":decision_to_resolution_micros
     }))?;
     if *outcome != RequestResolution::Denied {
         return Err("pc_did_not_report_denied");

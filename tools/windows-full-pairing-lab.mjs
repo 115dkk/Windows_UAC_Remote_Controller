@@ -150,6 +150,18 @@ export async function proveFullPairing({ page, ps, evidence, confirmService, cli
     assert.ok((await phone.next()).state === 'denial_queued');
     const result = await phone.next();
     assert.ok(result.state === 'pc_resolution' && result.outcome === 'denied' && result.request_id === request.request_id && result.content_digest === request.content_digest, 'PC did not verify/resolve the same denial');
+    assert.ok(Number.isSafeInteger(result.queued_to_resolution_micros) && result.queued_to_resolution_micros > 0
+      && Number.isSafeInteger(result.decision_to_resolution_micros)
+      && result.decision_to_resolution_micros >= result.queued_to_resolution_micros
+      && result.decision_to_resolution_micros <= 120_000_000, 'Monotonic denial latency observation missing');
+    proof.decisionLatency = {
+      sampleCount: 1, clock: 'software-phone-process-monotonic', decision: 'deny',
+      signingStartToVerifiedResolutionMicros: result.decision_to_resolution_micros,
+      queueStartToVerifiedResolutionMicros: result.queued_to_resolution_micros,
+      includes: ['software-signing', 'relay-transport', 'windows-decision', 'signed-result-verification'],
+      excludes: ['android-runtime', 'biometric-prompt', 'mobile-network', 'tap-to-render'],
+      artificialRenewalHoldIncluded: false,
+    };
     assert.ok((await phone.next()).state === 'completed');
     await phone.complete();
     proof.requestId = request.request_id; proof.contentDigest = request.content_digest;
