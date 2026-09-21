@@ -11,7 +11,7 @@ async fn routed_pair(
     clock: &Arc<HostClock>,
 ) -> (DurableInbox, PeerAssociationRef, Pair) {
     let (mut owner, old) = owner(temp, clock);
-    owner
+    let _revoked = owner
         .revoke_peer_association_from_trusted_host(old)
         .unwrap();
     let reference = reference(
@@ -35,7 +35,8 @@ async fn routed_pair(
     let clock_event = initial_clock(&mut pair, &owner, clock, PC_SIGNING_KEY)
         .await
         .unwrap();
-    pair.phone
+    let _applied = pair
+        .phone
         .apply_event(&mut owner, clock_event, clock.inbox())
         .unwrap();
     (owner, reference, pair)
@@ -316,10 +317,10 @@ async fn queued_hint_cannot_mutate_reenrollment_and_expired_query_cannot_refresh
                     .unwrap()
                     .descriptor()
                     .clone();
-                owner
+                let _revoked = owner
                     .revoke_peer_association_from_trusted_host(reference)
                     .unwrap();
-                owner
+                let _recorded = owner
                     .record_peer_association_from_trusted_host(descriptor)
                     .unwrap();
                 clock.inbox()
