@@ -50,7 +50,7 @@ export function renderChanges(commits, repository, previousTag, commit) {
 }
 
 export function fillTemplate(template, values) {
-  return template.replace(/\{\{([A-Z_]+)\}\}/gu, (placeholder, key) => {
+  return template.replace(/\{\{([A-Z][A-Z0-9_]*)\}\}/gu, (placeholder, key) => {
     if (!Object.hasOwn(values, key)) throw new Error('Unfilled placeholder ' + placeholder);
     return values[key];
   });

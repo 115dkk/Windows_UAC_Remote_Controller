@@ -83,9 +83,12 @@ test('release template is compact, change-free until rendered, and links immutab
   const output = fillTemplate(template, values);
   assert.ok(output.includes('/blob/' + sha + '/docs/release-verification.md'));
   assert.ok(output.includes('- 이번 판만의 변경'));
-  assert.doesNotMatch(output, /\{\{[A-Z_]+\}\}/u);
+  assert.doesNotMatch(output, /\{\{[A-Z][A-Z0-9_]*\}\}/u);
+  assert.ok(output.includes(env.SIGNER_SHA256), 'The numbered signer placeholder must be filled');
+  assert.ok(output.includes(sums), 'The numbered checksum placeholder must be filled');
   assert.equal(fillTemplate('{{CHANGES}}', { CHANGES: '$& {{VERSION}}' }), '$& {{VERSION}}', 'Inserted commit text is never re-interpolated');
   assert.throws(() => fillTemplate('{{UNKNOWN}}', {}));
+  assert.throws(() => fillTemplate('{{UNKNOWN_256}}', {}));
   assert.throws(() => releaseValues({ ...env, SIGNER_SHA256: 'bad' }, sums, ''));
   assert.throws(() => releaseValues({ ...env, GITHUB_SHA: 'main' }, sums, ''));
   assert.throws(() => releaseValues(env, 'bad checksum', ''));
