@@ -279,42 +279,47 @@ impl MobileController {
     }
 }
 
-pub(crate) async fn run_dial(
+pub(crate) fn run_dial(
     controller: Weak<MobileController>,
     intake_stop: CancellationToken,
     request: DialRequest,
-) -> DialCompletion {
-    // Both reactor shutdown and a replaced default network cancel the actual
-    // rendezvous wait. Old queued dials cannot attach after the new generation.
-    let succeeded = tokio::select! {
-        biased;
-        _ = request.network_stop.cancelled() => false,
-        result = async {
-            match RouteId::new(request.route) {
-                Ok(route) => relay_service::connect_rendezvous(
+) -> impl std::future::Future<Output = DialCompletion> + Send {
+    // Keep Send an explicit production contract at the scheduler boundary.
+    // Only the rendezvous wait is asynchronous; stream admission below is a
+    // separate synchronous phase, not a closure inside a select! expansion.
+    async move {
+        let carrier = match RouteId::new(request.route) {
+            Ok(route) => request
+                .network_stop
+                .clone()
+                .run_until_cancelled_owned(relay_service::connect_rendezvous(
                     request.address,
                     Registration::new(Role::Phone, route),
                     intake_stop,
-                )
+                ))
                 .await
-                .ok()
-                .and_then(|carrier| carrier.into_stream().into_std().ok())
-                .and_then(|stream| {
-                    stream.set_nonblocking(false).ok()?;
-                    Weak::<MobileController>::upgrade(&controller)?
-                        .attach_network_stream(request.reference, stream, &request.network_stop)
-                        .ok()
-                })
-                .is_some(),
-                Err(_) => false,
-            }
-        } => result,
-    };
-    DialCompletion {
-        reference: request.reference,
-        succeeded,
-        generation: request.generation,
-        completed_at: Instant::now(),
+                .and_then(Result::ok),
+            Err(_) => None,
+        };
+        // The combinator drops the old network's pending socket on cancellation.
+        // Simultaneous completion/cancellation may return a carrier; attachment
+        // still checks this exact token AFTER acquiring owner admission, so it
+        // cannot revive the old transport generation.
+        let succeeded = carrier
+            .and_then(|carrier| carrier.into_stream().into_std().ok())
+            .and_then(|stream| {
+                stream.set_nonblocking(false).ok()?;
+                Weak::<MobileController>::upgrade(&controller)?
+                    .attach_network_stream(request.reference, stream, &request.network_stop)
+                    .ok()
+            })
+            .is_some();
+        DialCompletion {
+            reference: request.reference,
+            succeeded,
+            generation: request.generation,
+            completed_at: Instant::now(),
+        }
     }
 }
 

@@ -30,6 +30,10 @@ internal class NativeRequestPayload(val json: String, val generation: Long, val 
     override fun toString(): String = "NativeRequestPayload([redacted])"
 }
 internal class NativeRequestReview(val locator: String?, val revision: String)
+internal class NativeRetainedDelivery(val locator: String, val submission: NativeApprovalSubmission,
+                                    val generation: NativeActionGeneration, val observation: NativeDecisionObservation?) {
+    override fun toString(): String = "NativeRetainedDelivery([redacted])"
+}
 internal class NativeNotificationRoute(val key: String, val locator: String, val action: NativeRequestAction)
 
 /** Locator/formatting rules only: no request, signing or enrollment authority. */
@@ -84,6 +88,10 @@ internal class NativeRequestActionClaims {
 
 internal class NativeRequestEntry(val key: String, val locator: String, val selection: NativeRequestSelection, val handle: NativePendingRequest) {
     val lock = Any()
+    // Serializes bounded native action admission plus phase-owner publication.
+    // Never acquired while holding registry/handle locks. Callbacks do not
+    // acquire it; no signing, IO or prompt lifetime runs under this lock.
+    val actionAdmissionLock = Any()
     // Serializes ONLY this generation's OS post/cancel. Never acquired while
     // holding the registry/handle lock, or used to release a body borrow.
     val notificationLock = Any()
@@ -103,6 +111,8 @@ internal class NativeRequestEntry(val key: String, val locator: String, val sele
     val notificationClaims = NativeRequestActionClaims()
     @Volatile var delivery: NativeApprovalSubmission? = null
     @Volatile var deliveryObservation: NativeDecisionObservation? = null
+    @Volatile var deliveryGeneration: NativeActionGeneration? = null
+    var phaseOwner = NativeActionPhaseOwner()
     override fun toString(): String = "NativeRequestEntry([redacted])"
 }
 
@@ -168,6 +178,8 @@ internal class NativeRequestRegistry(
                         synchronized(current.lock) {
                             next.phase = current.phase; next.delivery = current.delivery; current.delivery = null
                             next.deliveryObservation = current.deliveryObservation; current.deliveryObservation = null
+                            next.deliveryGeneration = current.deliveryGeneration; current.deliveryGeneration = null
+                            next.phaseOwner = current.phaseOwner.replaceForDelivery(next.deliveryGeneration)
                             next.postedFresh = current.postedFresh
                         }
                         retireLocked(current)
@@ -283,11 +295,30 @@ internal class NativeRequestRegistry(
         if (claim.isClosed()) throw BridgeException.RequestUnavailable()
         return checkedPreview(claim.entry)
     }
-    fun phase(locator: String, value: NativeRequestPhase, observation: NativeDecisionObservation? = null) {
+    /** Called only after the real native action coordinator reports admission. */
+    fun actionAdmitted(claim: NativeRequestClaim, generation: NativeActionGeneration, initial: NativeRequestPhase) {
+        val modified = synchronized(lock) {
+            val entry = entries[claim.entry.key] ?: return@synchronized false
+            if (entry !== claim.entry || claim.isClosed()) return@synchronized false
+            synchronized(entry.lock) {
+                if (!entry.active || entry.closed || !entry.phaseOwner.admitted(generation)) false
+                else { entry.phase = initial; bump(); true }
+            }
+        }
+        if (modified) changed()
+    }
+    fun phase(locator: String, generation: NativeActionGeneration, value: NativeRequestPhase, observation: NativeDecisionObservation? = null) {
         if (observation != null) decisions.progress(locator, observation, value, SystemClock.elapsedRealtimeNanos())
         val modified = synchronized(lock) {
             val entry = entries.values.singleOrNull { it.locator == locator } ?: return@synchronized false
-            synchronized(entry.lock) { if (entry.phase == value) false else { entry.phase = value; bump(); true } }
+            synchronized(entry.lock) {
+                if (!entry.active || entry.closed || !entry.phaseOwner.owns(generation) || entry.phase == value) false
+                else {
+                    entry.phase = value
+                    if (value == NativeRequestPhase.PENDING) entry.phaseOwner.completed(generation)
+                    bump(); true
+                }
+            }
         }
         if (modified) changed()
     }
@@ -300,17 +331,20 @@ internal class NativeRequestRegistry(
     fun decisionPrepared(locator: String, observation: NativeDecisionObservation, authenticatedAtNanos: Long? = null, signedAtNanos: Long? = null) {
         decisions.prepared(locator, observation, authenticatedAtNanos, signedAtNanos ?: SystemClock.elapsedRealtimeNanos())
     }
-    fun keepDelivery(locator: String, value: NativeApprovalSubmission, observation: NativeDecisionObservation): Boolean {
+    fun keepDelivery(locator: String, generation: NativeActionGeneration, value: NativeApprovalSubmission, observation: NativeDecisionObservation): Boolean {
         val entry = synchronized(lock) { entries.values.singleOrNull { it.locator == locator && it.active } }
         if (entry == null) { closeTemporary(value); return false }
         val accepted = synchronized(entry.lock) {
-            if (!entry.active || entry.closed || entry.delivery != null) false else { entry.delivery = value; entry.deliveryObservation = observation; true }
+            if (!entry.active || entry.closed || !entry.phaseOwner.owns(generation) || entry.delivery != null) false
+            else { entry.delivery = value; entry.deliveryObservation = observation; entry.deliveryGeneration = generation; true }
         }
         if (!accepted) closeTemporary(value)
         return accepted
     }
-    fun deliveries(): List<Triple<String, NativeApprovalSubmission, NativeDecisionObservation?>> = synchronized(lock) {
-        entries.values.mapNotNull { entry -> synchronized(entry.lock) { entry.delivery?.let { Triple(entry.locator, it, entry.deliveryObservation) } } }
+    fun deliveries(): List<NativeRetainedDelivery> = synchronized(lock) {
+        entries.values.mapNotNull { entry -> synchronized(entry.lock) {
+            entry.deliveryGeneration?.let { generation -> entry.delivery?.let { NativeRetainedDelivery(entry.locator, it, generation, entry.deliveryObservation) } }
+        } }
     }
     fun nextWake(): ULong? {
         val all = synchronized(lock) { if (stopping || failed || temporalInvalid) return null; entries.values.toList() }
@@ -491,6 +525,7 @@ internal class NativeRequestRegistry(
     private fun retireLocked(entry: NativeRequestEntry) {
         synchronized(entry.lock) {
             entry.active = false
+            entry.phaseOwner.retire()
         }
         if (reviewLocator == entry.locator) reviewLocator = null
         if (!retired.contains(entry)) retired.add(entry)

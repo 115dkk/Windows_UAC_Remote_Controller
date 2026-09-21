@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Temporary physical-phone instrumentation build. This uploads an APK, not a
+# release or physical-authentication proof. Never uses an ephemeral signer.
+name: Physical phone measurement APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['.github/workflows/android-physical-measurement.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: physical-phone-measurement-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    name: Same-signer arm64 measurement APK
+    # One explicitly authored measurement lane, never a fork or arbitrary PR.
+    if: github.actor == github.repository_owner && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/decision-feedback-research') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/decision-feedback-research'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install locked inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          rustup show active-toolchain
+          rustup target add aarch64-linux-android
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$sdk"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk" \
+            --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' --channel=0 </dev/null
+      - name: Build exact revision without launching an app or authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          export NDK_HOME="$sdk/ndk/28.2.13676358"
+          npm run tauri -- android build --target aarch64 --apk --ci
+      - name: Sign using the existing persistent release identity
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ANDROID_KEYSTORE_BASE64" && -n "$ANDROID_KEYSTORE_PASSWORD" && -n "$ANDROID_KEY_ALIAS" && -n "$ANDROID_KEY_PASSWORD" ]] || {
+            echo 'Physical in-place update requires the existing persistent signer.' >&2
+            exit 1
+          }
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          tools="$sdk/build-tools/36.0.0"
+          mapfile -t unsigned < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*unsigned*.apk')
+          [[ ${#unsigned[@]} -eq 1 ]]
+          mkdir -p measurement-out
+          umask 077
+          keystore="$RUNNER_TEMP/physical-measurement.jks"
+          # Only the known ephemeral file is removed; the repository key is not changed.
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+          "$tools/zipalign" -p 4 "${unsigned[0]}" "$RUNNER_TEMP/physical-aligned.apk"
+          "$tools/apksigner" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --v2-signing-enabled true --v3-signing-enabled true \
+            --out measurement-out/uac-remote-controller-android-arm64.apk "$RUNNER_TEMP/physical-aligned.apk"
+          "$tools/apksigner" verify --print-certs measurement-out/uac-remote-controller-android-arm64.apk > measurement-out/apk-signer.txt
+          digest="$(grep -i 'certificate SHA-256 digest' measurement-out/apk-signer.txt | head -1 | awk '{print tolower($NF)}')"
+          expected="$(tr -d '\r\n' < security/android-release-signer.sha256)"
+          [[ "$expected" =~ ^[0-9a-f]{64}$ && "$digest" == "$expected" ]] || {
+            echo 'Signer does not match the existing release identity.' >&2
+            exit 1
+          }
+      - name: Inspect and bind the artifact to its source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/verify-android-apk.mjs measurement-out/uac-remote-controller-android-arm64.apk > measurement-out/apk-inspection.json
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          "$sdk/cmdline-tools/latest/bin/apkanalyzer" manifest print measurement-out/uac-remote-controller-android-arm64.apk > measurement-out/apk-manifest.xml
+          node tools/verify-android-boot-manifest.mjs measurement-out/apk-manifest.xml > measurement-out/apk-boot-inspection.json
+          printf '%s\n' "$SOURCE_SHA" > measurement-out/product-commit.txt
+          (cd measurement-out && sha256sum uac-remote-controller-android-arm64.apk > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: physical-phone-measurement-${{ env.SOURCE_SHA }}
+          path: measurement-out/
+          if-no-files-found: error
+          retention-days: 14

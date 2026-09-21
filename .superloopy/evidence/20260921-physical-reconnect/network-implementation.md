@@ -35,3 +35,13 @@ ROOT adds `android.permission.ACCESS_NETWORK_STATE`. Metrics lane owns the share
 CI must run Rust fmt/Clippy/test and Android unit/package gates. New Rust tests exercise real loopback rendezvous cancellation without a READY response, no connection for pre-cancelled queued dials, and stale-success/failure completion fencing. Existing socket/request-source and native transport tests remain required for authorization regressions.
 
 ROOT should use the physical phone for callback registration/lifecycle, duplicate foreground/start behavior, default-network loss/return and authenticated reconnection observations. Measure request/decision/PC application separately; none of these source changes or policy tests constitute phone authentication, application latency, or mobile-WAN proof.
+
+## Rust Analyzer Send-bound correction
+
+ROOT reported exact commit `3c3d4e6`, Quality run `35605469630`, Linux job `106351364926`: Analyzer `RustcHardError E0277`, `Arguments<'<erased>>: Sync is not satisfied`, at `dial_jobs.spawn(run_dial(...))`. ROOT also reported Rust tests, Clippy and the Android build passed for that commit. This child did not execute validation.
+
+The previous new `run_dial` implementation nested a borrowing async block (including synchronous stream attachment) inside `tokio::select!`. There are no application `fmt::Arguments` values in its inputs. The installed locked Tokio select macro creates a borrowing `poll_fn` closure and a formatted panic fallback; the reported type is therefore consistent with Analyzer's coroutine/capture inference through that expansion, not evidence of a compiler-confirmed non-Send application value. The precise Analyzer internal capture cause remains an inference until the corrected exact-commit gate runs.
+
+The patch removes that new nested select expansion. It uses the installed, locked `tokio-util 0.7.19` `CancellationToken::run_until_cancelled_owned` around only the rendezvous future and performs synchronous admission after the await. `run_dial` now returns `impl Future<Output = DialCompletion> + Send`, making Send an explicit production signature requirement (the same pattern already used by intake `wait_peer`), without suppressions, unsafe traits, changed Analyzer settings or weakened validation.
+
+The cancellation combinator may favor completion if completion and cancellation coincide. The existing exact-token check after owner admission remains decisive: a carrier returned in that race cannot attach after its network generation was cancelled. Pre-cancelled network tokens never poll the dial future, and cancellation of a pending wait drops its socket. Existing new cancellation/backoff tests and the unchanged strict Analyzer gate remain required on ROOT's next CI commit.
