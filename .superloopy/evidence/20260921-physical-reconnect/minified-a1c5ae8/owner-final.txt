@@ -1,0 +1,22 @@
+SERVICE dev.dkk115.uacremote/.background.ControllerForegroundService b9c42ef pid=4371 user=0
+  Client:
+    UAC_LIFECYCLE_BEGIN_V1
+    promoted=true
+    attached=true
+    destroyed=false
+    retiring=false
+    user_unlock=UNLOCKED
+    boot_component=DEFAULT
+    owner_present=true
+    owner_phase=READY
+    wanted=true
+    start_pending=false
+    application_attached=true
+    construction_uncertain=false
+    start_rejected=false
+    reported_state=LOCAL_SETTINGS_READY
+    activation_state=ON
+    activation_pending=false
+    activation_uncertain=false
+    UAC_LIFECYCLE_END_V1
+    UAC_NETWORK_V1 callback_registered=true reset_requests=0
