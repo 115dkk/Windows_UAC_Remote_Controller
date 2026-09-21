@@ -2,17 +2,13 @@
 package dev.dkk115.uacremote
 
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.Activity
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -35,9 +31,7 @@ class AndroidDiagnosticSaveInstrumentationTest {
     private class Pending {
         val done = CountDownLatch(1)
         val outcome = AtomicReference<DiagnosticSaveOutcome?>(null)
-        val uri = AtomicReference<Uri?>(null)
         var operation: AndroidDiagnosticExporter.SaveOperation? = null
-        var launcher: ActivityResultLauncher<Intent>? = null
     }
 
     @Test fun documentPickerCancellationAndActualProviderSave() {
@@ -58,13 +52,13 @@ class AndroidDiagnosticSaveInstrumentationTest {
                     instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
                     assertTrue("Picker cancellation must complete", cancelled.done.await(15, TimeUnit.SECONDS))
                     assertEquals(DiagnosticSaveOutcome.CANCELLED, cancelled.outcome.get())
-                    assertNull(cancelled.uri.get())
                 } finally { retire(cancelled) }
 
                 await { onMain { foreground(host) } }
                 val saved = launch(host)
                 try {
                     await { pickerVisible() }
+                    selectDownloadsRoot()
                     // The production intent supplies a fixed synthetic-friendly
                     // diagnostic name. Only change the selected filename in the
                     // actual OS UI, ensuring independent repeated CI runs.
@@ -81,9 +75,13 @@ class AndroidDiagnosticSaveInstrumentationTest {
                     assertTrue(save.performAction(AccessibilityNodeInfo.ACTION_CLICK))
                     assertTrue("Selected provider write must complete", saved.done.await(20, TimeUnit.SECONDS))
                     assertEquals(DiagnosticSaveOutcome.SAVED, saved.outcome.get())
-                    val uri = requireNotNull(saved.uri.get())
-                    assertEquals("content", uri.scheme)
-                    val bytes = host.contentResolver.openInputStream(uri)?.use { input ->
+                    // Read only the exact synthetic filename selected in the
+                    // verified Downloads root, on the disposable CI emulator.
+                    // No product URI getter or storage permission is added.
+                    assertTrue(name.matches(Regex("uac-diagnostic-ci-[a-f0-9-]{36}\\.txt")))
+                    val bytes = ParcelFileDescriptor.AutoCloseInputStream(
+                        automation.executeShellCommand("head -c 393217 /sdcard/Download/$name"),
+                    ).use { input ->
                         val result = java.io.ByteArrayOutputStream()
                         val buffer = ByteArray(4096)
                         while (result.size() <= 384 * 1024) {
@@ -93,8 +91,7 @@ class AndroidDiagnosticSaveInstrumentationTest {
                         }
                         result.toByteArray()
                     }
-                    assertNotNull("Saved document must be readable through the selected provider", bytes)
-                    assertTrue(bytes!!.size in 1..(384 * 1024))
+                    assertTrue("Exact saved document must contain bounded bytes", bytes.size in 1..(384 * 1024))
                     val text = String(bytes, Charsets.UTF_8)
                     assertTrue(text.startsWith("UAC_REMOTE_ANDROID_DIAGNOSTICS_V1\n"))
                     assertTrue(text.contains("scope=closed_diagnostic_tokens_no_request_bodies_keys_or_credentials\n"))
@@ -111,27 +108,44 @@ class AndroidDiagnosticSaveInstrumentationTest {
 
     private fun launch(host: MainActivity): Pending = onMain {
         val pending = Pending()
-        val operation = AndroidDiagnosticExporter.beginSave(host, { foreground(host) }) { result ->
+        val operation = AndroidDiagnosticExporter.beginSave(
+            host, { foreground(host) }, { !host.isDestroyed && !host.isFinishing },
+        ) { result ->
             pending.outcome.set(result)
             pending.done.countDown()
         }
         assertNotNull("Production save must accept this current foreground Activity", operation)
         pending.operation = requireNotNull(operation)
-        pending.launcher = host.activityResultRegistry.register(
-            "uac-diagnostic-native-test-${UUID.randomUUID()}",
-            ActivityResultContracts.StartActivityForResult(),
-        ) { result ->
-            val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
-            pending.uri.set(uri)
-            operation.selected(uri, result.resultCode == Activity.RESULT_CANCELED)
-        }
-        requireNotNull(pending.launcher).launch(AndroidDiagnosticExporter.saveDocumentIntent())
         pending
     }
 
     private fun retire(pending: Pending) = onMain {
         pending.operation?.retire()
-        pending.launcher?.unregister()
+    }
+
+    private fun selectDownloadsRoot() {
+        // The guarded CI system image uses English system UI; app locale does
+        // not change DocumentsUI. Observe the real drawer and selected root.
+        await { findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") } != null }
+        click(requireNotNull(findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") }))
+        await { findNode { it.text?.toString() == "Downloads" && it.isEnabled } != null }
+        click(requireNotNull(findNode { it.text?.toString() == "Downloads" && it.isEnabled }))
+        await {
+            findNode { it.text?.toString() == "Downloads" } != null &&
+                findNode { it.viewIdResourceName?.endsWith(":id/button1") == true && it.isEnabled } != null
+        }
+    }
+
+    private fun click(start: AccessibilityNodeInfo) {
+        var node: AccessibilityNodeInfo? = start
+        repeat(8) {
+            val current = node ?: throw AssertionError("Picker target has no clickable ancestor")
+            if (current.isClickable && current.isEnabled) {
+                assertTrue(current.performAction(AccessibilityNodeInfo.ACTION_CLICK)); return
+            }
+            node = current.parent
+        }
+        throw AssertionError("Picker target exceeds bounded ancestry")
     }
 
     private fun foreground(host: MainActivity): Boolean = !host.isDestroyed && !host.isFinishing &&

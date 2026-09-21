@@ -11,6 +11,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import dev.dkk115.uacremote.background.PolicyOwnerBounds
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -22,6 +24,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 
 internal enum class DiagnosticExportOutcome { SHARED, UNAVAILABLE }
 internal enum class DiagnosticSaveOutcome { SAVED, CANCELLED, UNAVAILABLE }
@@ -106,12 +109,43 @@ internal object AndroidDiagnosticExporter {
         private val gate = DiagnosticSaveOperationGate()
         private val main = Handler(Looper.getMainLooper())
         private var writing = false
+        private var launcher: ActivityResultLauncher<Intent>? = null
         private val timeout = Runnable { complete(DiagnosticSaveOutcome.UNAVAILABLE) }
 
         private fun complete(outcome: DiagnosticSaveOutcome) {
             val terminal = gate.finish(outcome) ?: return
             main.removeCallbacks(timeout)
+            launcher?.unregister()
+            launcher = null
             try { completion(terminal) } catch (_: Exception) { }
+        }
+
+        internal fun launchPicker(
+            activity: MainActivity,
+            stillForeground: () -> Boolean,
+            stillCurrent: () -> Boolean,
+        ) {
+            if (!gate.isOpen()) return
+            if (!foreground(stillForeground) || !foreground(stillCurrent)) { retire(); return }
+            try {
+                // This operation, not its caller, owns the unique registration.
+                // A restored result cannot reach a replacement physical host.
+                launcher = activity.activityResultRegistry.register(
+                    "uac-diagnostic-save-${UUID.randomUUID()}",
+                    ActivityResultContracts.StartActivityForResult(),
+                ) { result ->
+                    if (!gate.isOpen()) return@register
+                    // The picker covers our Activity normally: current identity,
+                    // not foreground focus, determines whether its result is valid.
+                    if (!foreground(stillCurrent)) { retire(); return@register }
+                    selected(
+                        if (result.resultCode == Activity.RESULT_OK) result.data?.data else null,
+                        cancelled = result.resultCode == Activity.RESULT_CANCELED,
+                    )
+                }
+                if (!foreground(stillForeground) || !foreground(stillCurrent)) retire()
+                else launcher?.launch(saveDocumentIntent())
+            } catch (_: Exception) { retire() }
         }
 
         fun retire() {
@@ -119,7 +153,7 @@ internal object AndroidDiagnosticExporter {
             if (!writing) release()
         }
 
-        fun selected(uri: Uri?, cancelled: Boolean) {
+        private fun selected(uri: Uri?, cancelled: Boolean) {
             if (!gate.select()) return
             if (cancelled || uri?.scheme != "content") {
                 complete(if (cancelled) DiagnosticSaveOutcome.CANCELLED else DiagnosticSaveOutcome.UNAVAILABLE)
@@ -150,16 +184,24 @@ internal object AndroidDiagnosticExporter {
     }
 
     fun beginSave(
-        activity: Activity,
+        activity: MainActivity,
         stillForeground: () -> Boolean,
+        stillCurrent: () -> Boolean,
         completion: (DiagnosticSaveOutcome) -> Unit,
     ): SaveOperation? {
-        if (Looper.myLooper() != Looper.getMainLooper() || !foreground(stillForeground)) return null
+        if (Looper.myLooper() != Looper.getMainLooper() || !foreground(stillForeground) || !foreground(stillCurrent)) return null
         val lease = acquire() ?: return null
-        return SaveOperation(activity.applicationContext, lease::release, completion)
+        val operation = SaveOperation(activity.applicationContext, lease::release, completion)
+        // Install the caller's operation slot before any result or launch failure
+        // can complete it. An accepted operation always owns its terminal reply.
+        if (!Handler(Looper.getMainLooper()).post { operation.launchPicker(activity, stillForeground, stillCurrent) }) {
+            lease.release()
+            return null
+        }
+        return operation
     }
 
-    fun saveDocumentIntent(): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+    private fun saveDocumentIntent(): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
         addCategory(Intent.CATEGORY_OPENABLE)
         type = "text/plain"
         putExtra(Intent.EXTRA_TITLE, diagnosticName(System.currentTimeMillis()))

@@ -3,7 +3,6 @@
 package dev.dkk115.uacremote
 
 import android.app.KeyguardManager
-import android.app.Activity
 import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Intent
@@ -17,8 +16,6 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -36,7 +33,6 @@ import org.json.JSONObject
 import org.json.JSONArray
 import org.json.JSONTokener
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.UUID
 
 /**
  * One immutable physical Activity/WebView command adapter. Every queued closure,
@@ -56,8 +52,6 @@ internal class DeviceStateActivityCommands(
         binding.retire()
         diagnosticSave?.retire()
         diagnosticSave = null
-        diagnosticSaveLauncher?.unregister()
-        diagnosticSaveLauncher = null
         (activity.application as? ControllerApplication)?.retirePairingScanner(activity, binding)
         (activity.application as? ControllerApplication)?.observeRequestChanges(activity, null)
     }
@@ -66,7 +60,6 @@ internal class DeviceStateActivityCommands(
     // permits another explicit settings request; resuming never launches one.
     private var settingsLaunchPending = false
     private var diagnosticSave: AndroidDiagnosticExporter.SaveOperation? = null
-    private var diagnosticSaveLauncher: ActivityResultLauncher<Intent>? = null
     private val serviceMain = Handler(Looper.getMainLooper())
     private val serviceCommandPending = AtomicBoolean(false)
     private val serviceStopPending = AtomicBoolean(false)
@@ -597,36 +590,14 @@ internal class DeviceStateActivityCommands(
         if (!acceptsNoArguments(invoke)) return
         fun reject() { try { invoke.reject("diagnostics_save_unavailable", "diagnostics_save_unavailable") } catch (_: Exception) { } }
         if (!isForeground() || diagnosticSave != null) { reject(); return }
-        val operation = AndroidDiagnosticExporter.beginSave(activity, ::isForeground) { outcome ->
+        diagnosticSave = AndroidDiagnosticExporter.beginSave(activity, ::isForeground, { matches(webView) }) { outcome ->
             diagnosticSave = null
-            diagnosticSaveLauncher?.unregister()
-            diagnosticSaveLauncher = null
             when (outcome) {
                 DiagnosticSaveOutcome.SAVED -> try { invoke.resolveObject("saved") } catch (_: Exception) { }
                 DiagnosticSaveOutcome.CANCELLED -> try { invoke.resolveObject("cancelled") } catch (_: Exception) { }
                 DiagnosticSaveOutcome.UNAVAILABLE -> reject()
             }
         } ?: run { reject(); return }
-        diagnosticSave = operation
-        try {
-            // Manual registration is valid after STARTED. This physical adapter
-            // explicitly unregisters on completion/retirement. A unique key keeps
-            // a restored late result from reaching a newer WebView's operation.
-            val launcher = activity.activityResultRegistry.register(
-                "uac-diagnostic-save-${UUID.randomUUID()}",
-                ActivityResultContracts.StartActivityForResult(),
-            ) { result ->
-                if (diagnosticSave !== operation) return@register
-                if (!matches(webView)) { operation.retire(); return@register }
-                operation.selected(
-                    if (result.resultCode == Activity.RESULT_OK) result.data?.data else null,
-                    cancelled = result.resultCode == Activity.RESULT_CANCELED,
-                )
-            }
-            diagnosticSaveLauncher = launcher
-            if (!isForeground()) operation.retire()
-            else launcher.launch(AndroidDiagnosticExporter.saveDocumentIntent())
-        } catch (_: Exception) { operation.retire() }
     }
 
     private fun deviceSecure(): Boolean? {
