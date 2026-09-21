@@ -422,7 +422,7 @@ fn routing_coordinates_survive_boot_without_mutating_enrollment_and_are_removed_
         owner.peer_associations().unwrap().routing_candidates(first),
         addresses
     );
-    owner
+    let _revoked = owner
         .revoke_peer_association_from_trusted_host(first)
         .unwrap();
     let second = reference(

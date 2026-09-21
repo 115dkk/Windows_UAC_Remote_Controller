@@ -304,8 +304,8 @@ mod tests {
         let stop = CancellationToken::new();
         let server = async {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let mut first_byte = [0; 1];
+            stream.read_exact(&mut first_byte).await.unwrap();
             stop.cancel();
             stop.cancelled().await;
         };
