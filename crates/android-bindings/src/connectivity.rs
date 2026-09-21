@@ -279,47 +279,45 @@ impl MobileController {
     }
 }
 
-pub(crate) fn run_dial(
+pub(crate) async fn run_dial(
     controller: Weak<MobileController>,
     intake_stop: CancellationToken,
     request: DialRequest,
-) -> impl std::future::Future<Output = DialCompletion> + Send {
-    // Keep Send an explicit production contract at the scheduler boundary.
+) -> DialCompletion {
     // Only the rendezvous wait is asynchronous; stream admission below is a
     // separate synchronous phase, not a closure inside a select! expansion.
-    async move {
-        let carrier = match RouteId::new(request.route) {
-            Ok(route) => request
-                .network_stop
-                .clone()
-                .run_until_cancelled_owned(relay_service::connect_rendezvous(
-                    request.address,
-                    Registration::new(Role::Phone, route),
-                    intake_stop,
-                ))
-                .await
-                .and_then(Result::ok),
-            Err(_) => None,
-        };
-        // The combinator drops the old network's pending socket on cancellation.
-        // Simultaneous completion/cancellation may return a carrier; attachment
-        // still checks this exact token AFTER acquiring owner admission, so it
-        // cannot revive the old transport generation.
-        let succeeded = carrier
-            .and_then(|carrier| carrier.into_stream().into_std().ok())
-            .and_then(|stream| {
-                stream.set_nonblocking(false).ok()?;
-                Weak::<MobileController>::upgrade(&controller)?
-                    .attach_network_stream(request.reference, stream, &request.network_stop)
-                    .ok()
-            })
-            .is_some();
-        DialCompletion {
-            reference: request.reference,
-            succeeded,
-            generation: request.generation,
-            completed_at: Instant::now(),
-        }
+    // The production JoinSet::spawn call checks the future's Send bound.
+    let carrier = match RouteId::new(request.route) {
+        Ok(route) => request
+            .network_stop
+            .clone()
+            .run_until_cancelled_owned(relay_service::connect_rendezvous(
+                request.address,
+                Registration::new(Role::Phone, route),
+                intake_stop,
+            ))
+            .await
+            .and_then(Result::ok),
+        Err(_) => None,
+    };
+    // The combinator drops the old network's pending socket on cancellation.
+    // Simultaneous completion/cancellation may return a carrier; attachment
+    // still checks this exact token AFTER acquiring owner admission, so it
+    // cannot revive the old transport generation.
+    let succeeded = carrier
+        .and_then(|carrier| carrier.into_stream().into_std().ok())
+        .and_then(|stream| {
+            stream.set_nonblocking(false).ok()?;
+            Weak::<MobileController>::upgrade(&controller)?
+                .attach_network_stream(request.reference, stream, &request.network_stop)
+                .ok()
+        })
+        .is_some();
+    DialCompletion {
+        reference: request.reference,
+        succeeded,
+        generation: request.generation,
+        completed_at: Instant::now(),
     }
 }
 
