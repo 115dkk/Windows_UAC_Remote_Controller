@@ -24,6 +24,18 @@ pub(super) struct Lease {
 }
 
 impl Lease {
+    /// Synthetic ownership state only; wire behavior uses real UDP fixtures.
+    #[cfg(test)]
+    pub(super) fn ownership_fixture(expires: Instant) -> Self {
+        Self {
+            external: "8.8.8.8:45000".parse().unwrap(),
+            expires,
+            nonce: [1; 12],
+            epoch: 1,
+            cleanup_only: false,
+        }
+    }
+
     pub(super) fn is_candidate(&self) -> bool {
         !self.cleanup_only && self.remaining() > 0
     }

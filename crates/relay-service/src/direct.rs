@@ -3,6 +3,7 @@
 //! traffic still requires the existing end-to-end pinned encrypted protocol.
 //! No cloud, STUN, credentials, router-wide changes or arbitrary URL interface.
 mod igd;
+mod obligations;
 mod pcp;
 
 use std::{
@@ -241,32 +242,13 @@ async fn run(
     stop: CancellationToken,
     shared: Arc<Mutex<DirectGatewaySnapshot>>,
 ) {
-    let mut active: Option<(Network, pcp::Lease)> = None;
-    // Keep route-displaced cleanup obligations without contacting an old router
-    // through a new route. At capacity, do not allocate any additional mapping.
-    let mut displaced: Vec<(Network, pcp::Lease)> = Vec::new();
-    let mut failures = 0_u32;
-    let mut next_probe = Instant::now();
+    let mut mappings = obligations::MappingObligations::new();
     loop {
         if stop.is_cancelled() {
             break;
         }
         let network = discover(internal);
-        displaced.retain(|(_, lease)| lease.expires > Instant::now());
-        if active.as_ref().is_some_and(|(old, _)| {
-            !network
-                .as_ref()
-                .is_some_and(|current| old.same_mapping_path(current))
-        }) {
-            // A route change must not send cleanup through an unrelated new
-            // gateway. Retain ownership until this route returns or its actual
-            // server-granted lifetime expires; never assume the requested 600s.
-            if let Some((old, mut lease)) = active.take() {
-                lease.require_cleanup();
-                displaced.push((old, lease));
-            }
-            next_probe = Instant::now();
-        }
+        mappings.poll(network.as_ref(), &stop, nonce).await;
         let Some(network) = network else {
             let snapshot = if crate::local_endpoint()
                 .is_ok_and(|address| address.ip() == IpAddr::V4(*internal.ip()))
@@ -285,59 +267,6 @@ async fn run(
             }
             continue;
         };
-
-        if active.is_none()
-            && let Some(index) = displaced
-                .iter()
-                .position(|(old, _)| old.same_mapping_path(&network))
-        {
-            active = Some(displaced.swap_remove(index));
-        }
-
-        if let Some((_, mapping)) = active.as_mut() {
-            if mapping.expires <= Instant::now() {
-                active = None;
-            } else if mapping.is_candidate()
-                && mapping.remaining() <= LEASE_SECONDS / 2
-                && mapping.renew(&network, &stop).await.is_err()
-            {
-                // An uncertain renewal does not erase the cleanup obligation.
-                mapping.require_cleanup();
-            }
-        }
-        if active.is_none()
-            && displaced.len() < 4
-            && !stop.is_cancelled()
-            && Instant::now() >= next_probe
-        {
-            let mapped = match pcp::map(&network, &stop, nonce).await {
-                Ok(lease) => Some(lease),
-                Err(_) => {
-                    // NAT-PMP has no nonce/ownership query. Probe support only;
-                    // never risk rewriting an existing same-host TCP mapping.
-                    pcp::probe_nat_pmp(&network, &stop).await;
-                    // IGD cannot atomically exclude an unknown same-host map,
-                    // even with AddAny. Keep discovery strictly read-only.
-                    let _ = igd::probe(&network, &stop).await;
-                    None
-                }
-            };
-            if let Some(mapping) = mapped {
-                active = Some((network.clone(), mapping));
-                failures = 0;
-            } else {
-                failures = failures.saturating_add(1);
-                next_probe = Instant::now()
-                    + Duration::from_secs(30_u64 << failures.saturating_sub(1).min(2));
-            }
-        }
-        if let Some((_, mapping)) = active.as_mut()
-            && !mapping.is_candidate()
-            && mapping.cleanup(&network).await
-        {
-            active = None;
-            next_probe = Instant::now() + Duration::from_secs(120);
-        }
         let mut candidates = vec![SocketAddr::V4(internal)];
         candidates.extend(
             network
@@ -347,21 +276,19 @@ async fn run(
                 .map(|ip| SocketAddr::new(*ip, internal.port())),
         );
         let mut seconds = CANDIDATE_SECONDS;
-        let state =
-            if let Some((_, mapping)) = active.as_ref().filter(|(_, lease)| lease.is_candidate()) {
-                let endpoint = mapping.external;
-                if !candidates.contains(&endpoint) {
-                    candidates.push(endpoint);
-                }
-                seconds = seconds.min(mapping.remaining());
-                DirectGatewayState::MappedCandidate
-            } else if global(IpAddr::V4(*internal.ip())) {
-                DirectGatewayState::PublicIpv4Candidate
-            } else if !network.ipv6.is_empty() {
-                DirectGatewayState::Ipv6Candidate
-            } else {
-                DirectGatewayState::LanOnly
-            };
+        let state = if let Some((endpoint, remaining)) = mappings.candidate() {
+            if !candidates.contains(&endpoint) {
+                candidates.push(endpoint);
+            }
+            seconds = seconds.min(remaining);
+            DirectGatewayState::MappedCandidate
+        } else if global(IpAddr::V4(*internal.ip())) {
+            DirectGatewayState::PublicIpv4Candidate
+        } else if !network.ipv6.is_empty() {
+            DirectGatewayState::Ipv6Candidate
+        } else {
+            DirectGatewayState::LanOnly
+        };
         publish(
             &shared,
             DirectGatewaySnapshot::new(state, candidates, seconds),
@@ -376,13 +303,7 @@ async fn run(
         &shared,
         DirectGatewaySnapshot::empty(DirectGatewayState::Stopped),
     );
-    if let Some((network, lease)) = active
-        && discover(internal).is_some_and(|current| current.same_mapping_path(&network))
-    {
-        // One final bounded cleanup attempt, not a guarantee of router
-        // deletion if the gateway is silent. IGD is strictly read-only.
-        lease.release(&network).await;
-    }
+    mappings.shutdown(discover(internal).as_ref()).await;
 }
 
 async fn run_ipv6(

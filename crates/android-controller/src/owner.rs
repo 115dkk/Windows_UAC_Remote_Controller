@@ -340,7 +340,8 @@ impl DurableInbox {
             return Ok(());
         }
         let bytes = self.prevalidate_peer_candidate(&candidate)?;
-        self.commit_peer_candidate(candidate, &bytes)
+        let _committed = self
+            .commit_peer_candidate(candidate, &bytes)
             .map_err(PeerAssociationMutationError::Owner)?;
         Ok(())
     }
