@@ -576,12 +576,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_primary_falls_back_to_one_alternative_carrier() {
+    async fn stalled_primary_falls_back_to_one_alternative_carrier() {
         let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let primary = unavailable.local_addr().unwrap();
-        drop(unavailable);
+        // Keep this port owned and deliberately withhold READY. A closed port
+        // may be reused by the alternate listener, and Windows connection-refusal
+        // retries need not finish within the old two-second fixture deadline.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let alternate = listener.local_addr().unwrap();
+        assert_ne!(primary, alternate);
         let route = RouteId::new([11; 32]).unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -611,13 +614,20 @@ mod tests {
             stream
         });
         let carrier = tokio::time::timeout(
-            Duration::from_secs(2),
+            // The production per-candidate timeout is five seconds. Allow that
+            // timeout plus the bounded alternate exchange; do not change it.
+            Duration::from_secs(10),
             connect_candidates(primary, &[alternate], route, CancellationToken::new()),
         )
         .await
         .unwrap()
         .unwrap();
         assert_eq!(carrier.into_stream().peer_addr().unwrap(), alternate);
+        let _primary_connection =
+            tokio::time::timeout(Duration::from_secs(1), unavailable.accept())
+                .await
+                .unwrap()
+                .unwrap();
         drop(server.await.unwrap());
     }
 
