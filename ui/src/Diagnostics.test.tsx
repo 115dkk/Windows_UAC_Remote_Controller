@@ -65,7 +65,8 @@ describe('Android diagnostic log export handoff', () => {
 
   it('holds both actions while choosing a file and treats unknown replies as failure', async () => {
     let resolveSave!: (value: 'saved') => void;
-    const saveAndroidDiagnostics = vi.fn(() => new Promise<'saved'>(resolve => { resolveSave = resolve; }));
+    const pending = new Promise<'saved'>(resolve => { resolveSave = resolve; });
+    const saveAndroidDiagnostics = vi.fn(() => pending);
     render(<App initialPage="activity" bridge={{ ...createQaBridge(qaCase('phone-unavailable').snapshot), saveAndroidDiagnostics }} />);
     const button = await screen.findByRole('button', { name: ko.saveDiagnostics });
     fireEvent.click(button); fireEvent.click(button);
@@ -73,7 +74,7 @@ describe('Android diagnostic log export handoff', () => {
     expect(button).toBeDisabled();
     expect(screen.getByRole('button', { name: ko.exportDiagnostics })).toBeDisabled();
     expect(saveAndroidDiagnostics).toHaveBeenCalledTimes(1);
-    await act(async () => { resolveSave('unexpected' as 'saved'); });
+    await act(async () => { resolveSave('unexpected' as 'saved'); await pending; });
     expect(await screen.findByText(ko.diagnosticsSaveFailure)).toBeInTheDocument();
     expect(button).toBeEnabled();
     expect(screen.queryByText(ko.diagnosticsSaved)).not.toBeInTheDocument();
