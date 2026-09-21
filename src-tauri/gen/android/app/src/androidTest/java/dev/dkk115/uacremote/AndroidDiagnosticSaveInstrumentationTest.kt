@@ -2,7 +2,9 @@
 package dev.dkk115.uacremote
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
@@ -15,6 +17,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.FutureTask
@@ -58,6 +62,7 @@ class AndroidDiagnosticSaveInstrumentationTest {
                 val saved = launch(host)
                 try {
                     await { pickerVisible() }
+                    capturePicker("picker-ready")
                     selectDownloadsRoot()
                     // The production intent supplies a fixed synthetic-friendly
                     // diagnostic name. Only change the selected filename in the
@@ -72,6 +77,7 @@ class AndroidDiagnosticSaveInstrumentationTest {
                     val save = requireNotNull(findNode {
                         it.viewIdResourceName?.endsWith(":id/button1") == true && it.isEnabled && it.isClickable
                     })
+                    capturePicker("before-save")
                     assertTrue(save.performAction(AccessibilityNodeInfo.ACTION_CLICK))
                     assertTrue("Selected provider write must complete", saved.done.await(20, TimeUnit.SECONDS))
                     assertEquals(DiagnosticSaveOutcome.SAVED, saved.outcome.get())
@@ -99,6 +105,9 @@ class AndroidDiagnosticSaveInstrumentationTest {
                     assertTrue(text.contains("[native_log_buffer]\n"))
                     // Keep the one small selected document in this disposable
                     // AVD; do not delete a user-selected storage target.
+                } catch (failure: Throwable) {
+                    capturePicker("picker-failure")
+                    throw failure
                 } finally { retire(saved) }
             }
         } finally {
@@ -153,6 +162,58 @@ class AndroidDiagnosticSaveInstrumentationTest {
 
     private fun pickerVisible(): Boolean =
         instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString()?.contains("documentsui") == true
+
+    /** Optional diagnostic evidence, never a substitute for assertions. The
+     * explicit disposable-AVD predicate and checked DocumentsUI root exclude
+     * authentication, QR enrollment and application request presentation. */
+    private fun capturePicker(stage: String) {
+        if (stage !in setOf("picker-ready", "before-save", "picker-failure")) return
+        if (InstrumentationRegistry.getArguments().getString("diagnosticCapture") != "uac-lifecycle-ci-36-x86_64" ||
+            Build.VERSION.SDK_INT != 36 || Build.HARDWARE !in setOf("ranchu", "goldfish")) return
+        val captureRun = InstrumentationRegistry.getArguments().getString("diagnosticCaptureRun") ?: return
+        if (!captureRun.matches(Regex("[0-9]{13}"))) return
+        try {
+            val root = instrumentation.uiAutomation.rootInActiveWindow ?: return
+            val expectedPackage = root.packageName?.toString() ?: return
+            if (expectedPackage !in setOf("com.android.documentsui", "com.google.android.documentsui")) return
+            val queue = ArrayDeque<AccessibilityNodeInfo>(); queue.add(root)
+            val text = StringBuilder("UAC_DOCUMENT_PICKER_CI_V1\ncapture_run=$captureRun\nstage=$stage\npackage=$expectedPackage\n")
+            fun field(value: CharSequence?): String = value?.toString()?.take(160)
+                ?.map { if (it == '\n' || it == '\r' || it == '\t' || it.code < 0x20) ' ' else it }
+                ?.joinToString("") ?: ""
+            var count = 0
+            while (queue.isNotEmpty() && count < 256 && text.length < 48 * 1024) {
+                val node = queue.removeFirst()
+                if (node.packageName?.toString() != expectedPackage) continue
+                text.append("node=${count++} id=${field(node.viewIdResourceName)} class=${field(node.className)}")
+                    .append(" enabled=${node.isEnabled} clickable=${node.isClickable} editable=${node.isEditable}")
+                    .append(" text=${field(node.text)} description=${field(node.contentDescription)}\n")
+                for (index in 0 until minOf(node.childCount, 256 - count - queue.size)) {
+                    node.getChild(index)?.let(queue::add)
+                }
+            }
+            text.append("remaining_nodes=${queue.size}\n")
+            val directory = instrumentation.targetContext.getExternalFilesDir(null) ?: return
+            File(directory, "diagnostic-save-$stage.txt").writeText(text.toString().take(64 * 1024), Charsets.UTF_8)
+            if (instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() != expectedPackage) return
+            val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+            try {
+                // Recheck after capture: an intervening app transition must not
+                // leave another app's pixels as DocumentsUI evidence.
+                if (instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString() != expectedPackage ||
+                    bitmap.width > 4096 || bitmap.height > 4096 ||
+                    bitmap.width.toLong() * bitmap.height > 4_194_304L) return
+                val image = ByteArrayOutputStream()
+                if (bitmap.compress(Bitmap.CompressFormat.PNG, 100, image) && image.size() <= 4 * 1024 * 1024) {
+                    File(directory, "diagnostic-save-$stage.png").writeBytes(image.toByteArray())
+                    File(directory, "diagnostic-save-$stage.txt").appendText("screenshot=ready\n", Charsets.UTF_8)
+                }
+            } finally { bitmap.recycle() }
+        } catch (_: Exception) {
+            // Evidence capture must not replace or swallow the original failure.
+            System.out.println("UAC_DOCUMENT_PICKER_CI_CAPTURE_UNAVAILABLE stage=$stage")
+        }
+    }
 
     private fun findNode(match: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         val root = instrumentation.uiAutomation.rootInActiveWindow ?: return null

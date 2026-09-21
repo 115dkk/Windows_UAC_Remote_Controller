@@ -114,6 +114,9 @@ test('native save/provider instrumentation is required on the guarded lifecycle 
   assert.match(runner, /diagnostic-save-tests\.txt/u);
   assert.match(runner, /assert\.match\(saveOutput/u);
   assert.match(runner, /assert\.doesNotMatch\(saveOutput/u);
+  assert.match(runner, /'diagnosticCapture','uac-lifecycle-ci-36-x86_64'/u);
+  assert.match(runner, /finally \{[\s\S]*'picker-ready', 'before-save', 'picker-failure'/u);
+  assert.match(runner, /\/sdcard\/Android\/data\/dev\.dkk115\.uacremote\/files\//u);
   const native = read('src-tauri/gen/android/app/src/androidTest/java/dev/dkk115/uacremote/AndroidDiagnosticSaveInstrumentationTest.kt');
   assert.match(native, /AndroidDiagnosticExporter\.beginSave/u);
   assert.doesNotMatch(native, /activityResultRegistry|ActivityResultContracts|saveDocumentIntent/u);
@@ -123,4 +126,14 @@ test('native save/provider instrumentation is required on the guarded lifecycle 
   assert.match(native, /selectDownloadsRoot\(\)/u);
   assert.match(native, /executeShellCommand\("head -c 393217 \/sdcard\/Download\/\$name"\)/u);
   assert.match(native, /bytes\.size in 1\.\.\(384 \* 1024\)/u);
+  assert.match(native, /capturePicker\("picker-ready"\)/u);
+  assert.match(native, /capturePicker\("before-save"\)/u);
+  assert.match(native, /capturePicker\("picker-failure"\)\s+throw failure/u);
+  assert.match(native, /expectedPackage !in setOf\("com\.android\.documentsui", "com\.google\.android\.documentsui"\)/u);
+  assert.match(native, /Build\.HARDWARE !in setOf\("ranchu", "goldfish"\)/u);
+  assert.match(native, /count < 256 && text\.length < 48 \* 1024/u);
+  assert.match(native, /uiAutomation\.takeScreenshot\(\)/u);
+  assert.match(native, /bitmap\.width\.toLong\(\) \* bitmap\.height > 4_194_304L/u);
+  assert.match(native, /image\.size\(\) <= 4 \* 1024 \* 1024/u);
+  assert.match(native, /finally \{ bitmap\.recycle\(\) \}/u);
 });

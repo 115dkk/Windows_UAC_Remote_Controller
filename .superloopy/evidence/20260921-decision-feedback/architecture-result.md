@@ -44,3 +44,22 @@ unrelated-file read or test cleanup deletion occurs.
 No build, test, lint, format, executable validation, commit or push was performed
 by the architecture agent or its one read-only explorer. ROOT owns all CI/native
 validation and any evidence-backed correction.
+
+## Follow-up native picker evidence (ROOT-approved)
+
+The same instrumentation now optionally retains bounded accessibility summaries
+and PNGs at picker-ready, before-save and selector-failure. Capture requires the
+explicit guarded-AVD instrumentation argument, Android 36 and emulator hardware;
+only exact Android/Google DocumentsUI package roots are eligible. The root is
+rechecked around screenshot capture. Node summaries have bounded nodes/fields;
+PNGs are limited to 4,194,304 pixels and 4 MiB. Fixed synthetic filenames are
+written only in app-specific external files. No application request, QR or native
+authentication screen is selected for capture.
+
+`tools/android-language-ci.mjs` pulls those exact artifacts in `finally`, so test
+failure does not prevent diagnosis. A current-run summary and completed screenshot
+marker are required before pulling a PNG, avoiding old-picture adoption. Optional
+capture failure cannot replace or swallow the original instrumentation failure or
+its result assertions. Security review scope includes these test-only capture and
+runner changes; no production data export behavior is changed. No validation was
+executed by this agent.
