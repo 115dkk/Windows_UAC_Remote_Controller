@@ -126,13 +126,12 @@ pub fn local_endpoint() -> io::Result<SocketAddr> {
         socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
         socket.local_addr()
     })();
-    if let Ok(address) = ipv4 {
-        if !address.ip().is_unspecified()
-            && !address.ip().is_loopback()
-            && !address.ip().is_multicast()
-        {
-            return Ok(SocketAddr::new(address.ip(), EMBEDDED_RELAY_PORT));
-        }
+    if let Ok(address) = ipv4
+        && !address.ip().is_unspecified()
+        && !address.ip().is_loopback()
+        && !address.ip().is_multicast()
+    {
+        return Ok(SocketAddr::new(address.ip(), EMBEDDED_RELAY_PORT));
     }
     let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))?;
     socket.connect((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 9))?;

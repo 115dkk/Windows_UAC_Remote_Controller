@@ -376,12 +376,12 @@ async fn run(
         &shared,
         DirectGatewaySnapshot::empty(DirectGatewayState::Stopped),
     );
-    if let Some((network, lease)) = active {
-        if discover(internal).is_some_and(|current| current.same_mapping_path(&network)) {
-            // One final bounded cleanup attempt, not a guarantee of router
-            // deletion if the gateway is silent. IGD is strictly read-only.
-            lease.release(&network).await;
-        }
+    if let Some((network, lease)) = active
+        && discover(internal).is_some_and(|current| current.same_mapping_path(&network))
+    {
+        // One final bounded cleanup attempt, not a guarantee of router
+        // deletion if the gateway is silent. IGD is strictly read-only.
+        lease.release(&network).await;
     }
 }
 
