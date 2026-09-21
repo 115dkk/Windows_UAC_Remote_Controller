@@ -177,6 +177,7 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     openDiagnosticsFolder: () => Promise.resolve(),
     // Synthetic acknowledgement only; does not save or share an Android file.
     exportAndroidDiagnostics: () => diagnosticsExportPending ? new Promise<void>(() => { /* Held synthetic owner for pending-state gallery only. */ }) : Promise.resolve(),
+    saveAndroidDiagnostics: () => Promise.resolve('saved'),
     openLockSettings: () => Promise.resolve(),
     openNotificationSettings: () => Promise.resolve(),
     // Client/synthetic acknowledgement only; no camera surface or pairing result.

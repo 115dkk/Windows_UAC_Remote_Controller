@@ -21,3 +21,8 @@ writeFileSync('target/android-lifecycle-ci/language-back-tests.txt',backOutput);
 assert.match(backOutput,/OK \(1 test\)/u);
 assert.doesNotMatch(backOutput,/FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed/u);
 process.stdout.write('Actual Android Back cancelled unsaved language drafts, restored focus, kept the Activity and preserved normal Back without a dialog.\n');
+const saveOutput = adb(['shell','am','instrument','-w','-r','-e','class','dev.dkk115.uacremote.AndroidDiagnosticSaveInstrumentationTest','dev.dkk115.uacremote.test/androidx.test.runner.AndroidJUnitRunner']);
+writeFileSync('target/android-lifecycle-ci/diagnostic-save-tests.txt',saveOutput);
+assert.match(saveOutput,/OK \(1 test\)/u);
+assert.doesNotMatch(saveOutput,/FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed/u);
+process.stdout.write('Actual Android document-picker Back cancellation and selected-provider diagnostic bytes passed through the production exporter. No JS-bridge or physical-phone claim.\n');

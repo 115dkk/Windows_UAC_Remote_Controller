@@ -1,5 +1,9 @@
 {
-  "진단 로그 내보내기": "Export diagnostic logs",
+  "진단 로그 파일로 저장": "Save diagnostic log to file",
+  "선택한 위치에 진단 로그를 저장했습니다.": "Diagnostic log saved to the selected location.",
+  "파일 저장을 취소했습니다.": "File save cancelled.",
+  "진단 로그를 저장하지 못했습니다. 저장 위치와 여유 공간을 확인한 뒤 다시 시도하십시오.": "Could not save the diagnostic log. Check the location and available space, then try again.",
+  "진단 로그 내보내기": "Share diagnostic logs",
   "진단 로그 파일을 저장하고 공유 화면을 열었습니다.": "The diagnostic log file was saved and the share screen was opened.",
   "진단 로그를 내보내지 못했습니다. 잠시 후 다시 시도하십시오.": "Could not export diagnostic logs. Try again shortly.",
   "로그 폴더 열기": "Open log folder",

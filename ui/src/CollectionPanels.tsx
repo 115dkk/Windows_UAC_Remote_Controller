@@ -137,9 +137,9 @@ function ActivityTime({ timestamp }: { timestamp: number }) {
   return <time dateTime={date.toISOString()}>{dateFormatter.format(date)}</time>;
 }
 
-export function ActivityPanel({ snapshot, disabled, exporting, onClear, onOpenDiagnostics, onExportDiagnostics }: {
-  snapshot: AppSnapshot; disabled: boolean; exporting: boolean; onClear: () => void;
-  onOpenDiagnostics: () => void; onExportDiagnostics: () => void;
+export function ActivityPanel({ snapshot, disabled, exporting, saving, onClear, onOpenDiagnostics, onExportDiagnostics, onSaveDiagnostics }: {
+  snapshot: AppSnapshot; disabled: boolean; exporting: boolean; saving: boolean; onClear: () => void;
+  onOpenDiagnostics: () => void; onExportDiagnostics: () => void; onSaveDiagnostics: () => void;
 }) {
   const available = snapshot.dataAvailability.activity === 'available';
   const canClear = available && snapshot.canClearActivity && snapshot.activity.length > 0;
@@ -149,6 +149,7 @@ export function ActivityPanel({ snapshot, disabled, exporting, onClear, onOpenDi
       : <EmptyState icon="history" title={ko.noActivity} description={ko.noActivityBody} />}
     {(snapshot.platform === 'windows' || snapshot.platform === 'android' || canClear) && <div className="collection-actions">
       {snapshot.platform === 'windows' && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenDiagnostics}>{ko.openDiagnosticsFolder}</button>}
+      {snapshot.platform === 'android' && <button type="button" className="button secondary" disabled={disabled} aria-busy={saving} onClick={onSaveDiagnostics}>{ko.saveDiagnostics}</button>}
       {snapshot.platform === 'android' && <button type="button" className="button secondary" disabled={disabled} aria-busy={exporting} onClick={onExportDiagnostics}>{ko.exportDiagnostics}</button>}
       {canClear && <button type="button" className="button danger-quiet" disabled={disabled} onClick={onClear}>{ko.clearActivity}</button>}
     </div>}

@@ -123,6 +123,7 @@ export interface ControllerBridge {
   clearActivity(): Promise<AppSnapshot>;
   openDiagnosticsFolder(): Promise<void>;
   exportAndroidDiagnostics(): Promise<void>;
+  saveAndroidDiagnostics(): Promise<'saved' | 'cancelled'>;
   openLockSettings(): Promise<void>;
   openNotificationSettings(): Promise<void>;
   openPairingScanner(transport?: 'usb'): Promise<void>;

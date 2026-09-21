@@ -24,6 +24,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 internal enum class DiagnosticExportOutcome { SHARED, UNAVAILABLE }
+internal enum class DiagnosticSaveOutcome { SAVED, CANCELLED, UNAVAILABLE }
+
+/** Pure state table: one picker result and terminal reply. Retirement prevents
+ * a new selection or a late success reply; an already-started provider IO may finish. */
+internal class DiagnosticSaveOperationGate {
+    private val completed = AtomicBoolean(false)
+    private val selected = AtomicBoolean(false)
+    fun select(): Boolean = !completed.get() && selected.compareAndSet(false, true)
+    fun isOpen(): Boolean = !completed.get()
+    fun finish(outcome: DiagnosticSaveOutcome): DiagnosticSaveOutcome? =
+        if (completed.compareAndSet(false, true)) outcome else null
+}
 
 /** Pure terminal table for timeout/handoff races. Completion itself always runs
  * on the main thread; atomic identity keeps the invariant explicit in tests. */
@@ -82,6 +94,83 @@ internal object AndroidDiagnosticExporter {
     private fun execute(work: () -> Unit): Boolean = try { worker.execute { work() }; true } catch (_: Exception) { false }
 
     private data class Exported(val uri: Uri, val name: String)
+
+    /** The picker is native-only; the renderer cannot supply a URI or contents.
+     * Retiring an Activity cancels its pending selection. A started provider write
+     * retains the global lease until it returns, even after its bounded UI timeout. */
+    internal class SaveOperation internal constructor(
+        private val context: Context,
+        private val release: () -> Unit,
+        private val completion: (DiagnosticSaveOutcome) -> Unit,
+    ) {
+        private val gate = DiagnosticSaveOperationGate()
+        private val main = Handler(Looper.getMainLooper())
+        private var writing = false
+        private val timeout = Runnable { complete(DiagnosticSaveOutcome.UNAVAILABLE) }
+
+        private fun complete(outcome: DiagnosticSaveOutcome) {
+            val terminal = gate.finish(outcome) ?: return
+            main.removeCallbacks(timeout)
+            try { completion(terminal) } catch (_: Exception) { }
+        }
+
+        fun retire() {
+            complete(DiagnosticSaveOutcome.UNAVAILABLE)
+            if (!writing) release()
+        }
+
+        fun selected(uri: Uri?, cancelled: Boolean) {
+            if (!gate.select()) return
+            if (cancelled || uri?.scheme != "content") {
+                complete(if (cancelled) DiagnosticSaveOutcome.CANCELLED else DiagnosticSaveOutcome.UNAVAILABLE)
+                release()
+                return
+            }
+            // URI is from ACTION_CREATE_DOCUMENT's result, never from JS. No
+            // persistent grant or broad storage permission is requested.
+            writing = true
+            if (!main.postDelayed(timeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS) || !execute {
+                val saved = try {
+                    val bytes = snapshotBytes()
+                    if (bytes == null || !gate.isOpen()) false
+                    else context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                        output.write(bytes)
+                        output.flush()
+                        true
+                    } ?: false
+                } catch (_: Exception) { false }
+                finally { release() }
+                main.post { complete(if (saved) DiagnosticSaveOutcome.SAVED else DiagnosticSaveOutcome.UNAVAILABLE) }
+            }) {
+                writing = false
+                release()
+                complete(DiagnosticSaveOutcome.UNAVAILABLE)
+            }
+        }
+    }
+
+    fun beginSave(
+        activity: Activity,
+        stillForeground: () -> Boolean,
+        completion: (DiagnosticSaveOutcome) -> Unit,
+    ): SaveOperation? {
+        if (Looper.myLooper() != Looper.getMainLooper() || !foreground(stillForeground)) return null
+        val lease = acquire() ?: return null
+        return SaveOperation(activity.applicationContext, lease::release, completion)
+    }
+
+    fun saveDocumentIntent(): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TITLE, diagnosticName(System.currentTimeMillis()))
+    }
+
+    private fun diagnosticName(now: Long): String =
+        "uac-remote-diagnostics-${fileTime.format(Instant.ofEpochMilli(now))}.txt"
+
+    private fun snapshotBytes(now: Long = System.currentTimeMillis()): ByteArray? = render(
+        now, BuildConfig.VERSION_NAME, AndroidDiagnosticStore.snapshot(), nativeLogSnapshot(),
+    )
 
     /**
      * The single production Interface for the complete export operation.
@@ -148,13 +237,8 @@ internal object AndroidDiagnosticExporter {
 
     private fun create(activity: Context): Exported? {
         val now = System.currentTimeMillis()
-        val bytes = render(
-            now,
-            BuildConfig.VERSION_NAME,
-            AndroidDiagnosticStore.snapshot(),
-            nativeLogSnapshot(),
-        ) ?: return null
-        val name = "uac-remote-diagnostics-${fileTime.format(Instant.ofEpochMilli(now))}.txt"
+        val bytes = snapshotBytes(now) ?: return null
+        val name = diagnosticName(now)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")

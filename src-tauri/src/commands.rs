@@ -425,6 +425,24 @@ pub(crate) async fn export_android_diagnostics(
     .map_err(|_| worker_issue())?
 }
 
+/// Opens Android's document picker and saves closed diagnostics to its result.
+/// No renderer-selected path, URI, contents or service authority is accepted.
+#[tauri::command]
+pub(crate) async fn save_android_diagnostics(
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
+    _arguments: crate::mobile::EmptyArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<crate::mobile::DiagnosticSaveOutcome, AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        crate::mobile::save_android_diagnostics(&app, &origin)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}
+
 #[tauri::command]
 pub(crate) async fn open_pairing_scanner(
     app: tauri::AppHandle,

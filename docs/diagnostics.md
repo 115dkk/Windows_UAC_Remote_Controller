@@ -52,3 +52,10 @@ records and the app's own currently available `UacNative` log buffer are
 considered. The exported file contains no request bodies, program details,
 device identities, keys, credentials or signatures. Export is explicit; the app
 never uploads the file or chooses a recipient.
+
+The separate **Save diagnostic log to file** action opens Android's system file
+picker. Choose device storage/Downloads or another available document provider.
+The app reports success after writing to that selected document; cancelling the
+picker is not an error. It does not open the Sharesheet. The existing export
+action remains available when sharing is wanted. Both actions work independently
+of service/history readiness and serialize repeated requests.

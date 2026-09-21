@@ -98,6 +98,7 @@ class DeviceStatePlugin(activity: Activity) : Plugin(activity) {
     @Command fun openLockSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openLockSettings)
     @Command fun openNotificationSettings(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::openNotificationSettings)
     @Command fun exportAndroidDiagnostics(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::exportAndroidDiagnostics)
+    @Command fun saveAndroidDiagnostics(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::saveAndroidDiagnostics)
     @Command fun getLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::getLanguage)
     @Command fun setLanguage(invoke: Invoke) = dispatch(invoke, DeviceStateActivityCommands::setLanguage)
 

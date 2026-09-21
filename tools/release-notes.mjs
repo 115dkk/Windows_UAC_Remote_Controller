@@ -1,51 +1,117 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Fills docs/RELEASE_NOTES_TEMPLATE.md for one release. Pure text work: no network, no build.
-// Usage: node tools/release-notes.mjs <template.md> <SHA256SUMS.txt>
-// Environment: VERSION, SIGNER_SHA256, SIGNER_SOURCE, GITHUB_SHA (all required).
-import { readFileSync } from 'node:fs';
+// Generates bounded release notes and a separate version-bound verification asset.
+// Usage: node tools/release-notes.mjs <template.md> <SHA256SUMS.txt> <verification.md> <verification-output.md>
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const CAPABILITIES = [
-  ['Windows 설치 파일 빌드와 수동 실행 없는 페이로드 검사', '자동 검사 통과', 'CI가 설치 파일 안의 실행 파일 세 개를 바이트 단위로 확인합니다. 설치 자체는 실행하지 않습니다.'],
-  ['Android APK 빌드, JVM 단위 테스트, 부팅 선언 검사', '자동 검사 통과', '실제 휴대폰 설치나 인증은 포함하지 않습니다.'],
-  ['Android 에뮬레이터 수명주기(부팅, 재부팅, 앱 교체, 첫 잠금 해제, QR 스캐너 화면 열기)', '자동 검사 통과', 'x86_64 에뮬레이터 결과입니다. 실제 휴대폰 결과는 아닙니다.'],
-  ['연결 규약의 기호 증명(Tamarin)', '자동 검사 통과', '규약 모델의 성질만 증명합니다. 구현이나 기기 보안을 증명하지 않습니다.'],
-  ['호스팅 Windows 러너의 실제 QR 화면 → 소프트웨어 휴대폰 등록', '자동 검사 통과', '실제 PC 앱의 관리자 확인과 QR 화면 픽셀, 양쪽 비교 확인, 서비스 기기 등록을 검사합니다. 소프트웨어 키·인증서 픽스처를 사용하며 실제 Android 하드웨어 증거는 아닙니다.'],
-  ['실제 UAC 요청 → 소프트웨어 휴대폰의 서명된 거절 → Windows 취소', '자동 검사 통과', '같은 요청의 서명·내용 다이제스트·거절 결과를 확인하고, 원래 Windows 요청이 ERROR_CANCELLED로 끝나며 시험 대상이 실행되지 않아야 통과합니다. 휴대폰 생체 인증이나 승인 동작은 포함하지 않습니다.'],
-  ['PC 앱에서 짝지은 휴대폰 목록 확인, 기기 삭제, 중계 주소 설정', '실기 미검증', '코드는 들어 있으나 실제 PC에서 확인한 기록이 아직 없습니다.'],
-  ['이번 판의 새 QR 연결, 여섯 자리 비교, 등록', '실물 재등록은 별도 시험', '기존 연결의 실제 요청 승인은 사용자 시험 완료입니다. 이번 판의 새 등록은 CI 실험실 결과와 실물 재등록 시험을 구분합니다.'],
-  ['휴대폰 본인 확인과 실제 UAC 승인 수락', '기존 설치본 사용자 시험 완료', '2026-09-19 사용자 보고입니다. 새 설치본의 전체 여정은 별도 확인 항목입니다.'],
-  ['공개 진단 파일과 원본 저널 권한', '자동 검사 통과', '호스팅 Windows의 별도 일반 사용자로 공개 파일 읽기·쓰기 거부와 원본 저널 읽기 거부를 검사합니다. 실제 PC 설치 확인과는 구분합니다.'],
-  ['USB AOA 등록 보조 경로', '실기 미검증', '공개 연결 정보만 전달합니다. AOA 지원 기기와 호환 WinUSB 드라이버가 필요하며 실제 기기 조합 시험은 별도입니다.'],
-  ['TPM 기반 서비스 키 시작', 'alpha.13 실기 확인', '2026-09-12 실제 개발 PC에서 alpha.13 설치와 서비스 재시작이 성공했습니다. 현재 판의 실제 휴대폰 원격 승인 시험과는 별도 결과입니다.'],
-];
+const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+const SHA = /^[a-f0-9]{40}$/u;
+const MAX_CHANGES = 8;
 
-function required(name) {
-  const value = process.env[name];
-  if (!value || value.length > 256) throw new Error(`${name} is required for release notes`);
-  return value;
+export function publishedTagsArguments(repository) {
+  assert.match(repository, /^[\w.-]+\/[\w.-]+$/u);
+  return ['api', '--paginate', 'repos/' + repository + '/releases?per_page=100', '--jq',
+    '.[] | select(.draft == false) | .tag_name'];
 }
 
-function table(rows) {
-  const header = '| 항목 | 상태 | 설명 |\n| --- | --- | --- |';
-  return [header, ...rows.map(([item, status, note]) => `| ${item} | ${status} | ${note} |`)].join('\n');
+// distance returns null for a tag on an unrelated/future branch. Publication time
+// and semantic version ordering cannot define an older commit on this branch.
+export function previousPublishedTag(tags, currentTag, distance) {
+  const candidates = [...new Set(tags)].filter(tag => tag !== currentTag && tag.startsWith('v') && VERSION.test(tag.slice(1)))
+    .map(tag => ({ tag, distance: distance(tag) }))
+    .filter(item => item.distance !== null);
+  for (const item of candidates) assert.ok(Number.isSafeInteger(item.distance) && item.distance >= 0, 'Invalid ancestor distance');
+  candidates.sort((a, b) => a.distance - b.distance || a.tag.localeCompare(b.tag, 'en'));
+  return candidates[0]?.tag ?? null;
 }
 
-const [templatePath, sumsPath] = process.argv.slice(2);
-if (!templatePath || !sumsPath) throw new Error('Usage: node tools/release-notes.mjs <template.md> <SHA256SUMS.txt>');
-const template = readFileSync(templatePath, 'utf8');
-const sums = readFileSync(sumsPath, 'utf8').trim();
-if (Buffer.byteLength(sums) > 4096 || !/^[a-f0-9]{64}  \S+(\n[a-f0-9]{64}  \S+)*$/u.test(sums)) throw new Error('SHA256SUMS.txt has an unexpected shape');
-const values = {
-  VERSION: required('VERSION'),
-  SIGNER_SHA256: required('SIGNER_SHA256'),
-  SIGNER_SOURCE: required('SIGNER_SOURCE'),
-  COMMIT: required('GITHUB_SHA'),
-  SHA256SUMS: sums,
-  CAPABILITY_TABLE: table(CAPABILITIES),
-};
-if (!/^[a-f0-9]{64}$/u.test(values.SIGNER_SHA256)) throw new Error('SIGNER_SHA256 must be 64 lowercase hex characters');
-let output = template;
-for (const [key, value] of Object.entries(values)) output = output.replaceAll(`{{${key}}}`, value);
-const leftover = /\{\{[A-Z_]+\}\}/u.exec(output);
-if (leftover) throw new Error(`Unfilled placeholder ${leftover[0]}`);
-process.stdout.write(output);
+function markdownText(value) {
+  return value.replace(/[\r\n\t]/gu, ' ').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replace(/[\\`*_{}\[\]()!|#]/gu, '\\$&');
+}
+
+export function renderChanges(commits, repository, previousTag, commit) {
+  assert.match(repository, /^[\w.-]+\/[\w.-]+$/u);
+  assert.match(commit, SHA);
+  const base = 'https://github.com/' + repository;
+  const relevant = commits.filter(item => !/^chore\(release\): /u.test(item.subject));
+  const lines = relevant.slice(0, MAX_CHANGES).map(item => {
+    assert.match(item.sha, SHA);
+    return '- ' + markdownText(item.subject.slice(0, 180)) + ' ([' + item.sha.slice(0, 7) + '](' + base + '/commit/' + item.sha + '))';
+  });
+  if (lines.length === 0) lines.push('- 배포 메타데이터를 갱신했습니다.');
+  const rangeLink = previousTag
+    ? '[' + markdownText(previousTag) + ' 이후 전체 변경](' + base + '/compare/' + encodeURIComponent(previousTag) + '...' + commit + ')'
+    : '[첫 릴리즈의 전체 기록](' + base + '/commits/' + commit + ')';
+  return lines.join('\n') + '\n\n' + rangeLink + (relevant.length > MAX_CHANGES ? ' · 총 ' + relevant.length + '개 커밋 중 최근 ' + MAX_CHANGES + '개를 표시합니다.' : '');
+}
+
+export function fillTemplate(template, values) {
+  return template.replace(/\{\{([A-Z_]+)\}\}/gu, (placeholder, key) => {
+    if (!Object.hasOwn(values, key)) throw new Error('Unfilled placeholder ' + placeholder);
+    return values[key];
+  });
+}
+
+export function releaseValues(env, sums, changes) {
+  for (const name of ['VERSION', 'SIGNER_SHA256', 'SIGNER_SOURCE', 'GITHUB_SHA', 'GITHUB_REPOSITORY']) {
+    assert.ok(env[name] && env[name].length <= 256, name + ' is required for release notes');
+  }
+  assert.match(env.VERSION, VERSION);
+  assert.match(env.GITHUB_SHA, SHA);
+  assert.match(env.GITHUB_REPOSITORY, /^[\w.-]+\/[\w.-]+$/u);
+  assert.match(env.SIGNER_SHA256, /^[a-f0-9]{64}$/u);
+  assert.ok(['repository-secret', 'ephemeral-this-run-only'].includes(env.SIGNER_SOURCE), 'Unknown signer source');
+  assert.ok(Buffer.byteLength(sums) <= 4096 && /^[a-f0-9]{64}  [\w.-]+(?:\n[a-f0-9]{64}  [\w.-]+)*$/u.test(sums), 'Unexpected SHA256SUMS shape');
+  return {
+    VERSION: env.VERSION,
+    COMMIT: env.GITHUB_SHA,
+    SIGNER_SHA256: env.SIGNER_SHA256,
+    SIGNER_SOURCE: env.SIGNER_SOURCE,
+    SHA256SUMS: sums,
+    CHANGES: changes,
+    VERIFICATION_URL: 'https://github.com/' + env.GITHUB_REPOSITORY + '/blob/' + env.GITHUB_SHA + '/docs/release-verification.md',
+  };
+}
+
+export function readReleaseHistory(tags, currentTag, commit, cwd = process.cwd()) {
+  assert.match(commit, SHA);
+  assert.ok(currentTag.startsWith('v') && VERSION.test(currentTag.slice(1)), 'Version tag required');
+  const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim();
+  assert.equal(git('rev-parse', '--is-shallow-repository'), 'false', 'Full release history is required');
+  assert.equal(git('rev-parse', 'HEAD'), commit, 'Release notes must match the checked-out commit');
+  assert.equal(git('rev-parse', 'refs/tags/' + currentTag + '^{commit}'), commit);
+  const previous = previousPublishedTag(tags, currentTag, tag => {
+    const tagCommit = git('rev-parse', 'refs/tags/' + tag + '^{commit}');
+    const result = spawnSync('git', ['merge-base', '--is-ancestor', tagCommit, commit], { cwd, encoding: 'utf8' });
+    if (result.error) throw result.error;
+    if (result.status === 1) return null;
+    assert.equal(result.status, 0, result.stderr);
+    return Number(git('rev-list', '--count', tagCommit + '..' + commit));
+  });
+  const range = previous ? git('rev-parse', 'refs/tags/' + previous + '^{commit}') + '..' + commit : commit;
+  const log = git('log', '--no-merges', '--format=%H%x09%s', range, '--');
+  const commits = log ? log.split('\n').map(line => ({ sha: line.slice(0, 40), subject: line.slice(41) })) : [];
+  return { previous, commits };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const [templatePath, sumsPath, verificationPath, verificationOutput, ...extra] = process.argv.slice(2);
+  assert.ok(templatePath && sumsPath && verificationPath && verificationOutput && !extra.length,
+    'Usage: node tools/release-notes.mjs <template.md> <SHA256SUMS.txt> <verification.md> <verification-output.md>');
+  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Run inside the release publication job');
+  const sums = readFileSync(sumsPath, 'utf8').trim();
+  const values = releaseValues(process.env, sums, '');
+  assert.equal(process.env.RELEASE_TAG, 'v' + values.VERSION);
+  // Query all actually published releases (including prereleases), inside the
+  // same publication lock. Unpublished tags and drafts never advance the base.
+  const published = execFileSync('gh', publishedTagsArguments(process.env.GITHUB_REPOSITORY), { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  const { previous, commits } = readReleaseHistory(published.split(/\r?\n/u).filter(Boolean), process.env.RELEASE_TAG, values.COMMIT);
+  values.CHANGES = renderChanges(commits, process.env.GITHUB_REPOSITORY, previous, values.COMMIT);
+  const verification = '# ' + values.VERSION + ' 검증 기록\n\n빌드 커밋: ' + values.COMMIT + '  \n이전 공개 릴리즈: ' + (previous ?? '없음 (첫 릴리즈)') + '\n\n' + readFileSync(verificationPath, 'utf8');
+  writeFileSync(verificationOutput, verification);
+  process.stdout.write(fillTemplate(readFileSync(templatePath, 'utf8'), values));
+}

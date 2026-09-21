@@ -17,7 +17,7 @@ const commands = [
   [process.execPath, ['--test', 'tools/service-startup-diagnostics.test.mjs']],
   [process.execPath, ['--test', 'tools/public-diagnostics-contract.test.mjs']],
   [process.execPath, ['--test', 'tools/android-diagnostic-export-contract.test.mjs']],
-  [process.execPath, ['--test', 'tools/release-version.test.mjs']],
+  [process.execPath, ['--test', 'tools/release-version.test.mjs', 'tools/release-notes.test.mjs']],
   [process.execPath, ['--test', 'tools/ci-operator-process.test.mjs']],
   [process.execPath, ['--test', 'tools/rust-analyzer.test.mjs', 'tools/android-abi.test.mjs', 'tools/android-core-check.test.mjs', 'tools/build-android-bindings.test.mjs', 'tools/verify-android-apk.test.mjs', 'tools/android-approval-slot-contract.test.mjs']],
   [process.execPath, ['--test', 'tools/protocol-security.test.mjs', 'tools/prover-process.test.mjs', 'tools/protocol-diagnostic.test.mjs', 'tools/verify-android-boot-manifest.test.mjs']],

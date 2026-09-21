@@ -26,6 +26,7 @@ export const controllerBridge: ControllerBridge = {
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openDiagnosticsFolder: () => native<void>('open_diagnostics_folder'),
   exportAndroidDiagnostics: () => native<void>('export_android_diagnostics'),
+  saveAndroidDiagnostics: () => native<'saved' | 'cancelled'>('save_android_diagnostics'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),
   openPairingScanner: (transport) => native<void>(transport === 'usb' ? 'open_pairing_usb' : 'open_pairing_scanner'),

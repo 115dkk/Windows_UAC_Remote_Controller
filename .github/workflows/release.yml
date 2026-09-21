@@ -291,6 +291,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Download every release artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, Node 24
@@ -301,6 +302,7 @@ jobs:
       - name: Write checksums and release notes
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           SIGNER_SHA256: ${{ needs.android.outputs.signer_sha256 }}
           SIGNER_SOURCE: ${{ needs.android.outputs.signer_source }}
           VERSION: ${{ needs.version.outputs.version }}
@@ -310,7 +312,7 @@ jobs:
           rm -f SHA256SUMS.txt
           sha256sum uac-remote-controller-windows-x64-setup.exe uac-remote-controller-android-arm64.apk uac-relay-windows-x64.exe uac-relay-linux-x64 > SHA256SUMS.txt
           cd ..
-          node tools/release-notes.mjs docs/RELEASE_NOTES_TEMPLATE.md assets/SHA256SUMS.txt > notes.md
+          node tools/release-notes.mjs docs/RELEASE_NOTES_TEMPLATE.md assets/SHA256SUMS.txt docs/release-verification.md assets/release-verification.md > notes.md
       - name: Create the stable release or explicitly tagged prerelease
         shell: bash
         env:
@@ -319,7 +321,7 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          files=(assets/uac-remote-controller-windows-x64-setup.exe assets/uac-remote-controller-android-arm64.apk assets/uac-relay-windows-x64.exe assets/uac-relay-linux-x64 assets/SHA256SUMS.txt assets/windows-package-manifest.json assets/windows-package-inspection.json assets/apk-inspection.json assets/apk-boot-inspection.json assets/apk-signer.txt assets/apk-signer-source.txt)
+          files=(assets/uac-remote-controller-windows-x64-setup.exe assets/uac-remote-controller-android-arm64.apk assets/uac-relay-windows-x64.exe assets/uac-relay-linux-x64 assets/SHA256SUMS.txt assets/windows-package-manifest.json assets/windows-package-inspection.json assets/apk-inspection.json assets/apk-boot-inspection.json assets/apk-signer.txt assets/apk-signer-source.txt assets/release-verification.md)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'Release already exists; published tags/assets are immutable.' >&2
             exit 1

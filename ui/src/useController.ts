@@ -12,6 +12,7 @@ export type ClientCommand =
   | { readonly kind: 'clear' }
   | { readonly kind: 'diagnostics-folder' }
   | { readonly kind: 'diagnostics-export' }
+  | { readonly kind: 'diagnostics-save' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
@@ -70,7 +71,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
         || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'diagnostics-folder': return snapshot.platform === 'windows';
-    case 'diagnostics-export': return snapshot.platform === 'android';
+    case 'diagnostics-export': case 'diagnostics-save': return snapshot.platform === 'android';
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
       return snapshot.dataAvailability.requests === 'available' && request !== undefined
@@ -83,7 +84,7 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' | 'diagnostics-save' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
@@ -168,7 +169,7 @@ export function useController(bridge: ControllerBridge) {
     // its fresh capability. Never queue approval/denial or a generic command.
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const exportRead = command.kind === 'diagnostics-export' && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -219,17 +220,22 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
-      if (command.kind === 'diagnostics-export') {
+      if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
         // Native export shares command admission with the current read, but is
         // independent of service/activity readiness and does not mutate either.
         if (exportRead) {
           try { await exportRead.promise; } catch { /* Logs remain useful after a failed service read. */ }
           if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         }
-        await bridge.exportAndroidDiagnostics();
+        let notice: string = ko.diagnosticsExported;
+        if (command.kind === 'diagnostics-save') {
+          const result = await bridge.saveAndroidDiagnostics();
+          if (result !== 'saved' && result !== 'cancelled') throw new Error('invalid_save_result');
+          notice = result === 'saved' ? ko.diagnosticsSaved : ko.diagnosticsSaveCancelled;
+        } else await bridge.exportAndroidDiagnostics();
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         // Preserve any request-body withdrawal while the Sharesheet was open.
-        publish({ ...current.current, refreshing: false, busy: null, error: null, notice: ko.diagnosticsExported });
+        publish({ ...current.current, refreshing: false, busy: null, error: null, notice });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
@@ -254,8 +260,8 @@ export function useController(bridge: ControllerBridge) {
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-      if (command.kind === 'diagnostics-export') {
-        publish({ ...current.current, refreshing: false, busy: null, error: ko.diagnosticsExportFailure, notice: null });
+      if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
+        publish({ ...current.current, refreshing: false, busy: null, error: command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure, notice: null });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {

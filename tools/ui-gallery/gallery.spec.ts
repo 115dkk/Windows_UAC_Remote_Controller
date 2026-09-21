@@ -22,7 +22,22 @@ for (const selected of diagnosticsExportCases) {
     } else {
       await expect(page.locator('.activity-list li')).toHaveCount(2);
     }
-    const action = page.getByRole('button', { name: '진단 로그 내보내기', exact: true });
+    const action = page.getByRole('button', { name: '진단 로그 공유', exact: true });
+    const save = page.getByRole('button', { name: '진단 로그 파일로 저장', exact: true });
+    await expect(save).toBeEnabled();
+    await save.scrollIntoViewIfNeeded();
+    await save.focus();
+    await expect(save).toBeFocused();
+    await expect(save).toBeInViewport({ ratio: 1 });
+    const saveBox = await save.boundingBox();
+    expect(saveBox!.height).toBeGreaterThanOrEqual(48);
+    expect(saveBox!.x).toBeGreaterThanOrEqual(0);
+    expect(saveBox!.x + saveBox!.width).toBeLessThanOrEqual(selected.viewport.width + 0.5);
+    await gallery.capture('diagnostics-save-ready', 'CLIENT/SYNTHETIC · explicit file-save action, no native storage claim');
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('선택한 위치에 진단 로그를 저장했습니다.', { exact: true })).toBeVisible();
+    await expect(page.getByText('진단 로그 파일을 저장하고 공유 화면을 열었습니다.', { exact: true })).toHaveCount(0);
+    await gallery.capture('diagnostics-save-acknowledged', 'CLIENT/SYNTHETIC · separate saved response; actual Android provider tested independently');
     await expect(action).toHaveCount(1);
     await expect(action).toBeEnabled();
     await expect(action).toHaveAttribute('aria-busy', 'false');
@@ -221,7 +236,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
       const logs = page.getByRole('button', { name: '로그 폴더 열기', exact: true });
       await expect(logs).toBeEnabled();
-      await expect(page.getByRole('button', { name: '진단 로그 내보내기', exact: true })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '진단 로그 공유', exact: true })).toHaveCount(0);
       await logs.scrollIntoViewIfNeeded();
       await logs.focus();
       await expect(logs).toBeFocused();

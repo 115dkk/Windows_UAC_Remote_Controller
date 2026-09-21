@@ -1,5 +1,9 @@
 {
-  "진단 로그 내보내기": "Exporter les journaux de diagnostic",
+  "진단 로그 파일로 저장": "Enregistrer le journal de diagnostic",
+  "선택한 위치에 진단 로그를 저장했습니다.": "Journal de diagnostic enregistré à l’emplacement choisi.",
+  "파일 저장을 취소했습니다.": "Enregistrement annulé.",
+  "진단 로그를 저장하지 못했습니다. 저장 위치와 여유 공간을 확인한 뒤 다시 시도하십시오.": "Impossible d’enregistrer le journal de diagnostic. Vérifiez l’emplacement et l’espace disponible, puis réessayez.",
+  "진단 로그 내보내기": "Partager les journaux de diagnostic",
   "진단 로그 파일을 저장하고 공유 화면을 열었습니다.": "Le fichier de diagnostic a été enregistré et l’écran de partage a été ouvert.",
   "진단 로그를 내보내지 못했습니다. 잠시 후 다시 시도하십시오.": "Impossible d’exporter les journaux de diagnostic. Réessayez dans quelques instants.",
   "로그 폴더 열기": "Ouvrir le dossier des journaux",

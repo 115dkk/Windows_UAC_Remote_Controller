@@ -170,6 +170,40 @@ const fn diagnostics_export_issue() -> AppIssue {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiagnosticSaveOutcome {
+    Saved,
+    Cancelled,
+}
+
+pub(crate) fn save_android_diagnostics(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<DiagnosticSaveOutcome, AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        app.state::<DeviceState>()
+            .0
+            .run_mobile_plugin_from_origin(&origin.native, "saveAndroidDiagnostics", ())
+            .map_err(|_| diagnostics_save_issue())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, origin);
+        Err(diagnostics_save_issue())
+    }
+}
+
+const fn diagnostics_save_issue() -> AppIssue {
+    AppIssue {
+        code: "diagnostics_save_unavailable",
+        message: "진단 로그를 저장하지 못했습니다. 저장 위치와 여유 공간을 확인한 뒤 다시 시도하십시오.",
+        next_action: None,
+    }
+}
+
 const fn pairing_scanner_issue() -> AppIssue {
     AppIssue {
         code: "pairing_scanner_unavailable",
@@ -731,6 +765,35 @@ mod tests {
         ] {
             assert!(!native.contains(&format!("AndroidDiagnosticExporter{shallow}")));
         }
+    }
+
+    #[test]
+    fn diagnostic_save_has_only_saved_and_cancelled_success_outcomes() {
+        for value in ["saved", "cancelled"] {
+            let outcome: super::DiagnosticSaveOutcome =
+                serde_json::from_value(serde_json::json!(value)).unwrap();
+            assert_eq!(serde_json::to_value(outcome).unwrap(), value);
+        }
+        for value in [
+            serde_json::json!("shared"),
+            serde_json::json!("unavailable"),
+            serde_json::json!({"status": "saved"}),
+            serde_json::json!({"path": "Download/private.txt"}),
+            serde_json::Value::Null,
+        ] {
+            assert!(serde_json::from_value::<super::DiagnosticSaveOutcome>(value).is_err());
+        }
+        let declaration = include_str!("commands.rs")
+            .split("pub(crate) async fn save_android_diagnostics(")
+            .nth(1)
+            .unwrap()
+            .split("#[tauri::command]")
+            .next()
+            .unwrap();
+        assert!(declaration.contains("origin: crate::mobile::CommandOrigin"));
+        assert!(declaration.contains("_arguments: crate::mobile::EmptyArguments"));
+        assert!(declaration.contains("state.admission.try_enter()"));
+        assert!(declaration.contains("spawn_blocking"));
     }
 
     #[test]

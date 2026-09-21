@@ -1,5 +1,9 @@
 {
-  "진단 로그 내보내기": "Diagnoseprotokolle exportieren",
+  "진단 로그 파일로 저장": "Diagnoseprotokoll als Datei speichern",
+  "선택한 위치에 진단 로그를 저장했습니다.": "Diagnoseprotokoll am gewählten Speicherort gespeichert.",
+  "파일 저장을 취소했습니다.": "Speichern abgebrochen.",
+  "진단 로그를 저장하지 못했습니다. 저장 위치와 여유 공간을 확인한 뒤 다시 시도하십시오.": "Das Diagnoseprotokoll konnte nicht gespeichert werden. Prüfen Sie Speicherort und freien Speicherplatz und versuchen Sie es erneut.",
+  "진단 로그 내보내기": "Diagnoseprotokolle teilen",
   "진단 로그 파일을 저장하고 공유 화면을 열었습니다.": "Die Diagnoseprotokolldatei wurde gespeichert und die Freigabeansicht geöffnet.",
   "진단 로그를 내보내지 못했습니다. 잠시 후 다시 시도하십시오.": "Diagnoseprotokolle konnten nicht exportiert werden. Versuchen Sie es in Kürze erneut.",
   "로그 폴더 열기": "Protokollordner öffnen",
