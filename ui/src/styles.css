@@ -203,6 +203,8 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .state-line.is-success { color: var(--success); }
 .pairing-entry > .relay-state, .service-card > .relay-state { margin-block: var(--space-3) var(--space-4); font-size: var(--text-small); }
 .service-card > .supporting-text { margin-top: var(--space-3); }
+.direct-connection { margin-block: var(--space-3) var(--space-4); }
+.direct-connection > p + p { margin-top: var(--space-2); }
 .supporting-text { font-size: var(--text-small); color: var(--muted); line-height: 1.6; }
 .service-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-6); }
 .phone-service-card { padding: var(--space-5); margin-bottom: var(--space-6); }

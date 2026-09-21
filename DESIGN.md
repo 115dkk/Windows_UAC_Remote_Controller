@@ -253,3 +253,19 @@ tokens retained. Offline PC removal reuses the existing confirmation dialog,
 cancel-first focus and explicit local-only explanation. No new visual token,
 palette, typography or authorization owner. Connection display continuity is
 bounded to10seconds and never changes raw native action admission.
+
+## 2026-09-22 direct-network status and firewall guidance
+
+PC status and phone management add a passive external-network output below the
+existing listener state. Use `--text-small`, `--muted`, `--space-3`/`--space-4`
+outer spacing and `--space-2` between its paragraphs. Candidate addresses retain
+neutral text: they do not inherit connection-success styling from a LAN peer.
+Missing observations, stale reads and stopped service state cannot establish an
+external route. The output stays in normal main-page scrolling, with wrapping,
+no fixed height, additional focus stop, takeover, timer or new animation.
+Program-specific V3/firewall guidance accompanies a freshly observed embedded
+listener. Android shows PC-prompt recovery only with a known paired disconnected
+catalogue and active local service, preserving the existing disconnected notice.
+All added copy uses the eleven locale catalogues; the executable identifier is
+`uac-service.exe`. Existing external-relay configuration remains available.
+No new design token, palette, font, icon, security owner or authorization action.

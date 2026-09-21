@@ -11,6 +11,15 @@ import { RelayStatusLine } from './RelayStatusLine';
 import { locales, setPreviewLanguage, tr } from './i18n';
 
 describe('Windows relay observation and service recovery', () => {
+  it('withdraws stale or unavailable-owner listener success', () => {
+    const snapshot = qaCase('desktop-relay-listening').snapshot;
+    const view = render(<RelayStatusLine snapshot={snapshot} stale />);
+    expect(screen.getByRole('status')).not.toHaveClass('is-success');
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    view.rerender(<RelayStatusLine snapshot={{ ...snapshot, dataAvailability: { ...snapshot.dataAvailability, devices: 'unavailable' } }} />);
+    expect(screen.getByRole('status')).not.toHaveClass('is-success');
+    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+  });
   it('keeps unknown relay state when the stopped SCM value is only cached', () => {
     const cached = qaCase('desktop-relay-stopped').snapshot;
     render(<RelayStatusLine snapshot={{ ...cached, relayStatus: { mode: 'embedded', state: 'unknown' } }} />);
@@ -24,7 +33,7 @@ describe('Windows relay observation and service recovery', () => {
     const relay = view.container.querySelector('.auxiliary-card')!;
     expect(relay.textContent.length).toBeGreaterThan(0);
     if (locale !== 'ko') expect(relay.textContent).not.toMatch(/[가-힣]/u);
-    expect(within(relay as HTMLElement).getByRole('status')).not.toHaveClass('is-success');
+    for (const status of within(relay as HTMLElement).getAllByRole('status')) expect(status).not.toHaveClass('is-success');
   });
 
   it.each([

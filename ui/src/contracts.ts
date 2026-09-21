@@ -25,6 +25,8 @@ export interface ServiceView {
 export interface RelayStatus {
   readonly mode: 'embedded' | 'external' | 'unknown';
   readonly state: 'listening' | 'waiting_network' | 'unavailable' | 'stopped' | 'external_configured' | 'unknown';
+  /** Native Windows observation only; a candidate is not a verified WAN connection. */
+  readonly internetState?: 'discovering' | 'lan_only' | 'candidate' | 'unavailable' | 'stopped' | 'unknown' | null;
 }
 export interface PhoneServiceView {
   readonly state: 'stopped' | 'preparing' | 'waiting_for_unlock' | 'local_settings_ready' | 'cleanup_pending' | 'unavailable';

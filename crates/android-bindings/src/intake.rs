@@ -1139,6 +1139,19 @@ fn process_parked(
                         .native_progress_pending
                         .store(true, Ordering::Release);
                 }
+                PeerWork::Event(Ok(PcSocketEvent::Addresses(message))) => {
+                    let now = owner.read_clock()?;
+                    let result = owner.with_inbox(|inbox| {
+                        Ok(owned.socket.apply_routing_candidates(inbox, *message, now))
+                    })?;
+                    match result {
+                        Ok(()) => (),
+                        Err(android_controller::PeerSocketError::Persistence(_)) => {
+                            return Err(BridgeError::StorageUnavailable);
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
                 PeerWork::Event(Ok(PcSocketEvent::OutboundDrained)) => {
                     owner
                         .intake
@@ -1176,6 +1189,19 @@ fn process_parked(
                 PeerWork::Probe => {
                     queue_probe(owner, &mut owned)?;
                 }
+            }
+            let now = owner.read_clock()?;
+            match owner
+                .with_inbox(|inbox| Ok(owned.socket.refresh_routing_candidates(inbox, now)))?
+            {
+                Ok(())
+                | Err(android_controller::PeerSocketError::Socket(
+                    framed_transport::SocketError::Transport(
+                        framed_transport::TransportError::Busy
+                        | framed_transport::TransportError::NotReady,
+                    ),
+                )) => (),
+                Err(_) => return Ok(None),
             }
             if owned.socket.observe_liveness().is_err() {
                 return Ok(None);

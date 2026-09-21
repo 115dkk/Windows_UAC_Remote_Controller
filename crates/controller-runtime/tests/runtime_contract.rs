@@ -122,6 +122,7 @@ fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> Managem
         activity: None,
         relay_configured,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::External,
             state: if relay_configured {
                 RelayState::ExternalConfigured
@@ -490,6 +491,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
     assert_eq!(
         selected.relay_status.unwrap(),
         RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::Stopped,
         }
@@ -507,6 +509,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         activity: None,
         relay_configured: false,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::WaitingNetwork,
         },
@@ -522,6 +525,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         activity: None,
         relay_configured: true,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::Listening,
         },

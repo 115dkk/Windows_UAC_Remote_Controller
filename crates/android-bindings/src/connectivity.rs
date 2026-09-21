@@ -29,6 +29,7 @@ pub(super) struct DialState {
     pub(super) generation: u64,
     pub(super) in_flight: bool,
     pub(super) failures: u8,
+    pub(super) candidate_cursor: usize,
     pub(super) retry_at: Option<Instant>,
 }
 
@@ -103,6 +104,7 @@ impl ConnectivityOwner {
 pub(crate) struct DialRequest {
     pub(crate) reference: PeerAssociationRef,
     pub(crate) address: std::net::SocketAddr,
+    pub(crate) alternatives: Vec<std::net::SocketAddr>,
     pub(crate) route: [u8; 32],
     generation: u64,
     network_stop: CancellationToken,
@@ -116,7 +118,11 @@ pub(crate) struct DialCompletion {
 }
 
 /// One durable association with its optional relay address and route.
-type AssociationRelay = (PeerAssociationRef, Option<(std::net::SocketAddr, [u8; 32])>);
+type AssociationRelay = (
+    PeerAssociationRef,
+    Option<(std::net::SocketAddr, [u8; 32])>,
+    Vec<std::net::SocketAddr>,
+);
 
 impl MobileController {
     fn connectivity_snapshot(&self) -> Result<Vec<AssociationRelay>, BridgeError> {
@@ -129,7 +135,13 @@ impl MobileController {
             }
             Ok(ledger
                 .entries()
-                .map(|association| (association.reference(), association.descriptor().relay()))
+                .map(|association| {
+                    (
+                        association.reference(),
+                        association.descriptor().relay(),
+                        ledger.routing_candidates(association.reference()).to_vec(),
+                    )
+                })
                 .collect())
         })
     }
@@ -178,7 +190,7 @@ impl MobileController {
             .lock()
             .map_err(|_| BridgeError::Closed)?
             .clear();
-        for (reference, _) in associations {
+        for (reference, _, _) in associations {
             self.intake.retire_association(reference);
         }
         Ok(())
@@ -214,9 +226,9 @@ impl MobileController {
             states.retain(|key, _| {
                 associations
                     .iter()
-                    .any(|(reference, _)| *key == ConnectivityOwner::key(*reference))
+                    .any(|(reference, _, _)| *key == ConnectivityOwner::key(*reference))
             });
-            for (reference, endpoint) in &associations {
+            for (reference, endpoint, alternatives) in &associations {
                 let Some((address, route)) = endpoint else {
                     without_endpoint += 1;
                     continue;
@@ -230,6 +242,7 @@ impl MobileController {
                         generation: network.number,
                         in_flight: false,
                         failures: 0,
+                        candidate_cursor: 0,
                         retry_at: None,
                     });
                 if self.intake.has_live_peer(*reference) {
@@ -244,9 +257,22 @@ impl MobileController {
                     continue;
                 }
                 state.in_flight = true;
+                // Rotate after every carrier attempt, including a failed TLS
+                // handshake, so a stale/hostile READY endpoint cannot starve
+                // another pinned candidate on all subsequent reconnects.
+                let mut candidates = vec![*address];
+                for alternative in alternatives {
+                    if !candidates.contains(alternative) {
+                        candidates.push(*alternative);
+                    }
+                }
+                let cursor = state.candidate_cursor % candidates.len();
+                candidates.rotate_left(cursor);
+                state.candidate_cursor = (cursor + 1) % candidates.len();
                 requests.push(DialRequest {
                     reference: *reference,
-                    address: *address,
+                    address: candidates[0],
+                    alternatives: candidates[1..].to_vec(),
                     route: *route,
                     generation: network.number,
                     network_stop: network.stop.clone(),
@@ -291,13 +317,14 @@ pub(crate) async fn run_dial(
         Ok(route) => request
             .network_stop
             .clone()
-            .run_until_cancelled_owned(relay_service::connect_rendezvous(
+            .run_until_cancelled_owned(connect_candidates(
                 request.address,
-                Registration::new(Role::Phone, route),
+                &request.alternatives,
+                route,
                 intake_stop,
             ))
             .await
-            .and_then(Result::ok),
+            .flatten(),
         Err(_) => None,
     };
     // The combinator drops the old network's pending socket on cancellation.
@@ -319,6 +346,50 @@ pub(crate) async fn run_dial(
         generation: request.generation,
         completed_at: Instant::now(),
     }
+}
+
+/// Only carrier discovery is retried. TLS signing, requests and decisions are
+/// never replayed across candidates. Each failed/timed-out future drops its socket.
+pub(crate) async fn connect_candidates(
+    primary: std::net::SocketAddr,
+    alternatives: &[std::net::SocketAddr],
+    route: RouteId,
+    stop: CancellationToken,
+) -> Option<relay_service::RendezvousCarrier> {
+    let mut addresses = vec![primary];
+    for address in alternatives.iter().take(4) {
+        if !addresses.contains(address) {
+            addresses.push(*address);
+        }
+    }
+    if addresses.len() == 1 {
+        // Preserve the shipped single-endpoint LAN/rendezvous timeout profile.
+        return relay_service::connect_rendezvous(
+            primary,
+            Registration::new(Role::Phone, route),
+            stop,
+        )
+        .await
+        .ok();
+    }
+    for address in addresses {
+        if stop.is_cancelled() {
+            return None;
+        }
+        if let Ok(Ok(carrier)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            relay_service::connect_rendezvous(
+                address,
+                Registration::new(Role::Phone, route),
+                stop.clone(),
+            ),
+        )
+        .await
+        {
+            return Some(carrier);
+        }
+    }
+    None
 }
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -383,6 +454,7 @@ mod tests {
                 generation: 0,
                 in_flight: true,
                 failures: 0,
+                candidate_cursor: 0,
                 retry_at: None,
             },
         );
@@ -414,6 +486,7 @@ mod tests {
                 generation: 0,
                 in_flight: true,
                 failures: 4,
+                candidate_cursor: 0,
                 retry_at: Some(Instant::now()),
             },
         );
@@ -434,6 +507,7 @@ mod tests {
                 generation: 2,
                 in_flight: true,
                 failures: 0,
+                candidate_cursor: 0,
                 retry_at: None,
             },
         );
@@ -454,6 +528,7 @@ mod tests {
         let request = DialRequest {
             reference: reference(),
             address,
+            alternatives: Vec::new(),
             route: [9; 32],
             generation: 4,
             network_stop: network_stop.clone(),
@@ -485,6 +560,7 @@ mod tests {
             DialRequest {
                 reference: reference(),
                 address: listener.local_addr().unwrap(),
+                alternatives: Vec::new(),
                 route: [9; 32],
                 generation: 1,
                 network_stop,
@@ -497,6 +573,52 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_primary_falls_back_to_one_alternative_carrier() {
+        let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary = unavailable.local_addr().unwrap();
+        drop(unavailable);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alternate = listener.local_addr().unwrap();
+        let route = RouteId::new([11; 32]).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let expected = Registration::new(Role::Phone, route).to_wire();
+            let mut bytes = vec![0; expected.len()];
+            let mut read = 0;
+            while read < bytes.len() {
+                stream.readable().await.unwrap();
+                match stream.try_read(&mut bytes[read..]) {
+                    Ok(0) => panic!("closed before registration"),
+                    Ok(count) => read += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                    Err(error) => panic!("read: {error}"),
+                }
+            }
+            assert_eq!(bytes, expected);
+            let mut written = 0;
+            while written < relay_service::READY_MARKER.len() {
+                stream.writable().await.unwrap();
+                match stream.try_write(&relay_service::READY_MARKER[written..]) {
+                    Ok(0) => panic!("closed before ready"),
+                    Ok(count) => written += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                    Err(error) => panic!("write: {error}"),
+                }
+            }
+            stream
+        });
+        let carrier = tokio::time::timeout(
+            Duration::from_secs(2),
+            connect_candidates(primary, &[alternate], route, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(carrier.into_stream().peer_addr().unwrap(), alternate);
+        drop(server.await.unwrap());
     }
 
     #[tokio::test]

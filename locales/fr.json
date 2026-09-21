@@ -1,4 +1,13 @@
 {
+  "외부 네트워크 연결": "Connexion à un réseau externe",
+  "외부 연결 경로 확인 중": "Recherche de chemins de connexion externes",
+  "같은 네트워크용 주소만 확인됨 · 외부 연결 경로 확인 필요": "Adresses du réseau local uniquement · Chemin externe à vérifier",
+  "외부 연결 주소 확보 · 모바일망에서 연결 확인 필요": "Adresse externe obtenue · Vérifiez la connexion via les données mobiles",
+  "외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.": "Impossible de préparer un chemin de connexion externe. Vérifiez les paramètres réseau du PC et du routeur.",
+  "외부 연결 준비 중지됨 · PC 상태에서 휴대폰 승인을 켜십시오.": "Préparation de la connexion externe arrêtée · Activez l’approbation par téléphone dans l’état du PC.",
+  "외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.": "État de la connexion externe indisponible · Actualisez l’état du PC.",
+  "V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.": "Si V3 ou votre pare-feu demande d’autoriser une connexion, vérifiez qu’il s’agit du service Approbation UAC à distance (uac-service.exe), puis autorisez la connexion de ce programme.",
+  "PC에 V3 또는 방화벽의 연결 허용 알림이 표시되었는지 확인하십시오. UAC 원격 승인기 서비스(uac-service.exe)인 경우 해당 프로그램의 연결을 허용하십시오.": "Vérifiez si V3 ou le pare-feu affiche une demande de connexion sur le PC. S’il s’agit du service Approbation UAC à distance (uac-service.exe), autorisez la connexion de ce programme.",
   "진단 로그 파일로 저장": "Enregistrer le journal de diagnostic",
   "선택한 위치에 진단 로그를 저장했습니다.": "Journal de diagnostic enregistré à l’emplacement choisi.",
   "파일 저장을 취소했습니다.": "Enregistrement annulé.",

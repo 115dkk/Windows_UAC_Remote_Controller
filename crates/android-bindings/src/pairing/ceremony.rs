@@ -14,7 +14,7 @@ use std::{
 use framed_transport::{
     ConnectionBudget, PeerTransport, SocketDriver, SocketError, SocketEvent, SocketLimits,
 };
-use relay_service::{Registration, Role, RouteId};
+use relay_service::RouteId;
 use service_protocol::{
     CandidateSubmission, CandidateSubmissionFields, CeremonyMessageKind, PairingChallenge,
     PairingConfirmation, PairingConfirmationFields, candidate_digest, ceremony_message_kind,
@@ -262,76 +262,20 @@ async fn run_ceremony(
     set_phase(&status, NativeCeremonyPhase::Connecting, None);
 
     let fields = invitation.fields();
-    let route = RouteId::new(fields.route).map_err(|_| {
-        created.cancel();
-        NativeCeremonyFailure::Rejected
-    })?;
-    let carrier = await_bounded(
-        &stop,
-        deadline,
-        Duration::from_secs(30),
-        relay_service::connect_rendezvous(
-            fields.relay_address,
-            Registration::new(Role::Phone, route),
-            stop.child_token(),
-        ),
-    )
-    .await
-    .inspect_err(|_| created.cancel())?
-    .map_err(|error| {
-        created.cancel();
-        if matches!(error, relay_service::RendezvousError::Cancelled) {
-            NativeCeremonyFailure::Cancelled
-        } else {
-            NativeCeremonyFailure::Network
-        }
-    })?;
-
-    set_phase(&status, NativeCeremonyPhase::Submitting, None);
     let submission = make_submission(&invitation, &created).inspect_err(|_| created.cancel())?;
-    let stream = carrier.into_stream();
-    write_plaintext_submission(
-        &stream,
-        &frame_plaintext_submission(&submission),
+    let candidates = invitation.candidates();
+    let mut driver = select_pairing_transport(
+        &invitation,
+        &submission,
+        &created,
+        &scan,
+        platform,
+        Arc::clone(&clock),
         &stop,
         deadline,
+        &candidates,
     )
-    .await
-    .inspect_err(|_| created.cancel())?;
-
-    let local_keys = created.local_keys().clone();
-    let pc_transport_key = fields.pc_transport_key.clone();
-    let (stream, identity) = crate::transport::created_identity_with_socket(
-        stream, local_keys, platform,
-    )
-    .map_err(|error| {
-        created.cancel();
-        map_bridge(error)
-    })?;
-    let now = clock.now().map_err(|_| {
-        created.cancel();
-        NativeCeremonyFailure::Unavailable
-    })?;
-    let budget = Arc::new(ConnectionBudget::new(1).map_err(|_| {
-        created.cancel();
-        NativeCeremonyFailure::Unavailable
-    })?);
-    let transport =
-        PeerTransport::client(budget, identity, pc_transport_key, now).map_err(|_| {
-            created.cancel();
-            NativeCeremonyFailure::Rejected
-        })?;
-    let mut driver = SocketDriver::new(
-        stream,
-        transport,
-        Arc::clone(&clock),
-        SocketLimits::default(),
-        stop.child_token(),
-    )
-    .map_err(|error| {
-        created.cancel();
-        map_socket(error)
-    })?;
+    .await?;
 
     set_phase(&status, NativeCeremonyPhase::AwaitingCandidate, None);
     let frozen_wire = next_frame(&mut driver, &stop, deadline, CANDIDATE_TIMEOUT)
@@ -397,7 +341,22 @@ async fn run_ceremony(
         return Err(NativeCeremonyFailure::Rejected);
     }
     let warning = match controller.commit_created_pairing(frozen, &acceptance) {
-        Ok(_) => None,
+        Ok(committed) => {
+            let endpoints: Vec<_> = invitation
+                .candidates()
+                .into_iter()
+                .filter(|address| *address != fields.relay_address)
+                .collect();
+            let persisted = (|| {
+                let _admission = controller.enter()?;
+                controller.with_inbox(|owner| {
+                    owner
+                        .record_routing_candidates(committed.association(), endpoints)
+                        .map_err(|_| crate::BridgeError::StorageUnavailable)
+                })
+            })();
+            persisted.err().map(|_| NativeCeremonyFailure::Storage)
+        }
         Err(CreatedPairingCommitError::CommittedButNotLive { .. }) => {
             Some(NativeCeremonyFailure::Unavailable)
         }
@@ -405,6 +364,129 @@ async fn run_ceremony(
     };
     close_driver(&mut driver, &stop, deadline).await;
     Ok(warning)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn select_pairing_transport(
+    invitation: &service_protocol::PairingInvitation,
+    submission: &CandidateSubmission,
+    created: &CreatedPairingKeys,
+    scan: &NativePairingScan,
+    platform: Arc<dyn crate::NativePlatform>,
+    clock: Arc<dyn framed_transport::SocketClock>,
+    stop: &CancellationToken,
+    deadline: Instant,
+    candidates: &[std::net::SocketAddr],
+) -> Result<SocketDriver, NativeCeremonyFailure> {
+    let limit = Duration::from_secs(if candidates.len() == 1 { 30 } else { 8 });
+    let mut last_failure = NativeCeremonyFailure::Network;
+    for address in candidates.iter().take(4) {
+        ensure_live_or_cancel(created, stop, deadline)?;
+        scan.check_current().map_err(map_bridge)?;
+        let signing_attempted = Arc::new(AtomicBool::new(false));
+        let result = await_bounded(
+            stop,
+            deadline,
+            limit,
+            connect_pairing_candidate(
+                *address,
+                invitation,
+                submission,
+                created,
+                Arc::clone(&platform),
+                Arc::clone(&clock),
+                stop,
+                deadline,
+                Arc::clone(&signing_attempted),
+            ),
+        )
+        .await
+        .and_then(|result| result);
+        match result {
+            Ok(driver) => return Ok(driver),
+            Err(error) => {
+                // No restart after any native signature attempt, including an
+                // uncertain callback. Failed sockets/signers have been dropped.
+                if signing_attempted.load(Ordering::Acquire)
+                    || !matches!(
+                        error,
+                        NativeCeremonyFailure::Network | NativeCeremonyFailure::Rejected
+                    )
+                {
+                    created.cancel();
+                    return Err(error);
+                }
+                last_failure = error;
+            }
+        }
+    }
+    created.cancel();
+    Err(last_failure)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pairing_candidate(
+    address: std::net::SocketAddr,
+    invitation: &service_protocol::PairingInvitation,
+    submission: &CandidateSubmission,
+    created: &CreatedPairingKeys,
+    platform: Arc<dyn crate::NativePlatform>,
+    clock: Arc<dyn framed_transport::SocketClock>,
+    stop: &CancellationToken,
+    deadline: Instant,
+    signing_attempted: Arc<AtomicBool>,
+) -> Result<SocketDriver, NativeCeremonyFailure> {
+    let fields = invitation.fields();
+    let route = RouteId::new(fields.route).map_err(|_| NativeCeremonyFailure::Rejected)?;
+    let carrier = relay_service::connect_rendezvous(
+        address,
+        relay_service::Registration::new(relay_service::Role::Phone, route),
+        stop.child_token(),
+    )
+    .await
+    .map_err(|_| NativeCeremonyFailure::Network)?;
+    let stream = carrier.into_stream();
+    write_plaintext_submission(
+        &stream,
+        &frame_plaintext_submission(submission),
+        stop,
+        deadline,
+    )
+    .await?;
+    let (stream, identity) = crate::transport::created_identity_with_socket(
+        stream,
+        created.local_keys().clone(),
+        platform,
+        signing_attempted,
+    )
+    .map_err(map_bridge)?;
+    let transport = PeerTransport::client(
+        Arc::new(ConnectionBudget::new(1).map_err(|_| NativeCeremonyFailure::Unavailable)?),
+        identity,
+        fields.pc_transport_key.clone(),
+        clock
+            .now()
+            .map_err(|_| NativeCeremonyFailure::Unavailable)?,
+    )
+    .map_err(|_| NativeCeremonyFailure::Rejected)?;
+    let mut driver = SocketDriver::new(
+        stream,
+        transport,
+        clock,
+        SocketLimits::default(),
+        stop.child_token(),
+    )
+    .map_err(map_socket)?;
+    loop {
+        match driver.next_event().await.map_err(map_socket)? {
+            SocketEvent::Ready => return Ok(driver),
+            SocketEvent::OutboundDrained => (),
+            SocketEvent::Frame(_) => return Err(NativeCeremonyFailure::Rejected),
+            SocketEvent::PeerClosed | SocketEvent::LocallyClosed => {
+                return Err(NativeCeremonyFailure::Network);
+            }
+        }
+    }
 }
 
 struct CreatedCancellationGuard(Arc<super::CreationState>);
@@ -415,7 +497,7 @@ impl Drop for CreatedCancellationGuard {
     }
 }
 
-fn make_submission(
+pub(super) fn make_submission(
     invitation: &service_protocol::PairingInvitation,
     created: &CreatedPairingKeys,
 ) -> Result<CandidateSubmission, NativeCeremonyFailure> {

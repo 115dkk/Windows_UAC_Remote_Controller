@@ -56,7 +56,10 @@ function RequestContents({ snapshot, disabled, onDecision, readDetails }: Reques
   if (hasNoPairedPc(snapshot)) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
   if (!snapshot.requests.length && connected === false) return <>
     <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />
-    <section className="notice-box"><Icon name="pc" /><div><h2>{ko.requestDisconnected}</h2><p>{ko.requestDisconnectedBody}</p></div></section>
+    <section className="notice-box"><Icon name="pc" /><div><h2>{ko.requestDisconnected}</h2><p>{ko.requestDisconnectedBody}</p>
+      {!disabled && snapshot.phoneService?.state === 'local_settings_ready' && snapshot.requestCatalog?.status === 'ready'
+        && snapshot.requestCatalog.peerCount > 0 && <p className="supporting-text">{tr('PC에 V3 또는 방화벽의 연결 허용 알림이 표시되었는지 확인하십시오. UAC 원격 승인기 서비스(uac-service.exe)인 경우 해당 프로그램의 연결을 허용하십시오.')}</p>}
+    </div></section>
   </>;
   if (!snapshot.requests.length) return <EmptyState icon="request" title={ko.requestEmpty} description={ko.requestEmptyBody} />;
   const selected = snapshot.requests.find((request) => request.id === snapshot.requestReview?.locator);

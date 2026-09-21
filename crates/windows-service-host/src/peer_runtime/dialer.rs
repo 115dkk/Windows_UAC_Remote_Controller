@@ -50,6 +50,7 @@ struct Entry {
 
 pub(super) struct DeviceDialer {
     relay: SocketAddr,
+    embedded: bool,
     commands: mpsc::Sender<Command>,
     results: std::sync::mpsc::Receiver<ResultMessage>,
     stop: CancellationToken,
@@ -69,6 +70,14 @@ impl fmt::Debug for DeviceDialer {
 
 impl DeviceDialer {
     pub(super) fn new(relay: SocketAddr) -> Result<Self, super::PeerRuntimeError> {
+        Self::start(relay, false)
+    }
+
+    pub(super) fn new_embedded() -> Result<Self, super::PeerRuntimeError> {
+        Self::start(embedded_endpoint(), true)
+    }
+
+    fn start(relay: SocketAddr, embedded: bool) -> Result<Self, super::PeerRuntimeError> {
         let stop = CancellationToken::new();
         let thread_stop = stop.clone();
         let (command_sender, commands) = mpsc::channel(MAX_DEVICES + 2);
@@ -97,6 +106,7 @@ impl DeviceDialer {
         }
         Ok(Self {
             relay,
+            embedded,
             commands: command_sender,
             results,
             stop,
@@ -111,12 +121,7 @@ impl DeviceDialer {
         now: Instant,
     ) -> Vec<ServicePeerCarrier> {
         self.flush_releases();
-        let mut bounded: Vec<_> = routes
-            .iter()
-            .filter(|(_, relay, _)| *relay == self.relay)
-            .take(MAX_DEVICES)
-            .cloned()
-            .collect();
+        let mut bounded = selected_routes(routes, self.relay, self.embedded);
         bounded.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
         let _ = self.commands.try_send(Command::Poll {
             routes: bounded,
@@ -174,6 +179,36 @@ impl DeviceDialer {
     pub(super) fn remaining_owners(&self) -> usize {
         usize::from(self.thread.is_some())
     }
+}
+
+pub(super) fn embedded_endpoint() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], relay_service::EMBEDDED_RELAY_PORT))
+}
+
+fn selected_routes(
+    routes: &[(DeviceId, SocketAddr, RouteId)],
+    relay: SocketAddr,
+    embedded: bool,
+) -> Vec<(DeviceId, SocketAddr, RouteId)> {
+    // These routes come only from the current privileged registry. Embedded
+    // rendezvous always stays local; old advertised coordinates are immutable
+    // enrollment history, not a reason to suppress the enrolled device's route.
+    routes
+        .iter()
+        .filter(|(_, recorded, _)| embedded || *recorded == relay)
+        .take(MAX_DEVICES)
+        .map(|(device, recorded, route)| {
+            (
+                *device,
+                if embedded {
+                    embedded_endpoint()
+                } else {
+                    *recorded
+                },
+                *route,
+            )
+        })
+        .collect()
 }
 impl Drop for DeviceDialer {
     fn drop(&mut self) {
@@ -355,6 +390,25 @@ mod tests {
             backoff = doubled;
         }
         assert_eq!(backoff, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn embedded_routes_keep_old_enrollment_addresses_but_only_dial_local_listener() {
+        let old = "192.168.1.50:7443".parse().unwrap();
+        let other = "192.168.2.50:7443".parse().unwrap();
+        let routes = vec![
+            (device(1), old, RouteId::new([1; 32]).unwrap()),
+            (device(2), other, RouteId::new([2; 32]).unwrap()),
+        ];
+        let selected = selected_routes(&routes, embedded_endpoint(), true);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|(_, address, _)| *address
+            == SocketAddr::from(([127, 0, 0, 1], relay_service::EMBEDDED_RELAY_PORT))));
+        assert_eq!(selected[0].2, routes[0].2);
+        assert_eq!(selected[1].2, routes[1].2);
+        assert_eq!(selected_routes(&routes, old, false), vec![routes[0]]);
+        assert_eq!(routes[0].1, old);
+        assert_eq!(routes[1].1, other);
     }
 
     #[test]

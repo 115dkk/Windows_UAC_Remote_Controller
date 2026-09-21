@@ -43,6 +43,24 @@ pub use identity::{
 pub use key::{CertificateVerifySignature, KeyError, SignatureError, TlsPublicKey};
 
 pub const ALPN: &[u8] = b"wuac-control/1";
+pub const ALPN_V2: &[u8] = b"wuac-control/2";
+
+/// Authenticated application capability; not authorization or enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlProtocol {
+    V1,
+    V2,
+}
+
+impl ControlProtocol {
+    pub(crate) fn from_alpn(value: Option<&[u8]>) -> Option<Self> {
+        match value {
+            Some(ALPN) => Some(Self::V1),
+            Some(ALPN_V2) => Some(Self::V2),
+            _ => None,
+        }
+    }
+}
 pub const MAX_INGRESS_BYTES: usize = 16 * 1024;
 pub const MAX_PLAINTEXT_WRITE_BYTES: usize = 16 * 1024;
 pub const MAX_DRAIN_BYTES: usize = 16 * 1024;

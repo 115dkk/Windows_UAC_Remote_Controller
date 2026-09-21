@@ -44,6 +44,15 @@ export function qaCase(name: string): QaCase {
     service: { ...relayRunning.service!, state: 'stopped', allowedActions: ['start', 'uninstall'] },
     relayStatus: { mode: 'embedded', state: 'stopped' } };
   switch (name) {
+    case 'desktop-relay-wan-candidate': return { page: 'devices', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' } } };
+    case 'desktop-relay-wan-lan': return { page: 'devices', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' } } };
+    case 'desktop-relay-wan-unavailable': return { page: 'devices', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'unavailable' } } };
+    case 'desktop-relay-wan-stale': return { page: 'devices', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      dataAvailability: { ...relayRunning.dataAvailability, devices: 'unavailable' } } };
     case 'desktop-relay-stopped': return { page: 'devices', snapshot: relayStopped };
     case 'desktop-relay-listening': return { page: 'devices', snapshot: relayRunning };
     case 'desktop-relay-waiting': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };

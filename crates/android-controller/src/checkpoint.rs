@@ -20,12 +20,14 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"UACOWNR\0";
 const LEGACY_MAGIC: &[u8; 8] = b"UACINBX\0";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
+const ASSOCIATIONS_VERSION: u16 = 3;
 const LEGACY_COMPOSITE_VERSION: u16 = 1;
 const LOCAL_KEYS_VERSION: u16 = 2;
 const LEGACY_HEADER_BYTES: usize = 18;
 const LOCAL_KEYS_HEADER_BYTES: usize = 22;
-const HEADER_BYTES: usize = 26;
+const ASSOCIATIONS_HEADER_BYTES: usize = 26;
+const HEADER_BYTES: usize = 30;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ControllerCheckpointError {
@@ -51,6 +53,8 @@ pub enum ControllerCheckpointError {
     PeerAssociations(PeerAssociationError),
     #[error("original request source generations conflict with the peer ledger")]
     ReceivingSourceMismatch,
+    #[error("routing candidate coordinates or association generation are invalid")]
+    RoutingCandidates,
 }
 
 /// Strict metadata-only representation; not a runtime, permission or action token.
@@ -147,13 +151,32 @@ impl ControllerCheckpoint {
             return Err(ControllerCheckpointError::InvalidEncoding);
         }
         let version = u16::from_be_bytes([bytes[8], bytes[9]]);
-        if ![LEGACY_COMPOSITE_VERSION, LOCAL_KEYS_VERSION, VERSION].contains(&version) {
+        if ![
+            LEGACY_COMPOSITE_VERSION,
+            LOCAL_KEYS_VERSION,
+            ASSOCIATIONS_VERSION,
+            VERSION,
+        ]
+        .contains(&version)
+        {
             return Err(ControllerCheckpointError::UnsupportedVersion);
         }
         let inbox_len = length(&bytes[10..14])?;
         let history_len = length(&bytes[14..18])?;
-        let (header_bytes, key_len, association_len) = if version == VERSION {
+        let candidate_len = if version == VERSION {
             if bytes.len() < HEADER_BYTES {
+                return Err(ControllerCheckpointError::InvalidEncoding);
+            }
+            let len = length(&bytes[26..30])?;
+            if !(2..=crate::routing_candidates::MAX_CANDIDATE_BYTES).contains(&len) {
+                return Err(ControllerCheckpointError::RoutingCandidates);
+            }
+            len
+        } else {
+            0
+        };
+        let (header_bytes, key_len, association_len) = if version >= ASSOCIATIONS_VERSION {
+            if bytes.len() < ASSOCIATIONS_HEADER_BYTES {
                 return Err(ControllerCheckpointError::InvalidEncoding);
             }
             let key_len = length(&bytes[18..22])?;
@@ -161,7 +184,15 @@ impl ControllerCheckpoint {
             if key_len == 0 || association_len == 0 {
                 return Err(ControllerCheckpointError::InvalidEncoding);
             }
-            (HEADER_BYTES, key_len, association_len)
+            (
+                if version == VERSION {
+                    HEADER_BYTES
+                } else {
+                    ASSOCIATIONS_HEADER_BYTES
+                },
+                key_len,
+                association_len,
+            )
         } else if version == LOCAL_KEYS_VERSION {
             if bytes.len() < LOCAL_KEYS_HEADER_BYTES {
                 return Err(ControllerCheckpointError::InvalidEncoding);
@@ -197,8 +228,11 @@ impl ControllerCheckpoint {
         let keys_end = history_end
             .checked_add(key_len)
             .ok_or(ControllerCheckpointError::TooLarge)?;
-        let total = keys_end
+        let associations_end = keys_end
             .checked_add(association_len)
+            .ok_or(ControllerCheckpointError::TooLarge)?;
+        let total = associations_end
+            .checked_add(candidate_len)
             .ok_or(ControllerCheckpointError::TooLarge)?;
         if total != bytes.len() {
             return Err(ControllerCheckpointError::InvalidEncoding);
@@ -213,12 +247,20 @@ impl ControllerCheckpoint {
             LocalKeyLedger::from_bytes(&bytes[history_end..keys_end])
                 .map_err(ControllerCheckpointError::LocalKeys)?
         };
-        let peer_associations = if association_len == 0 {
+        let mut peer_associations = if association_len == 0 {
             PeerAssociationLedger::default()
         } else {
-            PeerAssociationLedger::from_bytes(&bytes[keys_end..])
+            PeerAssociationLedger::from_bytes(&bytes[keys_end..associations_end])
                 .map_err(ControllerCheckpointError::PeerAssociations)?
         };
+        if candidate_len != 0 {
+            peer_associations.candidates =
+                crate::routing_candidates::RoutingCandidates::from_bytes(
+                    &bytes[associations_end..],
+                    &peer_associations,
+                )
+                .map_err(|_| ControllerCheckpointError::RoutingCandidates)?;
+        }
         Self::with_peer_associations(inbox, history, local_keys, peer_associations)
     }
 
@@ -240,11 +282,13 @@ impl ControllerCheckpoint {
             .peer_associations
             .to_bytes()
             .map_err(ControllerCheckpointError::PeerAssociations)?;
+        let candidates = self.peer_associations.candidates.to_bytes();
         let total = HEADER_BYTES
             .checked_add(inbox.len())
             .and_then(|v| v.checked_add(history.len()))
             .and_then(|v| v.checked_add(local_keys.len()))
             .and_then(|v| v.checked_add(peer_associations.len()))
+            .and_then(|v| v.checked_add(candidates.len()))
             .filter(|v| *v <= MAX_SNAPSHOT_BYTES)
             .ok_or(ControllerCheckpointError::TooLarge)?;
         let mut bytes = Vec::with_capacity(total);
@@ -270,10 +314,12 @@ impl ControllerCheckpoint {
                 .map_err(|_| ControllerCheckpointError::TooLarge)?
                 .to_be_bytes(),
         );
+        bytes.extend_from_slice(&(candidates.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&inbox);
         bytes.extend_from_slice(&history);
         bytes.extend_from_slice(&local_keys);
         bytes.extend_from_slice(&peer_associations);
+        bytes.extend_from_slice(&candidates);
         Ok(bytes)
     }
 

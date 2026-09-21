@@ -139,6 +139,77 @@ fn absent_or_wrong_alpn_never_releases_application_bytes() {
 }
 
 #[test]
+fn legacy_client_negotiates_v1_and_modern_client_prefers_v2() {
+    for (alpn, expected) in [
+        (vec![crate::ALPN.to_vec()], crate::ControlProtocol::V1),
+        (
+            vec![crate::ALPN.to_vec(), crate::ALPN_V2.to_vec()],
+            crate::ControlProtocol::V2,
+        ),
+    ] {
+        let now = Instant::now();
+        let mut config = client_config(identity(EndpointRole::Client, 1), key(2)).unwrap();
+        config.alpn_protocols = alpn;
+        let mut client = ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("wuac.invalid").unwrap(),
+        )
+        .unwrap();
+        let mut server = Channel::server(identity(EndpointRole::Server, 2), key(1), now).unwrap();
+        assert_eq!(server.negotiated_protocol(), None);
+        drive_raw_client(&mut client, &mut server, now).unwrap();
+        assert_eq!(server.negotiated_protocol(), Some(expected));
+        client.writer().write_all(b"old client data").unwrap();
+        let mut encrypted = [0; MAX_INGRESS_BYTES];
+        let count = client.write_tls(&mut &mut encrypted[..]).unwrap();
+        server.feed_tls(&encrypted[..count], now).unwrap();
+        let mut plain = [0; 32];
+        assert_eq!(
+            server.read_plaintext(&mut plain, now),
+            Ok(PlaintextRead::Data(15))
+        );
+        assert_eq!(&plain[..15], b"old client data");
+    }
+}
+
+#[test]
+fn modern_client_accepts_legacy_server_only_after_readiness() {
+    let now = Instant::now();
+    let mut config = server_config(identity(EndpointRole::Server, 2), key(1)).unwrap();
+    config.alpn_protocols = vec![crate::ALPN.to_vec()];
+    let mut server = ServerConnection::new(Arc::new(config)).unwrap();
+    let mut client = Channel::client(identity(EndpointRole::Client, 1), key(2), now).unwrap();
+    let mut finished = false;
+    for _ in 0..32 {
+        let mut bytes = [0; MAX_INGRESS_BYTES];
+        let count = client.drain_tls(&mut bytes, now).unwrap();
+        if count > 0 {
+            server.read_tls(&mut &bytes[..count]).unwrap();
+            server.process_new_packets().unwrap();
+        }
+        let count = server.write_tls(&mut &mut bytes[..]).unwrap();
+        if count > 0 {
+            client.feed_tls(&bytes[..count], now).unwrap();
+        }
+        client.tick(now).unwrap();
+        assert_eq!(client.negotiated_protocol(), None);
+        if !server.is_handshaking() && client.status() == ChannelStatus::AwaitingReadiness {
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished);
+    send_raw_plaintext(&mut server, &mut client, READY_PREFACE, now).unwrap();
+    client.tick(now).unwrap();
+    assert_eq!(
+        client.negotiated_protocol(),
+        Some(crate::ControlProtocol::V1)
+    );
+    client.close(now).unwrap();
+    assert_eq!(client.negotiated_protocol(), None);
+}
+
+#[test]
 fn encrypted_readiness_preface_is_consumed_across_separate_tls_records() {
     let now = Instant::now();
     let (mut client, mut server) = raw_server_pair(now);

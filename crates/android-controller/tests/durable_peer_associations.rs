@@ -195,8 +195,8 @@ fn explicit_v1_v2_migration_adds_only_absent_association_metadata() {
             assert_eq!(checkpoint.local_keys(), &keys);
         }
         let migrated = checkpoint.to_bytes().unwrap();
-        assert_eq!(&migrated[8..10], &3u16.to_be_bytes());
-        assert!(migrated.len() >= 26);
+        assert_eq!(&migrated[8..10], &4u16.to_be_bytes());
+        assert!(migrated.len() >= 32);
         let reread = ControllerCheckpoint::from_bytes(&migrated).unwrap();
         assert_eq!(reread.peer_associations(), checkpoint.peer_associations());
         assert_eq!(reread.local_keys(), checkpoint.local_keys());
@@ -246,7 +246,7 @@ fn v2_migration_preflight_is_store_locked_and_can_reject_without_intent_or_rewri
     assert_eq!(owner.local_keys().unwrap(), &keys);
     assert_eq!(owner.peer_associations().unwrap().next_generation(), 1);
     drop(owner);
-    assert_eq!(&payload(&temp)[8..10], &3u16.to_be_bytes());
+    assert_eq!(&payload(&temp)[8..10], &4u16.to_be_bytes());
 }
 
 #[test]
@@ -370,6 +370,154 @@ fn durable_record_reopen_revoke_and_stale_removal_preserve_generation_highwater(
         second
     );
     assert!(owner.peer_associations().unwrap().resolve(first).is_none());
+}
+
+#[test]
+fn routing_coordinates_survive_boot_without_mutating_enrollment_and_are_removed_by_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh(&temp);
+    add_local(&mut owner, 1, 3);
+    let descriptor = peer(1, 1, 1, 20);
+    let first = reference(
+        owner
+            .record_peer_association_from_trusted_host(descriptor.clone())
+            .unwrap()
+            .1,
+    );
+    let addresses = vec![
+        "198.51.100.44:443".parse().unwrap(),
+        "[2001:db8::1]:8443".parse().unwrap(),
+    ];
+    owner
+        .record_routing_candidates(first, addresses.clone())
+        .unwrap();
+    assert_eq!(
+        owner
+            .peer_associations()
+            .unwrap()
+            .resolve(first)
+            .unwrap()
+            .descriptor(),
+        &descriptor
+    );
+    drop(owner);
+    let encoded = payload(&temp);
+    assert_eq!(&encoded[8..10], &4u16.to_be_bytes());
+    let parsed = ControllerCheckpoint::from_bytes(&encoded).unwrap();
+    assert_eq!(
+        parsed.peer_associations().routing_candidates(first),
+        addresses
+    );
+    assert_eq!(parsed.to_bytes().unwrap(), encoded);
+    for end in 0..encoded.len() {
+        assert!(ControllerCheckpoint::from_bytes(&encoded[..end]).is_err());
+    }
+    let (mut owner, _) = DurableInbox::open_existing_host_model(
+        directory(&temp),
+        PhoneBootId::from_native_boot_count(6).unwrap(),
+        clock(1),
+    )
+    .unwrap();
+    assert_eq!(
+        owner.peer_associations().unwrap().routing_candidates(first),
+        addresses
+    );
+    owner
+        .revoke_peer_association_from_trusted_host(first)
+        .unwrap();
+    let second = reference(
+        owner
+            .record_peer_association_from_trusted_host(descriptor)
+            .unwrap()
+            .1,
+    );
+    assert_ne!(first, second);
+    assert!(owner.record_routing_candidates(first, addresses).is_err());
+    assert!(
+        owner
+            .peer_associations()
+            .unwrap()
+            .routing_candidates(second)
+            .is_empty()
+    );
+    owner
+        .record_routing_candidates(second, vec!["198.51.100.55:443".parse().unwrap()])
+        .unwrap();
+    owner.record_routing_candidates(second, Vec::new()).unwrap();
+    assert!(
+        owner
+            .peer_associations()
+            .unwrap()
+            .routing_candidates(second)
+            .is_empty()
+    );
+}
+
+#[test]
+fn routing_codec_rejects_foreign_generation_duplicates_and_noncanonical_addresses() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut owner = fresh(&temp);
+    add_local(&mut owner, 1, 3);
+    let reference = reference(
+        owner
+            .record_peer_association_from_trusted_host(peer(1, 1, 1, 20))
+            .unwrap()
+            .1,
+    );
+    let address = "198.51.100.44:443".parse().unwrap();
+    for invalid in [
+        vec![address; 5],
+        vec![address; 2],
+        vec!["0.0.0.0:443".parse().unwrap()],
+        vec!["[fe80::1%3]:443".parse().unwrap()],
+    ] {
+        assert!(owner.record_routing_candidates(reference, invalid).is_err());
+        assert!(owner.fault().is_none());
+    }
+    owner
+        .record_routing_candidates(reference, vec![address])
+        .unwrap();
+    drop(owner);
+    let encoded = payload(&temp);
+    let candidates_start = encoded.len() - (2 + 41 + 19);
+    let mut wrong_generation = encoded.clone();
+    wrong_generation[candidates_start + 34..candidates_start + 42]
+        .copy_from_slice(&99u64.to_be_bytes());
+    assert_eq!(
+        ControllerCheckpoint::from_bytes(&wrong_generation).unwrap_err(),
+        ControllerCheckpointError::RoutingCandidates
+    );
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(ControllerCheckpoint::from_bytes(&trailing).is_err());
+}
+
+#[test]
+fn legacy_v3_migration_preserves_every_enrollment_byte_and_supplies_no_candidates() {
+    let keys = local_ledger();
+    let peers = associations(&keys);
+    let bytes = envelope(
+        &empty_inbox(),
+        &empty_history(),
+        Some(&keys.to_bytes().unwrap()),
+        Some(&peers.to_bytes().unwrap()),
+    );
+    let restored = ControllerCheckpoint::from_bytes(&bytes).unwrap();
+    assert_eq!(restored.peer_associations(), &peers);
+    assert_eq!(restored.local_keys(), &keys);
+    assert_eq!(
+        restored.peer_associations().to_bytes().unwrap(),
+        peers.to_bytes().unwrap()
+    );
+    let restored = ControllerCheckpoint::from_bytes(&restored.to_bytes().unwrap()).unwrap();
+    for peer in restored.peer_associations().entries() {
+        assert!(
+            restored
+                .peer_associations()
+                .routing_candidates(peer.reference())
+                .is_empty()
+        );
+    }
 }
 
 #[test]

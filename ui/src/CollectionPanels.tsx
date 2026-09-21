@@ -8,6 +8,7 @@ import { EmptyState } from './StatusPanels';
 import { currentLocale, formatText, tr } from './i18n';
 import { displayText } from './displayText';
 import { RelayStatusLine } from './RelayStatusLine';
+import { DirectConnectionStatus } from './DirectConnectionStatus';
 import { useConnectionDisplay } from './useConnectionDisplay';
 
 function DeviceConnectionLine({ device, active }: { device: PairedDeviceView; active: boolean }) {
@@ -23,11 +24,12 @@ function deviceLabel(device: PairedDeviceView, pc: boolean): string {
   return device.name;
 }
 
-export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStatus, onRemove, onSetRelay }: {
+export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStatus, onRemove, onSetRelay, stale = false }: {
   snapshot: AppSnapshot; disabled: boolean; onPair: () => void; onRemove: (device: PairedDeviceView) => void;
   onSetRelay: (address: string) => Promise<AppSnapshot | null>;
   onOpenStatus?: () => void;
   onPairUsb?: () => void;
+  stale?: boolean;
 }) {
   const [address, setAddress] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -78,9 +80,9 @@ export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStat
   const relayForm = snapshot.platform === 'windows' && <>
     <section className="surface pairing-entry auxiliary-card" aria-label={tr('PC 내장 중계')}>
       <h2>{tr('PC 내장 중계')}</h2>
-      <RelayStatusLine snapshot={snapshot} />
+      <RelayStatusLine snapshot={snapshot} stale={stale} />
+      <DirectConnectionStatus snapshot={snapshot} stale={stale} />
       <p className="supporting-text">{tr('중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.')}</p>
-      <p className="supporting-text">{tr('휴대폰을 같은 네트워크에 연결하고 Windows 네트워크 프로필을 ‘개인’으로 설정해 주세요. 외부 모바일망에서는 이 PC로 들어오는 연결 경로나 외부 중계 서버가 필요해요.')}</p>
       <button type="button" className="button primary" disabled={relayDisabled || submitting || embeddedSelected} onClick={() => { void enableEmbeddedRelay(); }}>{tr(embeddedSelected ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용')}</button>
       {embeddedSelected && snapshot.service?.state === 'stopped' && <>
         <p className="supporting-text">{tr('내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.')}</p>

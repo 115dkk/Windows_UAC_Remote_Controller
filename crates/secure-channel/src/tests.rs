@@ -22,6 +22,14 @@ fn real_mutual_handshake_and_encrypted_bidirectional_application_bytes() {
     let now = Instant::now();
     let (mut client, mut server) = pair(now);
     handshake(&mut client, &mut server, now, MAX_DRAIN_BYTES).unwrap();
+    assert_eq!(
+        client.negotiated_protocol(),
+        Some(crate::ControlProtocol::V2)
+    );
+    assert_eq!(
+        server.negotiated_protocol(),
+        Some(crate::ControlProtocol::V2)
+    );
     let payload = b"synthetic phone application payload";
     assert_eq!(client.write_plaintext(payload, now), Ok(payload.len()));
     let ciphertext = drain_all(&mut client, now);

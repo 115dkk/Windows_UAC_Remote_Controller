@@ -267,6 +267,26 @@ pub fn management_query() -> Result<management_protocol::ManagementResponse, Ser
     management_exchange(management_protocol::ManagementRequest::Query)
 }
 
+/// Optional read-only extension. Unsupported legacy services can refuse this
+/// without invalidating the caller's independently acquired ordinary snapshot.
+pub fn management_direct_query() -> Result<management_protocol::ManagementResponse, ServiceError> {
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        // The one-shot management listener rearms after the preceding normal
+        // snapshot (250ms). This optional read has one connect attempt, not a
+        // retry around any rejected identity/ACL or uncertain cleanup.
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        management_exchange_with_timeout(
+            management_protocol::ManagementRequest::QueryDirect,
+            std::time::Duration::from_secs(1),
+        )
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
 /// Elevated CLI verbs only (`remove`, `relay`); the service refuses other clients.
 #[cfg(windows)]
 pub(crate) fn management_mutation(
@@ -275,7 +295,8 @@ pub(crate) fn management_mutation(
     match management_exchange(request)? {
         management_protocol::ManagementResponse::Done => Ok(()),
         management_protocol::ManagementResponse::Refused(_) => Err(ServiceError::ManagementRefused),
-        management_protocol::ManagementResponse::Snapshot { .. } => {
+        management_protocol::ManagementResponse::Snapshot { .. }
+        | management_protocol::ManagementResponse::DirectStatus { .. } => {
             Err(ServiceError::UnexpectedState)
         }
     }
@@ -310,6 +331,14 @@ fn management_client_error_at(_stage: &'static str, _error: PairingClientError) 
 fn management_exchange(
     request: management_protocol::ManagementRequest,
 ) -> Result<management_protocol::ManagementResponse, ServiceError> {
+    management_exchange_with_timeout(request, std::time::Duration::from_secs(30))
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn management_exchange_with_timeout(
+    request: management_protocol::ManagementRequest,
+    timeout: std::time::Duration,
+) -> Result<management_protocol::ManagementResponse, ServiceError> {
     use std::time::{Duration, Instant};
 
     const POLL_DELAY: Duration = Duration::from_millis(10);
@@ -318,7 +347,7 @@ fn management_exchange(
     let wire = management_protocol::encode_request(&request)
         .map_err(|_| ServiceError::InvalidArguments)?;
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(30);
+    let deadline = start + timeout;
     let mut client = PairingClient::connect_management(start, deadline)
         .map_err(|error| management_client_error_at("connect", error))?;
     let exchange = (|| {

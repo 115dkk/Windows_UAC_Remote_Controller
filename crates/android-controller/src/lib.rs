@@ -32,6 +32,7 @@ mod owner;
 mod pairing;
 mod peer_associations;
 mod peer_socket;
+mod routing_candidates;
 mod types;
 
 pub use approval::{
@@ -63,8 +64,8 @@ pub use peer_associations::{
 pub use peer_socket::{
     ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, AssociatedPcSocket,
     AssociatedUpdate, DenialSendOutcome, DenialSendTransition, DenialWriteProgress, PcSocketEvent,
-    PcSocketInputs, PeerSocketError, QueuedApproval, QueuedDenial, ReceivedPcEvent, SendIssue,
-    SendRetry,
+    PcSocketInputs, PeerSocketError, QueuedApproval, QueuedDenial, ReceivedAddressAdvertisement,
+    ReceivedPcEvent, SendIssue, SendRetry,
 };
 pub use types::{
     CommittedCheck, CommittedHistoryMutation, CommittedOutcomeAcknowledgment, CommittedUpdate,

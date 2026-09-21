@@ -36,6 +36,7 @@ impl PlatformAdapter for Adapter {
             activity: None,
             relay_configured: true,
             relay_status: RelayStatusView {
+                internet_state: None,
                 mode: RelayMode::Embedded,
                 state: RelayState::Listening,
             },

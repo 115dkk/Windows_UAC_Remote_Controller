@@ -313,7 +313,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
     if (fixture.startsWith('desktop-relay-')) {
       const card = page.getByRole('region', { name: 'PC 내장 중계', exact: true });
-      const status = card.getByRole('status');
+      const status = card.locator('.relay-state');
       const expected: Record<string, string> = {
         'desktop-relay-stopped': '내장 중계 중지됨 · 수신 대기하지 않습니다.',
         'desktop-relay-listening': '내장 중계 수신 대기 중',

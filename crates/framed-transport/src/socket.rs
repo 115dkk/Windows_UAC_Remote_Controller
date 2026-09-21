@@ -256,6 +256,10 @@ impl SocketDriver {
         Ok(driver)
     }
 
+    pub fn negotiated_protocol(&self) -> Option<secure_channel::ControlProtocol> {
+        self.transport.negotiated_protocol()
+    }
+
     pub fn pending_counts(&self) -> SocketPending {
         SocketPending {
             transport: self.transport.pending_counts(),

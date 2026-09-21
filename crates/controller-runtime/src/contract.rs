@@ -80,6 +80,19 @@ pub enum RelayState {
 pub struct RelayStatusView {
     pub mode: RelayMode,
     pub state: RelayState,
+    /// A native route candidate observation, never an authenticated Internet path.
+    pub internet_state: Option<DirectConnectionState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectConnectionState {
+    Unknown,
+    Discovering,
+    LanOnly,
+    Candidate,
+    Unavailable,
+    Stopped,
 }
 
 /// Phone process/service availability, never a peer or authentication claim.

@@ -125,7 +125,8 @@ pub fn native_client_transport_identity(
     let lease = owner
         .lease_peer_association(association)
         .map_err(|_| BridgeError::LocalKeysUnavailable)?;
-    prepare_identity((), BindingKeys::Association(lease), platform).map(|(_, identity)| identity)
+    prepare_identity((), BindingKeys::Association(lease), platform, None)
+        .map(|(_, identity)| identity)
 }
 
 /// Fixed Client identity preparation off owner admission. Carrier drops BEFORE
@@ -135,21 +136,28 @@ pub(crate) fn native_identity_with_socket(
     lease: NativePeerLease,
     platform: Arc<dyn NativePlatform>,
 ) -> Result<(tokio::net::TcpStream, TlsIdentity), BridgeError> {
-    prepare_identity(socket, BindingKeys::Association(lease), platform)
+    prepare_identity(socket, BindingKeys::Association(lease), platform, None)
 }
 
 pub(crate) fn created_identity_with_socket(
     socket: tokio::net::TcpStream,
     local_keys: LocalKeySetDescriptor,
     platform: Arc<dyn NativePlatform>,
+    signing_attempted: Arc<AtomicBool>,
 ) -> Result<(tokio::net::TcpStream, TlsIdentity), BridgeError> {
-    prepare_identity(socket, BindingKeys::Created(Box::new(local_keys)), platform)
+    prepare_identity(
+        socket,
+        BindingKeys::Created(Box::new(local_keys)),
+        platform,
+        Some(signing_attempted),
+    )
 }
 
 fn prepare_identity<C>(
     carrier: C,
     keys: BindingKeys,
     platform: Arc<dyn NativePlatform>,
+    signing_attempted: Option<Arc<AtomicBool>>,
 ) -> Result<(C, TlsIdentity), BridgeError> {
     struct Owned<C> {
         carrier: Option<C>,
@@ -175,7 +183,11 @@ fn prepare_identity<C>(
     });
     // The adapter owns a release obligation BEFORE native publication. A failed
     // prepare may have partially published a holder in the retained platform.
-    let signer = Arc::new(NativeClientSigner { binding, platform });
+    let signer = Arc::new(NativeClientSigner {
+        binding,
+        platform,
+        signing_attempted,
+    });
     owned.signer = Some(Arc::clone(&signer));
     native_callback(|| {
         signer
@@ -196,6 +208,9 @@ fn prepare_identity<C>(
 struct NativeClientSigner {
     binding: Arc<NativeTransportBinding>,
     platform: Arc<dyn NativePlatform>,
+    // Native-only downward fence: once any signer invocation starts, a pairing
+    // failure cannot retry another transport or replay the original ceremony.
+    signing_attempted: Option<Arc<AtomicBool>>,
 }
 impl PlatformTlsSigner for NativeClientSigner {
     fn public_key(&self) -> Result<TlsPublicKey, SignerError> {
@@ -208,6 +223,9 @@ impl PlatformTlsSigner for NativeClientSigner {
         &self,
         input: CertificateVerifyInput<'_>,
     ) -> Result<CertificateVerifySignature, SignerError> {
+        if let Some(attempted) = &self.signing_attempted {
+            attempted.store(true, Ordering::Release);
+        }
         if input.role() != EndpointRole::Client || !matches!(input.as_bytes().len(), 130 | 146) {
             self.binding.close_binding();
             return Err(SignerError::InvalidMessage);

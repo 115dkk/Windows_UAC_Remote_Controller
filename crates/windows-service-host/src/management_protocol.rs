@@ -22,9 +22,57 @@ const MAX_DEVICES: usize = 32;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ManagementRequest {
     Query,
-    RemoveDevice { device: DeviceId },
-    SetRelay { address: SocketAddr },
+    /// Separate optional read so legacy Snapshot bytes remain unchanged.
+    QueryDirect,
+    RemoveDevice {
+        device: DeviceId,
+    },
+    SetRelay {
+        address: SocketAddr,
+    },
     UseEmbeddedRelay,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DirectConnectionState {
+    Unknown = 0,
+    Discovering = 1,
+    LanOnly = 2,
+    Candidate = 3,
+    Unavailable = 4,
+    Stopped = 5,
+}
+
+fn direct_state(value: u8) -> Result<DirectConnectionState, ManagementCodecError> {
+    Ok(match value {
+        0 => DirectConnectionState::Unknown,
+        1 => DirectConnectionState::Discovering,
+        2 => DirectConnectionState::LanOnly,
+        3 => DirectConnectionState::Candidate,
+        4 => DirectConnectionState::Unavailable,
+        5 => DirectConnectionState::Stopped,
+        _ => return Err(ManagementCodecError::Malformed),
+    })
+}
+
+fn validate_direct(
+    embedded: bool,
+    listening: bool,
+    state: DirectConnectionState,
+) -> Result<(), ManagementCodecError> {
+    if (!embedded && listening)
+        || (matches!(
+            state,
+            DirectConnectionState::Discovering
+                | DirectConnectionState::LanOnly
+                | DirectConnectionState::Candidate
+        ) && (!embedded || !listening))
+        || (state == DirectConnectionState::Stopped && listening)
+    {
+        return Err(ManagementCodecError::Malformed);
+    }
+    Ok(())
 }
 
 impl ManagementRequest {
@@ -65,6 +113,11 @@ impl fmt::Debug for DeviceRow {
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum ManagementResponse {
+    DirectStatus {
+        embedded_relay: bool,
+        relay_listening: bool,
+        state: DirectConnectionState,
+    },
     Snapshot {
         relay: Option<SocketAddr>,
         /// Selected service mode, independent of advertised relay readiness.
@@ -85,6 +138,10 @@ pub enum ManagementResponse {
 impl fmt::Debug for ManagementResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DirectStatus { state, .. } => f
+                .debug_tuple("ManagementResponse::DirectStatus")
+                .field(state)
+                .finish(),
             Self::Snapshot { devices, .. } => f
                 .debug_struct("ManagementResponse::Snapshot")
                 .field("devices", &devices.len())
@@ -105,6 +162,7 @@ pub fn encode_request(request: &ManagementRequest) -> Result<Vec<u8>, Management
     let mut writer = Writer::new();
     match request {
         ManagementRequest::Query => writer.byte(1),
+        ManagementRequest::QueryDirect => writer.byte(5),
         ManagementRequest::UseEmbeddedRelay => writer.byte(4),
         ManagementRequest::RemoveDevice { device } => {
             writer.byte(2);
@@ -124,6 +182,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
         1 => ManagementRequest::Query,
+        5 => ManagementRequest::QueryDirect,
         4 => ManagementRequest::UseEmbeddedRelay,
         2 => ManagementRequest::RemoveDevice {
             device: DeviceId::from_bytes(reader.array()?)
@@ -141,6 +200,17 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
 pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, ManagementCodecError> {
     let mut writer = Writer::new();
     match response {
+        ManagementResponse::DirectStatus {
+            embedded_relay,
+            relay_listening,
+            state,
+        } => {
+            validate_direct(*embedded_relay, *relay_listening, *state)?;
+            writer.byte(0x84);
+            writer.boolean(*embedded_relay);
+            writer.boolean(*relay_listening);
+            writer.byte(*state as u8);
+        }
         ManagementResponse::Snapshot {
             relay,
             embedded_relay,
@@ -236,6 +306,17 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
 pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCodecError> {
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
+        0x84 => {
+            let embedded_relay = reader.boolean()?;
+            let relay_listening = reader.boolean()?;
+            let state = direct_state(reader.byte()?)?;
+            validate_direct(embedded_relay, relay_listening, state)?;
+            ManagementResponse::DirectStatus {
+                embedded_relay,
+                relay_listening,
+                state,
+            }
+        }
         0x81 => {
             let relay = reader.optional_address()?;
             let embedded_relay = reader.boolean()?;
@@ -484,6 +565,62 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_direct_query_keeps_ordinary_query_wire_unchanged() {
+        assert_eq!(
+            encode_request(&ManagementRequest::Query).unwrap(),
+            b"UCMG\x03\x01"
+        );
+        let wire = encode_request(&ManagementRequest::QueryDirect).unwrap();
+        assert_eq!(wire, b"UCMG\x03\x05");
+        assert_eq!(
+            decode_request(&wire).unwrap(),
+            ManagementRequest::QueryDirect
+        );
+        let mut extra = wire;
+        extra.push(0);
+        assert!(decode_request(&extra).is_err());
+    }
+
+    #[test]
+    fn direct_status_is_bounded_and_not_a_connection_claim() {
+        for state in [
+            DirectConnectionState::Discovering,
+            DirectConnectionState::LanOnly,
+            DirectConnectionState::Candidate,
+            DirectConnectionState::Unavailable,
+            DirectConnectionState::Unknown,
+        ] {
+            let status = ManagementResponse::DirectStatus {
+                embedded_relay: true,
+                relay_listening: true,
+                state,
+            };
+            let wire = encode_response(&status).unwrap();
+            assert_eq!(wire.len(), 9);
+            assert_eq!(decode_response(&wire).unwrap(), status);
+            let mut bad = wire;
+            bad[8] = 255;
+            assert!(decode_response(&bad).is_err());
+        }
+        assert!(
+            encode_response(&ManagementResponse::DirectStatus {
+                embedded_relay: false,
+                relay_listening: false,
+                state: DirectConnectionState::Candidate
+            })
+            .is_err()
+        );
+        assert!(
+            encode_response(&ManagementResponse::DirectStatus {
+                embedded_relay: true,
+                relay_listening: true,
+                state: DirectConnectionState::Stopped
+            })
+            .is_err()
+        );
+    }
 
     fn device(value: u8) -> DeviceId {
         DeviceId::from_bytes([value; 16]).unwrap()

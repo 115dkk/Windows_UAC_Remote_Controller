@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Service-owned routing publication. Fixed signed hints only, never approval,
+//! generic signing, policy mutation, or changes to the enrollment key tuple.
+use std::net::SocketAddr;
+
+use service_protocol::{AddressAdvertisementFields, AddressQuery, UnsignedAddressAdvertisement};
+
+use super::*;
+
+const QUERY_INTERVAL: Duration =
+    Duration::from_secs(service_protocol::ADDRESS_QUERY_MIN_INTERVAL_SECONDS);
+
+impl ServiceSession<'_> {
+    fn address_query_current(
+        &mut self,
+        state: &PeerState,
+        query: &AddressQuery,
+    ) -> Result<bool, PeerRuntimeError> {
+        self.check_peer(state)?;
+        if query.pc != self.engine.pc_identity() || query.device != state.binding.device {
+            return Ok(false);
+        }
+        let routes = self
+            .registry
+            .as_mut()
+            .ok_or(PeerRuntimeError::Closed)?
+            .routes()?;
+        let Some((_, recorded, _)) = routes
+            .iter()
+            .find(|(device, _, route)| *device == query.device && route.as_bytes() == &query.route)
+        else {
+            return Ok(false);
+        };
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            if self.pending_relay.is_some() {
+                return Ok(false);
+            }
+            if self.embedded_mode {
+                return Ok(self.relay.is_some()
+                    && self
+                        .embedded_relay
+                        .as_ref()
+                        .is_some_and(relay_service::HostedRelay::is_running));
+            }
+            Ok(self.relay == Some(*recorded))
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            let _ = recorded;
+            Ok(true)
+        }
+    }
+
+    pub(super) fn respond_addresses(
+        &mut self,
+        index: usize,
+        state: Arc<PeerState>,
+        bytes: &[u8],
+        deadline: Instant,
+    ) -> Result<SessionProgress, PeerRuntimeError> {
+        let now = self.now()?;
+        let slot = &self.peers[index];
+        if !slot.ready
+            || !slot.clock_served
+            || slot.protocol != Some(secure_channel::ControlProtocol::V2)
+            || !Arc::ptr_eq(&slot.state, &state)
+            || slot.responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
+            || slot.address_query_after.is_some_and(|after| now < after)
+            || now >= deadline
+        {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
+        let query = match AddressQuery::from_wire(bytes) {
+            Ok(query) => query,
+            Err(_) => {
+                state.retire();
+                return Ok(SessionProgress::PeerRejected);
+            }
+        };
+        if !self.address_query_current(&state, &query)? {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
+        self.peers[index].address_query_after = Some(
+            now.checked_add(QUERY_INTERVAL)
+                .ok_or(PeerRuntimeError::Clock)?,
+        );
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        let (endpoints, valid_for_seconds) = self.current_direct_candidates();
+        let message = UnsignedAddressAdvertisement::new(AddressAdvertisementFields {
+            pc: self.engine.pc_identity(),
+            epoch: self.engine.boot_epoch(),
+            device: state.binding.device,
+            route: query.route,
+            nonce: query.nonce,
+            valid_for_seconds,
+            endpoints: endpoints.clone(),
+        })
+        .map_err(|_| PeerRuntimeError::Protocol)?;
+        // Only the above closed, validated statement reaches this service-key
+        // operation. The wire never supplies a digest or arbitrary signing input.
+        let signature = self.key.sign_protocol(&message.signing_bytes())?;
+        let signed = message
+            .with_der_signature(&signature)
+            .map_err(|_| PeerRuntimeError::Identity)?;
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        signed
+            .verify(
+                &PcPublicKey::from_spki_der(self.pc_key.as_spki_der())
+                    .map_err(|_| PeerRuntimeError::Identity)?,
+            )
+            .map_err(|_| PeerRuntimeError::Identity)?;
+        let (current, validity) = self.current_direct_candidates();
+        if current != endpoints
+            || (!current.is_empty() && validity == 0)
+            || !self.address_query_current(&state, &query)?
+            || self.now()? >= deadline
+        {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
+        let bytes = encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)?;
+        let id = self.next_response;
+        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
+        self.peers[index]
+            .responses
+            .try_send(Response {
+                source: state,
+                id,
+                bytes,
+                deadline,
+                kind: ResponseKind::Addresses,
+            })
+            .map_err(|_| PeerRuntimeError::Protocol)?;
+        self.peers[index]
+            .responses_in_flight
+            .push_back((id, deadline, ResponseKind::Addresses));
+        Ok(SessionProgress::Idle)
+    }
+
+    pub(super) fn current_direct_candidates(&self) -> (Vec<SocketAddr>, u32) {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            let Some(host) = self
+                .embedded_relay
+                .as_ref()
+                .filter(|host| host.is_running())
+            else {
+                return (Vec::new(), 0);
+            };
+            if !self.embedded_mode
+                || self.closing
+                || self.pending_relay.is_some()
+                || self.direct_internal.is_none()
+                || self.direct_internal != self.relay
+            {
+                return (Vec::new(), 0);
+            }
+            let Some(gateway) = self.direct_gateway.as_ref() else {
+                return (Vec::new(), 0);
+            };
+            let snapshot = gateway.snapshot();
+            let seconds = snapshot
+                .remaining_validity_seconds()
+                .min(service_protocol::MAX_ADDRESS_VALIDITY_SECONDS);
+            if seconds == 0 {
+                return (Vec::new(), 0);
+            }
+            let candidates: Vec<_> = snapshot
+                .candidates()
+                .iter()
+                .copied()
+                .filter(|address| address.is_ipv4() || host.supports_ipv6())
+                .take(service_protocol::MAX_ADDRESS_CANDIDATES)
+                .collect();
+            if candidates.is_empty() {
+                (Vec::new(), 0)
+            } else {
+                (candidates, seconds)
+            }
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            (Vec::new(), 0)
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn cancel_direct_gateway(&mut self) {
+        self.direct_internal = None;
+        if let Some(gateway) = self.direct_gateway.as_ref() {
+            gateway.cancel();
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn drain_direct_gateway(&mut self) -> bool {
+        self.cancel_direct_gateway();
+        if self
+            .direct_gateway
+            .as_mut()
+            .is_some_and(|gateway| !gateway.drain())
+        {
+            return false;
+        }
+        self.direct_gateway = None;
+        true
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn poll_direct_gateway(&mut self, endpoint: Option<SocketAddr>) {
+        let desired = endpoint.filter(|_| {
+            self.embedded_mode
+                && !self.closing
+                && self.pending_relay.is_none()
+                && self
+                    .embedded_relay
+                    .as_ref()
+                    .is_some_and(relay_service::HostedRelay::is_running)
+        });
+        if (self.direct_internal != desired || (desired.is_none() && self.direct_gateway.is_some()))
+            && !self.drain_direct_gateway()
+        {
+            return;
+        }
+        if self.direct_gateway.is_none()
+            && let Some(internal) = desired
+            && let Ok(gateway) = relay_service::DirectGatewayOwner::start(internal)
+        {
+            // Construction only starts a bounded background owner; no router
+            // discovery or router I/O runs on this service worker.
+            self.direct_gateway = Some(gateway);
+            self.direct_internal = Some(internal);
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn direct_status(&self) -> crate::management_protocol::ManagementResponse {
+        use crate::management_protocol::{DirectConnectionState as State, ManagementResponse};
+        let listening = self.embedded_mode
+            && !self.closing
+            && self.pending_relay.is_none()
+            && self
+                .embedded_relay
+                .as_ref()
+                .is_some_and(relay_service::HostedRelay::is_running);
+        let state = if self.closing || self.pending_relay.is_some() {
+            State::Stopped
+        } else if !self.embedded_mode {
+            State::Unknown
+        } else if !listening {
+            State::Unavailable
+        } else {
+            match self
+                .direct_gateway
+                .as_ref()
+                .map(|gateway| gateway.snapshot().state)
+            {
+                Some(relay_service::DirectGatewayState::PublicIpv4Candidate) => {
+                    if self.current_direct_candidates().0.is_empty() {
+                        State::Discovering
+                    } else {
+                        State::Candidate
+                    }
+                }
+                Some(relay_service::DirectGatewayState::LanOnly) => State::LanOnly,
+                Some(
+                    relay_service::DirectGatewayState::MappedCandidate
+                    | relay_service::DirectGatewayState::Ipv6Candidate,
+                ) => {
+                    let (candidates, _) = self.current_direct_candidates();
+                    if candidates.is_empty() {
+                        State::Discovering
+                    } else if candidates
+                        .iter()
+                        .any(|address| Some(*address) != self.relay)
+                        || self.relay.is_some_and(|address| address.is_ipv6())
+                    {
+                        State::Candidate
+                    } else {
+                        State::LanOnly
+                    }
+                }
+                Some(
+                    relay_service::DirectGatewayState::Unavailable
+                    | relay_service::DirectGatewayState::Stopped,
+                ) => State::Unavailable,
+                Some(relay_service::DirectGatewayState::Discovering) | None => State::Discovering,
+            }
+        };
+        ManagementResponse::DirectStatus {
+            embedded_relay: self.embedded_mode,
+            relay_listening: listening,
+            state,
+        }
+    }
+}

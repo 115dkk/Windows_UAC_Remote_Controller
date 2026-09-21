@@ -759,6 +759,7 @@ impl AppRuntime {
         let mut view = RelayStatusView {
             mode: self.confirmed_relay_mode,
             state: RelayState::Unknown,
+            internet_state: None,
         };
         if self
             .service_issue

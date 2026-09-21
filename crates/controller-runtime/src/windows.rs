@@ -35,10 +35,25 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         else {
             return Err(PlatformError::StatusUnavailable);
         };
+        // Independent optional read: old services do not implement it. Never
+        // let a refusal invent a candidate or hide a valid ordinary snapshot.
+        let internet_state = if embedded_relay && relay_listening {
+            match windows_service_host::management_direct_query() {
+                Ok(ManagementResponse::DirectStatus {
+                    embedded_relay: true,
+                    relay_listening: true,
+                    state,
+                }) => Some(project_direct_state(state)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         Ok(ManagementObservation {
             activity: activity.map(crate::pc_history::project),
             relay_configured: relay.is_some(),
             relay_status: RelayStatusView {
+                internet_state,
                 mode: if embedded_relay {
                     RelayMode::Embedded
                 } else {
@@ -117,6 +132,20 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
     fn use_embedded_relay(&self) -> Result<(), PlatformError> {
         completed_mutation(ServiceControlIntent::UseEmbeddedRelay)
+    }
+}
+
+fn project_direct_state(
+    state: windows_service_host::management_protocol::DirectConnectionState,
+) -> crate::DirectConnectionState {
+    use windows_service_host::management_protocol::DirectConnectionState as Native;
+    match state {
+        Native::Unknown => crate::DirectConnectionState::Unknown,
+        Native::Discovering => crate::DirectConnectionState::Discovering,
+        Native::LanOnly => crate::DirectConnectionState::LanOnly,
+        Native::Candidate => crate::DirectConnectionState::Candidate,
+        Native::Unavailable => crate::DirectConnectionState::Unavailable,
+        Native::Stopped => crate::DirectConnectionState::Stopped,
     }
 }
 

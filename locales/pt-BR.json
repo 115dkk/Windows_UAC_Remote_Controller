@@ -1,4 +1,13 @@
 {
+  "외부 네트워크 연결": "Conexão com redes externas",
+  "외부 연결 경로 확인 중": "Verificando rotas de conexão externa",
+  "같은 네트워크용 주소만 확인됨 · 외부 연결 경로 확인 필요": "Apenas endereços de rede local encontrados · Verifique a rota externa",
+  "외부 연결 주소 확보 · 모바일망에서 연결 확인 필요": "Endereço externo obtido · Verifique a conexão usando dados móveis",
+  "외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.": "Não foi possível preparar uma rota de conexão externa. Verifique as configurações de rede do PC e do roteador.",
+  "외부 연결 준비 중지됨 · PC 상태에서 휴대폰 승인을 켜십시오.": "Preparação da conexão externa interrompida · Ative a aprovação pelo celular no status do PC.",
+  "외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.": "Status da conexão externa indisponível · Atualize o status do PC.",
+  "V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.": "Se o V3 ou o firewall solicitar permissão de conexão, verifique se o programa é o serviço Aprovação remota UAC (uac-service.exe) e permita a conexão desse programa.",
+  "PC에 V3 또는 방화벽의 연결 허용 알림이 표시되었는지 확인하십시오. UAC 원격 승인기 서비스(uac-service.exe)인 경우 해당 프로그램의 연결을 허용하십시오.": "Verifique se o V3 ou o firewall exibe uma solicitação de conexão no PC. Se for do serviço Aprovação remota UAC (uac-service.exe), permita a conexão desse programa.",
   "진단 로그 파일로 저장": "Salvar log de diagnóstico em arquivo",
   "선택한 위치에 진단 로그를 저장했습니다.": "Log de diagnóstico salvo no local selecionado.",
   "파일 저장을 취소했습니다.": "Salvamento do arquivo cancelado.",
