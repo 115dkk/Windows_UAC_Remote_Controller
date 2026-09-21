@@ -28,7 +28,7 @@ const commands = [
   // These are safe policy/codec tests, never actual TPM/key operations.
   ['cargo', ['test', '--package', 'windows-identity', '--no-default-features', '--locked']],
   ['cargo', ['clippy', '--workspace', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings']],
-  ['cargo', ['test', '--workspace', '--all-targets', '--all-features', '--locked']],
+  ['cargo', ['test', '--workspace', '--all-targets', '--all-features', '--locked', '--no-fail-fast']],
   ['cargo', ['test', '--workspace', '--doc', '--all-features', '--locked']],
   [process.execPath, ['tools/rust-analyzer.mjs']],
   [process.execPath, ['tools/verify-analyzer-gate.mjs']],
