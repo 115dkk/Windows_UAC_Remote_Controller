@@ -137,10 +137,13 @@ class AndroidDiagnosticSaveInstrumentationTest {
         // not change DocumentsUI. Observe the real drawer and selected root.
         await { findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") } != null }
         click(requireNotNull(findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") }))
-        await { findNode { it.text?.toString() == "Downloads" && it.isEnabled } != null }
-        click(requireNotNull(findNode { it.text?.toString() == "Downloads" && it.isEnabled }))
+        // The toolbar and breadcrumb also say Downloads while the drawer is
+        // open. Only the observed root-list title belongs to the clickable row.
+        await { findNode { it.viewIdResourceName == "android:id/title" && it.text?.toString() == "Downloads" && it.isEnabled } != null }
+        click(requireNotNull(findNode { it.viewIdResourceName == "android:id/title" && it.text?.toString() == "Downloads" && it.isEnabled }))
         await {
-            findNode { it.text?.toString() == "Downloads" } != null &&
+            findNode { it.viewIdResourceName?.endsWith(":id/roots_list") == true && it.isVisibleToUser } == null &&
+                findNode { it.text?.toString() == "Downloads" } != null &&
                 findNode { it.viewIdResourceName?.endsWith(":id/button1") == true && it.isEnabled } != null
         }
     }

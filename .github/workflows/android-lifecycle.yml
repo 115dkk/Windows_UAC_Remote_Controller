@@ -150,6 +150,8 @@ jobs:
           path: |
             target/android-lifecycle-ci/**/result.json
             target/android-lifecycle-ci/**/*.log
+            target/android-lifecycle-ci/diagnostic-save-*.txt
+            target/android-lifecycle-ci/diagnostic-save-*.png
           if-no-files-found: error
           retention-days: 14
       - name: Retain exact APKs and lifecycle evidence even on failure
