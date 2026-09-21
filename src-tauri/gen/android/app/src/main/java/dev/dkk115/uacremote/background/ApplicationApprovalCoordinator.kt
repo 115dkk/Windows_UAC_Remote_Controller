@@ -17,6 +17,7 @@ import dev.dkk115.uacremote.nativecore.NativeApprovalSubmission
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
 import dev.dkk115.uacremote.nativecore.NativeApprovalDrainState
 import dev.dkk115.uacremote.security.ApprovalOperationOutcome
+import dev.dkk115.uacremote.security.ApprovalOperationError
 import dev.dkk115.uacremote.security.NativeApprovalOperation
 import dev.dkk115.uacremote.security.DeviceKeyError
 import java.util.concurrent.atomic.AtomicBoolean
@@ -26,8 +27,10 @@ import java.util.concurrent.atomic.AtomicReference
 /** Fixed native result categories. No DER/keys or raw exception reaches a WebView. */
 internal sealed class NativeApprovalReply {
     /** A Rust-verified candidate, NOT a sent decision or Windows success. */
-    class Prepared(val submission: NativeApprovalSubmission) : NativeApprovalReply()
+    class Prepared(val submission: NativeApprovalSubmission, val authenticatedAtNanos: Long? = null,
+                   val signedAtNanos: Long? = null) : NativeApprovalReply()
     object Cancelled : NativeApprovalReply()
+    object AuthenticationCancelled : NativeApprovalReply()
     object Unavailable : NativeApprovalReply()
     object Busy : NativeApprovalReply()
     object LockRequired : NativeApprovalReply()
@@ -222,7 +225,8 @@ internal class ApplicationApprovalCoordinator(
             val submission = session.submission.getAndSet(null) ?: return cancel(session, NativeApprovalReply.Unavailable)
             if (submission.isCancelled()) { submission.close(); cancel(session, NativeApprovalReply.Cancelled); return }
             session.prepared.set(true)
-            if (session.move(Phase.COMPLETED, Phase.TERMINAL)) deliver(session, NativeApprovalReply.Prepared(submission))
+            if (session.move(Phase.COMPLETED, Phase.TERMINAL)) deliver(session, NativeApprovalReply.Prepared(submission,
+                session.operation?.authenticationObservationNanos(), session.operation?.signingObservationNanos()))
             else submission.close()
             cleanup(session)
             return
@@ -241,8 +245,10 @@ internal class ApplicationApprovalCoordinator(
                     if (actual !== session.operation || !session.lease.isCurrent(host)) {
                         cancel(session, NativeApprovalReply.Cancelled)
                     } else if (session.move(Phase.PROMPT, Phase.AUTHENTICATED)) advance(session)
-                }, { actual, _ ->
-                    if (actual === session.operation) cancel(session, NativeApprovalReply.Cancelled)
+                }, { actual, reason ->
+                    if (actual === session.operation) cancel(session,
+                        if (reason == ApprovalOperationError.AUTHENTICATION_CANCELLED) NativeApprovalReply.AuthenticationCancelled
+                        else NativeApprovalReply.Cancelled)
                 })
                 if (shown is ApprovalOperationOutcome.Failure) cancel(session, NativeApprovalReply.Unavailable)
             }

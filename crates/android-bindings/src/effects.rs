@@ -160,6 +160,7 @@ impl MobileController {
             attached_peers,
             connected_peers,
             peers,
+            outcome_receipts: projections.outcome_receipts(),
         })
     }
     pub(crate) fn maintain_requests_admitted(&self) -> Result<(), BridgeError> {
@@ -259,6 +260,20 @@ impl MobileController {
         effects: Vec<Effect>,
         faulted: bool,
     ) -> Result<(), BridgeError> {
+        if !faulted
+            && effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RecordOutcome { .. }))
+        {
+            let pending = self.with_inbox(|owner| {
+                owner
+                    .pending_outcomes()
+                    .map(|items| items.to_vec())
+                    .map_err(|_| BridgeError::StorageUnavailable)
+            })?;
+            // Capture after commit and before OS withdrawal/cleanup callbacks.
+            self.observe_outcome_receipts(&pending);
+        }
         let mut withdrawals = BTreeSet::new();
         let mut presentations = BTreeMap::new();
         let mut failed = faulted;
@@ -503,6 +518,7 @@ impl MobileController {
             return Ok(());
         }
         // Preserve exact terminal evidence BEFORE the atomic history/producer ACK.
+        self.observe_outcome_receipts(&pending);
         for outcome in &pending {
             self.observe_denial_terminal(*outcome);
         }

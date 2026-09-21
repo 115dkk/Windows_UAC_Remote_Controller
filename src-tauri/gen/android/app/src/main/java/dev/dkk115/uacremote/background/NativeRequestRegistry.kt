@@ -102,6 +102,7 @@ internal class NativeRequestEntry(val key: String, val locator: String, val sele
     var cancelledIntents = 0
     val notificationClaims = NativeRequestActionClaims()
     @Volatile var delivery: NativeApprovalSubmission? = null
+    @Volatile var deliveryObservation: NativeDecisionObservation? = null
     override fun toString(): String = "NativeRequestEntry([redacted])"
 }
 
@@ -130,6 +131,7 @@ internal class NativeRequestRegistry(
     private val deferredClose = ArrayList<AutoCloseable>()
     private val renderer = RequestNotificationRenderer(application)
     private val random = SecureRandom()
+    private val decisions = NativeDecisionMeasurements()
     private var generation = 1L
     private var failed = false
     private var stopping = false
@@ -165,6 +167,7 @@ internal class NativeRequestRegistry(
                     if (current != null) {
                         synchronized(current.lock) {
                             next.phase = current.phase; next.delivery = current.delivery; current.delivery = null
+                            next.deliveryObservation = current.deliveryObservation; current.deliveryObservation = null
                             next.postedFresh = current.postedFresh
                         }
                         retireLocked(current)
@@ -280,24 +283,34 @@ internal class NativeRequestRegistry(
         if (claim.isClosed()) throw BridgeException.RequestUnavailable()
         return checkedPreview(claim.entry)
     }
-    fun phase(locator: String, value: NativeRequestPhase) {
+    fun phase(locator: String, value: NativeRequestPhase, observation: NativeDecisionObservation? = null) {
+        if (observation != null) decisions.progress(locator, observation, value, SystemClock.elapsedRealtimeNanos())
         val modified = synchronized(lock) {
             val entry = entries.values.singleOrNull { it.locator == locator } ?: return@synchronized false
             synchronized(entry.lock) { if (entry.phase == value) false else { entry.phase = value; bump(); true } }
         }
         if (modified) changed()
     }
-    fun keepDelivery(locator: String, value: NativeApprovalSubmission): Boolean {
+    fun decisionAccepted(claim: NativeRequestClaim, action: NativeRequestAction, observation: NativeDecisionObservation) {
+        decisions.accepted(claim.locator, action, claim.handle.outcomeDeliveryIds(), SystemClock.elapsedRealtimeNanos(), observation)
+    }
+    fun decisionLocalStatus(locator: String, observation: NativeDecisionObservation, authenticationCancelled: Boolean = false) {
+        decisions.localStatus(locator, observation, authenticationCancelled, SystemClock.elapsedRealtimeNanos())
+    }
+    fun decisionPrepared(locator: String, observation: NativeDecisionObservation, authenticatedAtNanos: Long? = null, signedAtNanos: Long? = null) {
+        decisions.prepared(locator, observation, authenticatedAtNanos, signedAtNanos ?: SystemClock.elapsedRealtimeNanos())
+    }
+    fun keepDelivery(locator: String, value: NativeApprovalSubmission, observation: NativeDecisionObservation): Boolean {
         val entry = synchronized(lock) { entries.values.singleOrNull { it.locator == locator && it.active } }
         if (entry == null) { closeTemporary(value); return false }
         val accepted = synchronized(entry.lock) {
-            if (!entry.active || entry.closed || entry.delivery != null) false else { entry.delivery = value; true }
+            if (!entry.active || entry.closed || entry.delivery != null) false else { entry.delivery = value; entry.deliveryObservation = observation; true }
         }
         if (!accepted) closeTemporary(value)
         return accepted
     }
-    fun deliveries(): List<Pair<String, NativeApprovalSubmission>> = synchronized(lock) {
-        entries.values.mapNotNull { entry -> synchronized(entry.lock) { entry.delivery?.let { entry.locator to it } } }
+    fun deliveries(): List<Triple<String, NativeApprovalSubmission, NativeDecisionObservation?>> = synchronized(lock) {
+        entries.values.mapNotNull { entry -> synchronized(entry.lock) { entry.delivery?.let { Triple(entry.locator, it, entry.deliveryObservation) } } }
     }
     fun nextWake(): ULong? {
         val all = synchronized(lock) { if (stopping || failed || temporalInvalid) return null; entries.values.toList() }
@@ -359,6 +372,7 @@ internal class NativeRequestRegistry(
         if (peers.length() != catalog.configuredPeers.toInt() || catalog.peers.count { it.connected } != catalog.connectedPeers.toInt()) throw BridgeException.NativeUnavailable()
         val root = JSONObject().put("version", 2).put("status", status).put("revision", catalog.revision.toString()).put("peers", peers)
             .put("peerCount", catalog.configuredPeers.toInt()).put("connectedPeerCount", catalog.connectedPeers.toInt()).put("requests", rows)
+            .put("decisions", decisions.snapshot(observed.elapsedAfterNanos.toLong()))
         return payload(root, NativeRequestRules.MAX_LIST_JSON, observed, until, originalGeneration)
     }
     fun details(claim: NativeRequestClaim): NativeRequestPayload {
@@ -405,9 +419,10 @@ internal class NativeRequestRegistry(
     }
     fun invalidateTime() { synchronized(lock) { temporalInvalid = true; bump() }; changed() }
     fun catalogMaintained(catalog: NativeRequestCatalogStatus) {
+        val receiptChanged = decisions.observe(catalog.outcomeReceipts)
         val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}"
         val modified = synchronized(lock) {
-            val result = (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
+            val result = receiptChanged || (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
             catalogReady = catalog.state == NativeRequestCatalogState.READY
             if (catalogReady) temporalInvalid = false
             lastCatalog = identity

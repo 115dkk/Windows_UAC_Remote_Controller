@@ -26,6 +26,7 @@ pub struct NativeConnectivityStatus {
 
 #[derive(Clone, Copy)]
 pub(super) struct DialState {
+    pub(super) generation: u64,
     pub(super) in_flight: bool,
     pub(super) failures: u8,
     pub(super) retry_at: Option<Instant>,
@@ -33,6 +34,13 @@ pub(super) struct DialState {
 
 pub(crate) struct ConnectivityOwner {
     pub(super) states: Mutex<BTreeMap<(approval_protocol::PcIdentity, u64), DialState>>,
+    network: Mutex<NetworkGeneration>,
+    stop: CancellationToken,
+}
+
+struct NetworkGeneration {
+    number: u64,
+    available: bool,
     stop: CancellationToken,
 }
 
@@ -40,6 +48,11 @@ impl Default for ConnectivityOwner {
     fn default() -> Self {
         Self {
             states: Mutex::new(BTreeMap::new()),
+            network: Mutex::new(NetworkGeneration {
+                number: 0,
+                available: true,
+                stop: CancellationToken::new(),
+            }),
             stop: CancellationToken::new(),
         }
     }
@@ -54,7 +67,13 @@ impl ConnectivityOwner {
         (reference.pc(), reference.generation())
     }
 
-    fn complete(&self, reference: PeerAssociationRef, succeeded: bool, now: Instant) {
+    fn complete(
+        &self,
+        reference: PeerAssociationRef,
+        generation: u64,
+        succeeded: bool,
+        now: Instant,
+    ) {
         let mut states = self
             .states
             .lock()
@@ -62,6 +81,9 @@ impl ConnectivityOwner {
         let Some(state) = states.get_mut(&Self::key(reference)) else {
             return;
         };
+        if state.generation != generation {
+            return;
+        }
         state.in_flight = false;
         if succeeded {
             state.failures = 0;
@@ -82,11 +104,15 @@ pub(crate) struct DialRequest {
     pub(crate) reference: PeerAssociationRef,
     pub(crate) address: std::net::SocketAddr,
     pub(crate) route: [u8; 32],
+    generation: u64,
+    network_stop: CancellationToken,
 }
 
 pub(crate) struct DialCompletion {
     pub(crate) reference: PeerAssociationRef,
     pub(crate) succeeded: bool,
+    generation: u64,
+    completed_at: Instant,
 }
 
 /// One durable association with its optional relay address and route.
@@ -110,14 +136,54 @@ impl MobileController {
 
     fn receive_dial_completions(&self) {
         for completion in self.intake.take_dial_completions() {
-            self.connectivity
-                .complete(completion.reference, completion.succeeded, Instant::now());
+            self.connectivity.complete(
+                completion.reference,
+                completion.generation,
+                completion.succeeded,
+                completion.completed_at,
+            );
         }
     }
 }
 
 #[uniffi::export]
 impl MobileController {
+    /// Fixed native lifecycle signal only: retire old carriers, never approve,
+    /// re-pair, extend a request deadline, or substitute network reachability
+    /// for authenticated peer readiness. Serialized with stream admission.
+    pub fn network_changed(&self, available: bool) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        if !self
+            .approval_alive
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.connectivity.stop.is_cancelled()
+        {
+            return Err(BridgeError::Closed);
+        }
+        let associations = self.connectivity_snapshot()?;
+        let mut network = self
+            .connectivity
+            .network
+            .lock()
+            .map_err(|_| BridgeError::Closed)?;
+        let number = network.number.checked_add(1).ok_or(BridgeError::Closed)?;
+        network.stop.cancel();
+        *network = NetworkGeneration {
+            number,
+            available,
+            stop: CancellationToken::new(),
+        };
+        self.connectivity
+            .states
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .clear();
+        for (reference, _) in associations {
+            self.intake.retire_association(reference);
+        }
+        Ok(())
+    }
+
     pub fn maintain_connections(self: &Arc<Self>) -> Result<NativeConnectivityStatus, BridgeError> {
         let _admission = self.enter()?;
         if !self
@@ -130,6 +196,11 @@ impl MobileController {
         self.start_intake_reactor()?;
         self.receive_dial_completions();
         let associations = self.connectivity_snapshot()?;
+        let network = self
+            .connectivity
+            .network
+            .lock()
+            .map_err(|_| BridgeError::Closed)?;
         let now = Instant::now();
         let mut requests = Vec::new();
         let mut connected = 0_u32;
@@ -150,9 +221,13 @@ impl MobileController {
                     without_endpoint += 1;
                     continue;
                 };
+                if !network.available {
+                    continue;
+                }
                 let state = states
                     .entry(ConnectivityOwner::key(*reference))
                     .or_insert(DialState {
+                        generation: network.number,
                         in_flight: false,
                         failures: 0,
                         retry_at: None,
@@ -173,12 +248,15 @@ impl MobileController {
                     reference: *reference,
                     address: *address,
                     route: *route,
+                    generation: network.number,
+                    network_stop: network.stop.clone(),
                 });
             }
         }
         for request in requests {
             if let Err(request) = self.intake.spawn_dial(request) {
-                self.connectivity.complete(request.reference, false, now);
+                self.connectivity
+                    .complete(request.reference, request.generation, false, now);
             }
         }
         if self.connectivity.stop.is_cancelled() {
@@ -206,27 +284,37 @@ pub(crate) async fn run_dial(
     intake_stop: CancellationToken,
     request: DialRequest,
 ) -> DialCompletion {
-    let succeeded = match RouteId::new(request.route) {
-        Ok(route) => relay_service::connect_rendezvous(
-            request.address,
-            Registration::new(Role::Phone, route),
-            intake_stop,
-        )
-        .await
-        .ok()
-        .and_then(|carrier| carrier.into_stream().into_std().ok())
-        .and_then(|stream| {
-            stream.set_nonblocking(false).ok()?;
-            Weak::<MobileController>::upgrade(&controller)?
-                .attach_provisioned_stream(request.reference, stream)
+    // Both reactor shutdown and a replaced default network cancel the actual
+    // rendezvous wait. Old queued dials cannot attach after the new generation.
+    let succeeded = tokio::select! {
+        biased;
+        _ = request.network_stop.cancelled() => false,
+        result = async {
+            match RouteId::new(request.route) {
+                Ok(route) => relay_service::connect_rendezvous(
+                    request.address,
+                    Registration::new(Role::Phone, route),
+                    intake_stop,
+                )
+                .await
                 .ok()
-        })
-        .is_some(),
-        Err(_) => false,
+                .and_then(|carrier| carrier.into_stream().into_std().ok())
+                .and_then(|stream| {
+                    stream.set_nonblocking(false).ok()?;
+                    Weak::<MobileController>::upgrade(&controller)?
+                        .attach_network_stream(request.reference, stream, &request.network_stop)
+                        .ok()
+                })
+                .is_some(),
+                Err(_) => false,
+            }
+        } => result,
     };
     DialCompletion {
         reference: request.reference,
         succeeded,
+        generation: request.generation,
+        completed_at: Instant::now(),
     }
 }
 
@@ -289,13 +377,14 @@ mod tests {
         owner.states.lock().unwrap().insert(
             ConnectivityOwner::key(reference),
             DialState {
+                generation: 0,
                 in_flight: true,
                 failures: 0,
                 retry_at: None,
             },
         );
         for (failure, seconds) in [(1_u8, 5_u64), (2, 10), (3, 20), (4, 40), (5, 60), (6, 60)] {
-            owner.complete(reference, false, start);
+            owner.complete(reference, 0, false, start);
             let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
             assert_eq!(state.failures, failure);
             assert_eq!(
@@ -319,16 +408,92 @@ mod tests {
         owner.states.lock().unwrap().insert(
             ConnectivityOwner::key(reference),
             DialState {
+                generation: 0,
                 in_flight: true,
                 failures: 4,
                 retry_at: Some(Instant::now()),
             },
         );
-        owner.complete(reference, true, Instant::now());
+        owner.complete(reference, 0, true, Instant::now());
         let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
         assert!(!state.in_flight);
         assert_eq!(state.failures, 0);
         assert_eq!(state.retry_at, None);
+    }
+
+    #[test]
+    fn stale_network_completion_cannot_finish_or_penalize_new_dial() {
+        let owner = ConnectivityOwner::default();
+        let reference = reference();
+        owner.states.lock().unwrap().insert(
+            ConnectivityOwner::key(reference),
+            DialState {
+                generation: 2,
+                in_flight: true,
+                failures: 0,
+                retry_at: None,
+            },
+        );
+        for succeeded in [false, true] {
+            owner.complete(reference, 1, succeeded, Instant::now());
+            let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
+            assert!(state.in_flight);
+            assert_eq!(state.failures, 0);
+            assert_eq!(state.retry_at, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn network_replacement_cancels_rendezvous_wait_without_ready_marker() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let network_stop = CancellationToken::new();
+        let request = DialRequest {
+            reference: reference(),
+            address,
+            route: [9; 32],
+            generation: 4,
+            network_stop: network_stop.clone(),
+        };
+        let job = tokio::spawn(run_dial(Weak::new(), CancellationToken::new(), request));
+        // Real rendezvous connection, deliberately no READY. Cancellation is
+        // independent of a response or timeout from the old remote endpoint.
+        let (_stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        network_stop.cancel();
+        let completion = tokio::time::timeout(Duration::from_secs(1), job)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!completion.succeeded);
+        assert_eq!(completion.generation, 4);
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_network_dial_never_opens_a_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let network_stop = CancellationToken::new();
+        network_stop.cancel();
+        let completion = run_dial(
+            Weak::new(),
+            CancellationToken::new(),
+            DialRequest {
+                reference: reference(),
+                address: listener.local_addr().unwrap(),
+                route: [9; 32],
+                generation: 1,
+                network_stop,
+            },
+        )
+        .await;
+        assert!(!completion.succeeded);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

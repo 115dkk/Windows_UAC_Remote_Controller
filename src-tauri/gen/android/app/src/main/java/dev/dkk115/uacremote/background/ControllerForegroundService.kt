@@ -12,6 +12,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -38,6 +41,29 @@ class ControllerForegroundService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val connectivityToken = Any()
     private var connectivityTickPosted = false
+    private val networkToken = Any()
+    private var networkFlushPosted = false
+    private var networkRegistrationAttempted = false
+    private var networkManager: ConnectivityManager? = null
+    private var networkPolicy: DefaultNetworkPolicy? = null
+    private var networkChanges = 0L
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (!destroyed && networkPolicy?.available(network.networkHandle) == true) scheduleNetworkFlush()
+        }
+        override fun onLost(network: Network) {
+            if (!destroyed && networkPolicy?.lost(network.networkHandle) == true) scheduleNetworkFlush()
+        }
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            if (!destroyed && networkPolicy?.capabilities(network.networkHandle, transportTypes(capabilities)) == true) {
+                scheduleNetworkFlush()
+            }
+        }
+    }
+    private val networkFlush = Runnable {
+        networkFlushPosted = false
+        flushNetworkChange()
+    }
     private val connectivityTick = object : Runnable {
         override fun run() {
             connectivityTickPosted = false
@@ -86,6 +112,7 @@ class ControllerForegroundService : Service() {
             return
         }
         registerForUnlockIfNeeded()
+        registerDefaultNetwork()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -208,6 +235,7 @@ class ControllerForegroundService : Service() {
 
     private fun scheduleConnectivityTick() {
         if (!connectionMaintenanceReady(application as? ControllerApplication)) { stopConnectivityTick(); return }
+        scheduleNetworkFlush()
         if (!connectivityTickPosted) {
             connectivityTickPosted = main.postDelayed(connectivityTick, connectivityToken, CONNECTION_TICK_MILLIS)
         }
@@ -216,6 +244,49 @@ class ControllerForegroundService : Service() {
     private fun stopConnectivityTick() {
         main.removeCallbacksAndMessages(connectivityToken)
         connectivityTickPosted = false
+    }
+
+    private fun registerDefaultNetwork() {
+        if (networkRegistrationAttempted || destroyed || !promoted) return
+        networkRegistrationAttempted = true
+        try {
+            val manager = getSystemService(ConnectivityManager::class.java) ?: return
+            networkPolicy = DefaultNetworkPolicy(manager.activeNetwork?.networkHandle)
+            // Observe Android's selected default, including VPN. Never bind to
+            // Wi-Fi or request a replacement network to bypass OS routing.
+            manager.registerDefaultNetworkCallback(networkCallback, main)
+            networkManager = manager
+            scheduleNetworkFlush()
+        } catch (_: Exception) {
+            networkPolicy = null // Existing bounded maintenance remains usable.
+        }
+    }
+
+    private fun scheduleNetworkFlush() {
+        if (destroyed || retiring || !promoted || networkPolicy == null || networkFlushPosted) return
+        networkFlushPosted = main.postDelayed(networkFlush, networkToken, NETWORK_COALESCE_MILLIS)
+    }
+
+    private fun flushNetworkChange() {
+        val owner = application as? ControllerApplication
+        // A pre-unlock callback only updates memory; no keys/CE/owner are opened.
+        if (!connectionMaintenanceReady(owner)) return
+        val update = networkPolicy?.consume() ?: return
+        if (update.retireTransport) {
+            if (networkChanges < Long.MAX_VALUE) networkChanges += 1
+            owner?.policyActor?.networkChanged(update.available)
+        } else if (update.available) owner?.policyActor?.maintainConnections()
+    }
+
+    private fun unregisterDefaultNetwork() {
+        main.removeCallbacksAndMessages(networkToken)
+        networkFlushPosted = false
+        val manager = networkManager
+        if (manager != null) {
+            try { manager.unregisterNetworkCallback(networkCallback) } catch (_: Exception) { }
+        }
+        networkManager = null
+        networkPolicy = null
     }
 
     private fun showState(state: ControllerServiceState) {
@@ -267,6 +338,8 @@ class ControllerForegroundService : Service() {
         writer.println("boot_component=${componentState(this).name}")
         for (line in owner) writer.println(line)
         writer.println("UAC_LIFECYCLE_END_V1")
+        // Keep the versioned lifecycle block's closed field contract unchanged.
+        writer.println("UAC_NETWORK_V1 callback_registered=${networkManager != null} reset_requests=$networkChanges")
     }
 
     override fun onDestroy() {
@@ -275,6 +348,7 @@ class ControllerForegroundService : Service() {
         destroyed = true
         stopConnectivityTick()
         activationWaitStartId = null
+        unregisterDefaultNetwork()
         unregisterUnlockReceiver()
         if (attached) (application as? ControllerApplication)?.detachControllerService(ownerToken, activatedGeneration)
         attached = false
@@ -284,7 +358,31 @@ class ControllerForegroundService : Service() {
     }
 
     companion object {
+        /** Public transport bits only: signal, bandwidth, meteredness, validation,
+         * SSID and NetworkCapabilities equality/hashCode never trigger resets.
+         * A VPN can retain identity while its Wi-Fi/mobile transport bits change. */
+        private fun transportTypes(capabilities: NetworkCapabilities): Int {
+            var mask = 0
+            for (type in intArrayOf(NetworkCapabilities.TRANSPORT_CELLULAR, NetworkCapabilities.TRANSPORT_WIFI,
+                NetworkCapabilities.TRANSPORT_BLUETOOTH, NetworkCapabilities.TRANSPORT_ETHERNET,
+                NetworkCapabilities.TRANSPORT_VPN, NetworkCapabilities.TRANSPORT_WIFI_AWARE,
+                NetworkCapabilities.TRANSPORT_LOWPAN)) {
+                if (capabilities.hasTransport(type)) mask = mask or (1 shl type)
+            }
+            if (Build.VERSION.SDK_INT >= 31 && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_USB)) {
+                mask = mask or (1 shl NetworkCapabilities.TRANSPORT_USB)
+            }
+            if (Build.VERSION.SDK_INT >= 34 && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_THREAD)) {
+                mask = mask or (1 shl NetworkCapabilities.TRANSPORT_THREAD)
+            }
+            if (Build.VERSION.SDK_INT >= 35 && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_SATELLITE)) {
+                mask = mask or (1 shl NetworkCapabilities.TRANSPORT_SATELLITE)
+            }
+            return mask
+        }
+
         private const val CONNECTION_TICK_MILLIS = 15_000L
+        private const val NETWORK_COALESCE_MILLIS = 250L
         private const val ACTION_START = "dev.dkk115.uacremote.service.START"
         private const val ACTION_EXPLICIT_START = "dev.dkk115.uacremote.service.EXPLICIT_START"
         private const val EXTRA_GENERATION = "dev.dkk115.uacremote.service.NATIVE_GENERATION"

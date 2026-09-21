@@ -41,6 +41,16 @@ pub struct PendingOutcome {
 }
 
 impl PendingOutcome {
+    /// Pure display-correlation identity. Computing one does not assert that an
+    /// outcome occurred and does not enqueue or acknowledge anything.
+    pub fn delivery_id_for(
+        binding: RequestBinding,
+        issued_at: ServiceTick,
+        outcome: RequestOutcome,
+    ) -> OutcomeDeliveryId {
+        Self::new(binding, issued_at, outcome).delivery_id
+    }
+
     pub const fn delivery_id(self) -> OutcomeDeliveryId {
         self.delivery_id
     }
@@ -147,6 +157,49 @@ pub(crate) const fn outcome_from_tag(tag: u8) -> Option<RequestOutcome> {
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+    use approval_protocol::{
+        BootEpoch, ChallengeNonce, ExpiryTick, OsSession, PcIdentity, RequestContent, RequestId,
+    };
+
+    fn binding(nonce: u8) -> RequestBinding {
+        RequestBinding::new(
+            PcIdentity::from_bytes([1; 32]).unwrap(),
+            BootEpoch::from_bytes([2; 32]).unwrap(),
+            OsSession::new(1, 2),
+            RequestId::from_bytes([3; 32]).unwrap(),
+            ChallengeNonce::from_bytes([nonce; 32]).unwrap(),
+            RequestContent::new("Synthetic", "synthetic.exe", "")
+                .unwrap()
+                .digest(),
+            ExpiryTick::from_nanos_since_epoch(1_000_000_000).unwrap(),
+        )
+    }
+
+    #[test]
+    fn expected_delivery_identity_matches_only_full_binding_issuance_and_outcome() {
+        let issued = ServiceTick::from_nanos_since_epoch(1);
+        let value = PendingOutcome::new(binding(4), issued, RequestOutcome::DeniedByPc);
+        assert_eq!(
+            value.delivery_id(),
+            PendingOutcome::delivery_id_for(binding(4), issued, RequestOutcome::DeniedByPc)
+        );
+        assert_ne!(
+            value.delivery_id(),
+            PendingOutcome::delivery_id_for(binding(5), issued, RequestOutcome::DeniedByPc)
+        );
+        assert_ne!(
+            value.delivery_id(),
+            PendingOutcome::delivery_id_for(
+                binding(4),
+                ServiceTick::from_nanos_since_epoch(2),
+                RequestOutcome::DeniedByPc
+            )
+        );
+        assert_ne!(
+            value.delivery_id(),
+            PendingOutcome::delivery_id_for(binding(4), issued, RequestOutcome::ApprovedByPc)
+        );
+    }
 
     #[test]
     fn legacy_storage_tags_keep_their_meaning_and_new_results_are_distinct() {

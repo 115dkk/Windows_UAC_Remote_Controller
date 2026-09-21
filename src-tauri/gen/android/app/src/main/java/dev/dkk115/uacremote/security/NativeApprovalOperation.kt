@@ -50,6 +50,8 @@ internal class NativeApprovalOperation internal constructor(
     private var cancellationConfirmed = false
     private var retirementConfirmed = false
     private var signed = false
+    private var authenticatedAtNanos: Long? = null
+    private var signedAtNanos: Long? = null
     private var releasing = false
     private var released = false
     private val expiry = Runnable { cancel(ApprovalOperationError.EXPIRED) }
@@ -175,8 +177,10 @@ internal class NativeApprovalOperation internal constructor(
         try {
             if (plan.isCancelled()) { cancel(); return }
             val sink = synchronized(lock) {
-                val error = policy.authenticated(host, result.cryptoObject?.signature, SystemClock.elapsedRealtimeNanos())
+                val observed = SystemClock.elapsedRealtimeNanos()
+                val error = policy.authenticated(host, result.cryptoObject?.signature, observed)
                 if (error != null) return@synchronized null
+                authenticatedAtNanos = observed
                 // Equality is actual object identity in policy, not algorithm,
                 // public key equality, an auth type or a supplied success boolean.
                 authenticatedSink.also { authenticatedSink = null }
@@ -237,6 +241,7 @@ internal class NativeApprovalOperation internal constructor(
                     // This locked result gate linearizes against local cancel.
                     // Rust must still reject cancellation occurring afterwards.
                     signed = true
+                    signedAtNanos = SystemClock.elapsedRealtimeNanos()
                     ApprovalOperationOutcome.Value(buffer.copyOf(length))
                 }
             }
@@ -260,6 +265,10 @@ internal class NativeApprovalOperation internal constructor(
      * no path makes this operation live again or reinitializes its Signature.
      */
     fun cancel() = cancel(ApprovalOperationError.CANCELLED)
+
+    /** Observation only; these values never enter the authorization policy. */
+    fun authenticationObservationNanos(): Long? = synchronized(lock) { authenticatedAtNanos }
+    fun signingObservationNanos(): Long? = synchronized(lock) { signedAtNanos }
 
     private fun cancel(reason: ApprovalOperationError) {
         synchronized(lock) {

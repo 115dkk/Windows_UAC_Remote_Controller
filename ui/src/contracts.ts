@@ -72,6 +72,18 @@ export interface RequestDetailsView {
   readonly remainingSeconds: number;
   readonly refreshAfterMillis: number;
 }
+/** Read-only native attempt/result correlation; never authorization. */
+export interface DecisionFeedbackView {
+  readonly id: string;
+  readonly action: 'approve' | 'deny';
+  readonly phase: 'authenticating' | 'preparing' | 'sending' | 'awaiting_pc'
+    | 'authentication_cancelled' | 'local_unconfirmed'
+    | 'approved' | 'denied' | 'failed' | 'cancelled' | 'expired' | 'pc_completed';
+  readonly elapsedMillis: number;
+  readonly authenticationMillis: number | null;
+  readonly afterAuthenticationMillis: number | null;
+  readonly timingAvailable?: boolean;
+}
 export interface ActivityView {
   readonly id: string;
   readonly timestampMillis: number;
@@ -97,7 +109,7 @@ export interface AppSnapshot {
   readonly relayConfigured: boolean;
   readonly relayStatus?: RelayStatus | null;
   readonly requests: readonly RequestView[];
-  readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number } | null;
+  readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number; readonly decisions?: readonly DecisionFeedbackView[] } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;
   readonly activity: readonly ActivityView[];
   readonly dataAvailability: {

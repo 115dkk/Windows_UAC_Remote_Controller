@@ -479,6 +479,24 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
     ) -> Result<IntakePeerId, BridgeError> {
+        self.attach_stream(association, stream, None)
+    }
+
+    pub(crate) fn attach_network_stream(
+        self: &Arc<Self>,
+        association: PeerAssociationRef,
+        stream: std::net::TcpStream,
+        network_stop: &CancellationToken,
+    ) -> Result<IntakePeerId, BridgeError> {
+        self.attach_stream(association, stream, Some(network_stop))
+    }
+
+    fn attach_stream(
+        self: &Arc<Self>,
+        association: PeerAssociationRef,
+        stream: std::net::TcpStream,
+        network_stop: Option<&CancellationToken>,
+    ) -> Result<IntakePeerId, BridgeError> {
         struct Carrier {
             socket: Option<std::net::TcpStream>,
             lease: Option<NativePeerLease>,
@@ -488,6 +506,11 @@ impl MobileController {
             lease: None,
         };
         let _admission = self.enter()?;
+        // network_changed holds this same admission while cancelling and
+        // retiring. Checking only before enter would permit a stale dial race.
+        if network_stop.is_some_and(CancellationToken::is_cancelled) {
+            return Err(BridgeError::Closed);
+        }
         if !self.approval_alive.load(Ordering::Acquire) {
             return Err(BridgeError::Closed);
         }
@@ -984,6 +1007,9 @@ fn process_parked(
 ) -> Result<Option<PeerOwned>, BridgeError> {
     match work {
         Parked::Attach(value) => {
+            if value.completion.control.stop.is_cancelled() {
+                return Ok(None);
+            }
             let PreparedAttach {
                 socket,
                 identity,

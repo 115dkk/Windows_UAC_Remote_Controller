@@ -27,6 +27,69 @@ fn details() -> Value {
 }
 
 #[test]
+fn decision_receipts_are_optional_bounded_and_strict_display_only() {
+    assert!(
+        decode_phone_requests_json(&serde_json::to_vec(&catalog()).unwrap())
+            .unwrap()
+            .catalog
+            .decisions
+            .is_empty()
+    );
+    let decision = json!({"id": LOCATOR, "action":"approve", "phase":"approved",
+        "elapsedMillis":1300, "timingAvailable":true, "authenticationMillis":1000, "afterAuthenticationMillis":300});
+    let mut document = catalog();
+    document["decisions"] = json!([decision.clone()]);
+    assert_eq!(
+        decode_phone_requests_json(&serde_json::to_vec(&document).unwrap())
+            .unwrap()
+            .catalog
+            .decisions
+            .len(),
+        1
+    );
+    for (key, invalid) in [
+        ("id", json!("unknown")),
+        ("action", json!("execute")),
+        ("phase", json!("socket_written")),
+        ("elapsedMillis", json!(300001)),
+        ("authenticationMillis", json!(1301)),
+        ("afterAuthenticationMillis", json!(400)),
+        ("requestBody", json!("not permitted")),
+        ("action", json!("deny")),
+        ("phase", json!("awaiting_pc")),
+        ("timingAvailable", json!(false)),
+    ] {
+        let mut invalid_document = document.clone();
+        invalid_document["decisions"][0][key] = invalid;
+        assert!(
+            decode_phone_requests_json(&serde_json::to_vec(&invalid_document).unwrap()).is_err()
+        );
+    }
+    document["decisions"] = json!([decision.clone(), decision]);
+    assert!(decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).is_err());
+}
+
+#[test]
+fn local_feedback_is_distinct_from_pc_results_and_has_no_pc_latency() {
+    for phase in [
+        "authenticating",
+        "preparing",
+        "sending",
+        "awaiting_pc",
+        "authentication_cancelled",
+        "local_unconfirmed",
+    ] {
+        let mut document = catalog();
+        document["decisions"] = json!([{"id":LOCATOR, "action":"approve", "phase":phase,
+            "elapsedMillis":120, "authenticationMillis":null, "afterAuthenticationMillis":null}]);
+        assert!(decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).is_ok());
+        document["decisions"][0]["authenticationMillis"] = json!(100);
+        document["decisions"][0]["afterAuthenticationMillis"] = json!(20);
+        assert!(decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn catalogue_is_strict_bounded_and_never_contains_bulk_commands() {
     let value = decode_phone_requests_json(&serde_json::to_vec(&catalog()).unwrap()).unwrap();
     assert_eq!(value.catalog.revision, u64::MAX.to_string());

@@ -227,6 +227,50 @@ pub enum RequestState {
     Expired,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionFeedbackAction {
+    Approve,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionFeedbackPhase {
+    Authenticating,
+    Preparing,
+    Sending,
+    AwaitingPc,
+    AuthenticationCancelled,
+    LocalUnconfirmed,
+    Approved,
+    Denied,
+    Failed,
+    Cancelled,
+    Expired,
+    PcCompleted,
+}
+
+/// Body-free native observation. Its locator is display correlation only.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DecisionFeedbackView {
+    pub id: String,
+    pub action: DecisionFeedbackAction,
+    pub phase: DecisionFeedbackPhase,
+    pub elapsed_millis: u32,
+    /// Eligible local interval only; does not identify which phone won on PC.
+    #[serde(default)]
+    pub timing_available: bool,
+    pub authentication_millis: Option<u32>,
+    pub after_authentication_millis: Option<u32>,
+}
+impl std::fmt::Debug for DecisionFeedbackView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DecisionFeedbackView([redacted], display_only)")
+    }
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RequestView {
