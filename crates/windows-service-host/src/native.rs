@@ -453,10 +453,15 @@ fn configure_recovery(service: &Service) -> Result<(), ServiceError> {
     service
         .update_failure_actions(ServiceFailureActions {
             reset_period: ServiceFailureResetPeriod::After(RECOVERY_RESET_PERIOD),
-            // Explicit empty values delete any inherited reboot message and
-            // command instead of leaving an earlier registration's value.
-            reboot_msg: Some(OsString::new()),
-            command: Some(OsString::new()),
+            // Both stay unchanged. Supplying any value here, including an empty
+            // one, asks Windows to rewrite the reboot message, and that path
+            // demands SE_SHUTDOWN_NAME; the privilege is present but disabled in
+            // an ordinary elevated token, so the call would fail with access
+            // denied. The actions below are replaced wholesale either way, and a
+            // registration this product did not create is already refused before
+            // reaching here.
+            reboot_msg: None,
+            command: None,
             actions: Some(
                 RECOVERY_DELAYS
                     .iter()
