@@ -449,17 +449,17 @@ pub(crate) fn probe_control_registration_ready(executable: &Path) -> Result<(), 
 /// This grants no admission: every restart re-runs the whole fail-closed
 /// startup sequence, including installation, registration, identity and ACL
 /// verification. It also adds no reboot action and no command line.
+///
+/// Windows refuses restart actions with access denied unless the handle
+/// carries SERVICE_START as well as SERVICE_CHANGE_CONFIG; see `INSTALL_ACCESS`.
 fn configure_recovery(service: &Service) -> Result<(), ServiceError> {
     service
         .update_failure_actions(ServiceFailureActions {
             reset_period: ServiceFailureResetPeriod::After(RECOVERY_RESET_PERIOD),
-            // Both stay unchanged. Supplying any value here, including an empty
-            // one, asks Windows to rewrite the reboot message, and that path
-            // demands SE_SHUTDOWN_NAME; the privilege is present but disabled in
-            // an ordinary elevated token, so the call would fail with access
-            // denied. The actions below are replaced wholesale either way, and a
-            // registration this product did not create is already refused before
-            // reaching here.
+            // Both stay unchanged: this contract has no reboot or command
+            // action, so it has nothing to write there. The actions and the
+            // reset period are replaced wholesale, and a registration this
+            // product did not create is already refused before reaching here.
             reboot_msg: None,
             command: None,
             actions: Some(
@@ -483,6 +483,16 @@ fn configure_recovery(service: &Service) -> Result<(), ServiceError> {
 
 const RECOVERY_RESET_PERIOD: Duration = Duration::from_secs(86_400);
 const RECOVERY_DELAYS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// One handle serves creation, hardening and recovery. SERVICE_START is here
+/// only because `configure_recovery` cannot set restart actions without it;
+/// install never starts the service, and it takes no stop or delete right.
+const INSTALL_ACCESS: ServiceAccess = ServiceAccess::QUERY_STATUS
+    .union(ServiceAccess::QUERY_CONFIG)
+    .union(ServiceAccess::READ_CONTROL)
+    .union(ServiceAccess::CHANGE_CONFIG)
+    .union(ServiceAccess::WRITE_DAC)
+    .union(ServiceAccess::START);
 
 fn service_info(executable: &Path, start_type: ServiceStartType) -> ServiceInfo {
     ServiceInfo {
@@ -559,11 +569,7 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
 fn install() -> Result<ServiceSnapshot, ServiceError> {
     let installation = ffi::validate_installation(true)?;
     let manager = manager(true)?;
-    let access = ServiceAccess::QUERY_STATUS
-        | ServiceAccess::QUERY_CONFIG
-        | ServiceAccess::READ_CONTROL
-        | ServiceAccess::CHANGE_CONFIG
-        | ServiceAccess::WRITE_DAC;
+    let access = INSTALL_ACCESS;
     let service = match open(&manager, access)? {
         Some(service) => {
             let config = verify_config(&service, installation.executable(), true)?;
@@ -857,6 +863,16 @@ mod tests {
                 .all(|delay| *delay >= Duration::from_secs(1) && *delay <= RECOVERY_RESET_PERIOD)
         );
         assert!(RECOVERY_DELAYS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn the_install_handle_can_set_restart_recovery() {
+        // Without SERVICE_START, ChangeServiceConfig2 refuses the restart
+        // actions with access denied, and the Windows UAC lab install failed
+        // exactly that way.
+        assert!(INSTALL_ACCESS.contains(ServiceAccess::START | ServiceAccess::CHANGE_CONFIG));
+        assert!(INSTALL_ACCESS.contains(ServiceAccess::WRITE_DAC | ServiceAccess::READ_CONTROL));
+        assert!(!INSTALL_ACCESS.intersects(ServiceAccess::STOP | ServiceAccess::DELETE));
     }
 
     #[test]
