@@ -68,17 +68,21 @@ class AndroidDiagnosticSaveInstrumentationTest {
                     // diagnostic name. Only change the selected filename in the
                     // actual OS UI, ensuring independent repeated CI runs.
                     val name = "uac-diagnostic-ci-${UUID.randomUUID()}.txt"
-                    await { findNode { it.isEditable && it.isEnabled } != null }
-                    val filename = requireNotNull(findNode { it.isEditable && it.isEnabled })
-                    assertTrue(filename.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
-                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, name)
-                    }))
-                    await { findNode { it.viewIdResourceName?.endsWith(":id/button1") == true && it.isEnabled && it.isClickable } != null }
-                    val save = requireNotNull(findNode {
-                        it.viewIdResourceName?.endsWith(":id/button1") == true && it.isEnabled && it.isClickable
-                    })
+                    awaitAction(
+                        "set the selected filename",
+                        AccessibilityNodeInfo.ACTION_SET_TEXT,
+                        Bundle().apply {
+                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, name)
+                        },
+                    ) { it.isEditable && it.isEnabled }
+                    val saveButton = { node: AccessibilityNodeInfo ->
+                        node.viewIdResourceName?.endsWith(":id/button1") == true && node.isEnabled && node.isClickable
+                    }
+                    // Observe the save control before the capture so the
+                    // evidence describes the state the click acts on.
+                    awaitNode("observe the save control", saveButton)
                     capturePicker("before-save")
-                    assertTrue(save.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+                    awaitAction("save the selected document", AccessibilityNodeInfo.ACTION_CLICK, match = saveButton)
                     assertTrue("Selected provider write must complete", saved.done.await(20, TimeUnit.SECONDS))
                     assertEquals(DiagnosticSaveOutcome.SAVED, saved.outcome.get())
                     // Read only the exact synthetic filename selected in the
@@ -135,12 +139,14 @@ class AndroidDiagnosticSaveInstrumentationTest {
     private fun selectDownloadsRoot() {
         // The guarded CI system image uses English system UI; app locale does
         // not change DocumentsUI. Observe the real drawer and selected root.
-        await { findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") } != null }
-        click(requireNotNull(findNode { it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer") }))
+        awaitAction("open the roots drawer", AccessibilityNodeInfo.ACTION_CLICK) {
+            it.contentDescription?.toString() in setOf("Show roots", "Show navigation drawer")
+        }
         // The toolbar and breadcrumb also say Downloads while the drawer is
         // open. Only the observed root-list title belongs to the clickable row.
-        await { findNode { it.viewIdResourceName == "android:id/title" && it.text?.toString() == "Downloads" && it.isEnabled } != null }
-        click(requireNotNull(findNode { it.viewIdResourceName == "android:id/title" && it.text?.toString() == "Downloads" && it.isEnabled }))
+        awaitAction("select the Downloads root", AccessibilityNodeInfo.ACTION_CLICK) {
+            it.viewIdResourceName == "android:id/title" && it.text?.toString() == "Downloads" && it.isEnabled
+        }
         await {
             findNode { it.viewIdResourceName?.endsWith(":id/roots_list") == true && it.isVisibleToUser } == null &&
                 findNode { it.text?.toString() == "Downloads" } != null &&
@@ -148,16 +154,24 @@ class AndroidDiagnosticSaveInstrumentationTest {
         }
     }
 
-    private fun click(start: AccessibilityNodeInfo) {
-        var node: AccessibilityNodeInfo? = start
-        repeat(8) {
-            val current = node ?: throw AssertionError("Picker target has no clickable ancestor")
-            if (current.isClickable && current.isEnabled) {
-                assertTrue(current.performAction(AccessibilityNodeInfo.ACTION_CLICK)); return
-            }
-            node = current.parent
+    /** One bounded attempt on a node the picker may already have replaced.
+     * A stale node, a vanished clickable ancestor or a refused action means
+     * "not this frame", never a verdict; the caller retries within its own
+     * deadline. Ancestry stays bounded exactly as before. */
+    private fun attempt(node: AccessibilityNodeInfo, action: Int, arguments: Bundle?): Boolean {
+        if (!node.refresh()) return false
+        if (action != AccessibilityNodeInfo.ACTION_CLICK) {
+            return node.isEnabled && node.performAction(action, arguments)
         }
-        throw AssertionError("Picker target exceeds bounded ancestry")
+        var current: AccessibilityNodeInfo? = node
+        repeat(8) {
+            val candidate = current ?: return false
+            if (candidate.isClickable && candidate.isEnabled) {
+                return candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            current = candidate.parent
+        }
+        return false
     }
 
     private fun foreground(host: MainActivity): Boolean = !host.isDestroyed && !host.isFinishing &&
@@ -241,8 +255,44 @@ class AndroidDiagnosticSaveInstrumentationTest {
     }
 
     private fun await(condition: () -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 30_000L
-        do { if (condition()) return; SystemClock.sleep(50) } while (SystemClock.elapsedRealtime() < deadline)
+        val deadline = SystemClock.elapsedRealtime() + OBSERVATION_DEADLINE_MILLIS
+        do { if (condition()) return; SystemClock.sleep(OBSERVATION_INTERVAL_MILLIS) } while (SystemClock.elapsedRealtime() < deadline)
         throw AssertionError("Native document-picker observation deadline")
+    }
+
+    /** Returns the node itself rather than proving that one existed a moment
+     * ago. Polling for presence and then querying again reads the live
+     * DocumentsUI tree twice, and the second read can land in a frame where
+     * the node is absent; that produced the only observed CI failure. */
+    private fun awaitNode(purpose: String, match: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        val deadline = SystemClock.elapsedRealtime() + OBSERVATION_DEADLINE_MILLIS
+        do {
+            findNode(match)?.let { return it }
+            SystemClock.sleep(OBSERVATION_INTERVAL_MILLIS)
+        } while (SystemClock.elapsedRealtime() < deadline)
+        throw AssertionError("Native document-picker observation deadline: $purpose")
+    }
+
+    /** Finds and acts within one bounded operation, so no node crosses a
+     * frame boundary between being observed and being used. A product
+     * regression still fails loudly here, at the same deadline as before. */
+    private fun awaitAction(
+        purpose: String,
+        action: Int,
+        arguments: Bundle? = null,
+        match: (AccessibilityNodeInfo) -> Boolean,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + OBSERVATION_DEADLINE_MILLIS
+        do {
+            val node = findNode(match)
+            if (node != null && attempt(node, action, arguments)) return
+            SystemClock.sleep(OBSERVATION_INTERVAL_MILLIS)
+        } while (SystemClock.elapsedRealtime() < deadline)
+        throw AssertionError("Native document-picker action deadline: $purpose")
+    }
+
+    private companion object {
+        const val OBSERVATION_DEADLINE_MILLIS = 30_000L
+        const val OBSERVATION_INTERVAL_MILLIS = 50L
     }
 }
