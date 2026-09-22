@@ -11,7 +11,7 @@ export function RelayStatusLine({ snapshot, stale = false }: { snapshot: AppSnap
     && (snapshot.service?.state === 'stopped' || relay?.state === 'stopped');
   const listening = !stale && !stopped && hasLiveEmbeddedListener(snapshot);
   const message = stale ? '중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.'
-    : stopped ? '내장 중계 중지됨 · 수신 대기하지 않아요.'
+    : stopped ? '내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받아요.'
     : listening ? '내장 중계 수신 대기 중'
     : relay?.mode === 'external' && relay.state === 'external_configured' ? '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.'
     : relay?.mode === 'embedded' && relay.state === 'waiting_network' ? '내장 중계가 네트워크를 기다리고 있어요.'

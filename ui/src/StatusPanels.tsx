@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { AppSnapshot, MobileReadiness, ServiceAction } from './contracts';
 import { Icon } from './icons';
 import type { IconName } from './icons';
-import { ko, serviceActionText, serviceStateText } from './messages';
+import { connectionUnknownText, devicesUnavailableText, ko, serviceActionText, serviceStateText } from './messages';
 import { tr } from './i18n';
 import { displayText } from './displayText';
 import { RelayStatusLine } from './RelayStatusLine';
@@ -28,7 +28,7 @@ export function ServicePanel({ snapshot, disabled, onAction, stale = false }: {
   const connectionKnown = service?.state === 'running' && snapshot.dataAvailability.devices === 'available';
   const connected = useConnectionDisplay(connectionKnown ? snapshot.devices.some(device => device.connected) : null,
     snapshot.devices.map(device => `${device.id}:${device.revision}`).sort().join('|'));
-  const connectionText = connected === true ? tr('휴대폰 연결됨') : connected === false ? tr('휴대폰 연결 안 됨') : tr('휴대폰 연결 상태 확인 불가');
+  const connectionText = connected === true ? tr('휴대폰 연결됨') : connected === false ? tr('휴대폰 연결 안 됨') : connectionUnknownText(snapshot);
   const description = !service ? ko.serviceUnknownBody : !service.installed ? ko.serviceMissingBody
     : service.state === 'running' ? null
       : service.state === 'stopped' ? (service.allowedActions.includes('start') ? ko.serviceStoppedBody : ko.serviceUnknownBody)
@@ -49,7 +49,7 @@ export function ServicePanel({ snapshot, disabled, onAction, stale = false }: {
       {service && service.allowedActions.length > 0 && <div className="service-actions">{actions.filter((action) => service.allowedActions.includes(action)).map((action) =>
         <button key={action} type="button" className={`button ${action === primary ? 'primary' : action === 'uninstall' ? 'danger-quiet' : 'secondary'}`} disabled={disabled} onClick={() => onAction(action)}>{serviceActionText[action]}</button>)}</div>}
     </section>
-    {snapshot.dataAvailability.devices === 'unavailable' && <section className="passive-note"><Icon name="phone" /><div><h2>{ko.phones}</h2><p>{ko.devicesUnavailableBody}</p></div></section>}
+    {snapshot.dataAvailability.devices === 'unavailable' && <section className="passive-note"><Icon name="phone" /><div><h2>{ko.phones}</h2><p>{devicesUnavailableText(snapshot)}</p></div></section>}
   </>;
 }
 

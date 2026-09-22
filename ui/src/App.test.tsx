@@ -92,7 +92,11 @@ describe('native snapshot truth in the client', () => {
       expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
     }
     expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
-    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨' : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
+    // A stopped PC service is the one cause the screen can name, so it offers
+    // the next step instead of only reporting that it cannot tell.
+    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨'
+      : snapshot.service!.state === 'stopped' ? '휴대폰 승인을 켜면 연결 상태를 확인합니다'
+      : '휴대폰 연결 상태를 아직 확인하지 못했습니다')).toBeInTheDocument();
   });
 
   it('offers lock setup only for an explicitly missing lock with native capability', async () => {

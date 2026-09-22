@@ -2,7 +2,7 @@
 // Keep canonical authored copy separate from mutable locale presentation.
 import * as original from './messages.ko';
 import { formatText, numberText, tr } from './i18n';
-import type { PhoneServiceView } from './contracts';
+import type { AppSnapshot, PhoneServiceView } from './contracts';
 
 const proxies = new WeakMap<object, object>();
 function translated<T extends object>(source: T): T {
@@ -25,6 +25,9 @@ export const serviceConfirmText = translated(original.serviceConfirmText);
 export const alertModeText = translated(original.alertModeText);
 export const activityText = translated(original.activityText);
 export const weekdayOptions = translated(original.weekdayOptions);
+export const devicesUnavailableText = (snapshot: AppSnapshot): string => tr(original.devicesUnavailableText(snapshot));
+export const activityUnavailableText = (snapshot: AppSnapshot): string => tr(original.activityUnavailableText(snapshot));
+export const connectionUnknownText = (snapshot: AppSnapshot): string => tr(original.connectionUnknownText(snapshot));
 export const policyUnavailableText = (service: PhoneServiceView | null): string => tr(original.policyUnavailableText(service));
 export const policyUnavailableTitleText = (service: PhoneServiceView | null): string => tr(original.policyUnavailableTitleText(service));
 export const timeWindowLabel = (index: number): string => formatText('시간대 {index}', {index:numberText(index+1)});

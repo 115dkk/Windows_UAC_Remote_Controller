@@ -3,7 +3,7 @@ import { useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AppSnapshot, PairedDeviceView } from './contracts';
 import { Icon } from './icons';
-import { activityText, ko } from './messages';
+import { activityText, activityUnavailableText, devicesUnavailableText, ko } from './messages';
 import { EmptyState } from './StatusPanels';
 import { currentLocale, formatText, tr } from './i18n';
 import { displayText } from './displayText';
@@ -76,7 +76,7 @@ export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStat
   const pairing = snapshot.pairing;
   const pairingActive = pairing?.phase === 'connecting' || pairing?.phase === 'waiting_for_admin' || pairing?.phase === 'helper_running';
   const unavailable = snapshot.dataAvailability.devices !== 'available';
-  const unavailableState = <EmptyState icon="link" title={ko.devicesUnavailable} description={ko.devicesUnavailableBody} />;
+  const unavailableState = <EmptyState icon="link" title={ko.devicesUnavailable} description={devicesUnavailableText(snapshot)} />;
   const relayForm = snapshot.platform === 'windows' && <>
     <section className="surface pairing-entry auxiliary-card" aria-label={tr('PC 내장 중계')}>
       <h2>{tr('PC 내장 중계')}</h2>
@@ -146,7 +146,7 @@ export function ActivityPanel({ snapshot, disabled, exporting, saving, onClear, 
   const available = snapshot.dataAvailability.activity === 'available';
   const canClear = available && snapshot.canClearActivity && snapshot.activity.length > 0;
   return <>
-    {!available ? <EmptyState icon="history" title={ko.activityUnavailable} description={ko.activityUnavailableBody} />
+    {!available ? <EmptyState icon="history" title={ko.activityUnavailable} description={activityUnavailableText(snapshot)} />
       : snapshot.activity.length ? <ol className="surface activity-list">{snapshot.activity.map((event) => <li key={event.id}><span className={`activity-mark ${event.kind === 'failure' ? 'is-danger' : ''}`}><Icon name={event.kind === 'failure' ? 'alert' : 'history'} /></span><div><h2>{activityText[event.kind]}</h2><ActivityTime timestamp={event.timestampMillis} /></div></li>)}</ol>
       : <EmptyState icon="history" title={ko.noActivity} description={ko.noActivityBody} />}
     {(snapshot.platform === 'windows' || snapshot.platform === 'android' || canClear) && <div className="collection-actions">

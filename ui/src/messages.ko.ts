@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import type { ActivityView, AlertMode, PhoneServiceView, ServiceAction, ServiceState } from './contracts';
+import type { ActivityView, AlertMode, AppSnapshot, PhoneServiceView, ServiceAction, ServiceState } from './contracts';
 
 export const ko = {
   appName: 'UAC 원격 승인',
@@ -101,7 +101,8 @@ export const ko = {
   policyCleanupPending: '이전 작업을 정리하고 있어요. 휴대폰 승인 상태를 다시 확인해 주세요.',
   policyDraftKept: '저장하지 않은 내용은 이 화면에 남아 있어요. 설정을 다시 읽으면 이어서 수정할 수 있어요.',
   devicesUnavailable: '연결된 기기를 확인할 수 없어요',
-  devicesUnavailableBody: '현재 연결 목록이 제공되지 않아요.',
+  devicesUnavailableBody: '기기 목록을 아직 읽지 못했어요. 준비되면 여기에 표시돼요.',
+  devicesUnavailableStoppedBody: '휴대폰 승인이 꺼져 있어 목록을 읽지 못했어요. 승인을 켜면 연결한 기기가 나타나요.',
   noPhones: '연결된 휴대폰이 없어요',
   noComputers: 'PC와 아직 연결하지 않았어요',
   noDevicesBody: '연결한 기기가 여기에 표시됩니다.',
@@ -144,7 +145,10 @@ export const ko = {
   noActivityBody: '기기 연결과 요청 처리 내역이 여기에 표시됩니다.',
   unknownActivityTime: '시간을 확인할 수 없어요',
   activityUnavailable: '활동 기록을 확인할 수 없어요',
-  activityUnavailableBody: '현재 활동 기록이 제공되지 않아요.',
+  activityUnavailableBody: '활동 기록을 아직 읽지 못했어요. 준비되면 여기에 표시돼요.',
+  activityUnavailableStoppedBody: '휴대폰 승인이 꺼져 있어 기록을 읽지 못했어요. 승인을 켜면 이어서 기록돼요.',
+  connectionUnknown: '휴대폰 연결 상태를 아직 확인하지 못했어요',
+  connectionStartFirst: '휴대폰 승인을 켜면 연결 상태를 확인해요',
   lockMissing: '휴대폰 화면 잠금이 필요해요',
   lockMissingBody: 'PIN, 패턴 또는 비밀번호를 설정한 뒤 앱으로 돌아와 주세요.',
   openLockSettings: '화면 잠금 설정',
@@ -195,6 +199,21 @@ export const phoneServiceStateText: Record<PhoneServiceView['state'], string> = 
   cleanup_pending: '이전 작업을 정리하고 있어요',
   unavailable: '휴대폰 승인 상태를 확인할 수 없어요',
 };
+/// A stopped Windows service is the one cause these panels can name, so say it
+/// and say what to do about it. Elsewhere the cause is genuinely unknown, and
+/// the copy must not imply the app is refusing on purpose.
+function approvalOff(snapshot: AppSnapshot): boolean {
+  return snapshot.platform === 'windows' && snapshot.service?.state === 'stopped';
+}
+export function devicesUnavailableText(snapshot: AppSnapshot): string {
+  return approvalOff(snapshot) ? ko.devicesUnavailableStoppedBody : ko.devicesUnavailableBody;
+}
+export function activityUnavailableText(snapshot: AppSnapshot): string {
+  return approvalOff(snapshot) ? ko.activityUnavailableStoppedBody : ko.activityUnavailableBody;
+}
+export function connectionUnknownText(snapshot: AppSnapshot): string {
+  return approvalOff(snapshot) ? ko.connectionStartFirst : ko.connectionUnknown;
+}
 export function policyUnavailableText(service: PhoneServiceView | null): string {
   if (service?.state === 'waiting_for_unlock') return ko.policyUnlockFirst;
   if (service?.state === 'preparing') return ko.policyPreparing;

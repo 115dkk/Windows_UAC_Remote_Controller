@@ -315,7 +315,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       const card = page.getByRole('region', { name: 'PC 내장 중계', exact: true });
       const status = card.locator('.relay-state');
       const expected: Record<string, string> = {
-        'desktop-relay-stopped': '내장 중계 중지됨 · 수신 대기하지 않습니다.',
+        'desktop-relay-stopped': '내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.',
         'desktop-relay-listening': '내장 중계 수신 대기 중',
         'desktop-relay-waiting': '내장 중계: 네트워크 연결 대기 중',
         'desktop-relay-unknown': '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.',
