@@ -1,8 +1,6 @@
 name: Android minified release startup
 
 on:
-  push:
-    branches: [main, 'codex/native-runtime']
   pull_request:
   workflow_dispatch:
 

@@ -2,8 +2,6 @@ name: Android real-product lifecycle
 
 on:
   pull_request:
-  push:
-    branches: [main, 'codex/native-runtime']
   workflow_dispatch:
 
 permissions:

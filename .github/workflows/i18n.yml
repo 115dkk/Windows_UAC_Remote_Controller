@@ -1,7 +1,5 @@
 name: Localization and bundled fonts
 on:
-  push:
-    branches: [main, 'codex/native-runtime']
   pull_request:
   workflow_dispatch:
 permissions:

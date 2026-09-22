@@ -11,6 +11,12 @@ export const RELEASE_GATES = ['quality.yml', 'android-package.yml', 'android-rel
 export function selectRun(rows, sha, event, excludedIds = new Set()) {
   return rows.find(row => row.headSha === sha && (!event || row.event === event) && !excludedIds.has(row.databaseId)) ?? null;
 }
+// A pull_request run is listed under the PR head SHA but builds the head merged
+// into main. That merge has the head's own tree only when main is already an
+// ancestor of the head, which the compare API reports as ahead or identical.
+export function mergeRunTestsExactTree(compareStatus) {
+  return compareStatus === 'ahead' || compareStatus === 'identical';
+}
 const output = (program, args) => execFileSync(program, args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }).trim();
 function run(program, args) {
   const result = spawnSync(program, args, { stdio: 'inherit', timeout: 75 * 60 * 1000 });
@@ -25,6 +31,7 @@ export async function requireReleaseGates(sha, dispatch = false) {
   const rowsFor = workflow => JSON.parse(output('gh', ['run', 'list', '--repo', repository, '--workflow', workflow, '--commit', sha,
     '--limit', '20', '--json', 'databaseId,headSha,event,status,conclusion']));
   const prior = new Map();
+  let exactMerge;
   if (dispatch) {
     const remote = output('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/u)[0];
     assert.equal(remote, sha, 'Main changed before dispatch');
@@ -46,7 +53,11 @@ export async function requireReleaseGates(sha, dispatch = false) {
       await setTimeout(2000);
     } while (Date.now() < deadline);
     assert.ok(selected && Number.isSafeInteger(selected.databaseId), `No exact-SHA run for ${workflow}`);
-    process.stdout.write(`Gate ${workflow}: ${selected.databaseId} at ${sha}\n`);
+    if (selected.event === 'pull_request') {
+      exactMerge ??= mergeRunTestsExactTree(output('gh', ['api', `repos/${repository}/compare/main...${sha}`, '--jq', '.status']));
+      assert.ok(exactMerge, `PR run ${selected.databaseId} built a merge with main, not ${sha}; update the branch from main`);
+    }
+    process.stdout.write(`Gate ${workflow}: ${selected.databaseId} (${selected.event}) at ${sha}\n`);
     run('gh', ['run', 'watch', String(selected.databaseId), '--repo', repository, '--compact', '--exit-status', '--interval', '10']);
     const final = JSON.parse(output('gh', ['run', 'view', String(selected.databaseId), '--repo', repository, '--json', 'headSha,status,conclusion']));
     assert.equal(final.headSha, sha);

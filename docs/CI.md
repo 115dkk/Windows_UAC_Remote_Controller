@@ -170,6 +170,21 @@ Both PR and main jobs have read-only repository permission. Checkout does not
 persist credentials. Dependency/build caches are not shared with privileged
 release jobs. No `pull_request_target` or ignored failure is used.
 
+## Release gate triggers
+
+The ten release gates listed in `tools/release-gates.mjs` run on `pull_request`
+without path filters, plus `workflow_dispatch`. None of them runs on `push`.
+
+- Every PR commit gets exactly one run of every gate, so tagging that commit
+  publishes without a manual dispatch. `release.yml` accepts those runs only
+  while `main` is an ancestor of the tagged commit, because a PR run builds the
+  head merged into `main`; otherwise update the branch from `main` first.
+- On `main`, `main-release.yml` dispatches every gate once on the exact release
+  commit. A push trigger would run the same gates a second time on that commit.
+
+`tools/release-version.test.mjs` fails if a gate regains a push trigger or a
+path filter.
+
 ## Incomplete release work
 
 The user's September11 instruction replaces bespoke license checks/collection
