@@ -219,6 +219,14 @@ struct PeerSlot {
     opened_sent: Option<RequestId>,
     responses_in_flight: VecDeque<(u64, Instant, ResponseKind)>,
     address_query_after: Option<Instant>,
+    /// When this connection's first clock response drained. The phone sends
+    /// its address query right after that clock exchange.
+    clock_since: Option<Instant>,
+    /// Endpoints of the last signed address advertisement queued on this
+    /// connection; `None` while none was.
+    advertised: Option<Vec<std::net::SocketAddr>>,
+    /// A query on this connection lapsed unanswered after `advertised`.
+    query_lapsed: bool,
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
@@ -516,6 +524,13 @@ pub struct ServiceSession<'key> {
     relay: Option<std::net::SocketAddr>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     pending_relay: Option<PendingRelayReplacement>,
+    /// Devices whose connection was ended to refresh stale routing hints, and
+    /// when. Entries leave after the refresh interval.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    hint_refreshes: std::collections::BTreeMap<DeviceId, Instant>,
+    /// Test-only stand-in for the gateway owner's publication.
+    #[cfg(all(windows, target_pointer_width = "64", test))]
+    gateway_fixture: Option<direct::GatewayReading>,
     registry: Option<RegistryOwner<'key>>,
     engine: ApprovalEngine,
     key: SessionKey<'key>,
@@ -623,6 +638,10 @@ impl<'key> ServiceSession<'key> {
             relay: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
             pending_relay: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            hint_refreshes: std::collections::BTreeMap::new(),
+            #[cfg(all(windows, target_pointer_width = "64", test))]
+            gateway_fixture: None,
             registry: Some(registry),
             engine,
             key,
@@ -1313,6 +1332,9 @@ impl<'key> ServiceSession<'key> {
             opened_sent: None,
             responses_in_flight: VecDeque::new(),
             address_query_after: None,
+            clock_since: None,
+            advertised: None,
+            query_lapsed: false,
         });
         Ok(())
     }
@@ -1376,6 +1398,7 @@ impl<'key> ServiceSession<'key> {
                 self.poll_direct_gateway(None);
             }
             self.poll_embedded_relay(now)?;
+            self.refresh_stale_hints(now);
             self.pairing.poll(self.engine.boot_epoch(), now);
             if self.pairing.wants_preparation_context() {
                 // One native-worker owner supplies the current registry/engine
@@ -1774,7 +1797,11 @@ impl<'key> ServiceSession<'key> {
                 self.check_peer(&state)?;
                 Ok(match kind {
                     ResponseKind::Clock => {
-                        self.peers[index].clock_served = true;
+                        let slot = &mut self.peers[index];
+                        slot.clock_served = true;
+                        if slot.clock_since.is_none() {
+                            slot.clock_since = Some(now);
+                        }
                         self.resend_live_opened(index, now)?;
                         SessionProgress::ClockDrained
                     }

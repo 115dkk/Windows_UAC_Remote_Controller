@@ -21,6 +21,19 @@ pub(crate) enum Event {
     // An optional setting read at this fixed startup stage was unusable; the
     // service kept running with that setting's default.
     ConfigurationIgnored { stage: u8 },
+    // A connected phone's routing hints lacked the external address the PC now
+    // publishes, so its connection was ended for it to reconnect and ask again.
+    HintsRefreshed { reason: HintRefresh },
+}
+
+/// Why a connected phone's routing hints were refreshed. Never an address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HintRefresh {
+    /// Its last address query lapsed unanswered while the owner was not ready.
+    QueryLapsed,
+    /// Its last answer did not list the external address published now.
+    WithoutExternal,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -139,6 +152,12 @@ mod tests {
                 reason: RefusalReason::ContentChanged.into(),
             },
             Event::ConfigurationIgnored { stage: 8 },
+            Event::HintsRefreshed {
+                reason: HintRefresh::QueryLapsed,
+            },
+            Event::HintsRefreshed {
+                reason: HintRefresh::WithoutExternal,
+            },
         ];
         for event in events {
             let value = serde_json::to_value(row(event)).unwrap();

@@ -416,3 +416,355 @@ fn a_changed_external_access_replaces_the_owner_like_a_changed_endpoint() {
         crate::management_protocol::encode_response(&status).unwrap();
     });
 }
+
+// Hint refresh: a connected phone learns addresses only by asking, so the PC
+// ends the connection of one holding stale hints. A fixed reading replaces the
+// gateway owner, and time moves only when the test moves it.
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+const LAN: &str = "192.168.219.103:7443";
+#[cfg(all(windows, target_pointer_width = "64"))]
+const EXTERNAL: &str = "203.0.113.9:7443";
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn reading(
+    state: direct_network::DirectGatewayState,
+    candidates: &[&str],
+    external: Option<&str>,
+) -> crate::peer_runtime::direct::GatewayReading {
+    crate::peer_runtime::direct::GatewayReading {
+        access: direct_network::ExternalAccess::Automatic,
+        state,
+        candidates: candidates
+            .iter()
+            .map(|value| value.parse().unwrap())
+            .collect(),
+        validity_seconds: if candidates.is_empty() { 0 } else { 60 },
+        external: external.map(|value| value.parse().unwrap()),
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn lan_only() -> crate::peer_runtime::direct::GatewayReading {
+    reading(direct_network::DirectGatewayState::LanOnly, &[LAN], None)
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn mapped() -> crate::peer_runtime::direct::GatewayReading {
+    reading(
+        direct_network::DirectGatewayState::MappedCandidate,
+        &[LAN, EXTERNAL],
+        Some(EXTERNAL),
+    )
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn discovering() -> crate::peer_runtime::direct::GatewayReading {
+    reading(direct_network::DirectGatewayState::Discovering, &[], None)
+}
+
+/// A listening embedded relay publishing `reading`. The relay retry never comes
+/// due, so no real gateway owner starts and no router traffic happens.
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn embed(
+    session: &mut ServiceSession<'_>,
+    registry: &Rc<RefCell<RegistryFixture>>,
+    reading: crate::peer_runtime::direct::GatewayReading,
+) {
+    let lan: std::net::SocketAddr = LAN.parse().unwrap();
+    registry
+        .borrow_mut()
+        .routes
+        .insert(device(1), (lan, route()));
+    session.embedded_mode = true;
+    session.embedded_relay =
+        Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
+    session.relay_retry_at = Instant::now() + Duration::from_secs(3_600);
+    session.relay = Some(lan);
+    session.direct_internal = Some(lan);
+    session.gateway_fixture = Some(reading);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn exercise_timed(
+    test: impl FnOnce(
+        &mut ServiceSession<'_>,
+        &Identity,
+        Rc<RefCell<RegistryFixture>>,
+        &mut Vec<Client>,
+        &ControlledClock,
+    ),
+) {
+    let key = Identity::new();
+    let registry = registry();
+    let origin = Instant::now();
+    let clock = Arc::new(ControlledClock {
+        origin,
+        offset: Mutex::new(Duration::ZERO),
+        calls: AtomicU64::new(0),
+    });
+    let mut session = ServiceSession::new(
+        RegistryOwner::Fixture(Rc::clone(&registry), PhantomData),
+        SessionKey::Fixture(&key),
+        origin,
+        clock.clone(),
+    )
+    .unwrap();
+    let mut clients = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        test(&mut session, &key, registry, &mut clients, &clock)
+    }));
+    drain(&mut session);
+    drop(session);
+    for mut client in clients {
+        let thread = client.thread.take().unwrap();
+        let end = Instant::now() + TEST_LIMIT;
+        while !thread.is_finished() {
+            assert!(Instant::now() < end, "actual client owner did not finish");
+            thread::yield_now();
+        }
+        thread.join().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn at(clock: &ControlledClock, seconds: u64) {
+    *clock.offset.lock().unwrap() = Duration::from_secs(seconds);
+}
+
+/// Every queued response drained, so a later clock step expires no frame.
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn settle(session: &mut ServiceSession<'_>) {
+    let limit = Instant::now() + TEST_LIMIT;
+    while session
+        .peers
+        .iter()
+        .any(|peer| !peer.responses_in_flight.is_empty())
+    {
+        assert!(Instant::now() < limit, "queued responses did not drain");
+        session.process_one().unwrap();
+        thread::yield_now();
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn told(
+    session: &mut ServiceSession<'_>,
+    key: &Identity,
+    client: &Client,
+) -> Vec<std::net::SocketAddr> {
+    let signed = advertisement(session, client);
+    settle(session);
+    signed
+        .verify(&PcPublicKey::from_spki_der(key.public.as_spki_der()).unwrap())
+        .unwrap()
+        .fields()
+        .endpoints
+        .clone()
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn lapse(session: &mut ServiceSession<'_>, commands: &async_mpsc::Sender<Vec<u8>>) {
+    commands.try_send(query(session).to_wire()).unwrap();
+    let limit = Instant::now() + TEST_LIMIT;
+    while !session.peers[0].query_lapsed {
+        assert!(Instant::now() < limit, "the query did not lapse");
+        session.process_one().unwrap();
+        thread::yield_now();
+    }
+    assert!(session.peers[0].advertised.is_none());
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn reaped(session: &mut ServiceSession<'_>) {
+    let limit = Instant::now() + TEST_LIMIT;
+    while !session.peers.is_empty() {
+        assert!(
+            Instant::now() < limit,
+            "the ended connection was not reaped"
+        );
+        session.process_one().unwrap();
+        thread::yield_now();
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn spin(session: &mut ServiceSession<'_>) {
+    for _ in 0..16 {
+        session.process_one().unwrap();
+        thread::yield_now();
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_phone_told_only_the_lan_address_is_ended_once_an_external_address_appears() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, lan_only());
+        let commands = ready(session, key, clients);
+        commands.try_send(query(session).to_wire()).unwrap();
+        let lan: std::net::SocketAddr = LAN.parse().unwrap();
+        assert_eq!(told(session, key, &clients[0]), vec![lan]);
+        assert_eq!(session.peers[0].advertised, Some(vec![lan]));
+        let state = Arc::clone(&session.peers[0].state);
+
+        session.gateway_fixture = Some(mapped());
+        // The first ten seconds after the clock exchange belong to the
+        // connection's own query.
+        at(clock, 9);
+        spin(session);
+        assert!(state.live());
+        // The normal poll path ends it.
+        at(clock, 10);
+        session.process_one().unwrap();
+        assert!(!state.live());
+        assert!(session.hint_refreshes.contains_key(&device(1)));
+        reaped(session);
+
+        // The redialled connection asks at once and is told the external
+        // address, so it is left alone.
+        let commands = ready(session, key, clients);
+        commands.try_send(query(session).to_wire()).unwrap();
+        let external: std::net::SocketAddr = EXTERNAL.parse().unwrap();
+        assert_eq!(told(session, key, &clients[1]), vec![lan, external]);
+        let state = Arc::clone(&session.peers[0].state);
+        at(clock, 200);
+        spin(session);
+        assert!(state.live());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_phone_already_told_the_external_address_keeps_its_connection() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, mapped());
+        let commands = ready(session, key, clients);
+        commands.try_send(query(session).to_wire()).unwrap();
+        let endpoints = told(session, key, &clients[0]);
+        assert!(endpoints.contains(&EXTERNAL.parse().unwrap()));
+        let state = Arc::clone(&session.peers[0].state);
+        at(clock, 11);
+        let now = session.now().unwrap();
+        assert!(session.refresh_stale_hints(now).is_empty());
+        at(clock, 150);
+        spin(session);
+        assert!(state.live());
+        assert!(session.hint_refreshes.is_empty());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_lapsed_query_is_refreshed_after_the_grace_and_at_most_once_per_interval() {
+    use crate::public_diagnostics::HintRefresh;
+    exercise_timed(|session, key, registry, clients, clock| {
+        // Service start: the phone asks while the owner is still discovering.
+        embed(session, &registry, discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        let state = Arc::clone(&session.peers[0].state);
+        session.gateway_fixture = Some(mapped());
+        at(clock, 9);
+        let now = session.now().unwrap();
+        assert!(session.refresh_stale_hints(now).is_empty());
+        assert!(state.live());
+        at(clock, 10);
+        let now = session.now().unwrap();
+        assert_eq!(
+            session.refresh_stale_hints(now),
+            vec![HintRefresh::QueryLapsed]
+        );
+        assert!(!state.live());
+        reaped(session);
+
+        // The redialled connection lapses too (the owner went back to
+        // discovering), then the owner settles again. Its device was
+        // refreshed at 10 s: nothing until 130 s, then once.
+        session.gateway_fixture = Some(discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        let state = Arc::clone(&session.peers[0].state);
+        session.gateway_fixture = Some(mapped());
+        for seconds in [25, 60, 129] {
+            at(clock, seconds);
+            let now = session.now().unwrap();
+            assert!(session.refresh_stale_hints(now).is_empty());
+            spin(session);
+            assert!(state.live(), "refreshed again at {seconds} s");
+        }
+        at(clock, 130);
+        let now = session.now().unwrap();
+        assert_eq!(
+            session.refresh_stale_hints(now),
+            vec![HintRefresh::QueryLapsed]
+        );
+        assert!(!state.live());
+        assert!(session.refresh_stale_hints(now).is_empty());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn without_a_settled_external_address_no_connection_is_ended() {
+    use direct_network::{DirectGatewayState, ExternalAccess};
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, lan_only());
+        let commands = ready(session, key, clients);
+        commands.try_send(query(session).to_wire()).unwrap();
+        told(session, key, &clients[0]);
+        let state = Arc::clone(&session.peers[0].state);
+        at(clock, 11);
+        // Only the LAN address: withdrawing an external one is not worth a
+        // reconnect either.
+        kept(session, &state);
+        // An owner that has not settled, or that runs another mode.
+        let mut unsettled = mapped();
+        unsettled.state = DirectGatewayState::Discovering;
+        session.gateway_fixture = Some(unsettled);
+        kept(session, &state);
+        let mut other_mode = mapped();
+        other_mode.access = ExternalAccess::RouterForward {
+            external_port: 7443,
+        };
+        session.gateway_fixture = Some(other_mode);
+        kept(session, &state);
+        // An external address this relay would not publish.
+        let mut expired = mapped();
+        expired.validity_seconds = 0;
+        session.gateway_fixture = Some(expired);
+        kept(session, &state);
+        // Not the embedded relay.
+        session.gateway_fixture = Some(mapped());
+        session.embedded_mode = false;
+        kept(session, &state);
+        session.embedded_mode = true;
+        assert!(session.hint_refreshes.is_empty());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn kept(session: &mut ServiceSession<'_>, state: &PeerState) {
+    let now = session.now().unwrap();
+    assert!(session.refresh_stale_hints(now).is_empty());
+    spin(session);
+    assert!(state.live());
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_connection_that_never_asked_is_not_ended() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, mapped());
+        let _commands = ready(session, key, clients);
+        let state = Arc::clone(&session.peers[0].state);
+        at(clock, 30);
+        let now = session.now().unwrap();
+        assert!(session.refresh_stale_hints(now).is_empty());
+        spin(session);
+        assert!(state.live());
+    });
+}

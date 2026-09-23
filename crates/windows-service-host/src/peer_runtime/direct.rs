@@ -9,6 +9,25 @@ use super::*;
 
 const QUERY_INTERVAL: Duration =
     Duration::from_secs(service_protocol::ADDRESS_QUERY_MIN_INTERVAL_SECONDS);
+/// A connection's own first query may still be in flight this long after its
+/// first clock exchange.
+#[cfg(all(windows, target_pointer_width = "64"))]
+const HINT_REFRESH_GRACE: Duration = Duration::from_secs(10);
+/// At most one hint refresh per device in this interval.
+#[cfg(all(windows, target_pointer_width = "64"))]
+const HINT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+
+/// One read of what the gateway owner publishes. Only a test can supply one
+/// in place of the owner.
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[derive(Clone, Debug)]
+pub(super) struct GatewayReading {
+    pub(super) access: direct_network::ExternalAccess,
+    pub(super) state: direct_network::DirectGatewayState,
+    pub(super) candidates: Vec<SocketAddr>,
+    pub(super) validity_seconds: u32,
+    pub(super) external: Option<SocketAddr>,
+}
 
 impl ServiceSession<'_> {
     fn address_query_current(
@@ -94,6 +113,7 @@ impl ServiceSession<'_> {
         if endpoints.is_empty() && self.direct_candidates_pending() {
             // An empty answer is a durable withdrawal on the phone. Let this
             // query lapse instead; the phone keeps its hints and asks again.
+            self.peers[index].query_lapsed = true;
             return Ok(SessionProgress::Idle);
         }
         let message = UnsignedAddressAdvertisement::new(AddressAdvertisementFields {
@@ -143,57 +163,168 @@ impl ServiceSession<'_> {
                 kind: ResponseKind::Addresses,
             })
             .map_err(|_| PeerRuntimeError::Protocol)?;
-        self.peers[index]
-            .responses_in_flight
+        let slot = &mut self.peers[index];
+        slot.responses_in_flight
             .push_back((id, deadline, ResponseKind::Addresses));
+        slot.advertised = Some(endpoints);
+        slot.query_lapsed = false;
         Ok(SessionProgress::Idle)
     }
 
     pub(super) fn current_direct_candidates(&self) -> (Vec<SocketAddr>, u32) {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            let Some(host) = self
-                .embedded_relay
-                .as_ref()
-                .filter(|host| host.is_running())
-            else {
-                return (Vec::new(), 0);
-            };
-            if !self.embedded_mode
-                || self.closing
-                || self.pending_relay.is_some()
-                || self.direct_internal.is_none()
-                || self.direct_internal != self.relay
-            {
-                return (Vec::new(), 0);
-            }
-            let Some(gateway) = self.direct_gateway.as_ref() else {
-                return (Vec::new(), 0);
-            };
-            let snapshot = gateway.snapshot();
-            let seconds = snapshot
-                .remaining_validity_seconds()
-                .min(service_protocol::MAX_ADDRESS_VALIDITY_SECONDS);
-            if seconds == 0 {
-                return (Vec::new(), 0);
-            }
-            let candidates: Vec<_> = snapshot
-                .candidates()
-                .iter()
-                .copied()
-                .filter(|address| address.is_ipv4() || host.supports_ipv6())
-                .take(service_protocol::MAX_ADDRESS_CANDIDATES)
-                .collect();
-            if candidates.is_empty() {
-                (Vec::new(), 0)
-            } else {
-                (candidates, seconds)
-            }
+            self.gateway_reading()
+                .map_or((Vec::new(), 0), |reading| self.publishable(&reading))
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
             (Vec::new(), 0)
         }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn gateway_reading(&self) -> Option<GatewayReading> {
+        #[cfg(test)]
+        {
+            if let Some(reading) = self.gateway_fixture.as_ref() {
+                return Some(reading.clone());
+            }
+        }
+        self.direct_gateway.as_ref().map(|gateway| {
+            let snapshot = gateway.snapshot();
+            GatewayReading {
+                access: gateway.access(),
+                state: snapshot.state,
+                candidates: snapshot.candidates().to_vec(),
+                validity_seconds: snapshot.remaining_validity_seconds(),
+                external: snapshot.external(),
+            }
+        })
+    }
+
+    /// The part of `reading` this listening relay may advertise, and for how long.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn publishable(&self, reading: &GatewayReading) -> (Vec<SocketAddr>, u32) {
+        let Some(host) = self
+            .embedded_relay
+            .as_ref()
+            .filter(|host| host.is_running())
+        else {
+            return (Vec::new(), 0);
+        };
+        if !self.embedded_mode
+            || self.closing
+            || self.pending_relay.is_some()
+            || self.direct_internal.is_none()
+            || self.direct_internal != self.relay
+        {
+            return (Vec::new(), 0);
+        }
+        let seconds = reading
+            .validity_seconds
+            .min(service_protocol::MAX_ADDRESS_VALIDITY_SECONDS);
+        if seconds == 0 {
+            return (Vec::new(), 0);
+        }
+        let candidates: Vec<_> = reading
+            .candidates
+            .iter()
+            .copied()
+            .filter(|address| address.is_ipv4() || host.supports_ipv6())
+            .take(service_protocol::MAX_ADDRESS_CANDIDATES)
+            .collect();
+        if candidates.is_empty() {
+            (Vec::new(), 0)
+        } else {
+            (candidates, seconds)
+        }
+    }
+
+    /// The external address a new connection would be told now, once the
+    /// owner of the configured mode has settled. `None` while there is none.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn settled_external(&self) -> Option<SocketAddr> {
+        use direct_network::DirectGatewayState as State;
+        let reading = self.gateway_reading()?;
+        if reading.access != self.external_access
+            || matches!(reading.state, State::Discovering | State::Stopped)
+        {
+            return None;
+        }
+        let external = reading.external?;
+        self.publishable(&reading)
+            .0
+            .contains(&external)
+            .then_some(external)
+    }
+
+    /// Ends, once per device and interval, the connection of a phone whose
+    /// last hints lack the external address now published, so that it
+    /// reconnects and asks. Returns what was recorded for each.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn refresh_stale_hints(
+        &mut self,
+        now: Instant,
+    ) -> Vec<crate::public_diagnostics::HintRefresh> {
+        use crate::public_diagnostics::HintRefresh;
+        self.hint_refreshes
+            .retain(|_, at| now.saturating_duration_since(*at) < HINT_REFRESH_INTERVAL);
+        // A phone deciding a live prompt keeps its connection; the refresh
+        // waits for a later pass.
+        if !self.embedded_mode || self.closing || self.prompt.is_live() {
+            return Vec::new();
+        }
+        // Only a connection whose phone asked can be helped: one that never
+        // asked would not ask on the next connection either.
+        let due: Vec<usize> = (0..self.peers.len())
+            .filter(|&index| {
+                let peer = &self.peers[index];
+                peer.ready
+                    && peer.protocol == Some(secure_channel::ControlProtocol::V2)
+                    && peer.state.live()
+                    && peer.clock_since.is_some_and(|since| {
+                        now.saturating_duration_since(since) >= HINT_REFRESH_GRACE
+                    })
+                    && (peer.advertised.is_some() || peer.query_lapsed)
+                    && !self.hint_refreshes.contains_key(&peer.state.binding.device)
+            })
+            .collect();
+        if due.is_empty() {
+            return Vec::new();
+        }
+        // Without an external address there is nothing to learn: a
+        // withdrawal is not worth a reconnect.
+        let Some(external) = self.settled_external() else {
+            return Vec::new();
+        };
+        let mut refreshed = Vec::new();
+        for index in due {
+            let peer = &self.peers[index];
+            if peer
+                .advertised
+                .as_ref()
+                .is_some_and(|told| told.contains(&external))
+            {
+                continue;
+            }
+            // The protocol lets only the phone ask for addresses, and a new
+            // connection is the one moment it always asks: end this one.
+            peer.state.retire();
+            self.hint_refreshes.insert(peer.state.binding.device, now);
+            let reason = if peer.query_lapsed {
+                HintRefresh::QueryLapsed
+            } else {
+                HintRefresh::WithoutExternal
+            };
+            // Tests read the returned reasons instead of this PC's real file.
+            #[cfg(not(test))]
+            crate::public_diagnostics::record(crate::public_diagnostics::Event::HintsRefreshed {
+                reason,
+            });
+            refreshed.push(reason);
+        }
+        refreshed
     }
 
     /// The embedded relay keeps listening while its gateway owner has not
@@ -211,12 +342,9 @@ impl ServiceSession<'_> {
                     .as_ref()
                     .is_some_and(relay_service::HostedRelay::is_running);
             listening
-                && self.direct_gateway.as_ref().is_none_or(|gateway| {
-                    gateway.access() != self.external_access
-                        || matches!(
-                            gateway.snapshot().state,
-                            State::Discovering | State::Stopped
-                        )
+                && self.gateway_reading().is_none_or(|reading| {
+                    reading.access != self.external_access
+                        || matches!(reading.state, State::Discovering | State::Stopped)
                 })
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
