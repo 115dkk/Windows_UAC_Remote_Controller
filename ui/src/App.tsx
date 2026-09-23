@@ -14,6 +14,9 @@ import { PhoneServicePanel } from './PhoneServicePanel';
 import { PairingEntry } from './PairingEntry';
 import { hasNoPairedPc, hasPairedPc } from './phoneConnection';
 import { RequestPanel } from './RequestPanel';
+import type { PendingDecision } from './RequestPanel';
+import { useDecisionReceipts } from './decisionFeedback';
+import { usePcConnectionClock } from './pcConnection';
 import { EmptyState, MobileNotices, ServicePanel } from './StatusPanels';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
 import { useController } from './useController';
@@ -49,6 +52,11 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   const [navigationState, setNavigationState] = useState<{ page: ClientPage | null; reviewKey: string | null }>({ page: initialPage ?? null, reviewKey: null });
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const { snapshot, refreshing, busy, stale, error, notice } = controller;
+  // App-session memory that outlives the requests page: body-free receipts and
+  // when a PC was last seen connected. Neither is consulted by any command.
+  const decisions = useDecisionReceipts(snapshot);
+  const connectionClock = usePcConnectionClock(snapshot, controller.requestObservedAt, snapshot?.requestCatalog?.connection);
+  const [decisionTap, setDecisionTap] = useState<PendingDecision | null>(null);
   const phone = snapshot?.platform === 'android';
   const review = snapshot?.requestReview;
   const reviewKey = review ? `${review.revision}:${review.locator}` : null;
@@ -96,6 +104,8 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   function clearActivity() {
     setConfirmation({ title: ko.clearTitle, body: ko.clearBody, confirmLabel: ko.clearActivity, onConfirm: () => { void controller.run({ kind: 'clear' }); } });
   }
+  // A decision's own card shows what the tap started, so the generic line stays quiet.
+  const feedback = busy ? (busy === 'policy' ? ko.saving : busy === 'decision' ? null : ko.pending) : notice && tr(notice);
   const refreshLabel = refreshing ? ko.refreshing : ko.refresh;
   const refreshButton = <div className="header-actions"><button className="button quiet refresh-button" type="button" aria-label={refreshLabel} title={refreshLabel} disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" /><span className="refresh-label">{refreshLabel}</span></button><button className="button quiet app-settings-button" type="button" aria-label={tr('앱 설정')} title={tr('앱 설정')} aria-haspopup="dialog" disabled={busy !== null || confirmation !== null} onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button></div>;
 
@@ -123,11 +133,18 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
       {stale && <p className="stale-label"><Icon name="alert" />{ko.stale}</p>}
       {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{tr(error)}</p></section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(snapshot.issue.message)}</p>{snapshot.issue.nextAction && <p className="supporting-text">{tr(snapshot.issue.nextAction)}</p>}</div></section>}
-      <div className={`global-feedback ${busy || notice ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{busy ? (busy === 'policy' ? ko.saving : ko.pending) : notice && tr(notice)}</div>
+      <div className={`global-feedback ${feedback ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{feedback}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} stale={stale} onAction={serviceAction} onOpenNetwork={() => navigate('network')} />}
       {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
-      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
+      {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails}
+        decisions={decisions} pendingDecision={busy === 'decision' ? decisionTap : null} connectionClock={connectionClock}
+        onDecision={(requestId, decision) => {
+          // Choosing another request moves on from the receipts of finished ones.
+          setDecisionTap({ requestId, decision });
+          decisions.dismissUnlisted();
+          void controller.run({ kind: 'decision', requestId, decision });
+        }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
       {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
       {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair' }); }} onPairUsb={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair', transport: 'usb' }); }} onOpenStatus={() => navigate('status')} onOpenNetwork={() => navigate('network')} onRemove={removeDevice} />}
       {!phone && page === 'network' && <ExternalAccessPanel snapshot={snapshot} disabled={disabled} stale={stale} onSave={(access) => controller.run({ kind: 'external-access', access })} onSetRelay={(address) => controller.run({ kind: 'relay', address })} onOpenStatus={() => navigate('status')} />}

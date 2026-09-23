@@ -18,3 +18,9 @@ export function hasLiveEmbeddedListener(snapshot: AppSnapshot): boolean {
     && snapshot.dataAvailability.devices === 'available'
     && snapshot.relayStatus?.mode === 'embedded' && snapshot.relayStatus.state === 'listening';
 }
+
+/** Paired phones are known and none of them is connected right now. */
+export function pairedPhonesDisconnected(snapshot: AppSnapshot): boolean {
+  return snapshot.dataAvailability.devices === 'available' && snapshot.devices.length > 0
+    && !snapshot.devices.some((device) => device.connected);
+}

@@ -10,7 +10,8 @@ import type { GalleryLocale } from './session';
 const forwardTitle = '공유기에서 포트를 직접 열었음';
 const fixedTitle = '외부 주소 직접 입력';
 const instructionSource = '공유기 관리 페이지의 포트포워딩에서 외부 포트 {external}을(를) {lan}의 {port} 포트(TCP)로 연결하십시오.';
-const firewallCopy = 'V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.';
+// Shown because these synthetic PCs have a paired phone that is not connected.
+const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';
 
 interface Expected {
   readonly mode: string;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { AppSnapshot } from './contracts';
 import { tr } from './i18n';
-import { directConnectionState, hasLiveEmbeddedListener } from './directConnection';
+import { directConnectionState, hasLiveEmbeddedListener, pairedPhonesDisconnected } from './directConnection';
 import type { InternetState } from './directConnection';
 
 const stateCopy: Record<InternetState, string> = {
@@ -13,11 +13,12 @@ const stateCopy: Record<InternetState, string> = {
   unknown: '외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.',
 };
 
-const firewallCopy = 'V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.';
+const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';
 
-/** Program-specific V3/firewall guidance, only beside a freshly observed embedded listener. */
+/** Program-specific V3/firewall guidance: a freshly observed embedded listener
+ *  and paired phones of which none is connected. */
 export function FirewallGuidance({ snapshot, stale = false, className = 'supporting-text' }: { snapshot: AppSnapshot; stale?: boolean; className?: string }) {
-  if (stale || !hasLiveEmbeddedListener(snapshot)) return null;
+  if (stale || !hasLiveEmbeddedListener(snapshot) || !pairedPhonesDisconnected(snapshot)) return null;
   return <p className={className}>{tr(firewallCopy)}</p>;
 }
 

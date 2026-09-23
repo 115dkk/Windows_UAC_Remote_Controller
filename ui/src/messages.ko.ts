@@ -55,8 +55,6 @@ export const ko = {
   detailsRefresh: '세부 내용 다시 확인',
   requestReconciling: '받은 요청을 확인하고 있어요',
   requestReconcilingBody: '현재 상태를 확인한 뒤 요청을 표시할게요.',
-  requestDisconnected: '컴퓨터와 연결을 기다리고 있어요',
-  requestDisconnectedBody: 'PC에서 휴대폰 승인과 인터넷 연결 상태를 확인해 주세요.',
   expired: '요청 시간이 지났어요.',
   requestUnavailable: '요청을 받을 준비가 필요해요',
   requestUnavailableBody: '알림 시간 화면에서 휴대폰 승인 상태를 확인해 주세요.',

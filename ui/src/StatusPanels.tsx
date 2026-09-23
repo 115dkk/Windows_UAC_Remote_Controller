@@ -46,7 +46,8 @@ export function ServicePanel({ snapshot, disabled, onAction, onOpenNetwork, stal
       {service && <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connectionText}</p>}
       {description && <p className="service-description">{description}</p>}
       <RelayStatusLine snapshot={snapshot} stale={stale} />
-      <DirectConnectionStatus snapshot={snapshot} stale={stale} />
+      {/* Never beside a line that still says a phone is connected. */}
+      <DirectConnectionStatus snapshot={snapshot} stale={stale} guidance={connected !== true} />
       {networkSetup && <div className="network-setup-action"><button type="button" className="button secondary" disabled={disabled} onClick={onOpenNetwork}>{ko.networkSetup}</button></div>}
       {actionIssue && !issueAlreadyGlobal && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(actionIssue.message)}</p>{actionIssue.nextAction && <p className="supporting-text">{tr(actionIssue.nextAction)}</p>}</div></section>}
       <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName || '—')}</bdi></dd></div></dl>

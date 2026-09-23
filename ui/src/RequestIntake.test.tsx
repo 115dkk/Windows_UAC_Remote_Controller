@@ -106,7 +106,6 @@ describe('native request presentation integration', () => {
   it('shows empty requests alongside connection state, but not during reconciliation', async () => {
     const states = [
       { status: 'ready' as const, peerCount: 0, connectedPeerCount: 0, title: ko.noComputers },
-      { status: 'ready' as const, peerCount: 1, connectedPeerCount: 0, title: ko.requestDisconnected },
       { status: 'reconciling' as const, peerCount: 1, connectedPeerCount: 1, title: ko.requestReconciling },
     ];
     for (const { title, ...catalog } of states) {
@@ -116,6 +115,12 @@ describe('native request presentation integration', () => {
       else expect(screen.queryByText(ko.requestEmpty)).not.toBeInTheDocument();
       rendered.unmount();
     }
+    // A fresh disconnection is a progress row beside the empty list, not a notice.
+    const rendered = view({ ...pending(), requests: [], requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 } });
+    expect(await screen.findByText('PC에 연결하는 중')).toBeInTheDocument();
+    expect(screen.getByText(ko.requestEmpty)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'PC에 연결하지 못했습니다' })).not.toBeInTheDocument();
+    rendered.unmount();
   });
 
   it('brings the selected notification request first and keeps recovery on that page after withdrawal', async () => {

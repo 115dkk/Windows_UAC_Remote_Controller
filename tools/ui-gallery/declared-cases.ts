@@ -6,6 +6,7 @@ import { headerCases } from './header-cases';
 import { pairingCeremonyCases } from './pairing-ceremony-cases';
 import { directConnectionCases } from './direct-connection-cases';
 import { networkCases } from './network-cases';
+import { feedbackCases } from './decision-feedback-cases';
 
 // CLIENT/SYNTHETIC launch controls only. No camera preview, permission UI, QR or
 // native read result is rendered by this gallery adapter.
@@ -25,4 +26,4 @@ export const diagnosticsExportCases: readonly GalleryCase[] = [
   { id: 'client-diagnostics-export-pending-text-size-200-390', fixture: 'phone-history-diagnostics-pending', viewport: { width: 390, height: 1000 }, colorScheme: 'light', forcedColors: 'none', action: 'overview', rootTextSizePercent: 200 },
 ];
 
-export const declaredGalleryCases = [...galleryCases, ...scannerLaunchCases, ...diagnosticsExportCases, ...i18nGalleryCases, ...headerCases, ...pairingCeremonyCases, ...directConnectionCases, ...networkCases];
+export const declaredGalleryCases = [...galleryCases, ...scannerLaunchCases, ...diagnosticsExportCases, ...i18nGalleryCases, ...headerCases, ...pairingCeremonyCases, ...directConnectionCases, ...networkCases, ...feedbackCases];

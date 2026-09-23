@@ -4,19 +4,24 @@ import { directConnectionCases } from './direct-connection-cases';
 import { test, expect, galleryText } from './session';
 
 const candidateCopy = '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요';
-const firewallCopy = 'V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.';
-const phoneCopy = 'PC에 V3 또는 방화벽의 연결 허용 알림이 표시되었는지 확인하십시오. UAC 원격 승인기 서비스(uac-service.exe)인 경우 해당 프로그램의 연결을 허용하십시오.';
+// The WAN fixtures have a paired phone that is not connected, so the PC paragraph applies.
+const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';
+const phoneCopy = '같은 Wi-Fi에 있다면 PC에 V3나 방화벽의 연결 허용 알림이 떠 있는지 확인하십시오.';
 
 for (const selected of directConnectionCases) {
   test(selected.id, async ({ page, gallery }) => {
     const { locale } = selected;
-    await gallery.open(selected, locale);
     const phone = selected.fixture === 'phone-disconnected';
+    if (phone) await page.clock.install();
+    await gallery.open(selected, locale);
     if (phone) {
+      // The phone names the V3 prompt only once a disconnection has lasted 60 s.
+      await expect(page.getByText(galleryText(locale, phoneCopy), { exact: true })).toHaveCount(0);
+      await page.clock.fastForward(61_000);
       const hint = page.getByText(galleryText(locale, phoneCopy), { exact: true });
       await hint.scrollIntoViewIfNeeded();
       await expect(hint).toBeInViewport({ ratio: 1 });
-      await gallery.capture('phone-firewall-recovery', 'CLIENT/SYNTHETIC · known disconnected peer, PC prompt guidance; not an observed firewall failure');
+      await gallery.capture('phone-firewall-recovery', 'CLIENT/SYNTHETIC · known disconnected peer past 60 s on a synthetic clock, PC prompt guidance; not an observed firewall failure');
       return;
     }
 

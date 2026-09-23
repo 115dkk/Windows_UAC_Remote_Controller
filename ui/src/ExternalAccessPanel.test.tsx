@@ -108,7 +108,7 @@ describe('external access status', () => {
     const relay = screen.getByRole('region', { name: '중계' });
     expect(within(relay).getByRole('button', { name: '내장 중계 선택됨' })).toBeDisabled();
     expect(within(relay).getByRole('form', { name: ko.relayAddress })).toBeInTheDocument();
-    const guidance = screen.getByText('V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.');
+    const guidance = screen.getByText('휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.');
     expect(relay.compareDocumentPosition(guidance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getAllByRole('status').filter(node => node.classList.contains('relay-state'))).toHaveLength(1);
   });

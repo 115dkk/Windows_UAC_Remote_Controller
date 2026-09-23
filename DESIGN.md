@@ -282,3 +282,14 @@ confirms), then 중계 (embedded-relay card and external-relay form moved from p
 management) and the V3/firewall guidance. Missing or stale views read 확인 불가, never 없음.
 PC status and phone management link here with a secondary button. Text and number inputs
 share one bordered 44px style. No new token, color, font, icon style or motion.
+
+## 2026-09-24 decision receipt and connection states
+
+A listed request card replaces its generic busy line with the decision phase (icon, title, body);
+the tap shows its first phase on the next frame. A request that has left the list leaves a
+`notice-box` receipt at the top of the requests page, carrying no program, path or PC name, until
+`확인`, another decision or a new review. Only the PC's authenticated approval uses `--success`.
+The phone's connection row is a `state-line` with a 1 s CSS ring (the clock icon under reduced
+motion); after 60 s (120 s while a dial is in flight) a warning notice gives failure-specific
+guidance. The PC firewall paragraph needs a paired phone and none connected. Receipts and the
+connection area are persistent `role="status"` regions. No new token, colour, font or spacing.

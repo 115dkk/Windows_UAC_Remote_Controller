@@ -233,7 +233,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture === 'phone-empty') await expect(page.getByRole('heading', { name: '승인 요청 없음', exact: true })).toBeVisible();
     const intakeCopy: Record<string, string> = {
-      'phone-unpaired': 'PC와 아직 연결하지 않았습니다', 'phone-disconnected': 'PC 연결 대기 중',
+      'phone-unpaired': 'PC와 아직 연결하지 않았습니다', 'phone-disconnected': 'PC에 연결하는 중',
       'phone-reconciling': '받은 요청을 확인 중입니다', 'phone-authenticating': '본인 확인을 진행하십시오.',
       'phone-waiting': '앞선 작업이 끝나기를 대기 중입니다.', 'phone-awaiting-outcome': 'Windows 처리 결과 대기 중입니다.',
     };
@@ -525,7 +525,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     if (selected.action === 'deny') {
       await page.getByRole('button', { name: '거부', exact: true }).focus();
       await page.keyboard.press('Enter');
-      await expect(page.getByText('선택한 내용을 컴퓨터로 전송 중입니다.', { exact: true })).toBeVisible();
+      await expect(page.getByText('거부를 선택했습니다', { exact: true })).toBeVisible();
+      await expect(page.getByText('PC로 보내는 중입니다.', { exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: '승인', exact: true })).toBeDisabled();
       await expect(page.getByRole('button', { name: '거부', exact: true })).toBeDisabled();
       await expect(page.getByText('본인 확인을 진행하십시오.', { exact: true })).toHaveCount(0);

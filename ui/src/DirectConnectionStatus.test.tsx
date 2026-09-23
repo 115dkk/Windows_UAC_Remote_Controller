@@ -11,8 +11,8 @@ import { createQaBridge, qaCase } from './qa-fixtures';
 import { ServicePanel } from './StatusPanels';
 
 const candidateCopy = '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요';
-const firewallCopy = 'V3 또는 방화벽이 연결 허용을 요청하면 UAC 원격 승인기 서비스(uac-service.exe)인지 확인한 뒤 해당 프로그램의 연결을 허용하십시오.';
-const phoneCopy = 'PC에 V3 또는 방화벽의 연결 허용 알림이 표시되었는지 확인하십시오. UAC 원격 승인기 서비스(uac-service.exe)인 경우 해당 프로그램의 연결을 허용하십시오.';
+const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';
+const phoneCopy = '같은 Wi-Fi에 있다면 PC에 V3나 방화벽의 연결 허용 알림이 떠 있는지 확인하십시오.';
 const candidate = (): AppSnapshot => qaCase('desktop-relay-wan-candidate').snapshot;
 
 describe('direct WAN observation boundaries', () => {
@@ -95,10 +95,38 @@ describe('direct WAN observation boundaries', () => {
   });
 });
 
+describe('PC firewall paragraph', () => {
+  it('appears only while paired phones exist and none of them is connected', async () => {
+    const view = render(<App bridge={createQaBridge(qaCase('desktop-status-phone-offline').snapshot)} />);
+    expect(await screen.findByText(firewallCopy)).toBeVisible();
+    view.unmount();
+    for (const fixture of ['desktop-connected', 'desktop-relay-listening'] as const) {
+      const rendered = render(<App bridge={createQaBridge(qaCase(fixture).snapshot)} initialPage="status" />);
+      await screen.findByRole('button', { name: '다시 확인' });
+      expect(screen.queryByText(firewallCopy)).not.toBeInTheDocument();
+      rendered.unmount();
+    }
+  });
+
+  it.each(['status', 'network'] as const)('follows the paired phones on the %s page', async (initialPage) => {
+    const source = qaCase('desktop-status-phone-offline').snapshot;
+    const connected = { ...source, devices: source.devices.map((device) => ({ ...device, connected: true })) };
+    const unread = { ...source, dataAvailability: { ...source.dataAvailability, devices: 'unavailable' as const } };
+    for (const [snapshot, shown] of [[source, true], [connected, false], [{ ...source, devices: [] }, false], [unread, false]] as const) {
+      const rendered = render(<App bridge={createQaBridge(snapshot)} initialPage={initialPage} />);
+      await screen.findByRole('button', { name: '다시 확인' });
+      if (shown) expect(screen.getByText(firewallCopy)).toBeVisible();
+      else expect(screen.queryByText(firewallCopy)).not.toBeInTheDocument();
+      rendered.unmount();
+    }
+  });
+});
+
 describe('phone firewall recovery context', () => {
-  it('adds PC prompt guidance only to a known paired disconnected state', async () => {
+  it('keeps the V3 line out of a fresh disconnection', async () => {
     render(<App bridge={createQaBridge(qaCase('phone-disconnected').snapshot)} />);
-    expect(await screen.findByText(phoneCopy)).toBeVisible();
+    expect(await screen.findByText('PC에 연결하는 중')).toBeVisible();
+    expect(screen.queryByText(phoneCopy)).not.toBeInTheDocument();
   });
 
   it.each(['phone-empty', 'phone-unpaired', 'phone-unavailable', 'phone-reconciling', 'phone-pending'])('does not diagnose a firewall from %s', async (fixture) => {

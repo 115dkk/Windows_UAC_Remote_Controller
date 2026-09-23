@@ -108,6 +108,18 @@ export interface DecisionFeedbackView {
   readonly afterAuthenticationMillis: number | null;
   readonly timingAvailable?: boolean;
 }
+/** Phone-side diagnosis of paired PCs it cannot reach. Guidance only: never
+ *  readiness, never a claim that any PC is connected. */
+export interface PcConnectionView {
+  /** A dial to some paired, unconnected PC is in flight now. */
+  readonly dialing: boolean;
+  /** The most informative failure among unconnected paired PCs since their last
+   *  successful session, or null. no_answer > refused > unreachable. */
+  readonly lastFailure: 'unreachable' | 'refused' | 'no_answer' | null;
+  /** Every paired PC has at least one stored global (non-private, non-link-local)
+   *  address besides its LAN relay address. */
+  readonly externalRoute: boolean;
+}
 export interface ActivityView {
   readonly id: string;
   readonly timestampMillis: number;
@@ -135,7 +147,12 @@ export interface AppSnapshot {
   /** Null or absent: not Windows, service not running, or not observed. */
   readonly externalAccess?: ExternalAccessView | null;
   readonly requests: readonly RequestView[];
-  readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number; readonly decisions?: readonly DecisionFeedbackView[] } | null;
+  readonly requestCatalog: {
+    readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number;
+    readonly decisions?: readonly DecisionFeedbackView[];
+    /** Absent until the native owner reports it; absent never claims a state. */
+    readonly connection?: PcConnectionView | null;
+  } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;
   readonly activity: readonly ActivityView[];
   readonly dataAvailability: {
