@@ -361,6 +361,41 @@ pub(crate) fn configure_relay_for_running_service(
     directory.write_relay_configuration(endpoint)
 }
 
+/// Same elevation, installation and service-state rules as `relay`. A running
+/// service persists and applies the choice itself on its one worker thread:
+/// a CLI-side staging file would be an unknown entry to that service's own
+/// directory checks. A stopped or absent service's configuration is written here.
+pub(crate) fn configure_external_access(
+    access: direct_network::ExternalAccess,
+) -> Result<(), ServiceError> {
+    let access = access
+        .validated()
+        .map_err(|_| ServiceError::InvalidArguments)?;
+    ffi::require_elevated()?;
+    let _installation = ffi::validate_installation(true)?;
+    let status = query_status()?;
+    if status.state == Some(ServiceState::Running) {
+        return crate::management_mutation(
+            crate::management_protocol::ManagementRequest::SetExternalAccess { access },
+        );
+    }
+    if status.state != Some(ServiceState::Stopped)
+        && status.installation != crate::InstallationState::NotInstalled
+    {
+        return Err(ServiceError::UnexpectedState);
+    }
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_external_access(access)
+}
+
+pub(crate) fn configure_external_access_for_running_service(
+    access: direct_network::ExternalAccess,
+) -> Result<(), ServiceError> {
+    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_external_access(access)
+}
+
 pub(crate) fn remove_device(device: approval_protocol::DeviceId) -> Result<(), ServiceError> {
     ffi::require_elevated()?;
     let _installation = ffi::validate_installation(true)?;

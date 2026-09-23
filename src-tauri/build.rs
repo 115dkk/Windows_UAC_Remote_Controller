@@ -21,6 +21,7 @@ fn main() {
         "open_pairing_usb",
         "request_details",
         "set_relay",
+        "set_external_access",
         "taskbar_offer",
         "request_taskbar_pin",
     ]);

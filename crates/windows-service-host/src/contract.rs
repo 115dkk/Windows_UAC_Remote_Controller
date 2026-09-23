@@ -22,6 +22,8 @@ pub enum Command {
     ProbeOnce,
     Relay(SocketAddr),
     EmbeddedRelay,
+    /// `external auto|forward <port>|fixed <ip:port>`; validated at parse.
+    ExternalAccess(direct_network::ExternalAccess),
     RemoveDevice(approval_protocol::DeviceId),
     Pair(PendingElevationId),
     PairRenderer(RendererInvocation),
@@ -124,6 +126,52 @@ pub enum ServiceControlIntent {
     RemoveDevice(#[serde(with = "device_id_hex")] approval_protocol::DeviceId),
     SetRelay(SocketAddr),
     UseEmbeddedRelay,
+    SetExternalAccess(#[serde(with = "external_access_shape")] direct_network::ExternalAccess),
+}
+
+/// The three `ExternalAccess` shapes as snake_case serde values. Decoding
+/// validates exactly as the CLI and the service do; nothing unvalidated exits.
+mod external_access_shape {
+    use std::net::SocketAddr;
+
+    use direct_network::ExternalAccess;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields, rename_all = "snake_case")]
+    enum Shape {
+        Automatic,
+        RouterForward { external_port: u16 },
+        Fixed { address: SocketAddr },
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        access: &ExternalAccess,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match *access {
+            ExternalAccess::Automatic => Shape::Automatic,
+            ExternalAccess::RouterForward { external_port } => {
+                Shape::RouterForward { external_port }
+            }
+            ExternalAccess::Fixed { address } => Shape::Fixed { address },
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ExternalAccess, D::Error> {
+        match Shape::deserialize(deserializer)? {
+            Shape::Automatic => ExternalAccess::Automatic,
+            Shape::RouterForward { external_port } => {
+                ExternalAccess::RouterForward { external_port }
+            }
+            Shape::Fixed { address } => ExternalAccess::Fixed { address },
+        }
+        .validated()
+        .map_err(D::Error::custom)
+    }
 }
 
 /// The presentation carries a device id as the same 64 lowercase hex characters
@@ -161,6 +209,7 @@ impl fmt::Debug for Command {
             Self::ProbeOnce => "Command::ProbeOnce",
             Self::Relay(_) => "Command::Relay(redacted)",
             Self::EmbeddedRelay => "Command::EmbeddedRelay",
+            Self::ExternalAccess(_) => "Command::ExternalAccess(redacted)",
             Self::RemoveDevice(_) => "Command::RemoveDevice(redacted)",
             Self::Pair(_) => "Command::Pair(redacted)",
             Self::PairRenderer(_) => "Command::PairRenderer(redacted)",
@@ -182,6 +231,7 @@ impl fmt::Debug for ServiceControlIntent {
             Self::RemoveDevice(_) => "ServiceControlIntent::RemoveDevice(redacted)",
             Self::SetRelay(_) => "ServiceControlIntent::SetRelay(redacted)",
             Self::UseEmbeddedRelay => "ServiceControlIntent::UseEmbeddedRelay",
+            Self::SetExternalAccess(_) => "ServiceControlIntent::SetExternalAccess(redacted)",
         })
     }
 }
@@ -198,6 +248,11 @@ impl ServiceControlIntent {
             Self::RemoveDevice(device) => format!("remove {}", device_hex(device)),
             Self::SetRelay(address) => format!("relay {address}"),
             Self::UseEmbeddedRelay => "relay-auto".into(),
+            // Every constructor validates; an invalid value renders the
+            // bare verb, which the CLI rejects instead of guessing a mode.
+            Self::SetExternalAccess(access) => {
+                crate::external_access::cli_argument(access).unwrap_or_else(|| "external".into())
+            }
         }
     }
 }
@@ -298,6 +353,29 @@ impl Command {
                 .map_err(|_| ServiceError::InvalidArguments)?;
             validate_relay_endpoint(endpoint)?;
             return Ok(Self::Relay(endpoint));
+        }
+        if first.as_ref().to_str() == Some("external") {
+            if arguments.next().is_some() {
+                return Err(ServiceError::InvalidArguments);
+            }
+            let mode = second
+                .ok_or(ServiceError::InvalidArguments)?
+                .as_ref()
+                .to_str()
+                .ok_or(ServiceError::InvalidArguments)?
+                .to_owned();
+            let value = third
+                .as_ref()
+                .map(|value| {
+                    value
+                        .as_ref()
+                        .to_str()
+                        .ok_or(ServiceError::InvalidArguments)
+                })
+                .transpose()?;
+            return crate::external_access::from_cli(&mode, value)
+                .map(Self::ExternalAccess)
+                .ok_or(ServiceError::InvalidArguments);
         }
         if first.as_ref().to_str() == Some("pair-renderer") {
             if arguments.next().is_some() {
@@ -814,6 +892,98 @@ mod tests {
     }
 
     #[test]
+    fn external_access_cli_and_intent_carry_the_three_validated_shapes() {
+        use direct_network::ExternalAccess;
+        let public: SocketAddr = "93.184.216.34:7443".parse().unwrap();
+        let public_v6: SocketAddr = "[2606:4700::1111]:443".parse().unwrap();
+        for (access, line) in [
+            (ExternalAccess::Automatic, "external auto"),
+            (
+                ExternalAccess::RouterForward {
+                    external_port: 7443,
+                },
+                "external forward 7443",
+            ),
+            (
+                ExternalAccess::Fixed { address: public },
+                "external fixed 93.184.216.34:7443",
+            ),
+            (
+                ExternalAccess::Fixed { address: public_v6 },
+                "external fixed [2606:4700::1111]:443",
+            ),
+        ] {
+            let intent = ServiceControlIntent::SetExternalAccess(access);
+            assert_eq!(intent.argument(), line);
+            assert_eq!(
+                Command::parse(intent.argument().split(' ')),
+                Ok(Command::ExternalAccess(access))
+            );
+            assert_eq!(
+                format!("{intent:?}"),
+                "ServiceControlIntent::SetExternalAccess(redacted)"
+            );
+            assert_eq!(
+                format!("{:?}", Command::ExternalAccess(access)),
+                "Command::ExternalAccess(redacted)"
+            );
+            let json = serde_json::to_string(&intent).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ServiceControlIntent>(&json).unwrap(),
+                intent
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(ServiceControlIntent::SetExternalAccess(
+                ExternalAccess::Automatic
+            ))
+            .unwrap(),
+            serde_json::json!({"set_external_access": "automatic"})
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceControlIntent::SetExternalAccess(
+                ExternalAccess::RouterForward {
+                    external_port: 7443
+                }
+            ))
+            .unwrap(),
+            serde_json::json!({"set_external_access": {"router_forward": {"external_port": 7443}}})
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceControlIntent::SetExternalAccess(
+                ExternalAccess::Fixed { address: public }
+            ))
+            .unwrap(),
+            serde_json::json!({"set_external_access": {"fixed": {"address": "93.184.216.34:7443"}}})
+        );
+        for invalid in [
+            r#"{"set_external_access":{"router_forward":{"external_port":0}}}"#,
+            r#"{"set_external_access":{"fixed":{"address":"192.168.1.20:7443"}}}"#,
+            r#"{"set_external_access":{"fixed":{"address":"93.184.216.34:0"}}}"#,
+            r#"{"set_external_access":{"router_forward":{"external_port":7443,"extra":1}}}"#,
+            r#"{"set_external_access":"dmz"}"#,
+        ] {
+            assert!(serde_json::from_str::<ServiceControlIntent>(invalid).is_err());
+        }
+        for arguments in [
+            vec!["external"],
+            vec!["external", "auto", "7443"],
+            vec!["external", "forward"],
+            vec!["external", "forward", "0"],
+            vec!["external", "forward", "7443", "extra"],
+            vec!["external", "fixed", "192.168.1.20:7443"],
+            vec!["external", "fixed", "203.0.113.7:7443"],
+            vec!["external", "fixed", "relay.example:7443"],
+            vec!["external", "dmz"],
+        ] {
+            assert_eq!(
+                Command::parse(arguments),
+                Err(ServiceError::InvalidArguments)
+            );
+        }
+    }
+
+    #[test]
     fn renderer_cli_is_exact_three_tokens_canonical_and_nonauthority() {
         let pending = "11".repeat(32);
         let display = "22".repeat(32);
@@ -1320,6 +1490,7 @@ mod tests {
             assert!(!intent.argument().contains([' ', '\\', '/', '"']));
         }
         assert!(serde_json::from_str::<ServiceControlIntent>("\"execute\"").is_err());
+        assert!(serde_json::from_str::<ServiceControlIntent>("\"set_external_access\"").is_err());
         let pending = serde_json::to_value(ControlOutcome::StillRunning).unwrap();
         assert_eq!(pending["outcome"], "still_running");
         assert!(pending.get("snapshot").is_none());

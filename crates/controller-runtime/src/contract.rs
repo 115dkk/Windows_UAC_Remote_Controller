@@ -95,6 +95,179 @@ pub enum DirectConnectionState {
     Stopped,
 }
 
+/// How the PC learns an address that reaches its relay from outside.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAccessMode {
+    Automatic,
+    RouterForward,
+    Fixed,
+}
+
+/// Where the published external candidate came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCandidateSource {
+    Pcp,
+    Upnp,
+    Stun,
+    Fixed,
+    PublicInterface,
+}
+
+/// Why no external candidate is published. Present only while there is none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAccessFailure {
+    NoMappingProtocol,
+    PrivateExternalAddress,
+    PublicAddressUnavailable,
+}
+
+/// The running service's configured mode and its current observation. Local
+/// presentation only; the external address is a candidate, not reachability.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalAccessView {
+    pub mode: ExternalAccessMode,
+    /// router_forward only: the router port forwarded to this PC's relay port.
+    pub external_port: Option<u16>,
+    /// fixed only: the configured address, `ip:port` with IPv6 in brackets.
+    pub fixed_address: Option<String>,
+    /// The published external candidate, `ip:port`.
+    pub external_address: Option<String>,
+    pub source: Option<ExternalCandidateSource>,
+    /// This PC's routed LAN IP without a port, for router instructions.
+    pub lan_address: Option<String>,
+    /// The embedded relay's port on this PC.
+    pub relay_port: u16,
+    pub failure: Option<ExternalAccessFailure>,
+}
+
+impl ExternalAccessView {
+    /// Contradictory observations are dropped rather than presented.
+    pub fn checked(self) -> Option<Self> {
+        let mode_fields = match self.mode {
+            ExternalAccessMode::Automatic => {
+                self.external_port.is_none() && self.fixed_address.is_none()
+            }
+            ExternalAccessMode::RouterForward => {
+                self.external_port.is_some_and(|port| port != 0) && self.fixed_address.is_none()
+            }
+            ExternalAccessMode::Fixed => {
+                self.external_port.is_none() && self.fixed_address.is_some()
+            }
+        };
+        let candidate = self.external_address.is_some() == self.source.is_some()
+            && !(self.external_address.is_some() && self.failure.is_some());
+        (mode_fields && candidate && self.relay_port != 0).then_some(self)
+    }
+}
+
+impl std::fmt::Debug for ExternalAccessView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalAccessView")
+            .field("mode", &self.mode)
+            .field("source", &self.source)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The presentation's requested mode, exactly one of three JSON shapes:
+/// `{"mode":"automatic"}`, `{"mode":"router_forward","externalPort":N}` or
+/// `{"mode":"fixed","fixedAddress":"ip:port"}`. Deserializing is not
+/// validation; `access()` applies the service's rules before any elevation.
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalAccessInput {
+    // A struct variant, not a unit one: serde lets an internally tagged unit
+    // variant ignore extra fields, which `deny_unknown_fields` must refuse.
+    Automatic {},
+    RouterForward {
+        #[serde(rename = "externalPort")]
+        external_port: u16,
+    },
+    Fixed {
+        #[serde(rename = "fixedAddress")]
+        fixed_address: std::net::SocketAddr,
+    },
+}
+
+impl std::fmt::Debug for ExternalAccessInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Automatic {} => "ExternalAccessInput::Automatic",
+            Self::RouterForward { .. } => "ExternalAccessInput::RouterForward(redacted)",
+            Self::Fixed { .. } => "ExternalAccessInput::Fixed(redacted)",
+        })
+    }
+}
+
+impl ExternalAccessInput {
+    /// The same rules as the elevated CLI and the service: port 1..=65535 and,
+    /// for `fixed`, a global unicast address without scope or flow label.
+    pub fn access(self) -> Result<direct_network::ExternalAccess, AppIssue> {
+        let access = match self {
+            Self::Automatic {} => direct_network::ExternalAccess::Automatic,
+            Self::RouterForward { external_port } => {
+                direct_network::ExternalAccess::RouterForward { external_port }
+            }
+            Self::Fixed { fixed_address } => direct_network::ExternalAccess::Fixed {
+                address: fixed_address,
+            },
+        };
+        access.validated().map_err(|error| match error {
+            direct_network::InvalidExternalAccess::ZeroPort
+                if matches!(self, Self::RouterForward { .. }) =>
+            {
+                invalid_external_port()
+            }
+            _ => invalid_external_address(),
+        })
+    }
+}
+
+/// Bound for the WebView's JSON text; the longest valid input is far shorter.
+pub const MAX_EXTERNAL_ACCESS_JSON_BYTES: usize = 256;
+
+/// Strict, bounded decoding of the WebView's `set_external_access` argument,
+/// validated with the service's rules. No field outside the three shapes.
+pub fn decode_external_access_json(
+    bytes: &[u8],
+) -> Result<direct_network::ExternalAccess, AppIssue> {
+    if bytes.len() > MAX_EXTERNAL_ACCESS_JSON_BYTES {
+        return Err(invalid_external_access());
+    }
+    let input: ExternalAccessInput =
+        serde_json::from_slice(bytes).map_err(|_| invalid_external_access())?;
+    input.access()
+}
+
+pub(crate) const fn invalid_external_access() -> AppIssue {
+    AppIssue {
+        code: "invalid_external_access",
+        message: "외부 연결 설정을 읽지 못했습니다.",
+        next_action: Some("설정을 다시 고른 뒤 저장해 주세요."),
+    }
+}
+
+pub(crate) const fn invalid_external_port() -> AppIssue {
+    AppIssue {
+        code: "invalid_external_port",
+        message: "포트는 1에서 65535 사이의 숫자로 입력해 주세요.",
+        next_action: None,
+    }
+}
+
+pub(crate) const fn invalid_external_address() -> AppIssue {
+    AppIssue {
+        code: "invalid_external_address",
+        message: "공인 IP와 포트를 203.0.113.7:7443 형식으로 입력해 주세요.",
+        next_action: Some("사설 주소나 문서용 주소는 외부에서 연결할 수 없습니다."),
+    }
+}
+
 /// Phone process/service availability, never a peer or authentication claim.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -215,6 +388,8 @@ pub struct ManagementObservation {
     pub relay_status: RelayStatusView,
     pub devices: Vec<ManagementDevice>,
     pub activity: Option<Vec<ActivityView>>,
+    /// Optional separate read; None when the service did not answer it.
+    pub external_access: Option<ExternalAccessView>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
@@ -382,6 +557,8 @@ pub struct AppSnapshot {
     pub policy: Option<NotificationPolicy>,
     pub relay_configured: bool,
     pub relay_status: Option<RelayStatusView>,
+    /// None: not Windows, service not running, or not observed.
+    pub external_access: Option<ExternalAccessView>,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
     /// None is no current native observation, not an empty provisioned map.
@@ -410,6 +587,7 @@ impl AppSnapshot {
             policy: None,
             relay_configured: false,
             relay_status: None,
+            external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,
@@ -452,6 +630,7 @@ impl AppSnapshot {
             policy: Some(policy),
             relay_configured: false,
             relay_status: None,
+            external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),
             request_catalog: None,

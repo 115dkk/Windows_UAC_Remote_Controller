@@ -105,6 +105,13 @@ pub trait PlatformAdapter: Send {
     fn use_embedded_relay(&self) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported)
     }
+    /// Receives only a value that already passed `ExternalAccess::validated()`.
+    fn set_external_access(
+        &self,
+        _access: direct_network::ExternalAccess,
+    ) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported)
+    }
 }
 
 /// Published state and cancellation seam for one asynchronous pairing attempt.
@@ -605,6 +612,53 @@ impl AppRuntime {
         }
     }
 
+    /// Explicit user command only, gated like `set_relay`. The value is
+    /// validated before any elevation; the elevated CLI and the service check
+    /// it again. A running service persists and applies it, a stopped one
+    /// reads it at its next start.
+    pub fn set_external_access(
+        &mut self,
+        access: direct_network::ExternalAccess,
+    ) -> Result<AppSnapshot, AppIssue> {
+        if self.platform != Platform::Windows {
+            return Err(PlatformError::Unsupported.into());
+        }
+        if self.pairing_worker_active() {
+            return Err(pairing_in_progress());
+        }
+        let access = access
+            .validated()
+            .map_err(|_| crate::contract::invalid_external_access())?;
+        let before = self.snapshot();
+        if let Some(issue) = before.issue {
+            return Err(issue);
+        }
+        let service = before
+            .service
+            .as_ref()
+            .ok_or_else(|| AppIssue::from(PlatformError::StatusUnavailable))?;
+        if service.control_hint != ControlHint::Available
+            || !matches!(
+                (service.installed, service.state),
+                (false, None) | (true, Some(ServiceState::Stopped | ServiceState::Running))
+            )
+        {
+            return Err(AppIssue {
+                code: "external_access_change_unavailable",
+                message: "휴대폰 승인의 현재 상태에서는 외부 연결 설정을 저장할 수 없습니다.",
+                next_action: Some("상태를 새로 확인한 뒤 다시 시도해 주세요."),
+            });
+        }
+        self.adapter
+            .set_external_access(access)
+            .map_err(|_| management_mutation_issue())?;
+        if service.state == Some(ServiceState::Running) {
+            self.refresh_after_running_management_mutation()
+        } else {
+            Ok(before)
+        }
+    }
+
     fn refresh_after_running_management_mutation(&mut self) -> Result<AppSnapshot, AppIssue> {
         let observation = self
             .adapter
@@ -846,6 +900,11 @@ impl AppRuntime {
                 self.confirmed_relay_configured
             },
             relay_status: self.relay_status_view(),
+            external_access: self
+                .last_management
+                .as_ref()
+                .filter(|_| management_running)
+                .and_then(|management| management.external_access.clone()),
             devices,
             requests: Vec::new(),
             request_catalog: None,
@@ -882,8 +941,13 @@ impl AppRuntime {
 }
 
 fn validate_management(
-    observation: ManagementObservation,
+    mut observation: ManagementObservation,
 ) -> Result<ManagementObservation, PlatformError> {
+    // Optional read: an inconsistent view is dropped, never the device list.
+    observation.external_access = observation
+        .external_access
+        .take()
+        .and_then(crate::ExternalAccessView::checked);
     let consistent = matches!(
         (
             observation.relay_status.mode,

@@ -34,6 +34,7 @@ impl PlatformAdapter for Adapter {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
         Ok(ManagementObservation {
             activity: None,
+            external_access: None,
             relay_configured: true,
             relay_status: RelayStatusView {
                 internet_state: None,

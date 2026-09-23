@@ -247,6 +247,25 @@ pub(crate) async fn set_relay(
     }
 }
 
+/// One of three strict JSON shapes, validated with the service's rules before
+/// any elevation; the elevated CLI and the service validate it again.
+#[tauri::command]
+pub(crate) async fn set_external_access(
+    access_json: String,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<AppSnapshot, AppIssue> {
+    let access = controller_runtime::decode_external_access_json(access_json.as_bytes())?;
+    #[cfg(not(target_os = "android"))]
+    {
+        with_runtime(&state, move |runtime| runtime.set_external_access(access)).await
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (state, access);
+        Err(controller_runtime::PlatformError::Unsupported.into())
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn decide_request(
     app: tauri::AppHandle,

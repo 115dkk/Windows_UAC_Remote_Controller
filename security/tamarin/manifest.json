@@ -32,7 +32,7 @@
     },
     {
       "path": "crates/windows-service-host/src/peer_runtime.rs",
-      "sha256": "2455aade2ceb697e409246717e74f00b4f276ae29b666e3c15c0b1030c18f4de"
+      "sha256": "44aa8323012c37b9a40b9e02e481b0e818252c46a3a706eeacffc6ee7c86e3be"
     },
     {
       "path": "crates/windows-prompt-probe/src/ffi/watch.rs",

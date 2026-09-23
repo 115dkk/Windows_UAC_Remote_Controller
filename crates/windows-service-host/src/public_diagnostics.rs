@@ -18,6 +18,9 @@ pub(crate) enum Event {
     StartupFailure { stage: u8, code: u32 },
     StartupGuard { phase: u8, policy: u8, code: u32 },
     PromptRefused { reason: PromptRefusal },
+    // An optional setting read at this fixed startup stage was unusable; the
+    // service kept running with that setting's default.
+    ConfigurationIgnored { stage: u8 },
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -135,6 +138,7 @@ mod tests {
             Event::PromptRefused {
                 reason: RefusalReason::ContentChanged.into(),
             },
+            Event::ConfigurationIgnored { stage: 8 },
         ];
         for event in events {
             let value = serde_json::to_value(row(event)).unwrap();

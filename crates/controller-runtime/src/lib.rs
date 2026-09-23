@@ -16,6 +16,8 @@ mod windows;
 mod windows_pairing;
 
 pub use contract::*;
+/// The validated external-access choice passed to `PlatformAdapter`.
+pub use direct_network::ExternalAccess;
 pub use notification_policy::{AlertMode, NotificationPolicy, Schedule};
 pub use phone_history::{
     MAX_PHONE_HISTORY_JSON_BYTES, decode_phone_history_json, encode_phone_history,

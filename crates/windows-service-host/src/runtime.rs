@@ -227,6 +227,13 @@ fn run(
     let relay = trust_directory
         .read_relay_endpoint()
         .map_err(|error| error.at_startup(6))?;
+    // Storage/ACL failures stop startup like the relay file. Unusable content
+    // does not: the service runs Automatic and says so in public diagnostics.
+    let external_access = startup_external_access(
+        trust_directory
+            .read_external_access()
+            .map_err(|error| error.at_startup(EXTERNAL_ACCESS_STAGE))?,
+    );
     let registry = match origin {
         IdentityOrigin::Existing => ServiceRegistry::open_existing(&identity, trust_directory),
         IdentityOrigin::CreatedNow | IdentityOrigin::ResumedInitial => {
@@ -239,6 +246,7 @@ fn run(
     // activated and SCM readiness still does not mean remote approval readiness.
     let mut session =
         ServiceSession::for_service(registry, &identity, Instant::now()).map_err(session_error)?;
+    session.use_external_access(external_access);
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
     let mut watch = None;
@@ -467,6 +475,22 @@ fn run(
     } else {
         Ok(())
     })
+}
+
+/// Fixed public-diagnostics stage of the optional external-access read.
+const EXTERNAL_ACCESS_STAGE: u8 = 8;
+
+fn startup_external_access(
+    stored: crate::external_access::StoredExternalAccess,
+) -> direct_network::ExternalAccess {
+    if stored == crate::external_access::StoredExternalAccess::Invalid {
+        crate::public_diagnostics::record(crate::public_diagnostics::Event::ConfigurationIgnored {
+            stage: EXTERNAL_ACCESS_STAGE,
+        });
+        #[cfg(feature = "lab-software-identity")]
+        crate::lab::record_note("external access configuration ignored; using automatic");
+    }
+    stored.effective()
 }
 
 fn session_error(error: PeerRuntimeError) -> ServiceError {

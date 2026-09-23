@@ -29,6 +29,7 @@ mod build_policy {
 }
 mod contract;
 mod diagnostic;
+mod external_access;
 #[cfg(all(
     windows,
     target_pointer_width = "64",
@@ -147,6 +148,8 @@ pub use ffi::{
 };
 
 pub const SERVICE_NAME: &str = "UacRemoteController";
+/// The packaged background relay's fixed TCP port on this PC.
+pub use relay_service::EMBEDDED_RELAY_PORT;
 
 /// Open only the fixed, protected public diagnostic folder; no path argument.
 pub fn open_diagnostics_folder() -> Result<(), ServiceError> {
@@ -287,7 +290,26 @@ pub fn management_direct_query() -> Result<management_protocol::ManagementRespon
     }
 }
 
-/// Elevated CLI verbs only (`remove`, `relay`); the service refuses other clients.
+/// Optional read-only extension for the external-access tab. Like the direct
+/// read, an older service refuses it without invalidating the other reads.
+pub fn management_external_query() -> Result<management_protocol::ManagementResponse, ServiceError>
+{
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        // Same one-shot listener rearm spacing and single attempt as QueryDirect.
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        management_exchange_with_timeout(
+            management_protocol::ManagementRequest::QueryExternal,
+            std::time::Duration::from_secs(1),
+        )
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Elevated CLI verbs only (`remove`, `relay`, `external`); the service refuses other clients.
 #[cfg(windows)]
 pub(crate) fn management_mutation(
     request: management_protocol::ManagementRequest,
@@ -296,7 +318,8 @@ pub(crate) fn management_mutation(
         management_protocol::ManagementResponse::Done => Ok(()),
         management_protocol::ManagementResponse::Refused(_) => Err(ServiceError::ManagementRefused),
         management_protocol::ManagementResponse::Snapshot { .. }
-        | management_protocol::ManagementResponse::DirectStatus { .. } => {
+        | management_protocol::ManagementResponse::DirectStatus { .. }
+        | management_protocol::ManagementResponse::ExternalStatus { .. } => {
             Err(ServiceError::UnexpectedState)
         }
     }
@@ -508,6 +531,22 @@ pub fn request_elevated_control_from_ui(
     #[cfg(not(windows))]
     {
         let _ = intent;
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
+/// Explicit administrator choice of how this PC learns an external address
+/// (`external auto|forward <port>|fixed <ip:port>`). Elevated installed helper only.
+pub fn configure_external_access(
+    access: direct_network::ExternalAccess,
+) -> Result<(), ServiceError> {
+    #[cfg(windows)]
+    {
+        native::configure_external_access(access)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = access;
         Err(ServiceError::UnsupportedPlatform)
     }
 }

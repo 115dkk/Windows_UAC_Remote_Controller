@@ -504,6 +504,10 @@ pub struct ServiceSession<'key> {
     direct_gateway: Option<direct_network::DirectGatewayOwner>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     direct_internal: Option<std::net::SocketAddr>,
+    /// The configured mode. A gateway owner of another mode is drained and
+    /// replaced by `poll_direct_gateway`; an owner never changes mode.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    external_access: direct_network::ExternalAccess,
     #[cfg(all(windows, target_pointer_width = "64"))]
     embedded_mode: bool,
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -610,6 +614,8 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             direct_internal: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
+            external_access: direct_network::ExternalAccess::Automatic,
+            #[cfg(all(windows, target_pointer_width = "64"))]
             embedded_mode: false,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_retry_at: epoch_start,
@@ -667,6 +673,12 @@ impl<'key> ServiceSession<'key> {
             let _ = ready;
             Err(PeerRuntimeError::Io)
         }
+    }
+
+    /// The stored choice read at service start, before any gateway owner runs.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(crate) fn use_external_access(&mut self, access: direct_network::ExternalAccess) {
+        self.external_access = access;
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -1605,7 +1617,9 @@ impl<'key> ServiceSession<'key> {
         use crate::management_protocol::{DeviceRow, ManagementRequest, ManagementResponse};
         if !matches!(
             request,
-            ManagementRequest::Query | ManagementRequest::QueryDirect
+            ManagementRequest::Query
+                | ManagementRequest::QueryDirect
+                | ManagementRequest::QueryExternal
         ) && class != crate::ffi::ManagementClientClass::CliElevated
         {
             return Ok(Some(ManagementResponse::Refused(
@@ -1614,6 +1628,21 @@ impl<'key> ServiceSession<'key> {
         }
         match request {
             ManagementRequest::QueryDirect => Ok(Some(self.direct_status())),
+            ManagementRequest::QueryExternal => Ok(Some(self.external_status())),
+            ManagementRequest::SetExternalAccess { access } => {
+                // Persist first, on this worker, through the same protected
+                // owner as the relay choice; a failed write changes nothing.
+                if crate::native::configure_external_access_for_running_service(access).is_err() {
+                    return Ok(Some(ManagementResponse::Refused(
+                        "외부 연결 설정을 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.".into(),
+                    )));
+                }
+                self.external_access = access;
+                // The next gateway poll drains an owner of another mode and
+                // starts one with this mode; do not wait for the relay retry.
+                self.relay_retry_at = Instant::now();
+                Ok(Some(ManagementResponse::Done))
+            }
             ManagementRequest::Query => {
                 let checkpoint = self.current_registry_checkpoint()?;
                 let routes = self

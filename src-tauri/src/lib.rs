@@ -126,6 +126,7 @@ pub fn run() {
             commands::open_pairing_usb,
             commands::remove_device,
             commands::set_relay,
+            commands::set_external_access,
             taskbar::taskbar_offer,
             taskbar::request_taskbar_pin,
             commands::decide_request,

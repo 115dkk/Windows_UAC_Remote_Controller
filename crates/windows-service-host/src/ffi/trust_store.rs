@@ -15,6 +15,7 @@ use super::{
 };
 use crate::{
     INSTALLATION_FOLDER, ServiceError,
+    external_access::{self, StoredExternalAccess},
     policy::{self, ObjectPolicy},
 };
 use std::{
@@ -46,13 +47,16 @@ const DIRECTORY_NAME: &str = "trust";
 const FILE_NAME: &str = "devices.journal";
 const RELAY_FILE_NAME: &str = "relay-endpoint.v1";
 const RELAY_STAGING_FILE_NAME: &str = "relay-endpoint.v1.staging";
+const EXTERNAL_FILE_NAME: &str = "external-access.v1";
+const EXTERNAL_STAGING_FILE_NAME: &str = "external-access.v1.staging";
 const BOOTSTRAP_FILE_NAME: &str = "initial-registry-permit.v1";
 const BOOTSTRAP_PENDING: &[u8; 8] = b"UACREG1P";
 const BOOTSTRAP_CONSUMED: &[u8; 8] = b"UACREG1C";
 const MAX_RELAY_FILE_BYTES: u64 = 48;
+const MAX_EXTERNAL_FILE_BYTES: u64 = external_access::MAX_STORED_BYTES;
 pub(crate) const MAX_TRUST_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const IO_CHUNK_BYTES: usize = 64 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 7;
+const MAX_DIRECTORY_ENTRIES: usize = 8;
 type Poison = Rc<Cell<bool>>;
 
 #[derive(Clone, Copy)]
@@ -252,7 +256,8 @@ impl TrustDirectory {
     }
 
     /// A narrow storage observation only. true means the exact journal was
-    /// absent and the pinned directory contained only the optional relay/permit files.
+    /// absent and the pinned directory contained only the optional relay,
+    /// external-access and permit files.
     /// It is NOT pairing/bootstrap authorization and cannot justify recreating a
     /// PC key. Unknown entries, a leftover staging file, access failures and
     /// races are errors, never absence.
@@ -266,6 +271,12 @@ impl TrustDirectory {
             owner.require_known_directory_entries(false)?;
             if let Some(file) = owner.open_named(RELAY_FILE_NAME, false)? {
                 owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+                file.close()?;
+            }
+            // Ownership, ACL and link checks only, at any size. Its content is
+            // judged by the reader, which falls back to the default safely.
+            if let Some(file) = owner.open_named(EXTERNAL_FILE_NAME, false)? {
+                owner.inspect_named_file(&file, EXTERNAL_FILE_NAME, u64::MAX)?;
                 file.close()?;
             }
             // Recheck exact absence after enumeration. CREATE_NEW remains the
@@ -312,30 +323,88 @@ impl TrustDirectory {
             || b"embedded\n".to_vec(),
             |endpoint| format!("{endpoint}\n").into_bytes(),
         );
-        if bytes.len() as u64 > MAX_RELAY_FILE_BYTES {
+        self.replace_configuration(
+            RELAY_FILE_NAME,
+            RELAY_STAGING_FILE_NAME,
+            MAX_RELAY_FILE_BYTES,
+            &bytes,
+        )
+    }
+
+    /// Read once at service start. Storage, ownership and ACL failures are
+    /// errors like the relay file's; the content itself is only classified, so
+    /// an unusable value never poisons this owner or stops the service.
+    pub(crate) fn read_external_access(&mut self) -> Result<StoredExternalAccess, ServiceError> {
+        let bytes = self.operate(|owner| {
+            owner.require_known_directory_entries(false)?;
+            let Some(file) = owner.open_named(EXTERNAL_FILE_NAME, false)? else {
+                return Ok(None);
+            };
+            // Any size passes this ownership/ACL check; nothing oversized is read.
+            let size = owner.inspect_named_file(&file, EXTERNAL_FILE_NAME, u64::MAX)?;
+            if size > MAX_EXTERNAL_FILE_BYTES {
+                // Not read at all: any oversized value is invalid content.
+                file.close()?;
+                return Ok(Some(None));
+            }
+            let bytes = read_exact_bounded(&file, size, MAX_EXTERNAL_FILE_BYTES)?;
+            owner.inspect_named_file(&file, EXTERNAL_FILE_NAME, MAX_EXTERNAL_FILE_BYTES)?;
+            file.close()?;
+            Ok(Some(Some(bytes)))
+        })?;
+        Ok(match bytes {
+            None => StoredExternalAccess::Absent,
+            Some(None) => StoredExternalAccess::Invalid,
+            Some(Some(bytes)) => StoredExternalAccess::from_stored(Some(&bytes)),
+        })
+    }
+
+    /// Same owner, protections and replace-then-verify path as the relay file.
+    pub(crate) fn write_external_access(
+        &mut self,
+        access: direct_network::ExternalAccess,
+    ) -> Result<(), ServiceError> {
+        if !matches!(self.context, AccessContext::Elevated) {
+            return Err(unavailable());
+        }
+        let bytes = external_access::encode(access).ok_or(ServiceError::InvalidArguments)?;
+        self.replace_configuration(
+            EXTERNAL_FILE_NAME,
+            EXTERNAL_STAGING_FILE_NAME,
+            MAX_EXTERNAL_FILE_BYTES,
+            &bytes,
+        )
+    }
+
+    /// Writes a new private staging file, replaces the fixed name with it and
+    /// reads the result back. A leftover staging file is an error, never reused.
+    fn replace_configuration(
+        &mut self,
+        name: &str,
+        staging_name: &str,
+        maximum: u64,
+        bytes: &[u8],
+    ) -> Result<(), ServiceError> {
+        if bytes.len() as u64 > maximum {
             return Err(unavailable());
         }
         self.operate(|owner| {
             owner.require_known_directory_entries(false)?;
-            if owner.open_named(RELAY_STAGING_FILE_NAME, false)?.is_some() {
+            if owner.open_named(staging_name, false)?.is_some() {
                 return Err(unavailable());
             }
             let staging = owner
-                .open_named(RELAY_STAGING_FILE_NAME, true)?
+                .open_named(staging_name, true)?
                 .ok_or_else(unavailable)?;
-            if owner.inspect_named_file(&staging, RELAY_STAGING_FILE_NAME, MAX_RELAY_FILE_BYTES)?
-                != 0
-            {
+            if owner.inspect_named_file(&staging, staging_name, maximum)? != 0 {
                 return Err(unavailable());
             }
-            write_all_and_flush(&staging, &bytes)?;
-            owner.inspect_named_file(&staging, RELAY_STAGING_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            write_all_and_flush(&staging, bytes)?;
+            owner.inspect_named_file(&staging, staging_name, maximum)?;
             staging.close()?;
 
-            let source =
-                Wide::new(owner.named_path(RELAY_STAGING_FILE_NAME)).map_err(|_| unavailable())?;
-            let destination =
-                Wide::new(owner.named_path(RELAY_FILE_NAME)).map_err(|_| unavailable())?;
+            let source = Wide::new(owner.named_path(staging_name)).map_err(|_| unavailable())?;
+            let destination = Wide::new(owner.named_path(name)).map_err(|_| unavailable())?;
             // SAFETY: both names are fixed children of retained, checked,
             // non-reparse private parent pins. The source was CREATE_NEW with a
             // private descriptor, flushed, inspected and closed above. The fixed
@@ -349,12 +418,10 @@ impl TrustDirectory {
             }
             .map_err(|_| unavailable())?;
 
-            let file = owner
-                .open_named(RELAY_FILE_NAME, false)?
-                .ok_or_else(unavailable)?;
-            let size = owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
-            let stored = read_exact_bounded(&file, size, MAX_RELAY_FILE_BYTES)?;
-            owner.inspect_named_file(&file, RELAY_FILE_NAME, MAX_RELAY_FILE_BYTES)?;
+            let file = owner.open_named(name, false)?.ok_or_else(unavailable)?;
+            let size = owner.inspect_named_file(&file, name, maximum)?;
+            let stored = read_exact_bounded(&file, size, maximum)?;
+            owner.inspect_named_file(&file, name, maximum)?;
             file.close()?;
             if stored != bytes {
                 return Err(unavailable());
@@ -493,6 +560,7 @@ impl TrustDirectory {
                     && name != ".."
                     && name != FILE_NAME
                     && name != RELAY_FILE_NAME
+                    && name != EXTERNAL_FILE_NAME
                     && name != BOOTSTRAP_FILE_NAME
                     && !(allow_staging && name == RELAY_STAGING_FILE_NAME)
                 {

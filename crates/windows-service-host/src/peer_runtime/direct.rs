@@ -196,14 +196,27 @@ impl ServiceSession<'_> {
         }
     }
 
-    /// The gateway owner has not published its first observation, or its
-    /// snapshot is momentarily unreadable or being refreshed.
+    /// The embedded relay keeps listening while its gateway owner has not
+    /// published yet, is momentarily unreadable, or is being replaced for a
+    /// new mode or endpoint. None of these is a reason to withdraw hints.
     fn direct_candidates_pending(&self) -> bool {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            self.embedded_mode
-                && self.direct_gateway.as_ref().is_some_and(|gateway| {
-                    gateway.snapshot().state == direct_network::DirectGatewayState::Discovering
+            use direct_network::DirectGatewayState as State;
+            let listening = self.embedded_mode
+                && !self.closing
+                && self.pending_relay.is_none()
+                && self
+                    .embedded_relay
+                    .as_ref()
+                    .is_some_and(relay_service::HostedRelay::is_running);
+            listening
+                && self.direct_gateway.as_ref().is_none_or(|gateway| {
+                    gateway.access() != self.external_access
+                        || matches!(
+                            gateway.snapshot().state,
+                            State::Discovering | State::Stopped
+                        )
                 })
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
@@ -245,22 +258,68 @@ impl ServiceSession<'_> {
                     .as_ref()
                     .is_some_and(relay_service::HostedRelay::is_running)
         });
-        if (self.direct_internal != desired || (desired.is_none() && self.direct_gateway.is_some()))
+        // A changed mode is handled exactly like a changed internal endpoint:
+        // drain the owner, then start one for the configured mode.
+        let other_mode = self
+            .direct_gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.access() != self.external_access);
+        if (self.direct_internal != desired
+            || (desired.is_none() && self.direct_gateway.is_some())
+            || other_mode)
             && !self.drain_direct_gateway()
         {
             return;
         }
         if self.direct_gateway.is_none()
             && let Some(internal) = desired
-            && let Ok(gateway) = direct_network::DirectGatewayOwner::start(
-                internal,
-                direct_network::ExternalAccess::Automatic,
-            )
+            && let Ok(gateway) =
+                direct_network::DirectGatewayOwner::start(internal, self.external_access)
         {
             // Construction only starts a bounded background owner; no router
             // discovery or router I/O runs on this service worker.
             self.direct_gateway = Some(gateway);
             self.direct_internal = Some(internal);
+        }
+    }
+
+    /// The configured mode and, when the current owner runs that mode, its
+    /// observation. Addresses go to local management clients of this PC only.
+    /// Every field is checked here so the reply always encodes.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn external_status(&self) -> crate::management_protocol::ManagementResponse {
+        let usable =
+            |address: &SocketAddr| crate::contract::validate_relay_endpoint(*address).is_ok();
+        let snapshot = self
+            .direct_gateway
+            .as_ref()
+            .filter(|gateway| {
+                !self.closing
+                    && self.direct_internal.is_some()
+                    && gateway.access() == self.external_access
+            })
+            .map(direct_network::DirectGatewayOwner::snapshot);
+        let (external, source) = match snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.external(), snapshot.source()))
+        {
+            Some((Some(external), Some(source))) if usable(&external) => {
+                (Some(external), Some(source))
+            }
+            _ => (None, None),
+        };
+        crate::management_protocol::ManagementResponse::ExternalStatus {
+            access: self.external_access,
+            external,
+            source,
+            failure: snapshot
+                .as_ref()
+                .filter(|_| external.is_none())
+                .and_then(direct_network::DirectGatewaySnapshot::failure),
+            lan: self
+                .direct_internal
+                .filter(|_| !self.closing && self.direct_gateway.is_some())
+                .filter(usable),
         }
     }
 

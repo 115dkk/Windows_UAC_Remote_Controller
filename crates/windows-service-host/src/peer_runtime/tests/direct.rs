@@ -261,3 +261,158 @@ fn routing_mode_withdrawal_retires_output_guards_and_status_contains_no_coordina
         ));
     });
 }
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn external_status(
+    session: &mut ServiceSession<'_>,
+    class: crate::ffi::ManagementClientClass,
+) -> crate::management_protocol::ManagementResponse {
+    session
+        .handle_management(
+            class,
+            crate::management_protocol::ManagementRequest::QueryExternal,
+        )
+        .unwrap()
+        .expect("the external read replies synchronously")
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn external_read_is_a_gui_query_and_its_mutation_is_elevated_cli_only() {
+    use crate::{
+        ffi::ManagementClientClass,
+        management_protocol::{ManagementRequest, ManagementResponse},
+    };
+    use direct_network::ExternalAccess;
+    exercise(|session, _, _, _| {
+        // No gateway owner: the configured mode only, no observation.
+        let status = external_status(session, ManagementClientClass::GuiMedium);
+        assert_eq!(
+            status,
+            ManagementResponse::ExternalStatus {
+                access: ExternalAccess::Automatic,
+                external: None,
+                source: None,
+                failure: None,
+                lan: None,
+            }
+        );
+        crate::management_protocol::encode_response(&status).unwrap();
+        let forward = ExternalAccess::RouterForward {
+            external_port: 8443,
+        };
+        session.use_external_access(forward);
+        assert!(matches!(
+            external_status(session, ManagementClientClass::GuiMedium),
+            ManagementResponse::ExternalStatus { access, .. } if access == forward
+        ));
+        let fixed = ExternalAccess::Fixed {
+            address: "93.184.216.34:7443".parse().unwrap(),
+        };
+        // A medium GUI client cannot change it.
+        assert!(matches!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::SetExternalAccess { access: fixed },
+                )
+                .unwrap(),
+            Some(ManagementResponse::Refused(_))
+        ));
+        // Outside the real service the protected write is refused, and a
+        // choice that was not persisted is not applied either.
+        assert!(matches!(
+            session
+                .handle_management(
+                    ManagementClientClass::CliElevated,
+                    ManagementRequest::SetExternalAccess { access: fixed },
+                )
+                .unwrap(),
+            Some(ManagementResponse::Refused(_))
+        ));
+        assert_eq!(session.external_access, forward);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_changed_external_access_replaces_the_owner_like_a_changed_endpoint() {
+    use crate::{ffi::ManagementClientClass, management_protocol::ManagementResponse};
+    use direct_network::{CandidateSource, ExternalAccess};
+    exercise(|session, _, _, _| {
+        // TEST-NET internal address: not this host's route, so the owner does
+        // no router or STUN traffic; Fixed never does any in the first place.
+        let internal: std::net::SocketAddr = "192.0.2.77:7443".parse().unwrap();
+        let first = ExternalAccess::Fixed {
+            address: "93.184.216.34:7443".parse().unwrap(),
+        };
+        let second = ExternalAccess::Fixed {
+            address: "[2606:4700::1111]:8443".parse().unwrap(),
+        };
+        session.embedded_mode = true;
+        session.embedded_relay =
+            Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
+        session.use_external_access(first);
+        session.poll_direct_gateway(Some(internal));
+        assert_eq!(
+            session
+                .direct_gateway
+                .as_ref()
+                .map(direct_network::DirectGatewayOwner::access),
+            Some(first)
+        );
+        assert_eq!(session.direct_internal, Some(internal));
+        // Same mode and endpoint: the owner is kept.
+        session.poll_direct_gateway(Some(internal));
+        assert_eq!(
+            session
+                .direct_gateway
+                .as_ref()
+                .map(direct_network::DirectGatewayOwner::access),
+            Some(first)
+        );
+
+        session.use_external_access(second);
+        // The old owner's observation is not reported under the new mode.
+        let ManagementResponse::ExternalStatus {
+            access,
+            external,
+            source,
+            ..
+        } = external_status(session, ManagementClientClass::GuiMedium)
+        else {
+            panic!("external status expected");
+        };
+        assert_eq!((access, external, source), (second, None, None));
+        let end = Instant::now() + TEST_LIMIT;
+        while session
+            .direct_gateway
+            .as_ref()
+            .is_none_or(|gateway| gateway.access() != second)
+        {
+            assert!(Instant::now() < end, "the owner was not replaced");
+            session.poll_direct_gateway(Some(internal));
+            thread::yield_now();
+        }
+        assert_eq!(session.direct_internal, Some(internal));
+        let status = external_status(session, ManagementClientClass::GuiMedium);
+        let ManagementResponse::ExternalStatus {
+            access,
+            external,
+            source,
+            lan,
+            ..
+        } = status.clone()
+        else {
+            panic!("external status expected");
+        };
+        assert_eq!(access, second);
+        assert_eq!(lan, Some(internal));
+        assert!(
+            external.is_none() && source.is_none()
+                || (external == Some("[2606:4700::1111]:8443".parse().unwrap())
+                    && source == Some(CandidateSource::Fixed))
+        );
+        crate::management_protocol::encode_response(&status).unwrap();
+    });
+}

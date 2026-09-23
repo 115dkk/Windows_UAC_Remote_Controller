@@ -10,6 +10,9 @@ description = "Fail-closed presentation orchestration and local notification pre
 
 [dependencies]
 activity-journal = { path = "../activity-journal" }
+# Address classification and `ExternalAccess::validated()` only, so an invalid
+# external-access choice is refused before any Windows elevation prompt.
+direct-network = { path = "../direct-network" }
 notification-policy = { path = "../notification-policy" }
 serde.workspace = true
 serde_json.workspace = true

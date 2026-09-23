@@ -17,7 +17,9 @@ Explorer or relaunch the app without administrator elevation.
 ## Contents and access
 
 - Committed activity outcomes, service startup failure codes, process-startup
-  guard phases and native prompt refusal reasons.
+  guard phases and native prompt refusal reasons. A stored external-access
+  setting the service could not parse is recorded as `configuration_ignored`;
+  the service then starts in automatic mode.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.
