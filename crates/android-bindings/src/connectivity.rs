@@ -349,7 +349,8 @@ pub(crate) async fn run_dial(
 }
 
 /// Only carrier discovery is retried. TLS signing, requests and decisions are
-/// never replayed across candidates. Each failed/timed-out future drops its socket.
+/// never replayed across candidates. Several candidates race their TCP connects
+/// and register on the first handshake alone; every other socket is dropped.
 pub(crate) async fn connect_candidates(
     primary: std::net::SocketAddr,
     alternatives: &[std::net::SocketAddr],
@@ -372,24 +373,11 @@ pub(crate) async fn connect_candidates(
         .await
         .ok();
     }
-    for address in addresses {
-        if stop.is_cancelled() {
-            return None;
-        }
-        if let Ok(Ok(carrier)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            relay_service::connect_rendezvous(
-                address,
-                Registration::new(Role::Phone, route),
-                stop.clone(),
-            ),
-        )
+    // A black-holed LAN address no longer holds the external one back: the
+    // next candidate is dialled 250 ms later instead of after a 5 s timeout.
+    relay_service::connect_rendezvous_any(&addresses, Registration::new(Role::Phone, route), stop)
         .await
-        {
-            return Some(carrier);
-        }
-    }
-    None
+        .ok()
 }
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
