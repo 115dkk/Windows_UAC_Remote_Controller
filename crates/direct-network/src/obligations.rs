@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{CancellationToken, LEASE_SECONDS, Network, igd, lease::Lease, pcp};
+use super::{
+    CancellationToken, CandidateSource, DirectFailure, LEASE_SECONDS, Network, global, igd,
+    lease::Lease, pcp,
+};
 
 const MAX_OBLIGATIONS: usize = 4;
 
@@ -17,6 +20,9 @@ pub(super) struct MappingObligations {
     displaced: Vec<(Network, Lease)>,
     failures: u32,
     next_probe: Instant,
+    /// Why the latest mapping attempt produced no candidate; `None` after a
+    /// usable grant or before any attempt.
+    failure: Option<DirectFailure>,
 }
 
 impl MappingObligations {
@@ -26,6 +32,7 @@ impl MappingObligations {
             displaced: Vec::new(),
             failures: 0,
             next_probe: Instant::now(),
+            failure: None,
         }
     }
 
@@ -102,14 +109,7 @@ impl MappingObligations {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
                 Err(_) => igd::map(network, stop).await.map(Lease::Igd),
             };
-            if let Ok(mapping) = mapped {
-                self.active = Some((network.clone(), mapping));
-                self.failures = 0;
-            } else {
-                self.failures = self.failures.saturating_add(1);
-                self.next_probe = Instant::now()
-                    + Duration::from_secs(30_u64 << self.failures.saturating_sub(1).min(2));
-            }
+            self.mapping_finished(network, mapped, Instant::now());
         }
         if let Some((_, mapping)) = self.active.as_mut()
             && !mapping.is_candidate()
@@ -119,11 +119,51 @@ impl MappingObligations {
         }
     }
 
-    pub(super) fn candidate(&self) -> Option<(SocketAddr, u32)> {
+    pub(super) fn mapping_finished(
+        &mut self,
+        network: &Network,
+        mapped: io::Result<Lease>,
+        now: Instant,
+    ) {
+        match mapped {
+            Ok(mapping) => {
+                // A grant outside candidate policy is still owned for cleanup;
+                // a non-global external address means another NAT sits above.
+                self.failure = if mapping.is_candidate() {
+                    None
+                } else if global(mapping.external().ip()) {
+                    Some(DirectFailure::NoMappingProtocol)
+                } else {
+                    Some(DirectFailure::PrivateExternalAddress)
+                };
+                self.active = Some((network.clone(), mapping));
+                self.failures = 0;
+            }
+            Err(error) => {
+                if error.kind() != io::ErrorKind::Interrupted {
+                    self.failure = Some(if igd::private_external(&error) {
+                        DirectFailure::PrivateExternalAddress
+                    } else {
+                        DirectFailure::NoMappingProtocol
+                    });
+                }
+                self.failures = self.failures.saturating_add(1);
+                self.next_probe =
+                    now + Duration::from_secs(30_u64 << self.failures.saturating_sub(1).min(2));
+            }
+        }
+    }
+
+    pub(super) fn candidate(&self) -> Option<(SocketAddr, u32, CandidateSource)> {
         self.active
             .as_ref()
             .filter(|(_, lease)| lease.is_candidate())
-            .map(|(_, lease)| (lease.external(), lease.remaining()))
+            .map(|(_, lease)| (lease.external(), lease.remaining(), lease.source()))
+    }
+
+    /// Meaningful only while `candidate()` is `None`.
+    pub(super) fn failure(&self) -> Option<DirectFailure> {
+        self.failure
     }
 
     fn take_final(&mut self, network: Option<&Network>, now: Instant) -> Option<(Network, Lease)> {
@@ -280,6 +320,43 @@ mod tests {
         assert_eq!(owner.displaced.len(), 1);
         assert!(owner.displaced[0].0.same_mapping_path(&other));
         assert!(owner.take_final(Some(&original), now).is_none());
+    }
+
+    #[test]
+    fn mapping_outcome_records_why_no_candidate_is_published() {
+        let now = Instant::now();
+        let path = network(1);
+        let mut owner = MappingObligations::new();
+        assert_eq!(owner.failure(), None);
+        owner.mapping_finished(&path, Err(io::Error::from(io::ErrorKind::TimedOut)), now);
+        assert_eq!(owner.failure(), Some(DirectFailure::NoMappingProtocol));
+        assert!(!owner.can_map(&CancellationToken::new(), now + Duration::from_secs(29)));
+        owner.mapping_finished(&path, Err(igd::private_external_error()), now);
+        assert_eq!(owner.failure(), Some(DirectFailure::PrivateExternalAddress));
+        // Cancellation says nothing about the router.
+        owner.mapping_finished(&path, Err(io::Error::from(io::ErrorKind::Interrupted)), now);
+        assert_eq!(owner.failure(), Some(DirectFailure::PrivateExternalAddress));
+
+        let mut behind_nat = pcp::Lease::ownership_fixture(now + Duration::from_secs(600));
+        behind_nat.external = "100.64.0.9:45000".parse().unwrap();
+        behind_nat.require_cleanup();
+        owner.mapping_finished(&path, Ok(Lease::Pcp(behind_nat)), now);
+        assert!(owner.candidate().is_none());
+        assert_eq!(owner.failure(), Some(DirectFailure::PrivateExternalAddress));
+
+        let mut owner = MappingObligations::new();
+        let mut long_grant = pcp::Lease::ownership_fixture(now + Duration::from_secs(7200));
+        long_grant.require_cleanup();
+        owner.mapping_finished(&path, Ok(Lease::Pcp(long_grant)), now);
+        assert_eq!(owner.failure(), Some(DirectFailure::NoMappingProtocol));
+
+        let mut owner = MappingObligations::new();
+        owner.mapping_finished(&path, Err(io::Error::from(io::ErrorKind::TimedOut)), now);
+        owner.mapping_finished(&path, Ok(lease(now + Duration::from_secs(600))), now);
+        assert_eq!(owner.failure(), None);
+        let (endpoint, _, source) = owner.candidate().unwrap();
+        assert_eq!(endpoint, "8.8.8.8:45000".parse().unwrap());
+        assert_eq!(source, CandidateSource::Pcp);
     }
 
     #[test]

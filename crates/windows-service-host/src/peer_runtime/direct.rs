@@ -203,7 +203,7 @@ impl ServiceSession<'_> {
         {
             self.embedded_mode
                 && self.direct_gateway.as_ref().is_some_and(|gateway| {
-                    gateway.snapshot().state == relay_service::DirectGatewayState::Discovering
+                    gateway.snapshot().state == direct_network::DirectGatewayState::Discovering
                 })
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
@@ -252,7 +252,10 @@ impl ServiceSession<'_> {
         }
         if self.direct_gateway.is_none()
             && let Some(internal) = desired
-            && let Ok(gateway) = relay_service::DirectGatewayOwner::start(internal)
+            && let Ok(gateway) = direct_network::DirectGatewayOwner::start(
+                internal,
+                direct_network::ExternalAccess::Automatic,
+            )
         {
             // Construction only starts a bounded background owner; no router
             // discovery or router I/O runs on this service worker.
@@ -283,17 +286,17 @@ impl ServiceSession<'_> {
                 .as_ref()
                 .map(|gateway| gateway.snapshot().state)
             {
-                Some(relay_service::DirectGatewayState::PublicIpv4Candidate) => {
+                Some(direct_network::DirectGatewayState::PublicIpv4Candidate) => {
                     if self.current_direct_candidates().0.is_empty() {
                         State::Discovering
                     } else {
                         State::Candidate
                     }
                 }
-                Some(relay_service::DirectGatewayState::LanOnly) => State::LanOnly,
+                Some(direct_network::DirectGatewayState::LanOnly) => State::LanOnly,
                 Some(
-                    relay_service::DirectGatewayState::MappedCandidate
-                    | relay_service::DirectGatewayState::Ipv6Candidate,
+                    direct_network::DirectGatewayState::MappedCandidate
+                    | direct_network::DirectGatewayState::Ipv6Candidate,
                 ) => {
                     let (candidates, _) = self.current_direct_candidates();
                     if candidates.is_empty() {
@@ -309,10 +312,10 @@ impl ServiceSession<'_> {
                     }
                 }
                 Some(
-                    relay_service::DirectGatewayState::Unavailable
-                    | relay_service::DirectGatewayState::Stopped,
+                    direct_network::DirectGatewayState::Unavailable
+                    | direct_network::DirectGatewayState::Stopped,
                 ) => State::Unavailable,
-                Some(relay_service::DirectGatewayState::Discovering) | None => State::Discovering,
+                Some(direct_network::DirectGatewayState::Discovering) | None => State::Discovering,
             }
         };
         ManagementResponse::DirectStatus {

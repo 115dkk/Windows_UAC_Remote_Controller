@@ -23,6 +23,7 @@ members = [
     "tools/controller-uniffi-bindgen",
     "tools/ci-phone-fixture",
     "crates/relay-service",
+    "crates/direct-network",
     "crates/framed-transport",
     "src-tauri",
 ]

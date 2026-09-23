@@ -42,6 +42,7 @@ secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }
 framed-transport = { path = "../framed-transport" }
 relay-service = { path = "../relay-service" }
+direct-network = { path = "../direct-network" }
 tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }

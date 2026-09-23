@@ -5,7 +5,6 @@
 
 mod client;
 mod config;
-mod direct;
 mod hosted;
 mod relay;
 mod wire;
@@ -20,8 +19,7 @@ pub use config::{
 };
 // Resilience policy, not tunable configuration: an operator cannot widen these.
 pub(crate) use config::{ACCEPT_BACKOFF, MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES};
-pub use direct::{DirectGatewayOwner, DirectGatewaySnapshot, DirectGatewayState};
-pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay, local_endpoint};
+pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay};
 pub use relay::run;
 pub use tokio_util::sync::CancellationToken;
 pub use wire::{

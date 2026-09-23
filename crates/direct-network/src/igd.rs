@@ -7,7 +7,7 @@ mod http;
 mod xml;
 
 use std::{
-    io,
+    error, fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     time::{Duration, Instant},
 };
@@ -15,7 +15,9 @@ use std::{
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
-use super::{CancellationToken, LEASE_SECONDS, Network, bounded, global, invalid_response};
+use super::{
+    CancellationToken, LEASE_SECONDS, Network, bounded, global, invalid_response, usable_local,
+};
 use http::{Soap, Target, fault_code};
 use xml::Node;
 
@@ -45,6 +47,31 @@ const PORT_FAULTS: [u16; 4] = [718, 724, 727, 728];
 struct Control {
     target: Target,
     service: &'static str,
+}
+
+/// GetExternalIPAddress named a unicast address that is not global: another
+/// NAT (a second router, or the carrier's CGNAT) sits above this gateway.
+#[derive(Debug)]
+struct PrivateExternal;
+
+impl fmt::Display for PrivateExternal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("gateway external address is not global")
+    }
+}
+
+impl error::Error for PrivateExternal {}
+
+pub(super) fn private_external_error() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, PrivateExternal)
+}
+
+/// True for `map`'s error when no connection had a global external address
+/// and at least one reported a private or shared one.
+pub(super) fn private_external(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<PrivateExternal>())
 }
 
 enum Entry {
@@ -151,14 +178,19 @@ async fn connection(
     network: &Network,
     stop: &CancellationToken,
 ) -> io::Result<(Control, Ipv4Addr)> {
+    let mut private = false;
     for control in controls {
         match external_ip(&control, network, stop).await {
             Ok(ip) => return Ok((control, ip)),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
-            Err(_) => {}
+            Err(error) => private |= private_external(&error),
         }
     }
-    Err(invalid_response())
+    Err(if private {
+        private_external_error()
+    } else {
+        invalid_response()
+    })
 }
 
 async fn claim(
@@ -301,7 +333,8 @@ fn key(port: u16) -> String {
     )
 }
 
-/// Double NAT and CGNAT report a non-global address: nothing to publish.
+/// Double NAT and CGNAT report a non-global address: nothing to publish. A
+/// disconnected connection's 0.0.0.0 is an ordinary rejection, not a NAT.
 async fn external_ip(
     control: &Control,
     network: &Network,
@@ -313,7 +346,11 @@ async fn external_ip(
         .parse()
         .map_err(|_| invalid_response())?;
     if !global(IpAddr::V4(ip)) {
-        return Err(invalid_response());
+        return Err(if usable_local(ip) {
+            private_external_error()
+        } else {
+            invalid_response()
+        });
     }
     Ok(ip)
 }
@@ -1166,9 +1203,29 @@ mod tests {
     async fn private_or_shared_external_address_is_never_mapped() {
         for external in ["10.0.0.2", "100.64.0.1"] {
             let fixture = Fixture::new(Router::new(external), &[("/ctl/ip", IP1)]).await;
-            assert!(map_with(&fixture).await.is_err());
+            let error = map_with(&fixture).await.err().unwrap();
+            assert!(private_external(&error));
             assert_eq!(fixture.actions(), ["GetExternalIPAddress"]);
         }
+    }
+
+    #[tokio::test]
+    async fn only_a_private_answer_reports_another_nat_above_the_gateway() {
+        // One disconnected connection beside one behind CGNAT: another NAT.
+        let mut router = Router::new("100.64.0.1");
+        router.disconnected = "/ctl/ip";
+        let fixture = Fixture::new(router, &[("/ctl/ppp", PPP1), ("/ctl/ip", IP1)]).await;
+        let error = map_with(&fixture).await.err().unwrap();
+        assert!(private_external(&error));
+        assert_eq!(
+            fixture.actions(),
+            ["GetExternalIPAddress", "GetExternalIPAddress"]
+        );
+        // Only disconnected connections: no mapping, but no NAT claim either.
+        let fixture = Fixture::new(Router::new("0.0.0.0"), &[("/ctl/ip", IP1)]).await;
+        let error = map_with(&fixture).await.err().unwrap();
+        assert!(!private_external(&error));
+        assert!(!private_external(&invalid_response()));
     }
 
     #[tokio::test]

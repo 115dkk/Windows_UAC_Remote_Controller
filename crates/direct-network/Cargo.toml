@@ -1,0 +1,23 @@
+[package]
+name = "direct-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Direct relay address candidates from router mapping, STUN or a typed address; routing hints, not peer authentication"
+
+[dependencies]
+tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "time", "macros"] }
+tokio-util = "=0.7.19"
+socket2 = "=0.6.5"
+getrandom.workspace = true
+sha2.workspace = true
+quick-xml = "=0.42.0"
+
+[target.'cfg(windows)'.dependencies]
+ipconfig = "=0.3.4"
+
+[lints]
+workspace = true

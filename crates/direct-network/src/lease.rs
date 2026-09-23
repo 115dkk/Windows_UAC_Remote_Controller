@@ -3,7 +3,7 @@
 //! keeps its own ownership proof and cleanup rule behind this dispatch.
 use std::{io, net::SocketAddr, time::Instant};
 
-use super::{CancellationToken, Network, igd, pcp};
+use super::{CancellationToken, CandidateSource, Network, igd, pcp};
 
 pub(super) enum Lease {
     Pcp(pcp::Lease),
@@ -15,6 +15,13 @@ impl Lease {
         match self {
             Self::Pcp(lease) => lease.external,
             Self::Igd(lease) => lease.external,
+        }
+    }
+
+    pub(super) fn source(&self) -> CandidateSource {
+        match self {
+            Self::Pcp(_) => CandidateSource::Pcp,
+            Self::Igd(_) => CandidateSource::Upnp,
         }
     }
 

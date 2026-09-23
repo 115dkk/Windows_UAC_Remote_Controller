@@ -2,7 +2,7 @@
 //! In-process opaque relay owner. No keys, signing or approval capabilities.
 use std::{
     io,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, UdpSocket},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     thread::{self, JoinHandle},
 };
 
@@ -115,34 +115,6 @@ impl Drop for HostedRelay {
             let _ = worker.join();
         }
     }
-}
-
-/// Ask the local routing table for IPv4, then a global IPv6 source. UDP connect
-/// sets a destination only: no send, DNS lookup or public-IP service is used.
-/// This is a LAN address, not proof of NAT traversal or mobile-network reachability.
-pub fn local_endpoint() -> io::Result<SocketAddr> {
-    let ipv4 = (|| {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
-        socket.local_addr()
-    })();
-    if let Ok(address) = ipv4
-        && !address.ip().is_unspecified()
-        && !address.ip().is_loopback()
-        && !address.ip().is_multicast()
-    {
-        return Ok(SocketAddr::new(address.ip(), EMBEDDED_RELAY_PORT));
-    }
-    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))?;
-    socket.connect((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 9))?;
-    let address = socket.local_addr()?.ip();
-    if !crate::direct::global(address) {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            "no routed address",
-        ));
-    }
-    Ok(SocketAddr::new(address, EMBEDDED_RELAY_PORT))
 }
 
 #[cfg(test)]

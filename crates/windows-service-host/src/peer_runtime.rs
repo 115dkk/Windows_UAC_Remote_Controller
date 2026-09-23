@@ -501,7 +501,7 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     embedded_relay: Option<relay_service::HostedRelay>,
     #[cfg(all(windows, target_pointer_width = "64"))]
-    direct_gateway: Option<relay_service::DirectGatewayOwner>,
+    direct_gateway: Option<direct_network::DirectGatewayOwner>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     direct_internal: Option<std::net::SocketAddr>,
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -744,13 +744,15 @@ impl<'key> ServiceSession<'key> {
             .as_ref()
             .is_some_and(relay_service::HostedRelay::is_running)
         {
-            relay_service::local_endpoint().ok().filter(|address| {
-                address.is_ipv4()
-                    || self
-                        .embedded_relay
-                        .as_ref()
-                        .is_some_and(relay_service::HostedRelay::supports_ipv6)
-            })
+            direct_network::local_endpoint(relay_service::EMBEDDED_RELAY_PORT)
+                .ok()
+                .filter(|address| {
+                    address.is_ipv4()
+                        || self
+                            .embedded_relay
+                            .as_ref()
+                            .is_some_and(relay_service::HostedRelay::supports_ipv6)
+                })
         } else {
             None
         };
@@ -2224,7 +2226,7 @@ impl<'key> ServiceSession<'key> {
                 + self
                     .direct_gateway
                     .as_ref()
-                    .map_or(0, relay_service::DirectGatewayOwner::remaining_owners)
+                    .map_or(0, direct_network::DirectGatewayOwner::remaining_owners)
                 + self
                     .dialer
                     .as_ref()
