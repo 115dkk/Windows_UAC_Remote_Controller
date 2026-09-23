@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One owner for exact-path mapping obligations, including shutdown selection.
 //! A displaced grant retains its actual expiry and cannot become a candidate
-//! again. Only a matching restored route may attempt its bounded PCP cleanup.
+//! again. Only a matching restored route may attempt its bounded router cleanup.
 use std::{
+    io,
     net::SocketAddr,
     time::{Duration, Instant},
 };
 
-use super::{CancellationToken, LEASE_SECONDS, Network, igd, pcp};
+use super::{CancellationToken, LEASE_SECONDS, Network, igd, lease::Lease, pcp};
 
 const MAX_OBLIGATIONS: usize = 4;
 
 pub(super) struct MappingObligations {
-    active: Option<(Network, pcp::Lease)>,
-    displaced: Vec<(Network, pcp::Lease)>,
+    active: Option<(Network, Lease)>,
+    displaced: Vec<(Network, Lease)>,
     failures: u32,
     next_probe: Instant,
 }
@@ -31,7 +32,7 @@ impl MappingObligations {
     /// This same transition serves ordinary polling and final cleanup. No
     /// router I/O is possible until the exact current path selects an owner.
     fn select_path(&mut self, network: Option<&Network>, now: Instant) {
-        self.displaced.retain(|(_, lease)| lease.expires > now);
+        self.displaced.retain(|(_, lease)| lease.expires() > now);
         if self
             .active
             .as_ref()
@@ -39,7 +40,7 @@ impl MappingObligations {
         {
             if let Some((old, mut lease)) = self.active.take() {
                 lease.require_cleanup();
-                if lease.expires > now {
+                if lease.expires() > now {
                     self.displaced.push((old, lease));
                 }
             }
@@ -48,7 +49,7 @@ impl MappingObligations {
         if self
             .active
             .as_ref()
-            .is_some_and(|(_, lease)| lease.expires <= now)
+            .is_some_and(|(_, lease)| lease.expires() <= now)
         {
             self.active = None;
         }
@@ -95,16 +96,13 @@ impl MappingObligations {
             mapping.require_cleanup();
         }
         if self.can_map(stop, Instant::now()) {
+            // PCP first; consumer routers that ignore it usually speak UPnP IGD.
             let mapped = match pcp::map(network, stop, nonce).await {
-                Ok(lease) => Some(lease),
-                Err(_) => {
-                    // These observations cannot overwrite any same-host map.
-                    pcp::probe_nat_pmp(network, stop).await;
-                    let _ = igd::probe(network, stop).await;
-                    None
-                }
+                Ok(lease) => Ok(Lease::Pcp(lease)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
+                Err(_) => igd::map(network, stop).await.map(Lease::Igd),
             };
-            if let Some(mapping) = mapped {
+            if let Ok(mapping) = mapped {
                 self.active = Some((network.clone(), mapping));
                 self.failures = 0;
             } else {
@@ -125,14 +123,10 @@ impl MappingObligations {
         self.active
             .as_ref()
             .filter(|(_, lease)| lease.is_candidate())
-            .map(|(_, lease)| (lease.external, lease.remaining()))
+            .map(|(_, lease)| (lease.external(), lease.remaining()))
     }
 
-    fn take_final(
-        &mut self,
-        network: Option<&Network>,
-        now: Instant,
-    ) -> Option<(Network, pcp::Lease)> {
+    fn take_final(&mut self, network: Option<&Network>, now: Instant) -> Option<(Network, Lease)> {
         self.select_path(network, now);
         self.active.take()
     }
@@ -160,9 +154,13 @@ mod tests {
         }
     }
 
+    fn lease(expires: Instant) -> Lease {
+        Lease::Pcp(pcp::Lease::ownership_fixture(expires))
+    }
+
     fn owner_on(network: &Network, expires: Instant) -> MappingObligations {
         let mut owner = MappingObligations::new();
-        owner.active = Some((network.clone(), pcp::Lease::ownership_fixture(expires)));
+        owner.active = Some((network.clone(), lease(expires)));
         owner
     }
 
@@ -237,10 +235,7 @@ mod tests {
             let path = network(gateway);
             owner.select_path(Some(&path), now);
             assert!(owner.can_map(&stop, now));
-            owner.active = Some((
-                path,
-                pcp::Lease::ownership_fixture(now + Duration::from_secs(600)),
-            ));
+            owner.active = Some((path, lease(now + Duration::from_secs(600))));
         }
         owner.select_path(Some(&network(5)), now);
         assert_eq!(owner.displaced.len(), MAX_OBLIGATIONS);
@@ -278,10 +273,7 @@ mod tests {
         let other = network(3);
         let mut owner = owner_on(&original, now + Duration::from_secs(600));
         owner.select_path(Some(&other), now);
-        owner.active = Some((
-            other.clone(),
-            pcp::Lease::ownership_fixture(now + Duration::from_secs(600)),
-        ));
+        owner.active = Some((other.clone(), lease(now + Duration::from_secs(600))));
         let (selected, lease) = owner.take_final(Some(&original), now).unwrap();
         assert!(selected.same_mapping_path(&original));
         assert!(!lease.is_candidate());

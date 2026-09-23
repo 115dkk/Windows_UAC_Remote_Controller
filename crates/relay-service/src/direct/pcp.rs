@@ -252,12 +252,6 @@ async fn exchange(
     .await
 }
 
-pub(super) async fn probe_nat_pmp(network: &Network, stop: &CancellationToken) {
-    // RFC 6886 public-address query is read-only. NAT-PMP cannot prove mapping
-    // ownership; no MAP (opcode 1/2) or deletion is ever sent on this path.
-    let _ = exchange(network, &[0, 0], stop, PCP_PORT).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

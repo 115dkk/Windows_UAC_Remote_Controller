@@ -7,6 +7,8 @@ use quick_xml::{Reader, events::Event};
 
 use super::super::invalid_response;
 
+const MAX_ELEMENTS: usize = 2048;
+
 pub(super) struct Node {
     pub(super) name: String,
     pub(super) text: String,
@@ -46,7 +48,8 @@ pub(super) fn parse(text: &str) -> io::Result<Node> {
         match reader.read_event().map_err(|_| invalid_response())? {
             Event::Start(start) => {
                 count += 1;
-                if count > 512 || stack.len() >= 32 {
+                // Real router descriptions exceed 512 elements; 64 KiB still bounds them.
+                if count > MAX_ELEMENTS || stack.len() >= 32 {
                     return Err(invalid_response());
                 }
                 for attribute in start.attributes() {
@@ -118,6 +121,9 @@ mod tests {
                 .value("a")
                 .is_err()
         );
+        let elements = |count| format!("<x>{}</x>", "<a/>".repeat(count - 1));
+        assert!(parse(&elements(MAX_ELEMENTS)).is_ok());
+        assert!(parse(&elements(MAX_ELEMENTS + 1)).is_err());
         assert!(parse("<x></y>").is_err());
         assert!(parse("<x/><y/>").is_err());
         assert!(

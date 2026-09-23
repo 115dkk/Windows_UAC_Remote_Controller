@@ -3,6 +3,7 @@
 //! traffic still requires the existing end-to-end pinned encrypted protocol.
 //! No cloud, STUN, credentials, router-wide changes or arbitrary URL interface.
 mod igd;
+mod lease;
 mod obligations;
 mod pcp;
 

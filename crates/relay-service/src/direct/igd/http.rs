@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Numeric same-origin HTTP only, one bounded socket, no redirects or DNS.
+//! A 500 reply surfaces only as a typed UPnP error code, never as a body.
 use std::{
-    io,
+    error, fmt, io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
@@ -10,7 +11,10 @@ use tokio::{
     net::TcpSocket,
 };
 
-use super::{CancellationToken, Network, SERVICE, bounded, invalid_response};
+use super::{
+    CancellationToken, Network, bounded, invalid_response,
+    xml::{self, Node},
+};
 
 const MAX_RESPONSE: usize = 65536;
 const MAX_HEADERS: usize = 8192;
@@ -18,6 +22,46 @@ const MAX_HEADERS: usize = 8192;
 pub(super) struct Target {
     pub(super) address: SocketAddrV4,
     pub(super) path: String,
+}
+
+/// One SOAP call. The matched service type names both header and namespace.
+pub(super) struct Soap<'a> {
+    pub(super) service: &'a str,
+    pub(super) action: &'a str,
+    pub(super) body: &'a str,
+}
+
+/// `detail/UPnPError/errorCode` of a SOAP fault the gateway answered with.
+#[derive(Debug)]
+struct Fault(u16);
+
+impl fmt::Display for Fault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UPnP error {}", self.0)
+    }
+}
+
+impl error::Error for Fault {}
+
+pub(super) fn fault_code(error: &io::Error) -> Option<u16> {
+    error
+        .get_ref()?
+        .downcast_ref::<Fault>()
+        .map(|fault| fault.0)
+}
+
+/// `HTTP/1.0` or `HTTP/1.1`, a three-digit code, then nothing or any reason.
+pub(super) fn status(line: &str) -> Option<u16> {
+    let rest = line
+        .strip_prefix("HTTP/1.1 ")
+        .or_else(|| line.strip_prefix("HTTP/1.0 "))?;
+    let (code, reason) = rest.split_at_checked(3)?;
+    if !code.bytes().all(|byte| byte.is_ascii_digit())
+        || !(reason.is_empty() || reason.starts_with(' '))
+    {
+        return None;
+    }
+    code.parse().ok()
 }
 
 impl Target {
@@ -93,7 +137,7 @@ fn validate_path(path: &str) -> io::Result<()> {
 
 pub(super) async fn request(
     target: &Target,
-    action: Option<(&str, &str)>,
+    soap: Option<Soap<'_>>,
     network: &Network,
     stop: &CancellationToken,
 ) -> io::Result<String> {
@@ -104,10 +148,10 @@ pub(super) async fn request(
         let socket = TcpSocket::new_v4()?;
         socket.bind(SocketAddr::new((*network.internal.ip()).into(), 0))?;
         let mut stream = socket.connect(SocketAddr::V4(target.address)).await?;
-        let request = match action {
+        let request = match soap {
             None => format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", target.path, target.address),
-            Some((action, body)) => format!(
-                "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{SERVICE}#{action}\"\r\nContent-Length: {}\r\n\r\n{body}",
+            Some(Soap { service, action, body }) => format!(
+                "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nSOAPAction: \"{service}#{action}\"\r\nContent-Length: {}\r\n\r\n{body}",
                 target.path, target.address, body.len(),
             ),
         };
@@ -122,9 +166,26 @@ pub(super) async fn request(
             if !received.windows(4).any(|bytes| bytes == b"\r\n\r\n") && received.len() > MAX_HEADERS {
                 return Err(invalid_response());
             }
+            // Some routers ignore `Connection: close`; a complete body ends the read.
+            if framed_length(&received).is_some_and(|total| received.len() >= total) {
+                break;
+            }
         }
         decode(&received)
     }).await
+}
+
+fn framed_length(bytes: &[u8]) -> Option<usize> {
+    let split = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = std::str::from_utf8(&bytes[..split]).ok()?;
+    let length = headers.split("\r\n").skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.eq_ignore_ascii_case("content-length") {
+            return None;
+        }
+        value.trim().parse::<usize>().ok()
+    })?;
+    split.checked_add(4)?.checked_add(length)
 }
 
 fn decode(bytes: &[u8]) -> io::Result<String> {
@@ -137,8 +198,8 @@ fn decode(bytes: &[u8]) -> io::Result<String> {
     }
     let headers = std::str::from_utf8(&bytes[..split]).map_err(|_| invalid_response())?;
     let mut lines = headers.split("\r\n");
-    let status = lines.next().ok_or_else(invalid_response)?;
-    if status != "HTTP/1.1 200 OK" && status != "HTTP/1.0 200 OK" {
+    let code = lines.next().and_then(status).ok_or_else(invalid_response)?;
+    if code != 200 && code != 500 {
         return Err(invalid_response());
     }
     let mut length = None;
@@ -166,16 +227,42 @@ fn decode(bytes: &[u8]) -> io::Result<String> {
         }
     }
     let body = &bytes[split + 4..];
-    if chunked {
+    let body = if chunked {
         if length.is_some() {
             return Err(invalid_response());
         }
-        return decode_chunks(body);
+        decode_chunks(body)?
+    } else {
+        if length.is_some_and(|length| length != body.len()) {
+            return Err(invalid_response());
+        }
+        String::from_utf8(body.to_vec()).map_err(|_| invalid_response())?
+    };
+    if code == 500 {
+        return Err(fault(&body));
     }
-    if length.is_some_and(|length| length != body.len()) {
+    Ok(body)
+}
+
+/// A 500 without a well-formed UPnP fault stays an ordinary rejection.
+fn fault(body: &str) -> io::Error {
+    xml::parse(body)
+        .and_then(|document| upnp_error(&document))
+        .map_or_else(|_| invalid_response(), |code| io::Error::other(Fault(code)))
+}
+
+fn upnp_error(document: &Node) -> io::Result<u16> {
+    if document.name != "Envelope" {
         return Err(invalid_response());
     }
-    String::from_utf8(body.to_vec()).map_err(|_| invalid_response())
+    document
+        .child("Body")?
+        .child("Fault")?
+        .child("detail")?
+        .child("UPnPError")?
+        .value("errorCode")?
+        .parse()
+        .map_err(|_| invalid_response())
 }
 
 fn decode_chunks(mut bytes: &[u8]) -> io::Result<String> {
@@ -216,6 +303,19 @@ fn decode_chunks(mut bytes: &[u8]) -> io::Result<String> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    fn upnp_fault(code: u16) -> String {
+        let body = format!(
+            "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
+             <s:Body><s:Fault><faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring>\
+             <detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>{code}</errorCode>\
+             <errorDescription>fixture</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>"
+        );
+        format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
 
     #[test]
     fn url_constraints_block_ssrf_credentials_redirect_origins_and_injection() {
@@ -266,6 +366,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn status_line_accepts_any_reason_and_only_200_or_500() {
+        for (bytes, body) in [
+            (
+                b"HTTP/1.1 200\r\nContent-Length: 2\r\n\r\nok".as_slice(),
+                "ok",
+            ),
+            (b"HTTP/1.1 200 ok\r\n\r\nok", "ok"),
+            (b"HTTP/1.0 200 Everything Fine\r\n\r\nok", "ok"),
+        ] {
+            assert_eq!(decode(bytes).unwrap(), body);
+        }
+        for bytes in [
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\nno".as_slice(),
+            b"HTTP/1.1 2000 OK\r\n\r\nok",
+            b"HTTP/1.1 200OK\r\n\r\nok",
+            b"HTTP/2 200\r\n\r\nok",
+            b"http/1.1 200 OK\r\n\r\nok",
+        ] {
+            let error = decode(bytes).unwrap_err();
+            assert_eq!(fault_code(&error), None);
+        }
+    }
+
+    #[test]
+    fn soap_fault_is_a_typed_upnp_error_and_other_500s_are_not() {
+        let error = decode(upnp_fault(725).as_bytes()).unwrap_err();
+        assert_eq!(fault_code(&error), Some(725));
+        let error = decode(upnp_fault(714).as_bytes()).unwrap_err();
+        assert_eq!(fault_code(&error), Some(714));
+        for bytes in [
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n\r\n<x/>".as_slice(),
+            b"HTTP/1.1 500 Internal Server Error\r\n\r\n",
+            b"HTTP/1.1 500 Internal Server Error\r\n\r\n<Envelope><Body><Fault><detail><UPnPError>\
+              <errorCode>x</errorCode></UPnPError></detail></Fault></Body></Envelope>",
+        ] {
+            assert_eq!(fault_code(&decode(bytes).unwrap_err()), None);
+        }
+        assert_eq!(fault_code(&invalid_response()), None);
+    }
+
+    #[test]
+    fn content_length_frames_a_reply_from_a_router_that_keeps_the_socket_open() {
+        let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+        assert_eq!(framed_length(&reply[..reply.len() - 1]), Some(reply.len()));
+        assert_eq!(framed_length(reply), Some(reply.len()));
+        assert_eq!(framed_length(b"HTTP/1.1 200 OK\r\n\r\nok"), None);
+        assert_eq!(framed_length(b"HTTP/1.1 200 OK\r\nContent-Length: 2"), None);
+    }
+
     #[tokio::test]
     async fn real_loopback_http_gateway_and_cancellable_silent_peer() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -279,17 +429,21 @@ mod tests {
             Target::absolute(&format!("http://{address}/root.xml"), Ipv4Addr::LOCALHOST).unwrap();
         let server = async {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = [0; 4096];
-            let count = stream.read(&mut bytes).await.unwrap();
-            assert!(
-                std::str::from_utf8(&bytes[..count])
-                    .unwrap()
-                    .starts_with("GET /root.xml HTTP/1.1\r\n")
-            );
+            // TCP may deliver the request in several reads.
+            let mut received = Vec::new();
+            while !received.ends_with(b"\r\n\r\n") {
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).await.unwrap();
+                assert!(count > 0 && received.len() + count < 4096);
+                received.extend_from_slice(&bytes[..count]);
+            }
+            assert!(received.starts_with(b"GET /root.xml HTTP/1.1\r\n"));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n<x/>")
                 .await
                 .unwrap();
+            // The framed reply lets the client close first.
+            let _ = stream.read(&mut [0; 1]).await;
         };
         let client = async {
             assert_eq!(
