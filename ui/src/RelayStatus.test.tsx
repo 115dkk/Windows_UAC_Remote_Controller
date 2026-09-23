@@ -3,7 +3,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { DevicesPanel } from './CollectionPanels';
+import { ExternalAccessPanel } from './ExternalAccessPanel';
+import { RelaySettings } from './RelaySettings';
 import type { AppSnapshot } from './contracts';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
@@ -29,11 +30,12 @@ describe('Windows relay observation and service recovery', () => {
   it.each(locales)('translates stopped relay, selected mode and the next step in %s', (locale) => {
     setPreviewLanguage(locale);
     const snapshot = qaCase('desktop-relay-stopped').snapshot;
-    const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onOpenStatus={vi.fn()} onSetRelay={vi.fn()} />);
+    const view = render(<ExternalAccessPanel snapshot={snapshot} disabled={false} onOpenStatus={vi.fn()} onSave={vi.fn()} onSetRelay={vi.fn()} />);
     const relay = view.container.querySelector('.auxiliary-card')!;
     expect(relay.textContent.length).toBeGreaterThan(0);
-    if (locale !== 'ko') expect(relay.textContent).not.toMatch(/[가-힣]/u);
-    for (const status of within(relay as HTMLElement).getAllByRole('status')) expect(status).not.toHaveClass('is-success');
+    expect(within(relay as HTMLElement).getByRole('button', { name: tr('PC 상태 열기') })).toBeEnabled();
+    if (locale !== 'ko') expect(view.container.textContent).not.toMatch(/[가-힣]/u);
+    for (const status of within(view.container).getAllByRole('status')) expect(status).not.toHaveClass('is-success');
   });
 
   it.each([
@@ -87,7 +89,7 @@ describe('Windows relay observation and service recovery', () => {
     const stopped = qaCase('desktop-relay-stopped').snapshot;
     const initial: AppSnapshot = { ...stopped, relayStatus: { mode: 'external', state: 'stopped' } };
     const setRelay = vi.fn(() => Promise.resolve(stopped));
-    render(<App bridge={{ ...createQaBridge(initial), setRelay }} initialPage="devices" />);
+    render(<App bridge={{ ...createQaBridge(initial), setRelay }} initialPage="network" />);
     fireEvent.click(await screen.findByRole('button', { name: '이 PC의 내장 중계 사용' }));
     const selected = await screen.findByRole('button', { name: '내장 중계 선택됨' });
     expect(selected).toBeDisabled();
@@ -107,7 +109,7 @@ describe('Windows relay observation and service recovery', () => {
       : condition === 'pending' ? { ...source, service: { ...source.service!, state: 'start_pending' } }
       : condition === 'unsupported' ? { ...source, service: { ...source.service!, controlHint: 'unsupported' } } : source;
     const onSetRelay = vi.fn();
-    render(<DevicesPanel snapshot={snapshot} disabled={condition === 'busy'} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    render(<RelaySettings snapshot={snapshot} disabled={condition === 'busy'} onSetRelay={onSetRelay} />);
     const select = screen.getByRole('button', { name: '이 PC의 내장 중계 사용' });
     expect(select).toBeDisabled();
     const address = screen.getByRole('textbox', { name: ko.relayAddress });
@@ -123,7 +125,7 @@ describe('Windows relay observation and service recovery', () => {
   it('keeps a writable relay draft through management failure and recovery without submitting it', () => {
     const unavailable = qaCase('desktop-relay-unknown').snapshot;
     const onSetRelay = vi.fn();
-    const view = render(<DevicesPanel snapshot={unavailable} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    const view = render(<RelaySettings snapshot={unavailable} disabled={false} onSetRelay={onSetRelay} />);
     const address = screen.getByRole('textbox', { name: ko.relayAddress });
     expect(address).toBeEnabled();
     fireEvent.change(address, { target: { value: '203.0.113.10:443' } });
@@ -131,7 +133,7 @@ describe('Windows relay observation and service recovery', () => {
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(onSetRelay).not.toHaveBeenCalled();
     const ready = qaCase('desktop-relay-listening').snapshot;
-    view.rerender(<DevicesPanel snapshot={ready} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    view.rerender(<RelaySettings snapshot={ready} disabled={false} onSetRelay={onSetRelay} />);
     expect(address).toHaveValue('203.0.113.10:443');
     expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
     expect(onSetRelay).not.toHaveBeenCalled();

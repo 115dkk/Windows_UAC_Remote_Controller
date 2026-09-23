@@ -269,3 +269,16 @@ catalogue and active local service, preserving the existing disconnected notice.
 All added copy uses the eleven locale catalogues; the executable identifier is
 `uac-service.exe`. Existing external-relay configuration remains available.
 No new design token, palette, font, icon, security owner or authorization action.
+
+## 2026-09-23 external-access tab
+
+The desktop rail gains `외부 연결` (icon `globe`) between phone management and history;
+phone navigation is unchanged, and below 42rem the desktop top navigation sets its four
+items two by two. Sections put their heading above their cards: 현재 상태 (relay and direct
+lines, a failure reason only while no external address exists, a facts list with `bdi`
+addresses), 외부에서 연결하는 방법 (a native radio fieldset; the selected option reveals its
+port or address field and router instructions; client validation; saved only after Rust
+confirms), then 중계 (embedded-relay card and external-relay form moved from phone
+management) and the V3/firewall guidance. Missing or stale views read 확인 불가, never 없음.
+PC status and phone management link here with a secondary button. Text and number inputs
+share one bordered 44px style. No new token, color, font, icon style or motion.

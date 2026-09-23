@@ -28,6 +28,28 @@ export interface RelayStatus {
   /** Native Windows observation only; a candidate is not a verified WAN connection. */
   readonly internetState?: 'discovering' | 'lan_only' | 'candidate' | 'unavailable' | 'stopped' | 'unknown' | null;
 }
+export type ExternalAccessMode = 'automatic' | 'router_forward' | 'fixed';
+export type ExternalCandidateSource = 'pcp' | 'upnp' | 'stun' | 'fixed' | 'public_interface';
+export type ExternalAccessFailure = 'no_mapping_protocol' | 'private_external_address' | 'public_address_unavailable';
+export interface ExternalAccessView {
+  readonly mode: ExternalAccessMode;
+  /** router_forward only: the router port forwarded to this PC's relay port. */
+  readonly externalPort: number | null;
+  /** fixed only: the configured address, e.g. "203.0.113.7:7443". */
+  readonly fixedAddress: string | null;
+  /** The published external candidate. A candidate, not proof of reachability. */
+  readonly externalAddress: string | null;
+  readonly source: ExternalCandidateSource | null;
+  /** This PC's routed LAN IP without port, for router instructions. */
+  readonly lanAddress: string | null;
+  /** The embedded relay's port on this PC (7443). */
+  readonly relayPort: number;
+  readonly failure: ExternalAccessFailure | null;
+}
+export type ExternalAccessInput =
+  | { readonly mode: 'automatic' }
+  | { readonly mode: 'router_forward'; readonly externalPort: number }
+  | { readonly mode: 'fixed'; readonly fixedAddress: string };
 export interface PhoneServiceView {
   readonly state: 'stopped' | 'preparing' | 'waiting_for_unlock' | 'local_settings_ready' | 'cleanup_pending' | 'unavailable';
   readonly bootEnabled: boolean | null;
@@ -110,6 +132,8 @@ export interface AppSnapshot {
   readonly devices: readonly PairedDeviceView[];
   readonly relayConfigured: boolean;
   readonly relayStatus?: RelayStatus | null;
+  /** Null or absent: not Windows, service not running, or not observed. */
+  readonly externalAccess?: ExternalAccessView | null;
   readonly requests: readonly RequestView[];
   readonly requestCatalog: { readonly status: 'unavailable' | 'reconciling' | 'ready'; readonly revision: string; readonly peerCount: number; readonly connectedPeerCount: number; readonly decisions?: readonly DecisionFeedbackView[] } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;
@@ -131,6 +155,7 @@ export interface ControllerBridge {
   beginPairing(transport?: 'usb'): Promise<AppSnapshot>;
   removeDevice(deviceId: string): Promise<AppSnapshot>;
   setRelay(address: string): Promise<AppSnapshot>;
+  setExternalAccess(input: ExternalAccessInput): Promise<AppSnapshot>;
   decide(requestId: string, decision: 'approve' | 'deny'): Promise<AppSnapshot>;
   requestDetails(requestId: string): Promise<RequestDetailsView>;
   watchRequests?(notify: () => void): Promise<() => Promise<void>>;

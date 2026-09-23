@@ -15,11 +15,12 @@ import { PairingEntry } from './PairingEntry';
 import { hasNoPairedPc, hasPairedPc } from './phoneConnection';
 import { RequestPanel } from './RequestPanel';
 import { EmptyState, MobileNotices, ServicePanel } from './StatusPanels';
+import { ExternalAccessPanel } from './ExternalAccessPanel';
 import { useController } from './useController';
 import { tr, useLanguage } from './i18n';
 import { LanguageSettings } from './LanguageSettings';
 
-export type ClientPage = 'status' | 'devices' | 'activity' | 'requests' | 'schedule';
+export type ClientPage = 'status' | 'devices' | 'network' | 'activity' | 'requests' | 'schedule';
 interface NavItem { readonly page: ClientPage; readonly label: string; readonly icon: IconName; readonly available: boolean }
 
 function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
@@ -31,7 +32,8 @@ function navigationFor(snapshot: AppSnapshot): readonly NavItem[] {
     // Request recovery remains reachable even while native inventory is unknown.
     { page: 'requests', label: ko.requests, icon: 'request', available: true },
     devices, { page: 'schedule', label: ko.schedule, icon: 'clock', available: true }, activity,
-  ] : [{ page: 'status', label: ko.status, icon: 'pc', available: true }, devices, activity];
+  ] : [{ page: 'status', label: ko.status, icon: 'pc', available: true }, devices,
+    { page: 'network', label: ko.network, icon: 'globe', available: true }, activity];
 }
 
 export function App({ bridge, initialPage, taskbarClient }: { bridge: ControllerBridge; initialPage?: ClientPage; taskbarClient?: TaskbarBridge | undefined }) {
@@ -105,6 +107,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   const title = !phone && page === 'status' ? ko.appName
     : items.find((item) => item.page === page)?.label ?? (phone ? ko.requests : ko.status);
   const description = page === 'schedule' ? ko.scheduleIntro
+    : !phone && page === 'network' ? ko.networkIntro
       : page === 'requests' && snapshot.requests.some(request => request.state === 'pending')
         && snapshot.dataAvailability.requests === 'available' ? ko.requestIntro : null;
   const navigation = <aside className="navigation-shell">
@@ -121,12 +124,13 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
       {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{tr(error)}</p></section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(snapshot.issue.message)}</p>{snapshot.issue.nextAction && <p className="supporting-text">{tr(snapshot.issue.nextAction)}</p>}</div></section>}
       <div className={`global-feedback ${busy || notice ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{busy ? (busy === 'policy' ? ko.saving : ko.pending) : notice && tr(notice)}</div>
-      {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} stale={stale} onAction={serviceAction} />}
+      {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} stale={stale} onAction={serviceAction} onOpenNetwork={() => navigate('network')} />}
       {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}
       {phone && (page === 'requests' || page === 'schedule') && <MobileNotices mobile={snapshot.mobile} disabled={disabled} onOpenLock={() => { void controller.run({ kind: 'lock-settings' }); }} onOpenNotifications={() => { void controller.run({ kind: 'notification-settings' }); }} />}
       {phone && page === 'requests' && <RequestPanel snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={(requestId, decision) => { void controller.run({ kind: 'decision', requestId, decision }); }} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
       {phone && page === 'schedule' && !hasPairedPc(snapshot) && (hasNoPairedPc(snapshot) || snapshot.requestCatalog?.status !== 'ready') && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={() => { void controller.run({ kind: 'scan_pairing' }); }} onOpenUsb={() => { void controller.run({ kind: 'scan_pairing', transport: 'usb' }); }} scannerButtonRef={scannerButton} />}
-      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} stale={stale} onPair={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair' }); }} onPairUsb={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair', transport: 'usb' }); }} onOpenStatus={() => navigate('status')} onRemove={removeDevice} onSetRelay={(address) => controller.run({ kind: 'relay', address })} />}
+      {page === 'devices' && <DevicesPanel snapshot={snapshot} disabled={disabled} onPair={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair' }); }} onPairUsb={() => { void controller.run({ kind: phone ? 'scan_pairing' : 'pair', transport: 'usb' }); }} onOpenStatus={() => navigate('status')} onOpenNetwork={() => navigate('network')} onRemove={removeDevice} />}
+      {!phone && page === 'network' && <ExternalAccessPanel snapshot={snapshot} disabled={disabled} stale={stale} onSave={(access) => controller.run({ kind: 'external-access', access })} onSetRelay={(address) => controller.run({ kind: 'relay', address })} onOpenStatus={() => navigate('status')} />}
       {page === 'activity' && <ActivityPanel snapshot={snapshot} disabled={disabled} exporting={busy === 'diagnostics-export'} saving={busy === 'diagnostics-save'} onClear={clearActivity} onOpenDiagnostics={() => { void controller.run({ kind: 'diagnostics-folder' }); }} onExportDiagnostics={() => { void controller.run({ kind: 'diagnostics-export' }); }} onSaveDiagnostics={() => { void controller.run({ kind: 'diagnostics-save' }); }} />}
       {phone && <div hidden={page !== 'schedule'}><PhoneServicePanel service={snapshot.phoneService} disabled={disabled} onAction={serviceAction} /><PolicyEditor policy={snapshot.policy} available={snapshot.phoneService?.policyOwnerReady === true} unavailableTitle={policyUnavailableTitleText(snapshot.phoneService)} unavailableBody={policyUnavailableText(snapshot.phoneService)} disabled={disabled} saving={busy === 'policy'} onSave={async (policy) => {
         const result = await controller.run({ kind: 'policy', policy });

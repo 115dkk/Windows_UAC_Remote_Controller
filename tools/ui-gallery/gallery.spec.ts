@@ -144,20 +144,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         body: Buffer.from(JSON.stringify({ scope: 'CLIENT/SYNTHETIC', fixture, a, b, horizontalGap, verticalGap, requiredGap })),
         contentType: 'application/json',
       });
-      if (!phone) {
-        const input = page.locator('.relay-advanced input[type="text"]');
-        const field = await input.evaluate(node => {
-          const box = node.getBoundingClientRect();
-          const parent = node.closest('fieldset')!;
-          const container = parent.getBoundingClientRect();
-          const style = getComputedStyle(parent);
-          return { left: box.left, right: box.right, allowedLeft: container.left + Number.parseFloat(style.paddingLeft),
-            allowedRight: container.right - Number.parseFloat(style.paddingRight) };
-        });
-        await info.attach('relay-input-geometry', { body: Buffer.from(JSON.stringify(field)), contentType: 'application/json' });
-        expect(field.left).toBeGreaterThanOrEqual(field.allowedLeft - 0.5);
-        expect(field.right).toBeLessThanOrEqual(field.allowedRight + 0.5);
-      }
+      // The external-relay form moved to the external-access tab (network.spec.ts keeps its geometry check).
+      if (!phone) await expect(page.locator('.relay-advanced')).toHaveCount(0);
       await gallery.capture('pairing-action-spacing', 'CLIENT/SYNTHETIC · QR/USB gaps, wrapping and keyboard order');
     }
     if (selected.action === 'connection-setup') {
@@ -197,7 +185,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('region', { name: '휴대폰 승인 설정이 필요합니다', exact: true }).getByRole('button')).toHaveCount(0);
     }
     if (fixture === 'desktop-unavailable') {
-      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(3);
+      await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(4);
       await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(0);
       // History may be unavailable while independent diagnostic files remain useful.
       await page.getByRole('navigation').getByRole('button', { name: '활동 기록', exact: true }).click();
@@ -313,7 +301,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
     if (fixture.startsWith('desktop-relay-')) {
       const card = page.getByRole('region', { name: 'PC 내장 중계', exact: true });
-      const status = card.locator('.relay-state');
+      // The observation line sits in the tab's current-status section, once.
+      const status = page.locator('.relay-state');
       const expected: Record<string, string> = {
         'desktop-relay-stopped': '내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.',
         'desktop-relay-listening': '내장 중계 수신 대기 중',
@@ -336,9 +325,10 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         await expect(address).toBeEnabled();
         await address.fill('203.0.113.10:443');
         await expect(address).toHaveValue('203.0.113.10:443');
-        await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
-        await page.getByRole('form', { name: '중계 서버 주소', exact: true }).scrollIntoViewIfNeeded();
-        await expect(page.getByRole('button', { name: '저장', exact: true })).toBeInViewport({ ratio: 1 });
+        const relayForm = page.getByRole('form', { name: '중계 서버 주소', exact: true });
+        await expect(relayForm.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+        await relayForm.scrollIntoViewIfNeeded();
+        await expect(relayForm.getByRole('button', { name: '저장', exact: true })).toBeInViewport({ ratio: 1 });
         await gallery.capture('relay-draft', 'CLIENT/SYNTHETIC · 상태 미확인 중 주소 작성, 저장은 대기');
       }
       if (fixture === 'desktop-relay-stopped') {
@@ -366,8 +356,8 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await gallery.capture('taskbar-suggestion', 'CLIENT/SYNTHETIC · 설치 선택 안내, 실제 Windows 고정 아님');
     }
     if (fixture === 'desktop-devices' || fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
-      await page.getByRole('button', { name: '이 PC의 내장 중계 사용' }).scrollIntoViewIfNeeded();
-      await gallery.capture('embedded-relay', 'CLIENT/SYNTHETIC · 내장 중계 진입과 외부 중계 안내');
+      // Relay controls moved to the external-access tab.
+      await expect(page.getByRole('button', { name: '이 PC의 내장 중계 사용' })).toHaveCount(0);
     }
     if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
       await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
@@ -383,11 +373,11 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
         await expect(rail).toHaveCSS('overflow-y', 'auto');
         const beforeMain = await page.locator('.main-scroll').evaluate((element) => element.scrollTop);
         const menu = page.getByRole('navigation', { name: '주요 메뉴', exact: true }).getByRole('button');
-        await expect(menu).toHaveCount(3);
+        await expect(menu).toHaveCount(4);
         const lastBefore = await menu.last().boundingBox();
         expect(lastBefore).not.toBeNull();
         await menu.first().focus();
-        for (let index = 0; index < 3; index += 1) {
+        for (let index = 0; index < 4; index += 1) {
           if (index > 0) await page.keyboard.press('Tab');
           const item = menu.nth(index);
           await expect(item).toBeFocused();

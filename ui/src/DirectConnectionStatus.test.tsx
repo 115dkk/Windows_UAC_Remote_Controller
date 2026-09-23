@@ -58,7 +58,7 @@ describe('direct WAN observation boundaries', () => {
     expect(directConnectionState({ ...source, relayStatus: { ...source.relayStatus!, state: 'stopped' } })).toBe('stopped');
   });
 
-  it.each(['status', 'devices'] as const)('withdraws a cached candidate when the snapshot refresh fails on %s', async (initialPage) => {
+  it.each(['status', 'network'] as const)('withdraws a cached candidate when the snapshot refresh fails on %s', async (initialPage) => {
     const source = candidate();
     const snapshot = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(source).mockRejectedValue(new Error('synthetic read failure'));
     render(<App bridge={{ ...createQaBridge(source), snapshot }} initialPage={initialPage} />);

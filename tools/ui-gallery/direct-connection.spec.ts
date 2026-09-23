@@ -21,7 +21,7 @@ for (const selected of directConnectionCases) {
     }
 
     const region = page.getByRole('region', { name: galleryText(locale, '외부 네트워크 연결'), exact: true });
-    const source = selected.fixture === 'desktop-relay-wan-lan' ? '같은 네트워크용 주소만 확인됨 · 외부 연결 경로 확인 필요'
+    const source = selected.fixture === 'desktop-relay-wan-lan' ? '외부에서 접속할 주소가 없음'
       : selected.fixture === 'desktop-relay-wan-unavailable' ? '외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.'
       : selected.fixture === 'desktop-relay-wan-stale' ? '외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.' : candidateCopy;
     const status = region.getByRole('status');
@@ -30,7 +30,8 @@ for (const selected of directConnectionCases) {
     await status.scrollIntoViewIfNeeded();
     await expect(status).toBeInViewport({ ratio: 1 });
     await gallery.capture('direct-state', 'CLIENT/SYNTHETIC · external route observation, neutral candidate or recovery state');
-    const hint = region.getByText(galleryText(locale, firewallCopy), { exact: true });
+    // The external-access tab shows the guidance after its relay section.
+    const hint = page.getByText(galleryText(locale, firewallCopy), { exact: true });
     if (selected.fixture === 'desktop-relay-wan-stale') await expect(hint).toHaveCount(0);
     else {
       await hint.scrollIntoViewIfNeeded();

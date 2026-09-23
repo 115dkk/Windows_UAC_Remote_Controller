@@ -27,11 +27,14 @@ describe('pre-approval connection guidance', () => {
     expect(entry).toBeDisabled();
     expect(screen.getByText(ko.pairingQrPurpose)).toBeVisible();
     expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
-    expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
+    // Relay settings live on the external-access tab, with the same install guidance.
+    expect(screen.queryByRole('form', { name: ko.relayAddress })).not.toBeInTheDocument();
     fireEvent.click(entry);
     expect(beginPairing).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
     expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: ko.network }));
+    expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
   });
 
   it('shows the PC QR action through navigation even with unread inventory, but requires relay and native capability', async () => {

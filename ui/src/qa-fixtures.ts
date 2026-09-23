@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SYNTHETIC CLIENT STATE ONLY. Imported exclusively by qa-preview and client tests.
 // This adapter performs no OS operation, networking, authentication or persistence.
-import type { AppSnapshot, ControllerBridge, RequestView, ServiceState } from './contracts';
+import type { AppSnapshot, ControllerBridge, ExternalAccessView, RequestView, ServiceState } from './contracts';
 import type { ClientPage } from './App';
 
 export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable'; readonly diagnosticsExportPending?: true }
@@ -40,32 +40,53 @@ export function qaCase(name: string): QaCase {
   const relayRunning: AppSnapshot = { ...windows, relayConfigured: true,
     service: { installed: true, state: 'running', allowedActions: ['restart', 'stop'], controlHint: 'available', remoteRequestsReady: false },
     relayStatus: { mode: 'embedded', state: 'listening' } };
+  const externalAccess: ExternalAccessView = { mode: 'automatic', externalPort: null, fixedAddress: null,
+    externalAddress: null, source: null, lanAddress: '192.168.0.23', relayPort: 7443, failure: null };
   const relayStopped: AppSnapshot = { ...relayRunning, relayConfigured: false,
     service: { ...relayRunning.service!, state: 'stopped', allowedActions: ['start', 'uninstall'] },
     relayStatus: { mode: 'embedded', state: 'stopped' } };
   switch (name) {
-    case 'desktop-relay-wan-candidate': return { page: 'devices', snapshot: { ...relayRunning,
+    case 'desktop-relay-wan-candidate': return { page: 'network', snapshot: { ...relayRunning,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' } } };
-    case 'desktop-relay-wan-lan': return { page: 'devices', snapshot: { ...relayRunning,
+    case 'desktop-relay-wan-lan': return { page: 'network', snapshot: { ...relayRunning,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' } } };
-    case 'desktop-relay-wan-unavailable': return { page: 'devices', snapshot: { ...relayRunning,
+    case 'desktop-relay-wan-unavailable': return { page: 'network', snapshot: { ...relayRunning,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'unavailable' } } };
-    case 'desktop-relay-wan-stale': return { page: 'devices', snapshot: { ...relayRunning,
+    case 'desktop-relay-wan-stale': return { page: 'network', snapshot: { ...relayRunning,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
       dataAvailability: { ...relayRunning.dataAvailability, devices: 'unavailable' } } };
-    case 'desktop-relay-stopped': return { page: 'devices', snapshot: relayStopped };
-    case 'desktop-relay-listening': return { page: 'devices', snapshot: relayRunning };
-    case 'desktop-relay-waiting': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };
-    case 'desktop-relay-unknown': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false,
+    case 'desktop-relay-stopped': return { page: 'network', snapshot: relayStopped };
+    case 'desktop-relay-listening': return { page: 'network', snapshot: relayRunning };
+    case 'desktop-relay-waiting': return { page: 'network', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };
+    case 'desktop-relay-unknown': return { page: 'network', snapshot: { ...relayRunning, relayConfigured: false,
       service: { ...relayRunning.service!, state: null, allowedActions: [] }, relayStatus: { mode: 'unknown', state: 'unknown' },
       dataAvailability: { ...windows.dataAvailability, devices: 'unavailable' } } };
-    case 'desktop-relay-external': return { page: 'devices', snapshot: { ...relayRunning, relayStatus: { mode: 'external', state: 'external_configured' } } };
+    case 'desktop-relay-external': return { page: 'network', snapshot: { ...relayRunning, relayStatus: { mode: 'external', state: 'external_configured' } } };
+    // Synthetic external-access observations. Documentation addresses only;
+    // a candidate here is neither a reachable route nor a native result.
+    case 'desktop-network-auto-no-mapping': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
+      externalAccess: { ...externalAccess, failure: 'no_mapping_protocol' } } };
+    case 'desktop-network-auto-upnp': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, externalAddress: '203.0.113.7:7443', source: 'upnp' } } };
+    case 'desktop-network-forward-stun': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 17443, externalAddress: '198.51.100.24:17443', source: 'stun' } } };
+    case 'desktop-network-forward-unavailable': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 7443, failure: 'public_address_unavailable' } } };
+    case 'desktop-network-fixed': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, mode: 'fixed', fixedAddress: '203.0.113.7:7443', externalAddress: '203.0.113.7:7443', source: 'fixed' } } };
     case 'desktop-start-failed': return { page: 'status', snapshot: { ...relayStopped,
       service: { ...relayStopped.service!, actionIssue: { code: 'synthetic_start_failed', message: '작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.', nextAction: null } } } };
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-connected': return { page: 'status', snapshot: { ...relayRunning,
       devices: [{ id: 'synthetic-connected-phone', name: '화면 예시 휴대폰', revision: 1, connected: true, routePresent: true, lastSeenLabel: null }] } };
     case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
+      service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
+    case 'desktop-pairing-relay-first': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: false,
       service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-setup-missing': return { page: 'devices', snapshot: { ...windows,
       dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
@@ -172,6 +193,12 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     beginPairing: () => reply({ ...value, issue: { code: 'synthetic_only', message: '이 화면 예시에서는 실제 기기를 연결하지 않아요.', nextAction: null } }),
     removeDevice: (id) => reply({ ...value, devices: value.devices.filter((device) => device.id !== id) }),
     setRelay: () => reply({ ...value, relayConfigured: true, issue: null }),
+    // Records the requested mode only. No address, source or reachability is invented.
+    setExternalAccess: (input) => reply({ ...value, issue: null, externalAccess: value.externalAccess ? {
+      ...value.externalAccess, mode: input.mode, externalAddress: null, source: null, failure: null,
+      externalPort: input.mode === 'router_forward' ? input.externalPort : null,
+      fixedAddress: input.mode === 'fixed' ? input.fixedAddress : null,
+    } : null }),
     decide: (id) => reply({ ...value, requests: value.requests.map((request) => request.id === id ? { ...request, state: 'sending', canApprove: false, canDeny: false } : request) }),
     requestDetails: (id) => {
       // Synthetic-only extra fixture text. Production snapshots contain no body.

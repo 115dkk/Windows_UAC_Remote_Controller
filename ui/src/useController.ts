@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AppSnapshot, ControllerBridge, NotificationPolicy, ServiceAction } from './contracts';
+import type { AppSnapshot, ControllerBridge, ExternalAccessInput, NotificationPolicy, ServiceAction } from './contracts';
 import { ko } from './messages.ko';
 import { ageRequestPresentation, withoutRequestBodies } from './requestPresentation';
 
@@ -9,6 +9,7 @@ export type ClientCommand =
   | { readonly kind: 'pair'; readonly transport?: 'usb' }
   | { readonly kind: 'remove'; readonly deviceId: string }
   | { readonly kind: 'relay'; readonly address: string }
+  | { readonly kind: 'external-access'; readonly access: ExternalAccessInput }
   | { readonly kind: 'clear' }
   | { readonly kind: 'diagnostics-folder' }
   | { readonly kind: 'diagnostics-export' }
@@ -55,6 +56,14 @@ async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
   }
 }
 
+/** The relay and external-access settings share one installed-helper owner. */
+function networkOwnerAvailable(snapshot: AppSnapshot): boolean {
+  return snapshot.platform === 'windows' && snapshot.service?.controlHint === 'available'
+    && ((snapshot.service.installed === false && snapshot.service.state === null)
+      || snapshot.service.state === 'stopped'
+      || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
+}
+
 // These are presentation gates only. Every command is checked again by its native owner.
 function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boolean {
   switch (command.kind) {
@@ -64,11 +73,8 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
       : snapshot.service?.allowedActions.includes(command.action) === true;
     case 'pair': return snapshot.canPair;
     case 'remove': return snapshot.dataAvailability.devices === 'available' && snapshot.canUnpair && snapshot.devices.some((device) => device.id === command.deviceId);
-    case 'relay': return snapshot.platform === 'windows' && snapshot.service?.controlHint === 'available'
-      && command.address.trim().length > 0
-      && ((snapshot.service.installed === false && snapshot.service.state === null)
-        || snapshot.service.state === 'stopped'
-        || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
+    case 'relay': return command.address.trim().length > 0 && networkOwnerAvailable(snapshot);
+    case 'external-access': return networkOwnerAvailable(snapshot);
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'diagnostics-folder': return snapshot.platform === 'windows';
     case 'diagnostics-export': case 'diagnostics-save': return snapshot.platform === 'android';
@@ -90,6 +96,7 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
     case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
     case 'remove': return bridge.removeDevice(command.deviceId);
     case 'relay': return bridge.setRelay(command.address);
+    case 'external-access': return bridge.setExternalAccess(command.access);
     case 'clear': return bridge.clearActivity();
     case 'decision': return bridge.decide(command.requestId, command.decision);
     case 'policy': return bridge.savePolicy(command.policy);
@@ -292,7 +299,7 @@ export function useController(bridge: ControllerBridge) {
       }
       const latest = current.current;
       publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
-        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' || command.kind === 'relay' ? ko.saveFailure : ko.actionFailure, notice: null });
+        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' || command.kind === 'relay' || command.kind === 'external-access' ? ko.saveFailure : ko.actionFailure, notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
