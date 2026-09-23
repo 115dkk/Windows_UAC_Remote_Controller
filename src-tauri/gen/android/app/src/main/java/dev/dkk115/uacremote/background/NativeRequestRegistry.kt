@@ -78,6 +78,17 @@ internal object NativeRequestRules {
         return ((difference + 999_999_999uL) / 1_000_000_000uL).toLong()
     }
     fun refreshMillis(until: ULong, now: ULong): Long = if (until <= now) 0 else ((until - now) / 1_000_000uL).coerceAtMost(60_000uL).toLong()
+    fun connectionFailure(value: NativeDialFailure): String = when (value) {
+        NativeDialFailure.UNREACHABLE -> "unreachable"
+        NativeDialFailure.REFUSED -> "refused"
+        NativeDialFailure.NO_ANSWER -> "no_answer"
+    }
+    /** Dialing and failures describe unconnected paired PCs only; a summary that
+     * says otherwise is dropped from the display, never shown. */
+    fun connectionConsistent(configured: UByte, connected: UByte, value: NativePcConnection): Boolean =
+        configured != 0.toUByte() && (connected < configured || (!value.dialing && value.lastFailure == null))
+    /** A PC connected at the previous catalogue and not at this one: its session ended. */
+    fun sessionEnded(previous: Set<String>, current: Set<String>): Boolean = previous.any { it !in current }
 }
 
 /** Duplicate intent prevention only; owning live-handle checks remain mandatory. */
@@ -150,6 +161,7 @@ internal class NativeRequestRegistry(
     private var clearFailed = false
     private var allNotificationsCleared = false
     private var lastCatalog: String? = null
+    private var connectedPeers: Set<String> = emptySet()
     private var catalogReady = false
     private var reviewLocator: String? = null
     private var reviewRevision = 0uL
@@ -404,9 +416,13 @@ internal class NativeRequestRegistry(
                 .put("routePresent", peer.routePresent).put("connected", peer.connected))
         }
         if (peers.length() != catalog.configuredPeers.toInt() || catalog.peers.count { it.connected } != catalog.connectedPeers.toInt()) throw BridgeException.NativeUnavailable()
+        val connection = catalog.connection?.takeIf { NativeRequestRules.connectionConsistent(catalog.configuredPeers, catalog.connectedPeers, it) }
+            ?.let { JSONObject().put("dialing", it.dialing).put("externalRoute", it.externalRoute)
+                .put("lastFailure", it.lastFailure?.let(NativeRequestRules::connectionFailure) ?: JSONObject.NULL) }
         val root = JSONObject().put("version", 2).put("status", status).put("revision", catalog.revision.toString()).put("peers", peers)
             .put("peerCount", catalog.configuredPeers.toInt()).put("connectedPeerCount", catalog.connectedPeers.toInt()).put("requests", rows)
             .put("decisions", decisions.snapshot(observed.elapsedAfterNanos.toLong()))
+            .put("connection", connection ?: JSONObject.NULL)
         return payload(root, NativeRequestRules.MAX_LIST_JSON, observed, until, originalGeneration)
     }
     fun details(claim: NativeRequestClaim): NativeRequestPayload {
@@ -452,18 +468,24 @@ internal class NativeRequestRegistry(
         return selected.any { synchronized(it.notificationLock) { it.notificationFailed } }
     }
     fun invalidateTime() { synchronized(lock) { temporalInvalid = true; bump() }; changed() }
-    fun catalogMaintained(catalog: NativeRequestCatalogStatus) {
+    /** True when a PC connected at the previous catalogue no longer is. */
+    fun catalogMaintained(catalog: NativeRequestCatalogStatus): Boolean {
         val receiptChanged = decisions.observe(catalog.outcomeReceipts)
-        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}"
+        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}:${catalog.connection}"
+        val connected = catalog.peers.filter { it.connected }.mapTo(HashSet()) { it.id }
+        var ended = false
         val modified = synchronized(lock) {
             val result = receiptChanged || (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
             catalogReady = catalog.state == NativeRequestCatalogState.READY
             if (catalogReady) temporalInvalid = false
             lastCatalog = identity
+            ended = NativeRequestRules.sessionEnded(connectedPeers, connected)
+            connectedPeers = connected
             if (result) bump()
             result
         }
         if (modified) changed()
+        return ended
     }
     fun clear() {
         synchronized(lock) { for (entry in entries.values.toList()) retireLocked(entry); entries.clear(); if (!allNotificationsCleared) clearRequested = true; bump() }

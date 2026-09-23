@@ -459,6 +459,39 @@ impl std::fmt::Debug for DecisionFeedbackView {
     }
 }
 
+/// How far the phone's last failed dial toward an unconnected PC got.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PcConnectionFailure {
+    /// Every address timed out or was unreachable.
+    Unreachable,
+    /// Some address refused or reset the TCP connect.
+    Refused,
+    /// A relay accepted the TCP connect but sent no READY.
+    NoAnswer,
+}
+
+/// The phone's own dialing toward its paired PCs. Display only: never a
+/// reachability, authentication or action claim.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PcConnectionView {
+    /// A dial to some paired, unconnected PC is in flight now.
+    pub dialing: bool,
+    /// The furthest failure among unconnected paired PCs since their last
+    /// carrier, or none. The property is required even when null.
+    #[serde(deserialize_with = "deserialize_connection_failure")]
+    pub last_failure: Option<PcConnectionFailure>,
+    /// Every paired PC has a stored global address besides its relay address.
+    pub external_route: bool,
+}
+
+fn deserialize_connection_failure<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PcConnectionFailure>, D::Error> {
+    Option::<PcConnectionFailure>::deserialize(deserializer)
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RequestView {

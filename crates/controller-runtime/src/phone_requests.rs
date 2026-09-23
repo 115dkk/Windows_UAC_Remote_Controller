@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppIssue, DecisionFeedbackAction, DecisionFeedbackPhase, DecisionFeedbackView,
-    PairedDeviceView, RequestState, RequestView,
+    PairedDeviceView, PcConnectionView, RequestState, RequestView,
 };
 
 pub const MAX_PHONE_REQUESTS_JSON_BYTES: usize = 512 * 1024;
@@ -31,6 +31,8 @@ pub struct RequestCatalogView {
     pub peer_count: u8,
     pub connected_peer_count: u8,
     pub decisions: Vec<DecisionFeedbackView>,
+    /// None: no paired PC, no current observation, or an older native side.
+    pub connection: Option<PcConnectionView>,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,8 @@ struct CatalogDocument {
     requests: Vec<RequestView>,
     #[serde(default)]
     decisions: Vec<DecisionFeedbackView>,
+    #[serde(default)]
+    connection: Option<PcConnectionView>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +149,12 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         || document.requests.len() > MAX_REQUESTS
         || document.decisions.len() > MAX_REQUESTS
         || document.peer_count == 0 && !document.requests.is_empty()
+        // Dialing and failures describe unconnected paired PCs only.
+        || document.connection.is_some_and(|connection| {
+            document.peer_count == 0
+                || document.connected_peer_count == document.peer_count
+                    && (connection.dialing || connection.last_failure.is_some())
+        })
     {
         return Err(phone_request_issue());
     }
@@ -260,6 +270,9 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
             } else {
                 document.decisions
             },
+            connection: document
+                .connection
+                .filter(|_| document.status != RequestCatalogState::Unavailable),
         },
     })
 }

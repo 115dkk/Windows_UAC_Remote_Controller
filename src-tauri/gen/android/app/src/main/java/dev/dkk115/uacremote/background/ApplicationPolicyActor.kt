@@ -75,7 +75,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
         approvals::canRequest, denials::canRequest, denials::externalProgress,
         { failure -> failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.REQUEST_MAINTENANCE, failure) },
-        ::traceMaintenanceFailure)
+        ::traceMaintenanceFailure, ::peerSessionEnded)
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
@@ -321,6 +321,8 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private val networkRecoveryPending = AtomicBoolean(false)
     private val networkRetries = AtomicInteger(0)
     private val networkRetry = Runnable { maintainConnections() }
+    private val sessionRedial = PromptRedialGate(1_000L)
+    private val sessionRedialRun = Runnable { sessionRedial.ran(SystemClock.elapsedRealtime()); maintainConnections() }
     @Volatile private var connectivityFailures = 0L
     internal fun connectivityFailureCount(): Long = connectivityFailures
 
@@ -361,6 +363,15 @@ internal class ApplicationPolicyActor(private val application: Application) {
                 }
             }
         } catch (_: RejectedExecutionException) { connectivityPending.set(false); scheduleNetworkRetry() }
+    }
+
+    /** A PC session that was connected has ended. Redial through the same
+     * coalesced maintenance now instead of on the 15 s tick, at most once per
+     * second. Nothing else changes: no new dial owner, address or action. */
+    private fun peerSessionEnded() {
+        if (lifecycle.phase() != PolicyOwnerPhase.READY) return
+        val delay = sessionRedial.request(SystemClock.elapsedRealtime()) ?: return
+        if (!main.postDelayed(sessionRedialRun, delay)) sessionRedial.abandoned()
     }
 
     private fun scheduleNetworkRetry() {

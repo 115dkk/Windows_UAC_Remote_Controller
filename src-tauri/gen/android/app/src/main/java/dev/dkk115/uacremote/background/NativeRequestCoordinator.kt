@@ -32,6 +32,8 @@ internal class NativeRequestCoordinator(
     private val externalProgress: () -> Unit,
     private val ownerFailed: (Throwable) -> Unit,
     private val maintenanceFailed: (Throwable) -> Unit,
+    // A PC session ended; the actor owns the one connection maintenance path.
+    private val sessionEnded: () -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
@@ -66,7 +68,7 @@ internal class NativeRequestCoordinator(
                     val controller = owner() ?: throw BridgeException.Closed()
                     platform.refreshPresentationClock()
                     val catalog = controller.maintainNativeRequests()
-                    platform.requests.catalogMaintained(catalog)
+                    if (platform.requests.catalogMaintained(catalog)) sessionEnded()
                     advanceDeliveries(controller)
                     externalProgress()
                     maintenanceFailures.set(0)
@@ -153,7 +155,7 @@ internal class NativeRequestCoordinator(
                 platform.refreshPresentationClock()
                 val value = if (locator == null) {
                     val catalog = controller.requestCatalogStatus()
-                    platform.requests.catalogMaintained(catalog)
+                    if (platform.requests.catalogMaintained(catalog)) sessionEnded()
                     val secure = platform.secureLockConfigured()
                     platform.requests.snapshot(catalog, { secure && canApprove(it) }, { secure && canDeny(it) })
                 } else {

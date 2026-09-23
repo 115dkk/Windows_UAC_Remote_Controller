@@ -28,7 +28,7 @@ mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
 };
-pub use connectivity::NativeConnectivityStatus;
+pub use connectivity::{NativeConnectivityStatus, NativeDialFailure, NativePcConnection};
 pub use denial::{
     NativeApprovalDrainState, NativeDenialAdvance, NativeDenialAttempt, NativeDenialOperationState,
     NativeDenialScope, NativeDenialWait,
@@ -332,7 +332,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    14
+    15
 }
 
 #[uniffi::export]

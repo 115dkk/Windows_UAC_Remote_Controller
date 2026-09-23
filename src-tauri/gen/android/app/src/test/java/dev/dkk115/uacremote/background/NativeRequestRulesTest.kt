@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote.background
 
+import dev.dkk115.uacremote.nativecore.NativeDialFailure
+import dev.dkk115.uacremote.nativecore.NativePcConnection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -93,5 +95,30 @@ class NativeRequestRulesTest {
         assertFalse(NativeRequestRules.mayRemoveEntry(oldOwner, newOwner))
         assertFalse(NativeRequestRules.mayRemoveEntry(oldOwner, null))
         assertTrue(NativeRequestRules.mayRemoveEntry(newOwner, newOwner))
+    }
+    @Test fun ConnectionFailuresUseTheValidatorsThreeWords() {
+        assertEquals(listOf("unreachable", "refused", "no_answer"),
+            NativeDialFailure.values().map(NativeRequestRules::connectionFailure))
+    }
+    @Test fun DialingOrFailureWithEveryPcConnectedOrNoPcIsNeverShown() {
+        val idle = NativePcConnection(dialing = false, lastFailure = null, externalRoute = true)
+        val dialing = NativePcConnection(dialing = true, lastFailure = null, externalRoute = false)
+        val failed = NativePcConnection(dialing = false, lastFailure = NativeDialFailure.NO_ANSWER, externalRoute = false)
+        for (value in listOf(idle, dialing, failed)) {
+            assertTrue(NativeRequestRules.connectionConsistent(2u, 1u, value))
+            assertFalse(NativeRequestRules.connectionConsistent(0u, 0u, value))
+        }
+        assertTrue(NativeRequestRules.connectionConsistent(1u, 1u, idle))
+        assertFalse(NativeRequestRules.connectionConsistent(1u, 1u, dialing))
+        assertFalse(NativeRequestRules.connectionConsistent(1u, 1u, failed))
+    }
+    @Test fun OnlyAPreviouslyConnectedPcThatIsNoLongerConnectedEndsASession() {
+        val first = "1".repeat(64); val second = "2".repeat(64)
+        assertFalse(NativeRequestRules.sessionEnded(emptySet(), setOf(first)))
+        assertFalse(NativeRequestRules.sessionEnded(setOf(first), setOf(first, second)))
+        assertTrue(NativeRequestRules.sessionEnded(setOf(first), emptySet()))
+        // One PC leaving while another connects still ends that PC's session.
+        assertTrue(NativeRequestRules.sessionEnded(setOf(first), setOf(second)))
+        assertFalse(NativeRequestRules.sessionEnded(emptySet(), emptySet()))
     }
 }

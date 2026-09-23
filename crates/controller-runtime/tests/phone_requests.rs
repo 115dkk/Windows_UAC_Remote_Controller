@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Synthetic native DTOs only. No peer, authentication or native OS exercised.
 use controller_runtime::{
-    MAX_PHONE_REQUEST_DETAILS_JSON_BYTES, MAX_PHONE_REQUESTS_JSON_BYTES, RequestCatalogState,
-    check_request_locator, decode_phone_request_details_json, decode_phone_requests_json,
+    MAX_PHONE_REQUEST_DETAILS_JSON_BYTES, MAX_PHONE_REQUESTS_JSON_BYTES, PcConnectionFailure,
+    PcConnectionView, RequestCatalogState, check_request_locator,
+    decode_phone_request_details_json, decode_phone_requests_json,
 };
 use serde_json::{Value, json};
 
@@ -67,6 +68,130 @@ fn decision_receipts_are_optional_bounded_and_strict_display_only() {
     }
     document["decisions"] = json!([decision.clone(), decision]);
     assert!(decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).is_err());
+}
+
+fn disconnected() -> Value {
+    let mut document = catalog();
+    document["connectedPeerCount"] = json!(0);
+    document["peers"][0]["connected"] = json!(false);
+    document
+}
+
+fn decode(document: &Value) -> Result<controller_runtime::PhoneRequestCatalog, ()> {
+    decode_phone_requests_json(&serde_json::to_vec(document).unwrap()).map_err(|_| ())
+}
+
+#[test]
+fn connection_diagnosis_is_optional_and_presented_exactly() {
+    assert_eq!(decode(&catalog()).unwrap().catalog.connection, None);
+    let mut document = disconnected();
+    document["connection"] = Value::Null;
+    assert_eq!(decode(&document).unwrap().catalog.connection, None);
+    for (dialing, failure, external) in [
+        (true, Value::Null, false),
+        (false, json!("unreachable"), false),
+        (false, json!("refused"), true),
+        (true, json!("no_answer"), true),
+    ] {
+        let connection = json!({"dialing":dialing,"lastFailure":failure,"externalRoute":external});
+        document["connection"] = connection.clone();
+        let value = decode(&document).unwrap();
+        let expected = PcConnectionView {
+            dialing,
+            last_failure: match failure.as_str() {
+                None => None,
+                Some("unreachable") => Some(PcConnectionFailure::Unreachable),
+                Some("refused") => Some(PcConnectionFailure::Refused),
+                Some(_) => Some(PcConnectionFailure::NoAnswer),
+            },
+            external_route: external,
+        };
+        assert_eq!(value.catalog.connection, Some(expected));
+        // The presentation receives the same shape the native side sent.
+        assert_eq!(
+            serde_json::to_value(&value.catalog).unwrap()["connection"],
+            connection
+        );
+    }
+    // A fully connected catalogue may still say whether an outside route exists.
+    let mut connected = catalog();
+    connected["connection"] = json!({"dialing":false,"lastFailure":null,"externalRoute":true});
+    assert!(decode(&connected).unwrap().catalog.connection.is_some());
+    assert_eq!(
+        serde_json::to_value(&decode(&catalog()).unwrap().catalog).unwrap()["connection"],
+        Value::Null
+    );
+}
+
+#[test]
+fn connection_diagnosis_rejects_unknown_incomplete_and_contradictory_values() {
+    let valid = json!({"dialing":true,"lastFailure":"refused","externalRoute":false});
+    let mut document = disconnected();
+    document["connection"] = valid.clone();
+    assert!(decode(&document).is_ok());
+    for (key, invalid) in [
+        ("lastFailure", json!("timeout")),
+        ("lastFailure", json!("")),
+        ("lastFailure", json!(1)),
+        ("dialing", json!("true")),
+        ("dialing", Value::Null),
+        ("externalRoute", json!(1)),
+        ("externalRoute", Value::Null),
+        ("address", json!("192.0.2.1:7443")),
+    ] {
+        let mut invalid_document = document.clone();
+        invalid_document["connection"][key] = invalid;
+        assert!(decode(&invalid_document).is_err(), "{key}");
+    }
+    for key in ["dialing", "lastFailure", "externalRoute"] {
+        let mut invalid_document = document.clone();
+        invalid_document["connection"]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(decode(&invalid_document).is_err(), "missing {key}");
+    }
+    for invalid in [json!(true), json!("dialing"), json!([valid.clone()])] {
+        let mut invalid_document = document.clone();
+        invalid_document["connection"] = invalid;
+        assert!(decode(&invalid_document).is_err());
+    }
+    // Every paired PC connected: nothing is being dialled and nothing failed.
+    for connection in [
+        json!({"dialing":true,"lastFailure":null,"externalRoute":false}),
+        json!({"dialing":false,"lastFailure":"no_answer","externalRoute":false}),
+    ] {
+        let mut contradictory = catalog();
+        contradictory["connection"] = connection;
+        assert!(decode(&contradictory).is_err());
+    }
+    // No paired PC: there is nothing to describe.
+    let mut unpaired = catalog();
+    unpaired["requests"] = json!([]);
+    unpaired["peerCount"] = json!(0);
+    unpaired["connectedPeerCount"] = json!(0);
+    unpaired["peers"] = json!([]);
+    assert!(decode(&unpaired).is_ok());
+    unpaired["connection"] = json!({"dialing":false,"lastFailure":null,"externalRoute":false});
+    assert!(decode(&unpaired).is_err());
+}
+
+#[test]
+fn unavailable_catalogue_drops_the_connection_diagnosis() {
+    let mut document = disconnected();
+    document["connection"] = json!({"dialing":true,"lastFailure":"no_answer","externalRoute":true});
+    for (status, kept) in [
+        ("unavailable", false),
+        ("reconciling", true),
+        ("ready", true),
+    ] {
+        document["status"] = json!(status);
+        assert_eq!(
+            decode(&document).unwrap().catalog.connection.is_some(),
+            kept,
+            "{status}"
+        );
+    }
 }
 
 #[test]

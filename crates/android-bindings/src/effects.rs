@@ -120,23 +120,35 @@ impl MobileController {
         let associations = owner
             .peer_associations()
             .map_err(|_| BridgeError::StorageUnavailable)?;
-        let peers: Vec<crate::NativePairedPc> = associations
-            .entries()
-            .map(|association| {
-                use std::fmt::Write;
-                let reference = association.reference();
-                let mut id = String::with_capacity(64);
-                for byte in reference.pc().as_bytes() {
-                    let _ = write!(id, "{byte:02x}");
-                }
-                crate::NativePairedPc {
-                    id,
-                    revision: association.descriptor().pc_registry_revision(),
-                    route_present: association.descriptor().relay().is_some(),
-                    connected: self.intake.has_connected_peer(reference),
-                }
-            })
-            .collect();
+        let mut peers: Vec<crate::NativePairedPc> = Vec::with_capacity(associations.len());
+        // The same connected observation feeds the rows and the summary, so
+        // the two cannot disagree within one catalogue.
+        let mut observed = Vec::with_capacity(associations.len());
+        for association in associations.entries() {
+            use std::fmt::Write;
+            let reference = association.reference();
+            let mut id = String::with_capacity(64);
+            for byte in reference.pc().as_bytes() {
+                let _ = write!(id, "{byte:02x}");
+            }
+            let relay = association.descriptor().relay();
+            let connected = self.intake.has_connected_peer(reference);
+            observed.push((
+                reference,
+                connected,
+                crate::connectivity::external_route(
+                    relay.map(|(address, _)| address),
+                    associations.routing_candidates(reference),
+                ),
+            ));
+            peers.push(crate::NativePairedPc {
+                id,
+                revision: association.descriptor().pc_registry_revision(),
+                route_present: relay.is_some(),
+                connected,
+            });
+        }
+        let connection = self.pc_connection(&observed);
         let projections = self.projections.lock().map_err(|_| BridgeError::Closed)?;
         let state = if !projections.initialized {
             NativeRequestCatalogState::Unavailable
@@ -161,6 +173,7 @@ impl MobileController {
             connected_peers,
             peers,
             outcome_receipts: projections.outcome_receipts(),
+            connection,
         })
     }
     pub(crate) fn maintain_requests_admitted(&self) -> Result<(), BridgeError> {

@@ -45,11 +45,22 @@ pub async fn connect_rendezvous(
         biased;
         _ = stop.cancelled() => return Err(RendezvousError::Cancelled),
         result = timeout(CONNECT_TIMEOUT, TcpStream::connect(address)) => {
-            result.map_err(|_| RendezvousError::ConnectTimeout)?.map_err(|_| RendezvousError::Connection)?
+            result.map_err(|_| RendezvousError::ConnectTimeout)?.map_err(connect_failure)?
         }
     };
     register(&mut stream, registration, CLIENT_RENDEZVOUS_TIMEOUT, &stop).await?;
     Ok(RendezvousCarrier(stream))
+}
+
+/// A refused or reset connect proves that a host answered at this address;
+/// any other connect error never reached one.
+fn connect_failure(error: io::Error) -> RendezvousError {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset => {
+            RendezvousError::Refused
+        }
+        _ => RendezvousError::Connection,
+    }
 }
 
 /// Dial several addresses of one relay and register on exactly one socket.
@@ -65,6 +76,10 @@ pub async fn connect_rendezvous(
 /// route. The winner must deliver READY within five seconds; when it times out,
 /// closes or sends a wrong marker, its socket is closed and the race resumes
 /// over the addresses whose connect has not failed yet.
+///
+/// When every address fails, the error is the one that got furthest: a relay
+/// that accepted the connect but sent no READY, then a refused connect, then an
+/// address that never answered. Equal ones report the latest.
 ///
 /// `stop` ends the call promptly and no attempt outlives it. Single-address
 /// callers keep [`connect_rendezvous`] and its longer READY wait.
@@ -100,17 +115,30 @@ where
             candidates.push(*address);
         }
     }
+    // The furthest registration failure so far; a later connect failure that
+    // never reached a relay does not replace it.
+    let mut kept: Option<RendezvousError> = None;
     loop {
-        let (mut stream, winner) = race_connect(&mut candidates, &stop, &connect).await?;
+        let (mut stream, winner) = match race_connect(&mut candidates, &stop, &connect).await {
+            Ok(value) => value,
+            Err(RendezvousError::Cancelled) => return Err(RendezvousError::Cancelled),
+            Err(failure) => return Err(kept.map_or(failure, |kept| kept.furthest(failure))),
+        };
         candidates.retain(|address| *address != winner);
         let registered = register(&mut stream, registration, RACE_RENDEZVOUS_TIMEOUT, &stop).await;
         match registered {
             Ok(()) => return Ok(RendezvousCarrier(stream)),
             Err(RendezvousError::Cancelled) => return Err(RendezvousError::Cancelled),
-            Err(failure) if candidates.is_empty() => return Err(failure),
-            // The failed registration's socket closes here, before the race
-            // resumes, so at most one registered socket exists at any time.
-            Err(_) => drop(stream),
+            Err(failure) => {
+                let failure = kept.map_or(failure, |kept| kept.furthest(failure));
+                if candidates.is_empty() {
+                    return Err(failure);
+                }
+                kept = Some(failure);
+                // The failed registration's socket closes here, before the
+                // race resumes, so at most one registered socket exists.
+                drop(stream);
+            }
         }
     }
 }
@@ -143,7 +171,7 @@ where
                 Some(Ok((address, Ok(stream)))) => break Ok((stream, address)),
                 Some(Ok((address, Err(failure)))) => {
                     failed.push(address);
-                    error = failure;
+                    error = error.furthest(failure);
                     next_start.as_mut().reset(Instant::now());
                 }
                 Some(Err(join_error)) if join_error.is_panic() => {
@@ -161,7 +189,7 @@ where
                 attempts.spawn(async move {
                     let result = match timeout(CONNECT_TIMEOUT, attempt).await {
                         Ok(Ok(stream)) => Ok(stream),
-                        Ok(Err(_)) => Err(RendezvousError::Connection),
+                        Ok(Err(failure)) => Err(connect_failure(failure)),
                         Err(_) => Err(RendezvousError::ConnectTimeout),
                     };
                     (address, result)
@@ -195,12 +223,12 @@ async fn register(
         stream
             .write_all(&registration.to_wire())
             .await
-            .map_err(|_| RendezvousError::Connection)?;
+            .map_err(|_| RendezvousError::Closed)?;
         let mut marker = [0; READY_MARKER.len()];
         stream
             .read_exact(&mut marker)
             .await
-            .map_err(|_| RendezvousError::Connection)?;
+            .map_err(|_| RendezvousError::Closed)?;
         if &marker != READY_MARKER {
             return Err(RendezvousError::InvalidMarker);
         }
@@ -225,8 +253,35 @@ pub enum RendezvousError {
     RendezvousTimeout,
     #[error("rendezvous connection could not complete")]
     Connection,
+    /// The host at the address refused or reset the TCP connect.
+    #[error("rendezvous connection was refused")]
+    Refused,
+    /// The relay accepted the connect, then closed or reset it before READY.
+    #[error("rendezvous connection closed before its marker")]
+    Closed,
     #[error("rendezvous marker was invalid")]
     InvalidMarker,
+}
+
+impl RendezvousError {
+    /// How far a failed setup got: no host answered, a host refused the
+    /// connect, or a relay accepted it and sent no READY.
+    const fn progress(self) -> u8 {
+        match self {
+            Self::Cancelled | Self::ConnectTimeout | Self::Connection => 0,
+            Self::Refused => 1,
+            Self::Closed | Self::RendezvousTimeout | Self::InvalidMarker => 2,
+        }
+    }
+
+    /// The failure that got further; on a tie, the later one.
+    const fn furthest(self, later: Self) -> Self {
+        if later.progress() >= self.progress() {
+            later
+        } else {
+            self
+        }
+    }
 }
 
 #[cfg(test)]
@@ -470,7 +525,7 @@ mod tests {
         )
         .await;
         let elapsed = began.elapsed();
-        assert_eq!(result.unwrap_err(), RendezvousError::Connection);
+        assert_eq!(result.unwrap_err(), RendezvousError::Refused);
         assert!(elapsed < CONNECTION_ATTEMPT_DELAY, "took {elapsed:?}");
         assert_eq!(
             *dialled.lock().unwrap(),
@@ -509,5 +564,101 @@ mod tests {
         release.cancel();
         assert_eq!(wrong_server.await.unwrap(), registration().to_wire());
         assert_eq!(right_server.await.unwrap(), registration().to_wire());
+    }
+
+    #[test]
+    fn only_a_refused_or_reset_connect_counts_as_an_answering_host() {
+        for (kind, expected) in [
+            (io::ErrorKind::ConnectionRefused, RendezvousError::Refused),
+            (io::ErrorKind::ConnectionReset, RendezvousError::Refused),
+            (
+                io::ErrorKind::NetworkUnreachable,
+                RendezvousError::Connection,
+            ),
+            (io::ErrorKind::HostUnreachable, RendezvousError::Connection),
+            (
+                io::ErrorKind::ConnectionAborted,
+                RendezvousError::Connection,
+            ),
+            (io::ErrorKind::AddrNotAvailable, RendezvousError::Connection),
+        ] {
+            assert_eq!(connect_failure(io::Error::from(kind)), expected, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_outranks_an_address_that_never_answered_in_either_order() {
+        for (refused, unreachable) in [
+            (unroutable(1), unroutable(2)),
+            (unroutable(2), unroutable(1)),
+        ] {
+            let result = race_rendezvous(
+                &[unroutable(1), unroutable(2)],
+                registration(),
+                CancellationToken::new(),
+                move |address| async move {
+                    let kind = if address == refused {
+                        io::ErrorKind::ConnectionRefused
+                    } else {
+                        assert_eq!(address, unreachable);
+                        io::ErrorKind::NetworkUnreachable
+                    };
+                    Err::<TcpStream, _>(io::Error::from(kind))
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap_err(), RendezvousError::Refused);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_closes_before_ready_outranks_a_later_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closing = listener.local_addr().unwrap();
+        let refused = unroutable(1);
+        // Read the whole registration, then close without READY.
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = [0; HEADER_BYTES];
+            socket.read_exact(&mut header).await.unwrap();
+            header
+        });
+        let result = timeout(
+            Duration::from_secs(3),
+            race_rendezvous(
+                &[closing, refused],
+                registration(),
+                CancellationToken::new(),
+                move |address| async move {
+                    if address == refused {
+                        return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+                    }
+                    TcpStream::connect(address).await
+                },
+            ),
+        )
+        .await
+        .expect("bounded race");
+        assert_eq!(result.unwrap_err(), RendezvousError::Closed);
+        assert_eq!(server.await.unwrap(), registration().to_wire());
+    }
+
+    #[tokio::test]
+    async fn a_single_relay_that_closes_before_ready_is_not_a_connect_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = [0; HEADER_BYTES];
+            socket.read_exact(&mut header).await.unwrap();
+        });
+        let result = timeout(
+            Duration::from_secs(3),
+            connect_rendezvous(address, registration(), CancellationToken::new()),
+        )
+        .await
+        .expect("bounded setup");
+        assert_eq!(result.unwrap_err(), RendezvousError::Closed);
+        server.await.unwrap();
     }
 }

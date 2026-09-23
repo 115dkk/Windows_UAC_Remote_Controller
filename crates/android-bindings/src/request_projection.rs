@@ -67,6 +67,8 @@ pub struct NativeRequestCatalogStatus {
     pub connected_peers: u8,
     pub peers: Vec<NativePairedPc>,
     pub outcome_receipts: Vec<NativeOutcomeReceipt>,
+    /// None when no PC is paired. Display only, like `peers`.
+    pub connection: Option<crate::NativePcConnection>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
