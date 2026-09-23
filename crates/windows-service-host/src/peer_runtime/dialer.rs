@@ -21,6 +21,10 @@ use super::ServicePeerCarrier;
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const TICK: Duration = Duration::from_millis(100);
+/// A dial that waited this long reached the relay and outlived its room, so no
+/// phone came. That is not a fault: rejoin at once, or a phone that arrives
+/// during a backoff finds the room empty and gives up after its own bound.
+const ROOM_EXPIRED: Duration = Duration::from_secs(15);
 const MAX_DEVICES: usize = 32;
 
 enum Command {
@@ -37,6 +41,7 @@ struct ResultMessage {
     route: RouteId,
     generation: u64,
     stream: Option<std::net::TcpStream>,
+    waited: Duration,
 }
 struct Entry {
     relay: SocketAddr,
@@ -258,7 +263,7 @@ async fn run(
                             entry.delivered = true;
                             entry.backoff = FIRST_BACKOFF;
                         } else if let Ok((next_attempt, next_backoff)) =
-                            retry_after(Instant::now(), entry.backoff)
+                            retry_after(Instant::now(), entry.backoff, message.waited)
                         {
                             entry.next_attempt = next_attempt;
                             entry.backoff = next_backoff;
@@ -296,6 +301,7 @@ fn start_due_dials(
         let generation = entry.generation;
         let task_stop = stop.child_token();
         tasks.spawn(async move {
+            let began = Instant::now();
             let stream = match connect_rendezvous(
                 relay,
                 Registration::new(Role::Pc, route),
@@ -316,12 +322,20 @@ fn start_due_dials(
                 route,
                 generation,
                 stream,
+                waited: began.elapsed(),
             }
         });
     }
 }
 
-fn retry_after(now: Instant, backoff: Duration) -> Result<(Instant, Duration), ()> {
+fn retry_after(
+    now: Instant,
+    backoff: Duration,
+    waited: Duration,
+) -> Result<(Instant, Duration), ()> {
+    if waited >= ROOM_EXPIRED {
+        return Ok((now, FIRST_BACKOFF));
+    }
     Ok((
         now.checked_add(backoff).ok_or(())?,
         backoff.saturating_mul(2).min(MAX_BACKOFF),
@@ -385,11 +399,27 @@ mod tests {
         let mut backoff = FIRST_BACKOFF;
         for expected in [5, 10, 20, 40, 60, 60] {
             assert_eq!(backoff, Duration::from_secs(expected));
-            let (next, doubled) = retry_after(now, backoff).unwrap();
+            let (next, doubled) = retry_after(now, backoff, Duration::ZERO).unwrap();
             assert_eq!(next.duration_since(now), backoff);
             backoff = doubled;
         }
         assert_eq!(backoff, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn expired_room_rejoins_at_once_and_resets_backoff() {
+        let now = Instant::now();
+        let quick = ROOM_EXPIRED - Duration::from_millis(1);
+        assert_eq!(
+            retry_after(now, MAX_BACKOFF, quick).unwrap(),
+            (now + MAX_BACKOFF, MAX_BACKOFF)
+        );
+        for waited in [ROOM_EXPIRED, relay_service::CLIENT_RENDEZVOUS_TIMEOUT] {
+            assert_eq!(
+                retry_after(now, MAX_BACKOFF, waited).unwrap(),
+                (now, FIRST_BACKOFF)
+            );
+        }
     }
 
     #[test]

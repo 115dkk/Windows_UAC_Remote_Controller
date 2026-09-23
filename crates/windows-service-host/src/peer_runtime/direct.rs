@@ -91,6 +91,11 @@ impl ServiceSession<'_> {
             return Err(PeerRuntimeError::Identity);
         }
         let (endpoints, valid_for_seconds) = self.current_direct_candidates();
+        if endpoints.is_empty() && self.direct_candidates_pending() {
+            // An empty answer is a durable withdrawal on the phone. Let this
+            // query lapse instead; the phone keeps its hints and asks again.
+            return Ok(SessionProgress::Idle);
+        }
         let message = UnsignedAddressAdvertisement::new(AddressAdvertisementFields {
             pc: self.engine.pc_identity(),
             epoch: self.engine.boot_epoch(),
@@ -188,6 +193,22 @@ impl ServiceSession<'_> {
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
             (Vec::new(), 0)
+        }
+    }
+
+    /// The gateway owner has not published its first observation, or its
+    /// snapshot is momentarily unreadable or being refreshed.
+    fn direct_candidates_pending(&self) -> bool {
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        {
+            self.embedded_mode
+                && self.direct_gateway.as_ref().is_some_and(|gateway| {
+                    gateway.snapshot().state == relay_service::DirectGatewayState::Discovering
+                })
+        }
+        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        {
+            false
         }
     }
 
