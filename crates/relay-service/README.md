@@ -53,10 +53,12 @@ and begin their actual inner TLS deadline. The marker is not encrypted,
 authenticated or a substitute for that handshake.
 
 A live duplicate role never overwrites or kicks the first waiting participant.
-While a route is active, further registrations for it are rejected rather than
-starting a parallel room. Different routes never cross-connect. Routes disappear
-when their owned participant/pair finishes; stale completion IDs cannot remove
-a newer owner of the same route.
+A fresh registration on an active route evicts that pair (both sockets close)
+and becomes the route's waiting participant, so an endpoint whose old path died
+without a FIN is not locked out until the inactivity timeout; `evicted_pairs`
+counts these. Different routes never cross-connect. Routes disappear when their
+owned participant/pair finishes; stale completion IDs cannot remove a newer
+owner of the same route.
 
 Correct endpoints should wait for the marker before TLS. A cancel-safe one-byte
 read detects a waiting EOF, using the same read path as active copying. If a peer
