@@ -61,3 +61,79 @@ test('closed Rust diagnostic labels remain represented in the export grammar', (
     for (const label of labels) assert.ok(store.includes(`"${label}"`), `Export grammar missing ${label}`);
   }
 });
+
+test('save uses the native document picker without the share chooser or broad storage grants', () => {
+  const exporter = read('src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/AndroidDiagnosticExporter.kt');
+  const save = exporter.split('internal class SaveOperation')[1].split('The single production Interface')[0];
+  assert.match(save, /Intent\.ACTION_CREATE_DOCUMENT/u);
+  assert.match(save, /Intent\.CATEGORY_OPENABLE/u);
+  assert.match(save, /type = "text\/plain"/u);
+  assert.match(save, /uri\?\.scheme != "content"/u);
+  assert.match(save, /openOutputStream\(uri, "wt"\)/u);
+  assert.match(save, /output\.write\(bytes\)/u);
+  assert.match(save, /snapshotBytes\(\)/u);
+  assert.match(save, /!execute \{/u);
+  assert.match(save, /finally \{ release\(\) \}/u);
+  assert.match(save, /val lease = acquire\(\) \?: return null/u);
+  assert.doesNotMatch(save, /ACTION_SEND|createChooser|takePersistableUriPermission|FLAG_GRANT_PERSISTABLE_URI_PERMISSION/u);
+  const manifest = read('src-tauri/gen/android/app/src/main/AndroidManifest.xml');
+  assert.doesNotMatch(manifest, /READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE/u);
+});
+
+test('save picker stays attached to its original physical adapter and reports cancellation separately', () => {
+  const native = read('src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/DeviceStateActivityCommands.kt');
+  const save = native.split('fun saveAndroidDiagnostics(invoke: Invoke)')[1].split('private fun deviceSecure()')[0];
+  assert.match(save, /acceptsNoArguments\(invoke\)/u);
+  assert.match(save, /AndroidDiagnosticExporter\.beginSave\(activity, ::isForeground, \{ matches\(webView\) \}\)/u);
+  assert.doesNotMatch(save, /activityResultRegistry|ActivityResultContracts|UUID|launcher/u);
+  const exporter = read('src-tauri/gen/android/app/src/main/java/dev/dkk115/uacremote/AndroidDiagnosticExporter.kt');
+  const operation = exporter.split('internal class SaveOperation')[1].split('The single production Interface')[0];
+  assert.match(operation, /activity\.activityResultRegistry\.register/u);
+  assert.match(operation, /ActivityResultContracts\.StartActivityForResult\(\)/u);
+  assert.match(operation, /UUID\.randomUUID\(\)/u);
+  assert.match(operation, /if \(!gate\.isOpen\(\)\) return@register/u);
+  assert.match(operation, /if \(!foreground\(stillCurrent\)\) \{ retire\(\); return@register \}/u);
+  assert.match(operation, /cancelled = result\.resultCode == Activity\.RESULT_CANCELED/u);
+  assert.match(operation, /launcher\?\.unregister\(\)/u);
+  assert.match(operation, /\.post \{ operation\.launchPicker\(activity, stillForeground, stillCurrent\) \}/u);
+  assert.match(save, /invoke\.resolveObject\("saved"\)/u);
+  assert.match(save, /invoke\.resolveObject\("cancelled"\)/u);
+  assert.match(native, /diagnosticSave\?\.retire\(\)/u);
+  const commands = read('src-tauri/src/commands.rs').split('pub(crate) async fn save_android_diagnostics(')[1].split('#[tauri::command]')[0];
+  assert.match(commands, /_arguments: crate::mobile::EmptyArguments/u);
+  assert.match(commands, /origin: crate::mobile::CommandOrigin/u);
+  assert.match(commands, /state\.admission\.try_enter\(\)/u);
+  assert.match(commands, /spawn_blocking/u);
+});
+
+test('native save/provider instrumentation is required on the guarded lifecycle AVD', () => {
+  const runner = read('tools/android-language-ci.mjs');
+  assert.match(runner, /process\.env\.CI !== 'true' \|\| process\.env\.GITHUB_ACTIONS !== 'true'/u);
+  assert.match(runner, /uac-lifecycle-ci-36-x86_64/u);
+  assert.match(runner, /dev\.dkk115\.uacremote\.AndroidDiagnosticSaveInstrumentationTest/u);
+  assert.match(runner, /diagnostic-save-tests\.txt/u);
+  assert.match(runner, /assert\.match\(saveOutput/u);
+  assert.match(runner, /assert\.doesNotMatch\(saveOutput/u);
+  assert.match(runner, /'diagnosticCapture','uac-lifecycle-ci-36-x86_64'/u);
+  assert.match(runner, /finally \{[\s\S]*'picker-ready', 'before-save', 'picker-failure'/u);
+  assert.match(runner, /\/sdcard\/Android\/data\/dev\.dkk115\.uacremote\/files\//u);
+  const native = read('src-tauri/gen/android/app/src/androidTest/java/dev/dkk115/uacremote/AndroidDiagnosticSaveInstrumentationTest.kt');
+  assert.match(native, /AndroidDiagnosticExporter\.beginSave/u);
+  assert.doesNotMatch(native, /activityResultRegistry|ActivityResultContracts|saveDocumentIntent/u);
+  assert.match(native, /KEYCODE_BACK/u);
+  assert.match(native, /DiagnosticSaveOutcome\.CANCELLED/u);
+  assert.match(native, /DiagnosticSaveOutcome\.SAVED/u);
+  assert.match(native, /selectDownloadsRoot\(\)/u);
+  assert.match(native, /executeShellCommand\("head -c 393217 \/sdcard\/Download\/\$name"\)/u);
+  assert.match(native, /bytes\.size in 1\.\.\(384 \* 1024\)/u);
+  assert.match(native, /capturePicker\("picker-ready"\)/u);
+  assert.match(native, /capturePicker\("before-save"\)/u);
+  assert.match(native, /capturePicker\("picker-failure"\)\s+throw failure/u);
+  assert.match(native, /expectedPackage !in setOf\("com\.android\.documentsui", "com\.google\.android\.documentsui"\)/u);
+  assert.match(native, /Build\.HARDWARE !in setOf\("ranchu", "goldfish"\)/u);
+  assert.match(native, /count < 256 && text\.length < 48 \* 1024/u);
+  assert.match(native, /uiAutomation\.takeScreenshot\(\)/u);
+  assert.match(native, /bitmap\.width\.toLong\(\) \* bitmap\.height > 4_194_304L/u);
+  assert.match(native, /image\.size\(\) <= 4 \* 1024 \* 1024/u);
+  assert.match(native, /finally \{ bitmap\.recycle\(\) \}/u);
+});

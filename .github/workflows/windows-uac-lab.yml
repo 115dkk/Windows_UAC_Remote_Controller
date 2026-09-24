@@ -15,12 +15,10 @@ name: Windows UAC lab (disposable runner)
 # Synthetic CA/KSP never ship. No developer-PC or phone-hardware proof is implied.
 
 on:
+  # Release requires native proof for the exact tagged SHA, including commits
+  # that change only Android/shared code or packaging, so no path filter.
+  pull_request:
   workflow_dispatch:
-  push:
-    branches: [main, 'codex/native-runtime']
-    # Release requires native proof for the exact tagged SHA, including commits
-    # that change only Android/shared code or packaging. Path-filtered evidence
-    # from a previous commit cannot satisfy that publication gate.
 
 permissions:
   contents: read

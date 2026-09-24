@@ -6,16 +6,16 @@
     <string name="controller_service_channel_description">Mostra se a aprovação pelo telemóvel está ativa e a aplicação está pronta.</string>
     <string name="controller_service_locked">Desbloqueie o telemóvel para preparar a aplicação.</string>
     <string name="controller_service_preparing">A preparar a aplicação.</string>
-    <string name="controller_service_ready">As definições da aplicação estão disponíveis.</string>
+    <string name="controller_service_ready">Aprovação pelo telemóvel ativada</string>
     <string name="controller_service_cleanup">A concluir a operação anterior.</string>
     <string name="controller_service_unavailable">Não foi possível preparar a aplicação. Abra-a para verificar o estado.</string>
     <string name="controller_service_stopping">A desativar a aprovação pelo telemóvel.</string>
     <string name="request_channel_sound">Alertas de pedidos · Som</string>
     <string name="request_channel_vibration">Alertas de pedidos · Vibração</string>
     <string name="request_channel_silent">Alertas de pedidos · Silencioso</string>
-    <string name="request_channel_description">Notifica sobre pedidos do computador.</string>
-    <string name="request_notification_title">Pedido de aprovação do UAC</string>
-    <string name="request_computer_context">Computador emparelhado</string>
+    <string name="request_channel_description">Notifica sobre pedidos de permissão de administrador do PC.</string>
+    <string name="request_notification_title">Pedido de aprovação de permissão de administrador</string>
+    <string name="request_computer_context">PC emparelhado</string>
     <string name="request_notification_public_body">Abra a aplicação para ver os detalhes.</string>
     <string name="request_action_approve">Aprovar</string>
     <string name="request_action_deny">Recusar</string>
@@ -25,7 +25,7 @@
     <string name="request_permission_missing">Permita as notificações de pedidos.</string>
     <string name="request_notifications_disabled">As notificações de pedidos estão desativadas.</string>
     <string name="request_notifications_next">Verifique as definições de notificações do telemóvel.</string>
-    <string name="approval_auth_title">Aprovar pedido do computador</string>
+    <string name="approval_auth_title">Aprovar pedido do PC</string>
     <string name="approval_auth_description">Autentique-se no telemóvel para aprovar este pedido.</string>
     <string name="lock_settings_pending">As definições de segurança já estão a abrir.</string>
     <string name="invalid_device_state_arguments">Não foi possível processar este pedido. Tente novamente na aplicação.</string>
@@ -42,7 +42,7 @@
     <string name="pairing_scanner_scanning">Aponte a câmara para o QR no ecrã de emparelhamento do PC.</string>
     <string name="pairing_scanner_reading">A verificar o QR.</string>
     <string name="pairing_scanner_read">QR de emparelhamento do PC lido.</string>
-    <string name="pairing_scanner_read_detail">O PC ainda não está emparelhado.</string>
+    <string name="pairing_scanner_read_detail">A iniciar o emparelhamento com o PC.</string>
     <string name="pairing_scanner_connecting">A ligar ao PC.</string>
     <string name="pairing_scanner_connecting_detail">Aguarde um momento.</string>
     <string name="pairing_scanner_compare">Verifique se estes seis dígitos são iguais aos do PC.</string>
@@ -55,11 +55,11 @@
     <string name="pairing_scanner_failed">Não foi possível emparelhar o PC.</string>
     <string name="pairing_scanner_failed_cancelled">Emparelhamento cancelado.</string>
     <string name="pairing_scanner_failed_expired">O tempo de confirmação terminou. Tente novamente no PC.</string>
-    <string name="pairing_scanner_failed_network">Não foi possível aceder ao PC ou ao servidor de retransmissão. Verifique a rede e tente novamente.</string>
+    <string name="pairing_scanner_failed_network">Não foi possível aceder ao PC. Verifique se o PC está ligado e se o telemóvel está na mesma rede Wi-Fi que o PC e tente novamente.</string>
     <string name="pairing_scanner_failed_rejected">O PC recusou o emparelhamento. Consulte as instruções no respetivo ecrã.</string>
     <string name="pairing_scanner_failed_mismatch">As informações do PC e do telemóvel não coincidiram e o emparelhamento foi interrompido. Tente novamente.</string>
-    <string name="pairing_scanner_failed_storage">Não foi possível guardar os dados de emparelhamento no telemóvel.</string>
-    <string name="pairing_scanner_failed_unavailable">O emparelhamento não está disponível agora.</string>
+    <string name="pairing_scanner_failed_storage">Não foi possível guardar os dados de emparelhamento no telemóvel. Feche e volte a abrir a aplicação e tente novamente.</string>
+    <string name="pairing_scanner_failed_unavailable">O emparelhamento não está disponível agora. Feche este ecrã, verifique se a aprovação pelo telemóvel está ativada e tente novamente.</string>
     <string name="pairing_scanner_invalid">Não foi possível ler este QR. Verifique se está no ecrã de emparelhamento do PC e volte a abrir este ecrã.</string>
     <string name="pairing_scanner_expired">O tempo de leitura terminou. Feche e volte a abrir este ecrã.</string>
     <string name="pairing_scanner_closed">Leitura do QR terminada.</string>
@@ -73,5 +73,5 @@
     <string name="request_notification_summary">%1$s\n%2$s</string>
     <string name="pairing_usb_title">Ligar PC por USB</string>
     <string name="pairing_usb_waiting">Ligue o cabo, selecione USB no PC e permita o acesso no Android. Espera máxima: 30 segundos.</string>
-    <string name="pairing_usb_unavailable">Não foi possível ler os dados USB. Verifique o cabo e a permissão USB ou ligue pelo código QR.</string>
+    <string name="pairing_usb_unavailable">Não foi possível receber os dados de ligação do PC. Verifique o cabo e a permissão USB ou ligue pelo código QR.</string>
 </resources>

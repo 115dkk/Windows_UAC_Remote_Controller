@@ -113,10 +113,11 @@ fn independent_base64_oracle_matches_known_padding_free_vectors() {
 #[test]
 fn ipv4_and_ipv6_roundtrip_exact_binary_and_ascii_layout() {
     assert_eq!(MIN_PAIRING_INVITATION_BYTES, 345);
-    assert_eq!(MAX_PAIRING_INVITATION_BYTES, 357);
+    assert_eq!(MAX_V1_BYTES, 357);
+    assert_eq!(MAX_PAIRING_INVITATION_BYTES, 415);
     assert_eq!(PAIRING_INVITATION_QR_PREFIX, "uac-remote:v1:");
     assert_eq!(MIN_PAIRING_INVITATION_QR_TEXT_BYTES, 474);
-    assert_eq!(MAX_PAIRING_INVITATION_QR_TEXT_BYTES, 490);
+    assert_eq!(MAX_PAIRING_INVITATION_QR_TEXT_BYTES, 568);
     for address in [fields().relay_address, ipv6_address()] {
         let mut original = fields();
         original.relay_address = address;
@@ -269,7 +270,7 @@ fn malformed_headers_are_rejected_without_version_or_kind_fallback() {
             PairingInvitationError::InvalidEncoding
         );
     }
-    for version in [0u16, 2, u16::MAX] {
+    for version in [0u16, 3, u16::MAX] {
         let mut bad = wire.clone();
         bad[8..10].copy_from_slice(&version.to_be_bytes());
         assert_eq!(
@@ -293,6 +294,122 @@ fn malformed_headers_are_rejected_without_version_or_kind_fallback() {
             PairingInvitationError::InvalidEncoding
         );
     }
+}
+
+#[test]
+fn alternatives_preserve_v1_or_bind_every_v2_candidate_into_original_digest() {
+    let original = PairingInvitation::new(fields()).unwrap();
+    let empty = original.clone().with_alternatives(Vec::new()).unwrap();
+    assert_eq!(empty.to_wire(), fixture_body(original.fields()));
+    assert_eq!(empty.to_qr_text(), original.to_qr_text());
+    assert_eq!(empty.context_digest(), original.context_digest());
+    let alternatives = vec!["10.0.0.50:7443".parse().unwrap(), ipv6_address()];
+    let v2 = original
+        .clone()
+        .with_alternatives(alternatives.clone())
+        .unwrap();
+    assert_eq!(v2.fields(), original.fields());
+    assert_eq!(
+        v2.candidates(),
+        [vec![fields().relay_address], alternatives].concat()
+    );
+    let mut expected = fixture_body(v2.fields());
+    expected[9] = 2;
+    expected.extend_from_slice(&[2, 4, 0x1d, 0x13, 10, 0, 0, 50, 6, 0x1d, 0x13]);
+    expected.extend_from_slice(&"2001:db8::42".parse::<Ipv6Addr>().unwrap().octets());
+    assert_eq!(v2.to_wire(), expected);
+    assert_eq!(
+        v2.to_qr_text(),
+        format!("uac-remote:v2:{}", reference_base64_url(&expected))
+    );
+    assert_eq!(PairingInvitation::from_wire(&expected).unwrap(), v2);
+    assert_eq!(
+        PairingInvitation::from_qr_text(&v2.to_qr_text()).unwrap(),
+        v2
+    );
+    assert_ne!(original.context_digest(), v2.context_digest());
+    let mut hash = Sha256::new();
+    hash.update(b"Windows-UAC-Remote-Controller/pairing-invitation/v2\0");
+    hash.update(&expected);
+    assert_eq!(
+        v2.context_digest().as_bytes(),
+        &<[u8; 32]>::from(hash.finalize())
+    );
+    let mut mutated = expected.clone();
+    mutated[352] ^= 1;
+    assert_ne!(
+        PairingInvitation::from_wire(&mutated)
+            .unwrap()
+            .context_digest(),
+        v2.context_digest()
+    );
+    let mut reordered = v2.candidates()[1..].to_vec();
+    reordered.reverse();
+    assert_ne!(
+        original
+            .with_alternatives(reordered)
+            .unwrap()
+            .context_digest(),
+        v2.context_digest()
+    );
+    assert!(PairingInvitation::from_qr_text(&fixture_text(&expected)).is_err());
+    let v1_with_v2_prefix = empty
+        .to_qr_text()
+        .replacen("uac-remote:v1:", "uac-remote:v2:", 1);
+    assert!(PairingInvitation::from_qr_text(&v1_with_v2_prefix).is_err());
+}
+
+#[test]
+fn alternatives_are_bounded_unique_strict_and_require_nonempty_v2_suffix() {
+    let original = PairingInvitation::new(fields()).unwrap();
+    let endpoint: SocketAddr = "10.0.0.50:7443".parse().unwrap();
+    for alternatives in [
+        vec![fields().relay_address],
+        vec![endpoint; 2],
+        vec![endpoint; 4],
+        vec!["127.0.0.1:7443".parse().unwrap()],
+    ] {
+        assert!(original.clone().with_alternatives(alternatives).is_err());
+    }
+    let mut v2 = original
+        .clone()
+        .with_alternatives(vec![endpoint])
+        .unwrap()
+        .to_wire();
+    for length in 0..v2.len() {
+        assert!(PairingInvitation::from_wire(&v2[..length]).is_err());
+    }
+    for count in [0, 2, 4, 255] {
+        let mut bad = v2.clone();
+        bad[345] = count;
+        assert!(PairingInvitation::from_wire(&bad).is_err());
+    }
+    v2.push(0);
+    assert!(PairingInvitation::from_wire(&v2).is_err());
+    let mut legacy = original.to_wire();
+    legacy[9] = 2;
+    assert!(PairingInvitation::from_wire(&legacy).is_err());
+    legacy.push(0);
+    assert!(PairingInvitation::from_wire(&legacy).is_err());
+    let mut maximum = fields();
+    maximum.relay_address = ipv6_address();
+    let maximum = PairingInvitation::new(maximum)
+        .unwrap()
+        .with_alternatives(vec![
+            "[2001:db8::1]:7443".parse().unwrap(),
+            "[2001:db8::2]:7443".parse().unwrap(),
+            "[2001:db8::3]:7443".parse().unwrap(),
+        ])
+        .unwrap();
+    assert_eq!(maximum.to_wire().len(), MAX_PAIRING_INVITATION_BYTES);
+    assert_eq!(
+        maximum.to_qr_text().len(),
+        MAX_PAIRING_INVITATION_QR_TEXT_BYTES
+    );
+    assert_eq!(
+        PairingInvitation::from_qr_text(&maximum.to_qr_text()).unwrap(),
+        maximum
+    );
 }
 
 #[test]

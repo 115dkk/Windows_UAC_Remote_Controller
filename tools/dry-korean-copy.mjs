@@ -12,7 +12,7 @@ const endings = [
   ['선택하세요', '선택하십시오'], ['확인하세요', '확인하십시오'],
   ['완료하세요', '완료하십시오'], ['정하세요', '설정하십시오'],
   ['여세요', '여십시오'], ['보세요', '확인하십시오'],
-  ['기다리고 있어요', '대기 중입니다'], ['진행하고 있어요', '진행 중입니다'],
+  ['기다리고 있어요', '기다리는 중입니다'], ['진행하고 있어요', '진행 중입니다'],
   ['준비하고 있어요', '준비 중입니다'], ['불러오고 있어요', '불러오는 중입니다'],
   ['확인하고 있어요', '확인 중입니다'], ['연결하고 있어요', '연결 중입니다'],
   ['정리하고 있어요', '정리 중입니다'], ['보내고 있어요', '전송 중입니다'],
@@ -42,32 +42,25 @@ export function dryCopy(text) {
 const path = 'locales/ko.json';
 const catalog = JSON.parse(readFileSync(path, 'utf8'));
 for (const key of Object.keys(catalog)) catalog[key] = dryCopy(catalog[key]);
-Object.assign(catalog, {
+// Fixed values for keys whose authored source still differs from the shown
+// Korean. Only keys that still exist are touched, so a re-run never adds a
+// retired key back. Keys whose source is already the shown text (the formal
+// copy of the 1.5.1 cleanup, e.g. '휴대폰 승인 켜짐') have no override here:
+// an override would turn them back into '서비스 …' wording.
+const overrides = {
   'UAC 원격 승인': 'UAC 원격 승인기',
-  'PC 승인을 휴대폰에서': 'UAC 원격 승인기',
-  'PC 요청을 휴대폰으로 보낼 준비가 됐어요.': '요청 전송 준비됨',
-  'PC 요청을 휴대폰으로 보낼 준비가 아직 되지 않았어요.': '요청 전송 준비 안 됨',
-  '이 PC에서 실행': 'PC 서비스',
-  '휴대폰 승인 켜짐': '서비스 실행 중',
-  '휴대폰 승인 꺼짐': '서비스 중지됨',
   '기다리는 요청이 없어요': '승인 요청 없음',
   '연결된 기기를 확인할 수 없어요': '연결 목록 확인 불가',
   '활동 기록을 확인할 수 없어요': '활동 기록 확인 불가',
   '숫자가 같아요': '숫자 일치',
-  'PC 연결 기능을 제거할까요?': 'PC 연결 기능 제거',
-  '기기 연결을 해제할까요?': '기기 연결 해제',
   '활동 기록을 지울까요?': '활동 기록 삭제',
-  '이 PC에서 휴대폰 승인을 끌까요?': 'PC 서비스 중지',
-  '이 휴대폰에서 휴대폰 승인을 끌까요?': '휴대폰 서비스 중지',
-  '휴대폰 승인을 다시 켤까요?': '서비스 다시 시작',
   'PC 또는 휴대폰의 응답을 기다리고 있어요.': 'PC 또는 휴대폰의 응답을 기다리는 중입니다.',
   'Windows의 처리 결과를 기다리고 있어요.': 'Windows 처리 결과 대기 중입니다.',
   '응답을 기다리고 있어요.': '응답 대기 중입니다.',
-  '컴퓨터와 연결을 기다리고 있어요': 'PC 연결 대기 중',
   '휴대폰 잠금 해제를 기다리고 있어요': '휴대폰 잠금 해제 대기 중',
-  '내장 중계가 네트워크를 기다리고 있어요.': '내장 중계: 네트워크 연결 대기 중',
   'PC의 UAC 원격 승인 앱에서 ‘휴대폰 관리’ → ‘UAC 원격 승인’을 눌러 QR 코드를 여세요. 아래 버튼을 누르면 이 앱에서 카메라가 열려요.': 'PC의 UAC 원격 승인기에서 ‘휴대폰 관리’ → ‘QR 코드 보기’를 선택하십시오. 아래 버튼으로 QR 코드를 촬영할 수 있습니다.',
-});
+};
+for (const [key, value] of Object.entries(overrides)) if (Object.hasOwn(catalog, key)) catalog[key] = value;
 writeFileSync(path, JSON.stringify(catalog, null, 2) + '\n');
 const android = 'src-tauri/gen/android/app/src/main/res/values-ko/strings.xml';
 writeFileSync(android, dryCopy(readFileSync(android, 'utf8')));

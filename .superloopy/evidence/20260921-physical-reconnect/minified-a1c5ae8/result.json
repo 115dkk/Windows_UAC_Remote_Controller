@@ -1,0 +1,17 @@
+{
+  "source": "current",
+  "commit": "a1c5ae8d925486d13964cb3b38966d4979f39324",
+  "release": true,
+  "minified": true,
+  "pregrantedCameraPermission": true,
+  "pairedPcCount": 0,
+  "physicalDeviceVerified": false,
+  "authenticationVerified": false,
+  "checks": [
+    "unpaired-native-owner-ready",
+    "actual-client-button-opens-native-scanner-before-pairing",
+    "notification-settings-available-before-pairing",
+    "actual-pc-list-qr-usb-action-spacing"
+  ],
+  "passed": true
+}

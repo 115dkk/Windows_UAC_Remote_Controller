@@ -28,7 +28,7 @@ mod transport;
 pub use approval::{
     NativeApprovalAttempt, NativeApprovalPlan, NativeApprovalSubmission, NativeRequestSelection,
 };
-pub use connectivity::NativeConnectivityStatus;
+pub use connectivity::{NativeConnectivityStatus, NativeDialFailure, NativePcConnection};
 pub use denial::{
     NativeApprovalDrainState, NativeDenialAdvance, NativeDenialAttempt, NativeDenialOperationState,
     NativeDenialScope, NativeDenialWait,
@@ -44,9 +44,10 @@ pub use pairing::{
     NativeKeyCreationRequest, NativePairingCeremony, NativePairingScan, NativePairingScanResult,
 };
 pub use request_projection::{
-    NativePairedPc, NativePendingRequest, NativeRequestAlert, NativeRequestCatalogState,
-    NativeRequestCatalogStatus, NativeRequestDetails, NativeRequestNotPosted,
-    NativeRequestPresentation, NativeRequestPreview, NativeRequestSinkOutcome,
+    NativeOutcomeKind, NativeOutcomeReceipt, NativePairedPc, NativePendingRequest,
+    NativeRequestAlert, NativeRequestCatalogState, NativeRequestCatalogStatus,
+    NativeRequestDetails, NativeRequestNotPosted, NativeRequestPresentation, NativeRequestPreview,
+    NativeRequestSinkOutcome,
 };
 pub use transport::{
     NativeCertificateVerify, NativeTransportBinding, native_client_transport_identity,
@@ -331,7 +332,7 @@ impl Drop for MobileController {
 
 #[uniffi::export]
 pub fn bridge_version() -> u32 {
-    13
+    15
 }
 
 #[uniffi::export]
@@ -463,6 +464,28 @@ enum OpenMode {
 }
 
 impl MobileController {
+    /// Best-effort diagnostic observation, never a new authorization clock gate.
+    /// Only owner-committed pending outcomes reach this private native method.
+    fn observe_outcome_receipts(&self, pending: &[phone_request_core::PendingOutcome]) {
+        if pending.is_empty() {
+            return;
+        }
+        let Ok((boot, clock)) =
+            native_clock::native_callback(|| self.platform.clock()).and_then(map_clock)
+        else {
+            return;
+        };
+        let now = clock.phone_monotonic_nanos();
+        if boot != self.boot || now < self.native_floor_nanos.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut projections) = self.projections.lock() {
+            for outcome in pending {
+                let _ = projections.observe_outcome(*outcome, now);
+            }
+        }
+    }
+
     fn maintain_history_while_admitted(&self) -> Result<(), BridgeError> {
         // Callback/shape rejection is BEFORE any storage intent or ACK. A valid
         // backwards wall-clock observation is acceptable; monotonic request time
@@ -477,6 +500,7 @@ impl MobileController {
                 .map_err(|_| BridgeError::StorageUnavailable)?
                 .to_vec())
         })?;
+        self.observe_outcome_receipts(&pending);
         for outcome in pending {
             self.observe_denial_terminal(outcome);
         }

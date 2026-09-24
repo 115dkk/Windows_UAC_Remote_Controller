@@ -7,7 +7,7 @@ use presentation_i18n::LanguageSettings;
 fn issue() -> AppIssue {
     AppIssue {
         code: "language_unavailable",
-        message: "언어 설정을 저장하지 못했어요. 다시 시도해 주세요.",
+        message: "언어 설정을 저장하지 못했습니다. 다시 시도하십시오.",
         next_action: None,
     }
 }

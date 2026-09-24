@@ -32,7 +32,7 @@ export function LanguageSettings({ onClose }: {onClose: () => void}) {
     </fieldset>
     <p id={hint} className="supporting-text">{tr('시스템 언어에 맞춰 표시합니다. 지원하지 않는 언어는 영어로 표시합니다.')}</p>
     <p className="supporting-text">{tr('언어를 바꿔도 PC 요청, 파일 경로와 연결 확인 숫자는 원문 그대로 표시합니다.')}</p>
-    {error && <p role="alert">{tr('언어 설정을 저장하지 못했어요. 다시 시도해 주세요.')}</p>}
+    {error && <p role="alert">{tr('언어 설정을 저장하지 못했습니다. 다시 시도하십시오.')}</p>}
     <div className="dialog-actions"><button type="button" className="button secondary" disabled={saving} onClick={onClose}>{tr('취소')}</button><button type="button" className="button primary" disabled={saving} onClick={() => { void save(); }}>{tr('적용')}</button></div>
   </dialog>;
 }

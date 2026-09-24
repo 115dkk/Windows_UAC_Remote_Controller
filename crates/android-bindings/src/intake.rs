@@ -206,7 +206,7 @@ impl IntakeOwner {
     pub(crate) fn spawn_dial(
         &self,
         request: crate::connectivity::DialRequest,
-    ) -> Result<(), crate::connectivity::DialRequest> {
+    ) -> Result<(), Box<crate::connectivity::DialRequest>> {
         let sender = self
             .inner
             .lock()
@@ -215,9 +215,11 @@ impl IntakeOwner {
             .as_ref()
             .map(|runtime| runtime.dial_sender.clone());
         let Some(sender) = sender else {
-            return Err(request);
+            return Err(Box::new(request));
         };
-        sender.try_send(request).map_err(|error| error.into_inner())
+        sender
+            .try_send(request)
+            .map_err(|error| Box::new(error.into_inner()))
     }
     pub(crate) fn take_dial_completions(&self) -> Vec<crate::connectivity::DialCompletion> {
         std::mem::take(
@@ -479,6 +481,24 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
     ) -> Result<IntakePeerId, BridgeError> {
+        self.attach_stream(association, stream, None)
+    }
+
+    pub(crate) fn attach_network_stream(
+        self: &Arc<Self>,
+        association: PeerAssociationRef,
+        stream: std::net::TcpStream,
+        network_stop: &CancellationToken,
+    ) -> Result<IntakePeerId, BridgeError> {
+        self.attach_stream(association, stream, Some(network_stop))
+    }
+
+    fn attach_stream(
+        self: &Arc<Self>,
+        association: PeerAssociationRef,
+        stream: std::net::TcpStream,
+        network_stop: Option<&CancellationToken>,
+    ) -> Result<IntakePeerId, BridgeError> {
         struct Carrier {
             socket: Option<std::net::TcpStream>,
             lease: Option<NativePeerLease>,
@@ -488,6 +508,11 @@ impl MobileController {
             lease: None,
         };
         let _admission = self.enter()?;
+        // network_changed holds this same admission while cancelling and
+        // retiring. Checking only before enter would permit a stale dial race.
+        if network_stop.is_some_and(CancellationToken::is_cancelled) {
+            return Err(BridgeError::Closed);
+        }
         if !self.approval_alive.load(Ordering::Acquire) {
             return Err(BridgeError::Closed);
         }
@@ -984,6 +1009,9 @@ fn process_parked(
 ) -> Result<Option<PeerOwned>, BridgeError> {
     match work {
         Parked::Attach(value) => {
+            if value.completion.control.stop.is_cancelled() {
+                return Ok(None);
+            }
             let PreparedAttach {
                 socket,
                 identity,
@@ -1113,6 +1141,19 @@ fn process_parked(
                         .native_progress_pending
                         .store(true, Ordering::Release);
                 }
+                PeerWork::Event(Ok(PcSocketEvent::Addresses(message))) => {
+                    let now = owner.read_clock()?;
+                    let result = owner.with_inbox(|inbox| {
+                        Ok(owned.socket.apply_routing_candidates(inbox, *message, now))
+                    })?;
+                    match result {
+                        Ok(()) => (),
+                        Err(android_controller::PeerSocketError::Persistence(_)) => {
+                            return Err(BridgeError::StorageUnavailable);
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
                 PeerWork::Event(Ok(PcSocketEvent::OutboundDrained)) => {
                     owner
                         .intake
@@ -1150,6 +1191,19 @@ fn process_parked(
                 PeerWork::Probe => {
                     queue_probe(owner, &mut owned)?;
                 }
+            }
+            let now = owner.read_clock()?;
+            match owner
+                .with_inbox(|inbox| Ok(owned.socket.refresh_routing_candidates(inbox, now)))?
+            {
+                Ok(())
+                | Err(android_controller::PeerSocketError::Socket(
+                    framed_transport::SocketError::Transport(
+                        framed_transport::TransportError::Busy
+                        | framed_transport::TransportError::NotReady,
+                    ),
+                )) => (),
+                Err(_) => return Ok(None),
             }
             if owned.socket.observe_liveness().is_err() {
                 return Ok(None);

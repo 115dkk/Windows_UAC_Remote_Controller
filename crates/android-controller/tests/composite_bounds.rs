@@ -35,8 +35,8 @@ use service_protocol::{
 const MILLI: u64 = 1_000_000;
 const RECORD_CAP: usize = 512;
 const BODY_MARKER: &str = "SYNTHETIC_COMPOSITE_BODY_NOT_PERSISTED";
-// Published v3 format sizes; no access to private constructors or state fields.
-const COMPOSITE_HEADER_BYTES: usize = 26;
+// Published v4 header plus empty routing book; no private constructor access.
+const COMPOSITE_HEADER_BYTES: usize = 32;
 const HISTORY_HEADER_BYTES: usize = 22;
 
 fn pc(peer: u16) -> PcIdentity {
@@ -251,15 +251,17 @@ fn envelope(inbox: &[u8], history: &[u8], keys: &[u8], peers: &[u8]) -> Vec<u8> 
         COMPOSITE_HEADER_BYTES + inbox.len() + history.len() + keys.len() + peers.len(),
     );
     bytes.extend_from_slice(b"UACOWNR\0");
-    bytes.extend_from_slice(&3_u16.to_be_bytes());
+    bytes.extend_from_slice(&4_u16.to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(inbox.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(history.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(keys.len()).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u32::try_from(peers.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
     bytes.extend_from_slice(inbox);
     bytes.extend_from_slice(history);
     bytes.extend_from_slice(keys);
     bytes.extend_from_slice(peers);
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
     bytes
 }
 
@@ -448,6 +450,33 @@ fn maximum_four_components_roundtrip_within_the_unchanged_snapshot_cap() {
     let encoded = composite.to_bytes().unwrap();
     assert_eq!(encoded, bytes);
     assert!(encoded.len() <= MAX_SNAPSHOT_BYTES);
+    // Maximum routing coordinates are an independent fifth component. They
+    // must fit without shrinking history/replay/source limits or changing pins.
+    let mut routing = 32u16.to_be_bytes().to_vec();
+    for peer in peers.entries() {
+        routing.extend_from_slice(peer.descriptor().pc().as_bytes());
+        routing.extend_from_slice(&peer.generation().to_be_bytes());
+        routing.push(4);
+        for last in 1..=4_u8 {
+            routing.push(6);
+            let mut ip = [0; 16];
+            ip[..4].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+            ip[15] = last;
+            routing.extend_from_slice(&ip);
+            routing.extend_from_slice(&443u16.to_be_bytes());
+        }
+    }
+    let mut maximum = encoded[..encoded.len() - 2].to_vec();
+    maximum[26..30].copy_from_slice(&(routing.len() as u32).to_be_bytes());
+    maximum.extend_from_slice(&routing);
+    assert!(maximum.len() <= MAX_SNAPSHOT_BYTES);
+    let maximum_checkpoint = ControllerCheckpoint::from_bytes(&maximum).unwrap();
+    assert_eq!(maximum_checkpoint.to_bytes().unwrap(), maximum);
+    assert_eq!(
+        maximum_checkpoint.peer_associations().to_bytes().unwrap(),
+        peer_bytes
+    );
+    assert_eq!(maximum_checkpoint.local_keys(), &keys);
     let reread = ControllerCheckpoint::from_bytes(&encoded).unwrap();
     let (restored, update) =
         PhoneInbox::restore_checkpoint(reread.inbox().clone(), boot(), clock(1)).unwrap();

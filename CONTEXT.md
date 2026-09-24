@@ -39,6 +39,12 @@ not a general remote desktop or arbitrary remote execution tool.
 - **Activity journal**: bounded, expiring operational history with typed events.
   It is not an authorization registry or a tamper-proof audit trail. It must not
   contain passwords, private keys, QR secrets or full command lines.
+- **Mapping obligation**: one owned PCP mapping's exact local/gateway path,
+  server-scoped nonce and actual granted expiry, retained for bounded cleanup.
+  Route displacement withdraws its candidate without erasing the obligation;
+  only the matching restored path can attempt cleanup, including at shutdown.
+  An unanswered cleanup is not evidence that the mapping disappeared. This
+  routing ownership grants no peer or request authorization.
 - **Release metadata**: the common product version in package.json, the root
   package-lock entries, Tauri configuration, Cargo workspace and owned Cargo.lock
   packages. Main preparation and tagged publication share its consistency checks;

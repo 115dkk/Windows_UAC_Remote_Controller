@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Safe delegation to the reviewed Windows-only service owner. No local FFI.
 
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use windows_service_host::{
     ControlOutcome, InstallationState, ServiceControlIntent, ServiceError, ServiceOperation,
@@ -9,13 +13,43 @@ use windows_service_host::{
 };
 
 use crate::{
-    ControlHint, ManagementDevice, ManagementObservation, ObservedServiceState, PlatformAdapter,
-    PlatformError, RelayMode, RelayState, RelayStatusView, ServiceAction, ServiceCommandOutcome,
-    ServiceObservation, ServiceState,
+    ControlHint, ExternalAccess, ManagementDevice, ManagementObservation, ObservedServiceState,
+    PlatformAdapter, PlatformError, RelayMode, RelayState, RelayStatusView, ServiceAction,
+    ServiceCommandOutcome, ServiceObservation, ServiceState,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowsPlatformAdapter;
+
+/// The optional status reads get one connect attempt each after the pipe
+/// rearms, so a busy service misses one now and then. A missed read keeps the
+/// last answer for this long instead of flashing "unknown"; a service that
+/// keeps not answering still shows as unknown after it.
+const OPTIONAL_READ_HOLD: Duration = Duration::from_secs(30);
+static LAST_DIRECT: Mutex<Option<(Instant, crate::DirectConnectionState)>> = Mutex::new(None);
+static LAST_EXTERNAL: Mutex<Option<(Instant, crate::ExternalAccessView)>> = Mutex::new(None);
+
+fn held<T: Clone>(slot: &Mutex<Option<(Instant, T)>>, fresh: Option<T>) -> Option<T> {
+    match slot.lock() {
+        Ok(mut slot) => hold(&mut slot, fresh, Instant::now()),
+        Err(_) => fresh,
+    }
+}
+
+fn hold<T: Clone>(slot: &mut Option<(Instant, T)>, fresh: Option<T>, now: Instant) -> Option<T> {
+    if let Some(value) = fresh {
+        *slot = Some((now, value.clone()));
+        return Some(value);
+    }
+    let kept = slot
+        .as_ref()
+        .filter(|(at, _)| now.saturating_duration_since(*at) <= OPTIONAL_READ_HOLD)
+        .map(|(_, value)| value.clone());
+    if kept.is_none() {
+        *slot = None;
+    }
+    kept
+}
 
 impl PlatformAdapter for WindowsPlatformAdapter {
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError> {
@@ -35,10 +69,45 @@ impl PlatformAdapter for WindowsPlatformAdapter {
         else {
             return Err(PlatformError::StatusUnavailable);
         };
+        // Independent optional read: old services do not implement it. Never
+        // let a refusal invent a candidate or hide a valid ordinary snapshot.
+        let internet_state = if embedded_relay && relay_listening {
+            let fresh = match windows_service_host::management_direct_query() {
+                Ok(ManagementResponse::DirectStatus {
+                    embedded_relay: true,
+                    relay_listening: true,
+                    state,
+                }) => Some(project_direct_state(state)),
+                _ => None,
+            };
+            held(&LAST_DIRECT, fresh)
+        } else {
+            if let Ok(mut last) = LAST_DIRECT.lock() {
+                *last = None;
+            }
+            None
+        };
+        // Independent optional read with the same rule: an older service or a
+        // failed exchange leaves it unobserved and keeps the ordinary snapshot.
+        let external_access = held(
+            &LAST_EXTERNAL,
+            match windows_service_host::management_external_query() {
+                Ok(ManagementResponse::ExternalStatus {
+                    access,
+                    external,
+                    source,
+                    failure,
+                    lan,
+                }) => external_access_view(access, external, source, failure, lan),
+                _ => None,
+            },
+        );
         Ok(ManagementObservation {
+            external_access,
             activity: activity.map(crate::pc_history::project),
             relay_configured: relay.is_some(),
             relay_status: RelayStatusView {
+                internet_state,
                 mode: if embedded_relay {
                     RelayMode::Embedded
                 } else {
@@ -117,6 +186,69 @@ impl PlatformAdapter for WindowsPlatformAdapter {
 
     fn use_embedded_relay(&self) -> Result<(), PlatformError> {
         completed_mutation(ServiceControlIntent::UseEmbeddedRelay)
+    }
+
+    fn set_external_access(&self, access: ExternalAccess) -> Result<(), PlatformError> {
+        // Checked again here so no invalid value can reach an elevation prompt.
+        let access = access
+            .validated()
+            .map_err(|_| PlatformError::ControlFailed)?;
+        completed_mutation(ServiceControlIntent::SetExternalAccess(access))
+    }
+}
+
+/// Addresses are rendered `ip:port` (IPv6 in brackets); the LAN address is
+/// the IP alone. `None` if the service sent an unusable combination.
+fn external_access_view(
+    access: ExternalAccess,
+    external: Option<SocketAddr>,
+    source: Option<direct_network::CandidateSource>,
+    failure: Option<direct_network::DirectFailure>,
+    lan: Option<SocketAddr>,
+) -> Option<crate::ExternalAccessView> {
+    use crate::{ExternalAccessFailure as Failure, ExternalAccessMode as Mode};
+    use direct_network::{CandidateSource as Source, DirectFailure};
+    let (mode, external_port, fixed_address) = match access.validated().ok()? {
+        ExternalAccess::Automatic => (Mode::Automatic, None, None),
+        ExternalAccess::RouterForward { external_port } => {
+            (Mode::RouterForward, Some(external_port), None)
+        }
+        ExternalAccess::Fixed { address } => (Mode::Fixed, None, Some(address.to_string())),
+    };
+    crate::ExternalAccessView {
+        mode,
+        external_port,
+        fixed_address,
+        external_address: external.map(|address| address.to_string()),
+        source: source.map(|source| match source {
+            Source::Pcp => crate::ExternalCandidateSource::Pcp,
+            Source::Upnp => crate::ExternalCandidateSource::Upnp,
+            Source::Stun => crate::ExternalCandidateSource::Stun,
+            Source::Fixed => crate::ExternalCandidateSource::Fixed,
+            Source::PublicInterface => crate::ExternalCandidateSource::PublicInterface,
+        }),
+        lan_address: lan.map(|address| address.ip().to_string()),
+        relay_port: windows_service_host::EMBEDDED_RELAY_PORT,
+        failure: failure.map(|failure| match failure {
+            DirectFailure::NoMappingProtocol => Failure::NoMappingProtocol,
+            DirectFailure::PrivateExternalAddress => Failure::PrivateExternalAddress,
+            DirectFailure::PublicAddressUnavailable => Failure::PublicAddressUnavailable,
+        }),
+    }
+    .checked()
+}
+
+fn project_direct_state(
+    state: windows_service_host::management_protocol::DirectConnectionState,
+) -> crate::DirectConnectionState {
+    use windows_service_host::management_protocol::DirectConnectionState as Native;
+    match state {
+        Native::Unknown => crate::DirectConnectionState::Unknown,
+        Native::Discovering => crate::DirectConnectionState::Discovering,
+        Native::LanOnly => crate::DirectConnectionState::LanOnly,
+        Native::Candidate => crate::DirectConnectionState::Candidate,
+        Native::Unavailable => crate::DirectConnectionState::Unavailable,
+        Native::Stopped => crate::DirectConnectionState::Stopped,
     }
 }
 
@@ -226,6 +358,23 @@ mod tests {
     };
 
     #[test]
+    fn a_missed_optional_read_keeps_the_last_answer_only_within_the_hold() {
+        let start = Instant::now();
+        let mut slot = None;
+        assert_eq!(hold(&mut slot, None::<u8>, start), None);
+        assert_eq!(hold(&mut slot, Some(1), start), Some(1));
+        assert_eq!(hold(&mut slot, None, start + OPTIONAL_READ_HOLD), Some(1));
+        assert_eq!(
+            hold(&mut slot, Some(2), start + OPTIONAL_READ_HOLD),
+            Some(2)
+        );
+        let later = start + OPTIONAL_READ_HOLD * 2 + Duration::from_millis(1);
+        assert_eq!(hold(&mut slot, None, later), None);
+        assert!(slot.is_none());
+        assert_eq!(hold(&mut slot, None, later), None);
+    }
+
+    #[test]
     fn lowercase_device_identifier_builds_typed_intent_and_round_trips() {
         for text in [
             "0123456789abcdef0123456789abcdef",
@@ -243,6 +392,87 @@ mod tests {
                 Ok(request)
             );
         }
+    }
+
+    #[test]
+    fn external_status_projects_to_the_pinned_view_for_each_mode() {
+        use direct_network::{CandidateSource, DirectFailure};
+        let lan: SocketAddr = "192.168.1.50:7443".parse().unwrap();
+        let automatic = external_access_view(
+            ExternalAccess::Automatic,
+            None,
+            None,
+            Some(DirectFailure::NoMappingProtocol),
+            Some(lan),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&automatic).unwrap(),
+            serde_json::json!({
+                "mode": "automatic", "externalPort": null, "fixedAddress": null,
+                "externalAddress": null, "source": null, "lanAddress": "192.168.1.50",
+                "relayPort": 7443, "failure": "no_mapping_protocol"
+            })
+        );
+        let forward = external_access_view(
+            ExternalAccess::RouterForward {
+                external_port: 8443,
+            },
+            Some("93.184.216.34:8443".parse().unwrap()),
+            Some(CandidateSource::Stun),
+            None,
+            Some(lan),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&forward).unwrap(),
+            serde_json::json!({
+                "mode": "router_forward", "externalPort": 8443, "fixedAddress": null,
+                "externalAddress": "93.184.216.34:8443", "source": "stun",
+                "lanAddress": "192.168.1.50", "relayPort": 7443, "failure": null
+            })
+        );
+        let fixed_address: SocketAddr = "[2606:4700::1111]:7443".parse().unwrap();
+        let fixed = external_access_view(
+            ExternalAccess::Fixed {
+                address: fixed_address,
+            },
+            Some(fixed_address),
+            Some(CandidateSource::Fixed),
+            None,
+            Some("[2606:4700::5]:7443".parse().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&fixed).unwrap(),
+            serde_json::json!({
+                "mode": "fixed", "externalPort": null,
+                "fixedAddress": "[2606:4700::1111]:7443",
+                "externalAddress": "[2606:4700::1111]:7443", "source": "fixed",
+                "lanAddress": "2606:4700::5", "relayPort": 7443, "failure": null
+            })
+        );
+        // An invalid access or a contradictory observation is not presented.
+        assert!(
+            external_access_view(
+                ExternalAccess::RouterForward { external_port: 0 },
+                None,
+                None,
+                None,
+                None
+            )
+            .is_none()
+        );
+        assert!(
+            external_access_view(
+                ExternalAccess::Automatic,
+                Some("93.184.216.34:7443".parse().unwrap()),
+                None,
+                None,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]

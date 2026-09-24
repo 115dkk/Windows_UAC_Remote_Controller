@@ -176,7 +176,7 @@ try {
     report.checks.push('actual-client-button-opens-native-scanner-before-pairing');
     await clickLabel('닫기');
     await clickLabel('알림 시간');
-    await until(ui, view => Boolean(nodeFor(view, '서비스 실행 중')), 'schedule owner panel');
+    await until(ui, view => Boolean(nodeFor(view, '휴대폰 승인 켜짐')), 'schedule owner panel');
     // The first policy choice can be below the connection and service cards on
     // this fixed Pixel 6 portrait emulator. Exercise scrolling, not DOM injection.
     adb(['shell', 'input', 'swipe', '540', '1800', '540', '850', '400']);

@@ -6,6 +6,7 @@
 //! mapping. Neither keys nor a generic native signing/execution API live here.
 #![forbid(unsafe_code)]
 
+mod address;
 mod clock;
 mod clock_request;
 mod codec;
@@ -13,6 +14,12 @@ mod frame;
 mod message;
 mod pairing;
 
+pub use address::{
+    ADDRESS_QUERY_BYTES, ADDRESS_QUERY_MIN_INTERVAL_SECONDS, AddressAdvertisementFields,
+    AddressControlKind, AddressError, AddressQuery, MAX_ADDRESS_ADVERTISEMENT_BYTES,
+    MAX_ADDRESS_CANDIDATES, MAX_ADDRESS_VALIDITY_SECONDS, SignedAddressAdvertisement,
+    UnsignedAddressAdvertisement, VerifiedAddressAdvertisement, address_control_kind,
+};
 pub use clock::{
     ClockCorrelation, ClockError, ClockProbe, MAX_CLOCK_CORRELATION_AGE_NANOS,
     MAX_CLOCK_PROBE_RTT_NANOS, MappedRequestWindow,

@@ -313,6 +313,39 @@ impl DurableInbox {
         Ok(&self.peer_associations)
     }
 
+    /// Native-only routing update. No association/key/revision or request lifetime
+    /// is changed; generation is checked again immediately before durable commit.
+    pub fn record_routing_candidates(
+        &mut self,
+        reference: PeerAssociationRef,
+        endpoints: Vec<std::net::SocketAddr>,
+    ) -> Result<(), PeerAssociationMutationError> {
+        self.ensure_healthy()
+            .map_err(|fault| PeerAssociationMutationError::Owner(DurableFailure::new(fault)))?;
+        if self.peer_associations.resolve(reference).is_none() {
+            return Err(PeerAssociationMutationError::Rejected(
+                crate::PeerAssociationError::InvalidGeneration,
+            ));
+        }
+        let mut candidate = self.peer_associations.clone();
+        candidate
+            .candidates
+            .replace(reference, endpoints)
+            .map_err(|_| {
+                PeerAssociationMutationError::RejectedCheckpoint(
+                    crate::ControllerCheckpointError::RoutingCandidates,
+                )
+            })?;
+        if candidate == self.peer_associations {
+            return Ok(());
+        }
+        let bytes = self.prevalidate_peer_candidate(&candidate)?;
+        let _committed = self
+            .commit_peer_candidate(candidate, &bytes)
+            .map_err(PeerAssociationMutationError::Owner)?;
+        Ok(())
+    }
+
     /// Internal connection-owner identity; callers must also check health and
     /// current association generation. No handles/storage live inside the Arc.
     pub(crate) fn owner_epoch(&self) -> Arc<()> {

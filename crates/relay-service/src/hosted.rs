@@ -2,7 +2,7 @@
 //! In-process opaque relay owner. No keys, signing or approval capabilities.
 use std::{
     io,
-    net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     thread::{self, JoinHandle},
 };
 
@@ -15,11 +15,40 @@ pub const EMBEDDED_RELAY_PORT: u16 = 7443;
 pub struct HostedRelay {
     stop: CancellationToken,
     worker: Option<JoinHandle<()>>,
+    supports_ipv6: bool,
 }
 
 impl HostedRelay {
     pub fn start(address: SocketAddr) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
+        Self::from_listener(listener, address.is_ipv6())
+    }
+
+    /// A single dual-stack socket feeds a single rendezvous room owner. If the
+    /// OS cannot provide dual stack, use IPv4 only, never two isolated relays.
+    pub fn start_embedded(port: u16) -> io::Result<Self> {
+        let dual_stack = (|| {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )?;
+            socket.set_only_v6(false)?;
+            socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+            socket.listen(128)?;
+            Ok::<TcpListener, io::Error>(socket.into())
+        })();
+        match dual_stack {
+            Ok(listener) => Self::from_listener(listener, true),
+            Err(_) => Self::from_listener(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?, false),
+        }
+    }
+
+    pub fn supports_ipv6(&self) -> bool {
+        self.supports_ipv6
+    }
+
+    fn from_listener(listener: TcpListener, supports_ipv6: bool) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -40,6 +69,7 @@ impl HostedRelay {
         Ok(Self {
             stop,
             worker: Some(worker),
+            supports_ipv6,
         })
     }
 
@@ -87,26 +117,47 @@ impl Drop for HostedRelay {
     }
 }
 
-/// Ask the local routing table for its default IPv4 source address. UDP connect
-/// sets a destination only: no send, DNS lookup or public-IP service is used.
-/// This is a LAN address, not proof of NAT traversal or mobile-network reachability.
-pub fn local_endpoint() -> io::Result<SocketAddr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
-    let address = socket.local_addr()?.ip();
-    if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
-        return Err(io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            "no LAN address",
-        ));
-    }
-    Ok(SocketAddr::new(address, EMBEDDED_RELAY_PORT))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn embedded_dual_stack_uses_one_rendezvous_room_owner() {
+        use crate::{READY_MARKER, Registration, Role, RouteId};
+        use std::io::{Read, Write};
+        let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let host = HostedRelay::start_embedded(port).unwrap();
+        assert!(
+            host.supports_ipv6(),
+            "dual-stack listener required by this native loopback test"
+        );
+        let mut pc = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut phone = std::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)).unwrap();
+        pc.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        phone
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let route = RouteId::new([17; 32]).unwrap();
+        pc.write_all(&Registration::new(Role::Pc, route).to_wire())
+            .unwrap();
+        phone
+            .write_all(&Registration::new(Role::Phone, route).to_wire())
+            .unwrap();
+        let mut marker = [0; READY_MARKER.len()];
+        pc.read_exact(&mut marker).unwrap();
+        assert_eq!(&marker, READY_MARKER);
+        phone.read_exact(&mut marker).unwrap();
+        assert_eq!(&marker, READY_MARKER);
+        // Synthetic opaque bytes, not application authentication/UAC evidence.
+        pc.write_all(b"synthetic").unwrap();
+        let mut payload = [0; 9];
+        phone.read_exact(&mut payload).unwrap();
+        assert_eq!(&payload, b"synthetic");
+        drop(host);
+    }
 
     #[test]
     fn occupied_port_is_not_reported_as_started() {

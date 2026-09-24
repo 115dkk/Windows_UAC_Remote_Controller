@@ -178,9 +178,9 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .radio-option:has(input:disabled), .alert-option:has(input:disabled), .weekday-chip:has(input:disabled), .end-of-day:has(input:disabled), input[type="time"]:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 .pairing-entry { padding: var(--space-5); margin-bottom: var(--space-6); }
 .auxiliary-card { margin-top: var(--space-6); }
-.relay-advanced > h2 { font-size: var(--text-normal); margin-bottom: var(--space-4); }
-.relay-advanced input[type="text"] { min-width: 0; max-width: 100%; }
-.pairing-entry h2 { font-size: var(--text-normal); }
+.relay-advanced > h3 { font-size: var(--text-normal); margin-bottom: var(--space-4); }
+.relay-advanced input[type="text"], .network-field input { min-width: 0; max-width: 100%; min-height: var(--target-desktop); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--text); font-size: var(--text-normal); font-variant-numeric: tabular-nums; }
+.pairing-entry h2, .pairing-entry h3 { font-size: var(--text-normal); }
 .pairing-entry > .supporting-text { margin-top: var(--space-3); }
 .pairing-entry > .button { margin-top: var(--space-4); width: 100%; }
 .refresh-button { flex: 0 0 auto; font-weight: 500; }
@@ -203,6 +203,26 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .state-line.is-success { color: var(--success); }
 .pairing-entry > .relay-state, .service-card > .relay-state { margin-block: var(--space-3) var(--space-4); font-size: var(--text-small); }
 .service-card > .supporting-text { margin-top: var(--space-3); }
+.direct-connection { margin-block: var(--space-3) var(--space-4); }
+.direct-connection > p + p { margin-top: var(--space-2); }
+.service-card > .network-setup-action { margin-bottom: var(--space-4); }
+/* External-access tab: section headings sit above their cards, like the external-relay form. */
+.network-section + .network-section, .network-section + .network-guidance { margin-top: var(--space-8); }
+.network-section > h2, .network-choice > legend { margin-bottom: var(--space-4); }
+.network-section > h2 + .auxiliary-card { margin-top: 0; }
+.network-choice { border: 0; padding: 0; }
+.network-choice > legend { float: left; width: 100%; padding: 0; }
+.network-choice > legend + * { clear: both; }
+.network-card { padding: var(--space-5); }
+.network-card > .relay-state { margin-bottom: var(--space-3); font-size: var(--text-small); }
+.network-card > .network-reason { margin-bottom: var(--space-4); }
+.network-card .status-facts > div + div { margin-top: var(--space-2); }
+.network-option-detail { display: flex; flex-direction: column; gap: var(--space-4); padding-inline-start: calc(1.125rem + var(--space-3)); margin-block: var(--space-2) var(--space-3); }
+.network-option-detail > .notice-box { margin-bottom: 0; }
+.network-field { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.network-field > label { font-weight: 500; }
+.network-field > .field-error { margin-top: 0; }
+.network-note { margin-top: var(--space-3); }
 .supporting-text { font-size: var(--text-small); color: var(--muted); line-height: 1.6; }
 .service-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-6); }
 .phone-service-card { padding: var(--space-5); margin-bottom: var(--space-6); }
@@ -267,6 +287,27 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .time-remaining { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-small); color: var(--muted); font-variant-numeric: tabular-nums; }
 .time-remaining .icon { width: 1rem; height: 1rem; }
 .pending-copy { color: var(--warning); font-size: var(--text-caption); }
+/* Decision phase in a listed card and receipts of requests that have left.
+   Only the PC's authenticated approval is drawn in the success colour. */
+.decision-phase { display: flex; align-items: flex-start; gap: var(--space-3); }
+.decision-phase > .icon, .decision-receipt > .icon { color: var(--muted); }
+.decision-phase > .icon { margin-top: var(--space-1); }
+.decision-phase > div { min-width: 0; }
+.decision-title { font-size: var(--text-body); font-weight: 600; }
+.decision-body { font-size: var(--text-caption); color: var(--muted); margin-top: var(--space-1); }
+.decision-phase.tone-success > .icon, .decision-receipt.tone-success > .icon { color: var(--success); }
+.decision-phase.tone-warning > .icon, .decision-receipt.tone-warning > .icon { color: var(--warning); }
+.decision-phase.tone-danger > .icon, .decision-receipt.tone-danger > .icon { color: var(--danger); }
+/* Phone connection: a quiet progress row first, the notice only when it lasts. */
+.connection-progress { justify-content: center; font-size: var(--text-caption); margin-bottom: var(--space-4); }
+.request-list + .connection-status > :first-child { margin-top: var(--space-6); }
+.connection-checks { margin: 0; padding-inline-start: var(--space-5); font-size: var(--text-caption); }
+.connection-checks > li + li { margin-top: var(--space-1); }
+.progress-indicator { display: inline-grid; place-items: center; flex: 0 0 auto; width: 1rem; height: 1rem; }
+.progress-indicator > * { grid-area: 1 / 1; }
+.spinner { width: 1rem; height: 1rem; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: progress-spin 1s linear infinite; }
+.progress-indicator > .spinner-still { display: none; width: 1rem; height: 1rem; }
+@keyframes progress-spin { to { transform: rotate(360deg); } }
 .request-actions { display: grid; grid-template-columns: 1fr 1.6fr; gap: var(--space-3); margin-top: var(--space-5); }
 .request-actions .button { padding-block: var(--space-4); }
 .device-list, .activity-list { padding: 0; list-style: none; }
@@ -286,7 +327,7 @@ fieldset { min-width: 0; margin: 0; }
 .form-section { border: 0; padding: 0 var(--space-5) var(--space-5); }
 .form-section > legend { font-size: var(--text-normal); font-weight: 600; padding: var(--space-5) 0 var(--space-4); float: left; width: 100%; }
 .form-section > legend + * { clear: both; }
-.schedule-modes { display: flex; flex-direction: column; gap: var(--space-2); }
+.schedule-modes, .network-modes { display: flex; flex-direction: column; gap: var(--space-2); }
 .radio-option { display: flex; gap: var(--space-3); align-items: flex-start; min-height: var(--target-phone); padding: var(--space-3); margin-inline: calc(-1 * var(--space-3)); border-radius: var(--radius-control); cursor: pointer; border: 1px solid transparent; }
 .radio-option.selected { background: var(--accent-soft); }
 .radio-option > span { min-width: 0; }
@@ -353,7 +394,7 @@ input[aria-invalid="true"] { border-color: var(--danger); }
   .desktop-shell { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .desktop-shell .navigation-shell { padding: var(--space-3) var(--space-4); }
   .desktop-shell .app-brand { margin-bottom: var(--space-3); padding-inline: 0; }
-  .desktop-shell .navigation-shell nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
+  .desktop-shell .navigation-shell nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-1); }
   .desktop-shell .navigation-item { padding: var(--space-2); flex-direction: column; justify-content: center; text-align: center; font-size: var(--text-small); gap: var(--space-1); }
   .desktop-shell .rail-caption { display: none; }
   .page-header { gap: var(--space-2); }
@@ -375,6 +416,8 @@ input[aria-invalid="true"] { border-color: var(--danger); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   .button:active:not(:disabled), button.navigation-item:active, .disclosure-button:active { transform: none; }
+  .progress-indicator > .spinner { display: none; }
+  .progress-indicator > .spinner-still { display: block; }
 }
 @media (forced-colors: active) {
   :root { --bg: Canvas; --surface: Canvas; --surface-subtle: Canvas; --text: CanvasText; --muted: CanvasText; --line: ButtonBorder; --accent: Highlight; --accent-hover: Highlight; --on-accent: HighlightText; --accent-soft: Canvas; --danger: CanvasText; --success: CanvasText; --warning: CanvasText; --shadow-surface: none; }

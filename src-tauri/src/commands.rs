@@ -33,24 +33,24 @@ impl ControllerState {
 pub(crate) const fn storage_issue() -> AppIssue {
     AppIssue {
         code: "app_storage_unavailable",
-        message: "앱 설정을 열지 못했어요.",
-        next_action: Some("앱을 닫고 다시 열어 주세요."),
+        message: "앱 설정을 열지 못했습니다.",
+        next_action: Some("앱을 닫았다가 다시 여십시오."),
     }
 }
 
 const fn worker_issue() -> AppIssue {
     AppIssue {
         code: "app_worker_unavailable",
-        message: "요청한 작업을 마치지 못했어요.",
-        next_action: Some("현재 상태를 새로 확인해 주세요."),
+        message: "요청한 작업을 마치지 못했습니다.",
+        next_action: Some("[다시 확인]을 누르십시오."),
     }
 }
 
 pub(crate) const fn busy_issue() -> AppIssue {
     AppIssue {
         code: "app_busy",
-        message: "앞서 요청한 작업이 아직 끝나지 않았어요.",
-        next_action: Some("작업이 끝난 뒤 다시 시도해 주세요."),
+        message: "앱이 다른 작업을 처리하는 중입니다.",
+        next_action: Some("잠시 후 다시 시도하십시오."),
     }
 }
 
@@ -58,8 +58,8 @@ fn check_identifier(identifier: &str) -> Result<(), AppIssue> {
     if identifier.is_empty() || identifier.len() > 128 {
         return Err(AppIssue {
             code: "invalid_request_identifier",
-            message: "요청 정보를 읽지 못했어요.",
-            next_action: Some("현재 상태를 새로 확인해 주세요."),
+            message: "요청 정보를 읽지 못했습니다.",
+            next_action: Some("[다시 확인]을 누르십시오."),
         });
     }
     Ok(())
@@ -232,7 +232,7 @@ pub(crate) async fn set_relay(
     if address.is_empty() || address.len() > 80 {
         return Err(AppIssue {
             code: "invalid_relay_address",
-            message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력해 주세요.",
+            message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력하십시오.",
             next_action: Some("예: 192.0.2.10:443 또는 [2001:db8::10]:443"),
         });
     }
@@ -243,6 +243,25 @@ pub(crate) async fn set_relay(
     #[cfg(target_os = "android")]
     {
         let _ = state;
+        Err(controller_runtime::PlatformError::Unsupported.into())
+    }
+}
+
+/// One of three strict JSON shapes, validated with the service's rules before
+/// any elevation; the elevated CLI and the service validate it again.
+#[tauri::command]
+pub(crate) async fn set_external_access(
+    access_json: String,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<AppSnapshot, AppIssue> {
+    let access = controller_runtime::decode_external_access_json(access_json.as_bytes())?;
+    #[cfg(not(target_os = "android"))]
+    {
+        with_runtime(&state, move |runtime| runtime.set_external_access(access)).await
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (state, access);
         Err(controller_runtime::PlatformError::Unsupported.into())
     }
 }
@@ -420,6 +439,24 @@ pub(crate) async fn export_android_diagnostics(
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
         crate::mobile::export_android_diagnostics(&app, &origin)
+    })
+    .await
+    .map_err(|_| worker_issue())?
+}
+
+/// Opens Android's document picker and saves closed diagnostics to its result.
+/// No renderer-selected path, URI, contents or service authority is accepted.
+#[tauri::command]
+pub(crate) async fn save_android_diagnostics(
+    app: tauri::AppHandle,
+    origin: crate::mobile::CommandOrigin,
+    _arguments: crate::mobile::EmptyArguments,
+    state: tauri::State<'_, ControllerState>,
+) -> Result<crate::mobile::DiagnosticSaveOutcome, AppIssue> {
+    let lease = state.admission.try_enter().ok_or_else(busy_issue)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lease = lease;
+        crate::mobile::save_android_diagnostics(&app, &origin)
     })
     .await
     .map_err(|_| worker_issue())?

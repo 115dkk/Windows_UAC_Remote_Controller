@@ -2,7 +2,7 @@
 //! Failure-only production diagnosis. No raw error text, SID, ACL, path, token,
 //! user name or request data reaches EventLog. Not an authorization input.
 use super::policy::Rejection;
-use crate::ServiceError;
+use crate::{ServiceError, native::RegistrationRejection};
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::{
     Win32::System::EventLog::{
@@ -18,6 +18,23 @@ pub(super) enum Phase {
     Context,
     Installation,
     Scm,
+    // One fixed registration term each, so a refused startup names the term
+    // instead of collapsing eleven distinct checks into a single label.
+    ScmOpen,
+    ScmAbsent,
+    ScmConfigQuery,
+    ScmConfigBinaryEncoding,
+    ScmConfigBinaryPath,
+    ScmConfigServiceType,
+    ScmConfigAccount,
+    ScmConfigDisplayName,
+    ScmConfigDependencies,
+    ScmConfigLoadOrder,
+    ScmConfigErrorControl,
+    ScmConfigStartType,
+    ScmSecurity,
+    ScmSidTypeQuery,
+    ScmSidType,
     ScmStatus,
     ScmState,
     ScmProcess,
@@ -47,6 +64,21 @@ impl Phase {
             Self::Context => "context",
             Self::Installation => "installation",
             Self::Scm => "scm",
+            Self::ScmOpen => "scm_open",
+            Self::ScmAbsent => "scm_absent",
+            Self::ScmConfigQuery => "scm_config_query",
+            Self::ScmConfigBinaryEncoding => "scm_config_binary_encoding",
+            Self::ScmConfigBinaryPath => "scm_config_binary_path",
+            Self::ScmConfigServiceType => "scm_config_service_type",
+            Self::ScmConfigAccount => "scm_config_account",
+            Self::ScmConfigDisplayName => "scm_config_display_name",
+            Self::ScmConfigDependencies => "scm_config_dependencies",
+            Self::ScmConfigLoadOrder => "scm_config_load_order",
+            Self::ScmConfigErrorControl => "scm_config_error_control",
+            Self::ScmConfigStartType => "scm_config_start_type",
+            Self::ScmSecurity => "scm_security",
+            Self::ScmSidTypeQuery => "scm_sid_type_query",
+            Self::ScmSidType => "scm_sid_type",
             Self::ScmStatus => "scm_status",
             Self::ScmState => "scm_state",
             Self::ScmProcess => "scm_process",
@@ -87,6 +119,29 @@ impl Trace {
     pub(super) fn enter(&mut self, phase: Phase) {
         self.phase = phase;
         self.policy = Rejection::None;
+    }
+    /// Narrows the already entered registration phase to the fixed term that
+    /// refused it. The ACL policy reason is a different axis and stays as the
+    /// entered phase left it. An unreported refusal keeps the coarse phase.
+    pub(super) fn classify_registration(&mut self, reason: RegistrationRejection) {
+        self.phase = match reason {
+            RegistrationRejection::None => return,
+            RegistrationRejection::Open => Phase::ScmOpen,
+            RegistrationRejection::NotInstalled => Phase::ScmAbsent,
+            RegistrationRejection::ConfigQuery => Phase::ScmConfigQuery,
+            RegistrationRejection::BinaryEncoding => Phase::ScmConfigBinaryEncoding,
+            RegistrationRejection::BinaryPath => Phase::ScmConfigBinaryPath,
+            RegistrationRejection::ServiceType => Phase::ScmConfigServiceType,
+            RegistrationRejection::Account => Phase::ScmConfigAccount,
+            RegistrationRejection::DisplayName => Phase::ScmConfigDisplayName,
+            RegistrationRejection::Dependencies => Phase::ScmConfigDependencies,
+            RegistrationRejection::LoadOrderGroup => Phase::ScmConfigLoadOrder,
+            RegistrationRejection::ErrorControl => Phase::ScmConfigErrorControl,
+            RegistrationRejection::StartType => Phase::ScmConfigStartType,
+            RegistrationRejection::Security => Phase::ScmSecurity,
+            RegistrationRejection::SidTypeQuery => Phase::ScmSidTypeQuery,
+            RegistrationRejection::SidType => Phase::ScmSidType,
+        };
     }
     pub(super) fn report(&self, error: ServiceError) {
         if REPORTED.swap(true, Ordering::Relaxed) {
@@ -179,6 +234,62 @@ mod tests {
         .unwrap();
         assert!(text.ends_with("phase=merge class=permissions code=00000000 policy=10"));
         assert!(!text.contains("unsafe") && !text.contains("SID") && !text.contains('\\'));
+    }
+
+    #[test]
+    fn every_registration_term_names_a_distinct_startup_phase() {
+        use RegistrationRejection as R;
+        let terms = [
+            R::Open,
+            R::NotInstalled,
+            R::ConfigQuery,
+            R::BinaryEncoding,
+            R::BinaryPath,
+            R::ServiceType,
+            R::Account,
+            R::DisplayName,
+            R::Dependencies,
+            R::LoadOrderGroup,
+            R::ErrorControl,
+            R::StartType,
+            R::Security,
+            R::SidTypeQuery,
+            R::SidType,
+        ];
+        let mut seen = Vec::new();
+        for term in terms {
+            let mut trace = Trace::new();
+            trace.enter(Phase::Scm);
+            trace.classify_registration(term);
+            let name = trace.phase.name();
+            assert!(name.starts_with("scm"), "{name}");
+            assert_ne!(name, "scm", "{term:?} must narrow the coarse phase");
+            assert!(!seen.contains(&name), "duplicate phase {name}");
+            // The projection must still fit the fixed bounded ASCII record.
+            let text = record(
+                trace.phase,
+                trace.policy,
+                ServiceError::ConfigurationConflict,
+            );
+            assert!(text.is_some(), "{name}");
+            seen.push(name);
+        }
+        assert_eq!(seen.len(), terms.len());
+    }
+
+    #[test]
+    fn an_unreported_registration_refusal_keeps_the_coarse_phase() {
+        let mut trace = Trace::new();
+        trace.enter(Phase::Scm);
+        trace.policy = Rejection::Owner;
+        trace.classify_registration(RegistrationRejection::None);
+        assert_eq!(trace.phase.name(), "scm");
+        // Narrowing the phase is a different axis from the ACL policy reason
+        // and must not silently discard or invent one.
+        assert_eq!(trace.policy, Rejection::Owner);
+        trace.classify_registration(RegistrationRejection::StartType);
+        assert_eq!(trace.phase.name(), "scm_config_start_type");
+        assert_eq!(trace.policy, Rejection::Owner);
     }
 
     #[test]

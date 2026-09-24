@@ -46,8 +46,18 @@ well as the `tag` input. A published release is final.
 
 The workflow needs repository `contents: write` and `actions: write`. Protected
 branch rules must permit the normal release metadata update; do not bypass a
-branch protection failure. Native test limitations remain in release notes,
-regardless of stable/prerelease naming.
+branch protection failure. Native test scope and limitations remain in the
+commit-pinned `docs/release-verification.md` linked from release notes, with a
+version/commit-bound copy attached to every release, regardless of naming.
+
+Release notes list at most eight recent non-merge changes after the nearest
+reachable **published** release (stable or prerelease), plus a full comparison
+link. The publication job fetches full Git history and queries every page of
+published releases under its publication lock. Drafts, unpublished tags and
+unrelated/future branches do not advance that boundary. Release metadata-only
+commits are omitted. The template contains no persistent feature bullet list:
+past changes cannot accumulate across successive releases. If no release is an
+ancestor, the first-release summary links to that exact commit's full history.
 
 Stable Android publication requires all persistent keystore secrets and the
 public certificate fingerprint in `security/android-release-signer.sha256`.

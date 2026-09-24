@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { expect } from '@playwright/test';
 
 export async function proveDiagnosticFolder({ page, ps, evidence, replies, sameShellUser }) {
-  await page.locator('nav .navigation-item').nth(2).click();
+  await page.locator('nav .navigation-item', { hasText: /^(Activity history|활동 기록)$/u }).click();
   const button = page.getByRole('button', { name: /^(Open log folder|로그 폴더 열기)$/u });
   await expect(button).toBeEnabled();
   await page.screenshot({ path: resolve(evidence, 'diagnostic-folder-action.png') });

@@ -9,8 +9,8 @@ use rustls::{Connection, ProtocolVersion};
 use thiserror::Error;
 
 use crate::{
-    ALPN, EndpointRole, HANDSHAKE_TIMEOUT, MAX_BUFFERED_BYTES, MAX_DRAIN_BYTES, MAX_INGRESS_BYTES,
-    MAX_PLAINTEXT_WRITE_BYTES, READY_PREFACE, TlsIdentity, TlsPublicKey, config,
+    ControlProtocol, EndpointRole, HANDSHAKE_TIMEOUT, MAX_BUFFERED_BYTES, MAX_DRAIN_BYTES,
+    MAX_INGRESS_BYTES, MAX_PLAINTEXT_WRITE_BYTES, READY_PREFACE, TlsIdentity, TlsPublicKey, config,
 };
 
 // rustls applies its writer limit before adding record overhead. Keep explicit
@@ -143,6 +143,14 @@ impl Channel {
         } else {
             ChannelStatus::Handshaking
         }
+    }
+
+    /// Available only after authenticated readiness, never from a raw offer.
+    pub fn negotiated_protocol(&self) -> Option<ControlProtocol> {
+        if !self.ready || self.failure.is_some() || self.local_closed {
+            return None;
+        }
+        ControlProtocol::from_alpn(self.connection.as_ref()?.alpn_protocol())
     }
 
     pub fn buffered_tls_bytes(&self) -> usize {
@@ -412,7 +420,7 @@ impl Channel {
                 .peer_certificates()
                 .is_some_and(|keys| keys.len() == 1 && keys[0].as_ref() == self.peer.as_spki_der());
             if connection.protocol_version() != Some(ProtocolVersion::TLSv1_3)
-                || connection.alpn_protocol() != Some(ALPN)
+                || ControlProtocol::from_alpn(connection.alpn_protocol()).is_none()
                 || !peer_matches
             {
                 return Err(self.fail(ChannelError::NegotiationRejected));

@@ -49,6 +49,37 @@ describe('fixed Windows diagnostic folder handoff', () => {
 });
 
 describe('Android diagnostic log export handoff', () => {
+  it.each(['saved', 'cancelled'] as const)('saves without sharing and reports %s distinctly', async outcome => {
+    const value = qaCase('phone-history').snapshot;
+    const saveAndroidDiagnostics = vi.fn().mockResolvedValue(outcome);
+    const exportAndroidDiagnostics = vi.fn();
+    render(<App initialPage="activity" bridge={{ ...createQaBridge(value), saveAndroidDiagnostics, exportAndroidDiagnostics }} />);
+    const history = (await screen.findByRole('list')).textContent;
+    fireEvent.click(screen.getByRole('button', { name: ko.saveDiagnostics }));
+    expect(await screen.findByText(outcome === 'saved' ? ko.diagnosticsSaved : ko.diagnosticsSaveCancelled)).toBeInTheDocument();
+    expect(saveAndroidDiagnostics).toHaveBeenCalledExactlyOnceWith();
+    expect(exportAndroidDiagnostics).not.toHaveBeenCalled();
+    expect(screen.getByRole('list').textContent).toBe(history);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('holds both actions while choosing a file and treats unknown replies as failure', async () => {
+    let resolveSave!: (value: 'saved') => void;
+    const pending = new Promise<'saved'>(resolve => { resolveSave = resolve; });
+    const saveAndroidDiagnostics = vi.fn(() => pending);
+    render(<App initialPage="activity" bridge={{ ...createQaBridge(qaCase('phone-unavailable').snapshot), saveAndroidDiagnostics }} />);
+    const button = await screen.findByRole('button', { name: ko.saveDiagnostics });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(button).toHaveAttribute('aria-busy', 'true');
+    expect(button).toBeDisabled();
+    expect(screen.getByRole('button', { name: ko.exportDiagnostics })).toBeDisabled();
+    expect(saveAndroidDiagnostics).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveSave('unexpected' as 'saved'); await pending; });
+    expect(await screen.findByText(ko.diagnosticsSaveFailure)).toBeInTheDocument();
+    expect(button).toBeEnabled();
+    expect(screen.queryByText(ko.diagnosticsSaved)).not.toBeInTheDocument();
+  });
+
   it('exports from activity with an exact no-argument call, retaining history', async () => {
     const value = qaCase('phone-history').snapshot;
     const snapshot = vi.fn().mockResolvedValue(value);
@@ -155,7 +186,7 @@ describe('Android diagnostic log export handoff', () => {
     expect(result.current.snapshot).toBe(value);
     expect(result.current.stale).toBe(false);
     expect(result.current.busy).toBeNull();
-    expect(result.current.error).toBe(fails ? ko.diagnosticsExportFailure : null);
+    expect(result.current.error).toEqual(fails ? { message: ko.diagnosticsExportFailure, nextAction: null } : null);
     expect(result.current.notice).toBe(fails ? null : ko.diagnosticsExported);
   });
 

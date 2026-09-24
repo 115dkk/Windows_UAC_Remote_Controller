@@ -9,6 +9,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidDiagnosticExportTest {
+    @Test fun saveSelectionAndCompletionAreSingleUse() {
+        val saved = DiagnosticSaveOperationGate()
+        assertTrue(saved.select())
+        assertFalse(saved.select())
+        assertEquals(DiagnosticSaveOutcome.SAVED, saved.finish(DiagnosticSaveOutcome.SAVED))
+        assertFalse(saved.isOpen())
+        assertNull(saved.finish(DiagnosticSaveOutcome.UNAVAILABLE))
+        assertFalse(saved.select())
+    }
+
+    @Test fun saveCancellationIsNotSuccessOrFailure() {
+        val cancelled = DiagnosticSaveOperationGate()
+        assertTrue(cancelled.select())
+        assertEquals(DiagnosticSaveOutcome.CANCELLED, cancelled.finish(DiagnosticSaveOutcome.CANCELLED))
+        assertNull(cancelled.finish(DiagnosticSaveOutcome.SAVED))
+        assertFalse(cancelled.isOpen())
+    }
+
+    @Test fun retiredPickerAndTimedOutWriterCannotReportSaved() {
+        val retired = DiagnosticSaveOperationGate()
+        assertEquals(DiagnosticSaveOutcome.UNAVAILABLE, retired.finish(DiagnosticSaveOutcome.UNAVAILABLE))
+        assertFalse(retired.select())
+        assertNull(retired.finish(DiagnosticSaveOutcome.SAVED))
+        val timeout = DiagnosticSaveOperationGate()
+        assertTrue(timeout.select())
+        assertEquals(DiagnosticSaveOutcome.UNAVAILABLE, timeout.finish(DiagnosticSaveOutcome.UNAVAILABLE))
+        assertFalse(timeout.isOpen())
+        assertNull(timeout.finish(DiagnosticSaveOutcome.SAVED))
+    }
+
     @Test fun persistentStoreAcceptsOnlyClosedBootAndNativeTokens() {
         assertTrue(AndroidDiagnosticStore.persistable("UacBoot", "stage=SERVICE_CREATE"))
         assertTrue(AndroidDiagnosticStore.persistable("UacNative", "UAC_NATIVE_VALUE_V1 site=APPROVAL_RETIRE_BUSY name=waits value=1"))

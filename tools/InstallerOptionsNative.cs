@@ -53,7 +53,7 @@ public static class InstallerOptionsNative {
     private static string[] ShortcutLabels(string locale) {
         switch (locale) {
             case "en": return new[] { "Add to desktop", "Add to the Start menu app list", "Add to taskbar — confirm with Windows in the app" };
-            case "ko": return new[] { "바탕화면에 추가", "시작 메뉴의 앱 목록에 추가", "작업표시줄에 추가 (앱에서 Windows 확인)" };
+            case "ko": return new[] { "바탕화면에 추가", "시작 메뉴의 앱 목록에 추가", "작업 표시줄에 추가 (설치 후 앱에서 확인)" };
             case "fr": return new[] { "Ajouter au bureau", "Ajouter à la liste d’applications du menu Démarrer", "Ajouter à la barre des tâches — confirmer dans l’application" };
             case "de": return new[] { "Zum Desktop hinzufügen", "Zur App-Liste im Startmenü hinzufügen", "Zur Taskleiste hinzufügen — in der App mit Windows bestätigen" };
             case "ja": return new[] { "デスクトップに追加", "スタートメニューのアプリ一覧に追加", "タスクバーに追加（アプリ内で Windows に確認）" };

@@ -163,6 +163,10 @@ impl PeerTransport {
         }
     }
 
+    pub fn negotiated_protocol(&self) -> Option<secure_channel::ControlProtocol> {
+        self.channel.as_ref()?.negotiated_protocol()
+    }
+
     pub fn pending_counts(&self) -> PendingCounts {
         PendingCounts {
             outbound_frame: self.outbound.is_some(),

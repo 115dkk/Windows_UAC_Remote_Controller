@@ -120,7 +120,7 @@ function Introduction({ width }: { width: number }) {
       {tr('QR 연결 절차를 시작합니다.')}
     </h2>
     <p style={{ margin: `18px 0 0`, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
-      {tr('QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.')}
+      {tr('휴대폰을 이 PC에 등록합니다. [QR 코드 보기]를 누른 뒤 휴대폰의 UAC 원격 승인기에서 [PC의 QR 코드 촬영]을 누르십시오.')}
     </p>
     <p style={{ margin: `20px 0 0`, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
       {tr('ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다.')}

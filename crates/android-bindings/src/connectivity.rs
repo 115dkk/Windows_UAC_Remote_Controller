@@ -8,7 +8,7 @@ use std::{
 };
 
 use android_controller::{MAX_PEER_ASSOCIATIONS, PeerAssociationRef};
-use relay_service::{Registration, Role, RouteId};
+use relay_service::{Registration, RendezvousError, Role, RouteId};
 use tokio_util::sync::CancellationToken;
 
 use crate::{BridgeError, MobileController};
@@ -24,15 +24,66 @@ pub struct NativeConnectivityStatus {
     pub without_endpoint: u32,
 }
 
+/// How far a failed dial got, least informative first. Display only: it never
+/// changes what is dialled, when, or what a later peer is trusted with.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, uniffi::Enum)]
+pub enum NativeDialFailure {
+    /// Every address timed out or was unreachable.
+    Unreachable,
+    /// Some address refused or reset the TCP connect.
+    Refused,
+    /// A relay accepted the TCP connect but sent no READY.
+    NoAnswer,
+}
+
+impl NativeDialFailure {
+    /// Cancellation is not an observation of the PC or its network.
+    pub(crate) const fn classify(error: RendezvousError) -> Option<Self> {
+        match error {
+            RendezvousError::Cancelled => None,
+            RendezvousError::ConnectTimeout | RendezvousError::Connection => {
+                Some(Self::Unreachable)
+            }
+            RendezvousError::Refused => Some(Self::Refused),
+            RendezvousError::Closed
+            | RendezvousError::RendezvousTimeout
+            | RendezvousError::InvalidMarker => Some(Self::NoAnswer),
+        }
+    }
+}
+
+/// This phone's dialing toward its paired, unconnected PCs. An observation for
+/// the presentation, not reachability, authentication or an action input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct NativePcConnection {
+    /// A dial to some paired, unconnected PC is in flight.
+    pub dialing: bool,
+    /// The furthest failure among unconnected PCs since their last carrier.
+    pub last_failure: Option<NativeDialFailure>,
+    /// Every paired PC has a stored global address besides its relay address.
+    pub external_route: bool,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct DialState {
+    pub(super) generation: u64,
     pub(super) in_flight: bool,
     pub(super) failures: u8,
+    pub(super) candidate_cursor: usize,
     pub(super) retry_at: Option<Instant>,
+    /// The furthest failure since this association last held a carrier.
+    pub(super) failure: Option<NativeDialFailure>,
 }
 
 pub(crate) struct ConnectivityOwner {
     pub(super) states: Mutex<BTreeMap<(approval_protocol::PcIdentity, u64), DialState>>,
+    network: Mutex<NetworkGeneration>,
+    stop: CancellationToken,
+}
+
+struct NetworkGeneration {
+    number: u64,
+    available: bool,
     stop: CancellationToken,
 }
 
@@ -40,6 +91,11 @@ impl Default for ConnectivityOwner {
     fn default() -> Self {
         Self {
             states: Mutex::new(BTreeMap::new()),
+            network: Mutex::new(NetworkGeneration {
+                number: 0,
+                available: true,
+                stop: CancellationToken::new(),
+            }),
             stop: CancellationToken::new(),
         }
     }
@@ -54,7 +110,13 @@ impl ConnectivityOwner {
         (reference.pc(), reference.generation())
     }
 
-    fn complete(&self, reference: PeerAssociationRef, succeeded: bool, now: Instant) {
+    fn complete(
+        &self,
+        reference: PeerAssociationRef,
+        generation: u64,
+        outcome: Result<(), Option<NativeDialFailure>>,
+        now: Instant,
+    ) {
         let mut states = self
             .states
             .lock()
@@ -62,18 +124,87 @@ impl ConnectivityOwner {
         let Some(state) = states.get_mut(&Self::key(reference)) else {
             return;
         };
+        if state.generation != generation {
+            return;
+        }
         state.in_flight = false;
-        if succeeded {
-            state.failures = 0;
-            state.retry_at = None;
-        } else {
-            state.failures = state.failures.saturating_add(1);
-            let shift = u32::from(state.failures.saturating_sub(1)).min(4);
-            let delay = FIRST_BACKOFF
-                .checked_mul(1_u32 << shift)
-                .unwrap_or(MAX_BACKOFF)
-                .min(MAX_BACKOFF);
-            state.retry_at = now.checked_add(delay);
+        match outcome {
+            Ok(()) => {
+                state.failures = 0;
+                state.retry_at = None;
+                state.failure = None;
+            }
+            Err(failure) => {
+                // A local refusal (None) keeps what the network last showed.
+                state.failure = state.failure.max(failure);
+                state.failures = state.failures.saturating_add(1);
+                let shift = u32::from(state.failures.saturating_sub(1)).min(4);
+                let delay = FIRST_BACKOFF
+                    .checked_mul(1_u32 << shift)
+                    .unwrap_or(MAX_BACKOFF)
+                    .min(MAX_BACKOFF);
+                state.retry_at = now.checked_add(delay);
+            }
+        }
+    }
+
+    /// Whether a dial is in flight and the furthest failure, over the given
+    /// `(association, connected)` pairs. A connected PC contributes nothing.
+    fn observe(&self, peers: &[(PeerAssociationRef, bool)]) -> (bool, Option<NativeDialFailure>) {
+        let states = self
+            .states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        peers
+            .iter()
+            .filter(|(_, connected)| !connected)
+            .filter_map(|(reference, _)| states.get(&Self::key(*reference)))
+            .fold((false, None), |(dialing, failure), state| {
+                (dialing || state.in_flight, failure.max(state.failure))
+            })
+    }
+}
+
+/// Whether the stored candidates hold a global address other than the relay
+/// address the PC was paired on. Stored coordinates only, not reachability.
+/// Without a relay address nothing is dialled at all, so there is no route.
+pub(crate) fn external_route(
+    relay: Option<std::net::SocketAddr>,
+    candidates: &[std::net::SocketAddr],
+) -> bool {
+    relay.is_some_and(|relay| {
+        candidates
+            .iter()
+            .any(|candidate| *candidate != relay && global(candidate.ip()))
+    })
+}
+
+/// The same conservative allow-list as `direct_network::global`, which the
+/// phone crates do not depend on: private, shared, link-local, loopback,
+/// documentation, benchmarking, 6to4 and reserved ranges are not global.
+fn global(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+                && !ip.is_link_local()
+                && a != 0
+                && a < 224
+                && !ip.is_private()
+                && !(a == 100 && (64..=127).contains(&b))
+                && !(a == 192 && (b == 0 || (b == 88 && c == 99)))
+                && !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)))
+                && !(a == 203 && b == 0 && c == 113)
+        }
+        std::net::IpAddr::V6(ip) => {
+            let s = ip.segments();
+            (s[0] & 0xe000) == 0x2000
+                && !(s[0] == 0x2001 && (s[1] <= 0x1ff || s[1] == 0xdb8))
+                && s[0] != 0x2002
+                && !(s[0] == 0x3fff && s[1] < 0x1000)
         }
     }
 }
@@ -81,16 +212,27 @@ impl ConnectivityOwner {
 pub(crate) struct DialRequest {
     pub(crate) reference: PeerAssociationRef,
     pub(crate) address: std::net::SocketAddr,
+    pub(crate) alternatives: Vec<std::net::SocketAddr>,
     pub(crate) route: [u8; 32],
+    generation: u64,
+    network_stop: CancellationToken,
 }
 
 pub(crate) struct DialCompletion {
     pub(crate) reference: PeerAssociationRef,
-    pub(crate) succeeded: bool,
+    /// Ok once a carrier was attached; otherwise what the network showed, if
+    /// anything (a replaced network or a local refusal shows nothing).
+    pub(crate) outcome: Result<(), Option<NativeDialFailure>>,
+    generation: u64,
+    completed_at: Instant,
 }
 
 /// One durable association with its optional relay address and route.
-type AssociationRelay = (PeerAssociationRef, Option<(std::net::SocketAddr, [u8; 32])>);
+type AssociationRelay = (
+    PeerAssociationRef,
+    Option<(std::net::SocketAddr, [u8; 32])>,
+    Vec<std::net::SocketAddr>,
+);
 
 impl MobileController {
     fn connectivity_snapshot(&self) -> Result<Vec<AssociationRelay>, BridgeError> {
@@ -103,21 +245,90 @@ impl MobileController {
             }
             Ok(ledger
                 .entries()
-                .map(|association| (association.reference(), association.descriptor().relay()))
+                .map(|association| {
+                    (
+                        association.reference(),
+                        association.descriptor().relay(),
+                        ledger.routing_candidates(association.reference()).to_vec(),
+                    )
+                })
                 .collect())
         })
     }
 
     fn receive_dial_completions(&self) {
         for completion in self.intake.take_dial_completions() {
-            self.connectivity
-                .complete(completion.reference, completion.succeeded, Instant::now());
+            self.connectivity.complete(
+                completion.reference,
+                completion.generation,
+                completion.outcome,
+                completion.completed_at,
+            );
         }
+    }
+
+    /// The request catalogue's connection summary over `(association,
+    /// connected, external_route)`; None when no PC is paired. Finished dials
+    /// are taken in first, so an ended one never reads as still in flight.
+    pub(crate) fn pc_connection(
+        &self,
+        peers: &[(PeerAssociationRef, bool, bool)],
+    ) -> Option<NativePcConnection> {
+        if peers.is_empty() {
+            return None;
+        }
+        self.receive_dial_completions();
+        let connections: Vec<_> = peers
+            .iter()
+            .map(|(reference, connected, _)| (*reference, *connected))
+            .collect();
+        let (dialing, last_failure) = self.connectivity.observe(&connections);
+        Some(NativePcConnection {
+            dialing,
+            last_failure,
+            external_route: peers.iter().all(|(_, _, external)| *external),
+        })
     }
 }
 
 #[uniffi::export]
 impl MobileController {
+    /// Fixed native lifecycle signal only: retire old carriers, never approve,
+    /// re-pair, extend a request deadline, or substitute network reachability
+    /// for authenticated peer readiness. Serialized with stream admission.
+    pub fn network_changed(&self, available: bool) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        if !self
+            .approval_alive
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.connectivity.stop.is_cancelled()
+        {
+            return Err(BridgeError::Closed);
+        }
+        let associations = self.connectivity_snapshot()?;
+        let mut network = self
+            .connectivity
+            .network
+            .lock()
+            .map_err(|_| BridgeError::Closed)?;
+        let number = network.number.checked_add(1).ok_or(BridgeError::Closed)?;
+        network.stop.cancel();
+        *network = NetworkGeneration {
+            number,
+            available,
+            stop: CancellationToken::new(),
+        };
+        self.connectivity
+            .states
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .clear();
+        for (reference, _, _) in associations {
+            self.intake.retire_association(reference);
+        }
+        Ok(())
+    }
+
     pub fn maintain_connections(self: &Arc<Self>) -> Result<NativeConnectivityStatus, BridgeError> {
         let _admission = self.enter()?;
         if !self
@@ -130,6 +341,11 @@ impl MobileController {
         self.start_intake_reactor()?;
         self.receive_dial_completions();
         let associations = self.connectivity_snapshot()?;
+        let network = self
+            .connectivity
+            .network
+            .lock()
+            .map_err(|_| BridgeError::Closed)?;
         let now = Instant::now();
         let mut requests = Vec::new();
         let mut connected = 0_u32;
@@ -143,19 +359,25 @@ impl MobileController {
             states.retain(|key, _| {
                 associations
                     .iter()
-                    .any(|(reference, _)| *key == ConnectivityOwner::key(*reference))
+                    .any(|(reference, _, _)| *key == ConnectivityOwner::key(*reference))
             });
-            for (reference, endpoint) in &associations {
+            for (reference, endpoint, alternatives) in &associations {
                 let Some((address, route)) = endpoint else {
                     without_endpoint += 1;
                     continue;
                 };
+                if !network.available {
+                    continue;
+                }
                 let state = states
                     .entry(ConnectivityOwner::key(*reference))
                     .or_insert(DialState {
+                        generation: network.number,
                         in_flight: false,
                         failures: 0,
+                        candidate_cursor: 0,
                         retry_at: None,
+                        failure: None,
                     });
                 if self.intake.has_live_peer(*reference) {
                     if self.intake.has_connected_peer(*reference) {
@@ -163,22 +385,39 @@ impl MobileController {
                     }
                     state.failures = 0;
                     state.retry_at = None;
+                    state.failure = None;
                     continue;
                 }
                 if state.in_flight || state.retry_at.is_some_and(|retry| now < retry) {
                     continue;
                 }
                 state.in_flight = true;
+                // Rotate after every carrier attempt, including a failed TLS
+                // handshake, so a stale/hostile READY endpoint cannot starve
+                // another pinned candidate on all subsequent reconnects.
+                let mut candidates = vec![*address];
+                for alternative in alternatives {
+                    if !candidates.contains(alternative) {
+                        candidates.push(*alternative);
+                    }
+                }
+                let cursor = state.candidate_cursor % candidates.len();
+                candidates.rotate_left(cursor);
+                state.candidate_cursor = (cursor + 1) % candidates.len();
                 requests.push(DialRequest {
                     reference: *reference,
-                    address: *address,
+                    address: candidates[0],
+                    alternatives: candidates[1..].to_vec(),
                     route: *route,
+                    generation: network.number,
+                    network_stop: network.stop.clone(),
                 });
             }
         }
         for request in requests {
             if let Err(request) = self.intake.spawn_dial(request) {
-                self.connectivity.complete(request.reference, false, now);
+                self.connectivity
+                    .complete(request.reference, request.generation, Err(None), now);
             }
         }
         if self.connectivity.stop.is_cancelled() {
@@ -206,28 +445,80 @@ pub(crate) async fn run_dial(
     intake_stop: CancellationToken,
     request: DialRequest,
 ) -> DialCompletion {
-    let succeeded = match RouteId::new(request.route) {
-        Ok(route) => relay_service::connect_rendezvous(
-            request.address,
-            Registration::new(Role::Phone, route),
-            intake_stop,
-        )
-        .await
-        .ok()
+    // Only the rendezvous wait is asynchronous; stream admission below is a
+    // separate synchronous phase, not a closure inside a select! expansion.
+    // The production JoinSet::spawn call checks the future's Send bound.
+    let attempt = match RouteId::new(request.route) {
+        Ok(route) => {
+            request
+                .network_stop
+                .clone()
+                .run_until_cancelled_owned(connect_candidates(
+                    request.address,
+                    &request.alternatives,
+                    route,
+                    intake_stop,
+                ))
+                .await
+        }
+        Err(_) => None,
+    };
+    // A replaced network or an unusable route says nothing about the PC.
+    let (carrier, failure) = match attempt {
+        Some(Ok(carrier)) => (Some(carrier), None),
+        Some(Err(error)) => (None, NativeDialFailure::classify(error)),
+        None => (None, None),
+    };
+    // The combinator drops the old network's pending socket on cancellation.
+    // Simultaneous completion/cancellation may return a carrier; attachment
+    // still checks this exact token AFTER acquiring owner admission, so it
+    // cannot revive the old transport generation.
+    let attached = carrier
         .and_then(|carrier| carrier.into_stream().into_std().ok())
         .and_then(|stream| {
             stream.set_nonblocking(false).ok()?;
             Weak::<MobileController>::upgrade(&controller)?
-                .attach_provisioned_stream(request.reference, stream)
+                .attach_network_stream(request.reference, stream, &request.network_stop)
                 .ok()
         })
-        .is_some(),
-        Err(_) => false,
-    };
+        .is_some();
     DialCompletion {
         reference: request.reference,
-        succeeded,
+        outcome: if attached { Ok(()) } else { Err(failure) },
+        generation: request.generation,
+        completed_at: Instant::now(),
     }
+}
+
+/// Only carrier discovery is retried. TLS signing, requests and decisions are
+/// never replayed across candidates. Several candidates race their TCP connects
+/// and register on the first handshake alone; every other socket is dropped.
+pub(crate) async fn connect_candidates(
+    primary: std::net::SocketAddr,
+    alternatives: &[std::net::SocketAddr],
+    route: RouteId,
+    stop: CancellationToken,
+) -> Result<relay_service::RendezvousCarrier, RendezvousError> {
+    let mut addresses = vec![primary];
+    for address in alternatives.iter().take(4) {
+        if !addresses.contains(address) {
+            addresses.push(*address);
+        }
+    }
+    if addresses.len() == 1 {
+        // Preserve the shipped single-endpoint LAN/rendezvous timeout profile.
+        return relay_service::connect_rendezvous(
+            primary,
+            Registration::new(Role::Phone, route),
+            stop,
+        )
+        .await;
+    }
+    // A black-holed LAN address no longer holds the external one back: the
+    // next candidate is dialled 250 ms later instead of after a 5 s timeout.
+    // The race reports the furthest failure across its attempts.
+    relay_service::connect_rendezvous_any(&addresses, Registration::new(Role::Phone, route), stop)
+        .await
 }
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -235,6 +526,10 @@ mod tests {
     use super::*;
 
     fn reference() -> PeerAssociationRef {
+        reference_for(7)
+    }
+
+    fn reference_for(pc: u8) -> PeerAssociationRef {
         use android_controller::{
             LocalAttestationChallenge, LocalKeyHandle, LocalKeyLedger, LocalKeySetDescriptor,
             PeerAssociationDescriptor, PeerAssociationLedger, PeerAssociationMutation,
@@ -264,7 +559,7 @@ mod tests {
         match associations
             .record_from_trusted_host(
                 PeerAssociationDescriptor::new(
-                    approval_protocol::PcIdentity::from_bytes([7; 32]).unwrap(),
+                    approval_protocol::PcIdentity::from_bytes([pc; 32]).unwrap(),
                     DeviceId::from_bytes([8; 16]).unwrap(),
                     1,
                     handle,
@@ -289,13 +584,16 @@ mod tests {
         owner.states.lock().unwrap().insert(
             ConnectivityOwner::key(reference),
             DialState {
+                generation: 0,
                 in_flight: true,
                 failures: 0,
+                candidate_cursor: 0,
                 retry_at: None,
+                failure: None,
             },
         );
         for (failure, seconds) in [(1_u8, 5_u64), (2, 10), (3, 20), (4, 40), (5, 60), (6, 60)] {
-            owner.complete(reference, false, start);
+            owner.complete(reference, 0, Err(None), start);
             let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
             assert_eq!(state.failures, failure);
             assert_eq!(
@@ -319,16 +617,157 @@ mod tests {
         owner.states.lock().unwrap().insert(
             ConnectivityOwner::key(reference),
             DialState {
+                generation: 0,
                 in_flight: true,
                 failures: 4,
+                candidate_cursor: 0,
                 retry_at: Some(Instant::now()),
+                failure: Some(NativeDialFailure::NoAnswer),
             },
         );
-        owner.complete(reference, true, Instant::now());
+        owner.complete(reference, 0, Ok(()), Instant::now());
         let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
         assert!(!state.in_flight);
         assert_eq!(state.failures, 0);
         assert_eq!(state.retry_at, None);
+        assert_eq!(state.failure, None);
+    }
+
+    #[test]
+    fn stale_network_completion_cannot_finish_or_penalize_new_dial() {
+        let owner = ConnectivityOwner::default();
+        let reference = reference();
+        owner.states.lock().unwrap().insert(
+            ConnectivityOwner::key(reference),
+            DialState {
+                generation: 2,
+                in_flight: true,
+                failures: 0,
+                candidate_cursor: 0,
+                retry_at: None,
+                failure: None,
+            },
+        );
+        for outcome in [Err(Some(NativeDialFailure::NoAnswer)), Ok(())] {
+            owner.complete(reference, 1, outcome, Instant::now());
+            let state = owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)];
+            assert!(state.in_flight);
+            assert_eq!(state.failures, 0);
+            assert_eq!(state.retry_at, None);
+            assert_eq!(state.failure, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn network_replacement_cancels_rendezvous_wait_without_ready_marker() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let network_stop = CancellationToken::new();
+        let request = DialRequest {
+            reference: reference(),
+            address,
+            alternatives: Vec::new(),
+            route: [9; 32],
+            generation: 4,
+            network_stop: network_stop.clone(),
+        };
+        let job = tokio::spawn(run_dial(Weak::new(), CancellationToken::new(), request));
+        // Real rendezvous connection, deliberately no READY. Cancellation is
+        // independent of a response or timeout from the old remote endpoint.
+        let (_stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        network_stop.cancel();
+        let completion = tokio::time::timeout(Duration::from_secs(1), job)
+            .await
+            .unwrap()
+            .unwrap();
+        // The replaced network says nothing about the PC.
+        assert_eq!(completion.outcome, Err(None));
+        assert_eq!(completion.generation, 4);
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_network_dial_never_opens_a_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let network_stop = CancellationToken::new();
+        network_stop.cancel();
+        let completion = run_dial(
+            Weak::new(),
+            CancellationToken::new(),
+            DialRequest {
+                reference: reference(),
+                address: listener.local_addr().unwrap(),
+                alternatives: Vec::new(),
+                route: [9; 32],
+                generation: 1,
+                network_stop,
+            },
+        )
+        .await;
+        assert_eq!(completion.outcome, Err(None));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_primary_falls_back_to_one_alternative_carrier() {
+        let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary = unavailable.local_addr().unwrap();
+        // Keep this port owned and deliberately withhold READY. A closed port
+        // may be reused by the alternate listener, and Windows connection-refusal
+        // retries need not finish within the old two-second fixture deadline.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alternate = listener.local_addr().unwrap();
+        assert_ne!(primary, alternate);
+        let route = RouteId::new([11; 32]).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let expected = Registration::new(Role::Phone, route).to_wire();
+            let mut bytes = vec![0; expected.len()];
+            let mut read = 0;
+            while read < bytes.len() {
+                stream.readable().await.unwrap();
+                match stream.try_read(&mut bytes[read..]) {
+                    Ok(0) => panic!("closed before registration"),
+                    Ok(count) => read += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                    Err(error) => panic!("read: {error}"),
+                }
+            }
+            assert_eq!(bytes, expected);
+            let mut written = 0;
+            while written < relay_service::READY_MARKER.len() {
+                stream.writable().await.unwrap();
+                match stream.try_write(&relay_service::READY_MARKER[written..]) {
+                    Ok(0) => panic!("closed before ready"),
+                    Ok(count) => written += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                    Err(error) => panic!("write: {error}"),
+                }
+            }
+            stream
+        });
+        let carrier = tokio::time::timeout(
+            // The production per-candidate timeout is five seconds. Allow that
+            // timeout plus the bounded alternate exchange; do not change it.
+            Duration::from_secs(10),
+            connect_candidates(primary, &[alternate], route, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(carrier.into_stream().peer_addr().unwrap(), alternate);
+        let _primary_connection =
+            tokio::time::timeout(Duration::from_secs(1), unavailable.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        drop(server.await.unwrap());
     }
 
     #[tokio::test]
@@ -371,6 +810,193 @@ mod tests {
         .await
         .unwrap();
         drop(carrier);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn rendezvous_errors_classify_by_how_far_the_dial_got() {
+        for (error, expected) in [
+            (RendezvousError::Cancelled, None),
+            (
+                RendezvousError::ConnectTimeout,
+                Some(NativeDialFailure::Unreachable),
+            ),
+            (
+                RendezvousError::Connection,
+                Some(NativeDialFailure::Unreachable),
+            ),
+            (RendezvousError::Refused, Some(NativeDialFailure::Refused)),
+            (RendezvousError::Closed, Some(NativeDialFailure::NoAnswer)),
+            (
+                RendezvousError::RendezvousTimeout,
+                Some(NativeDialFailure::NoAnswer),
+            ),
+            (
+                RendezvousError::InvalidMarker,
+                Some(NativeDialFailure::NoAnswer),
+            ),
+        ] {
+            assert_eq!(NativeDialFailure::classify(error), expected, "{error:?}");
+        }
+        assert!(NativeDialFailure::Unreachable < NativeDialFailure::Refused);
+        assert!(NativeDialFailure::Refused < NativeDialFailure::NoAnswer);
+    }
+
+    #[test]
+    fn failures_keep_the_furthest_until_a_carrier_attaches() {
+        let owner = ConnectivityOwner::default();
+        let reference = reference();
+        owner.states.lock().unwrap().insert(
+            ConnectivityOwner::key(reference),
+            DialState {
+                generation: 0,
+                in_flight: true,
+                failures: 0,
+                candidate_cursor: 0,
+                retry_at: None,
+                failure: None,
+            },
+        );
+        let failure = || owner.states.lock().unwrap()[&ConnectivityOwner::key(reference)].failure;
+        for (outcome, expected) in [
+            (
+                Err(Some(NativeDialFailure::Refused)),
+                Some(NativeDialFailure::Refused),
+            ),
+            (
+                Err(Some(NativeDialFailure::Unreachable)),
+                Some(NativeDialFailure::Refused),
+            ),
+            // A local refusal or a replaced network shows nothing new.
+            (Err(None), Some(NativeDialFailure::Refused)),
+            (
+                Err(Some(NativeDialFailure::NoAnswer)),
+                Some(NativeDialFailure::NoAnswer),
+            ),
+            (Ok(()), None),
+            (
+                Err(Some(NativeDialFailure::Unreachable)),
+                Some(NativeDialFailure::Unreachable),
+            ),
+        ] {
+            owner.complete(reference, 0, outcome, Instant::now());
+            assert_eq!(failure(), expected);
+        }
+    }
+
+    #[test]
+    fn only_unconnected_pcs_contribute_dialing_and_failure() {
+        let owner = ConnectivityOwner::default();
+        let (first, second, unknown) = (reference_for(7), reference_for(17), reference_for(27));
+        for (reference, in_flight, failure) in [
+            (first, true, Some(NativeDialFailure::Refused)),
+            (second, false, Some(NativeDialFailure::NoAnswer)),
+        ] {
+            owner.states.lock().unwrap().insert(
+                ConnectivityOwner::key(reference),
+                DialState {
+                    generation: 0,
+                    in_flight,
+                    failures: 1,
+                    candidate_cursor: 0,
+                    retry_at: None,
+                    failure,
+                },
+            );
+        }
+        assert_eq!(
+            owner.observe(&[(first, false), (second, false)]),
+            (true, Some(NativeDialFailure::NoAnswer))
+        );
+        assert_eq!(
+            owner.observe(&[(first, false), (second, true)]),
+            (true, Some(NativeDialFailure::Refused))
+        );
+        assert_eq!(
+            owner.observe(&[(first, true), (second, false)]),
+            (false, Some(NativeDialFailure::NoAnswer))
+        );
+        assert_eq!(
+            owner.observe(&[(first, true), (second, true)]),
+            (false, None)
+        );
+        assert_eq!(owner.observe(&[(unknown, false)]), (false, None));
+        assert_eq!(owner.observe(&[]), (false, None));
+    }
+
+    #[test]
+    fn an_external_route_is_a_stored_global_address_other_than_the_relay() {
+        let address = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        let relay = Some(address("192.168.0.10:7443"));
+        assert!(external_route(relay, &[address("8.8.8.8:7443")]));
+        assert!(external_route(
+            relay,
+            &[address("192.168.0.10:7443"), address("[2400:cb00::1]:7443")]
+        ));
+        for local in [
+            "192.168.0.10:7443",
+            "10.0.0.2:7443",
+            "172.16.4.1:7443",
+            "169.254.1.1:7443",
+            "100.64.0.1:7443",
+            "192.0.2.1:7443",
+            "198.18.0.1:7443",
+            "198.51.100.1:7443",
+            "203.0.113.7:7443",
+            "240.0.0.1:7443",
+            "[fd00::1]:7443",
+            "[2001:db8::1]:7443",
+            "[2002:c000:201::1]:7443",
+            "[3fff::1]:7443",
+        ] {
+            assert!(!external_route(relay, &[address(local)]), "{local}");
+        }
+        assert!(!external_route(relay, &[]));
+        // The relay itself is not a second route, and without one nothing is dialled.
+        let public = address("8.8.8.8:7443");
+        assert!(!external_route(Some(public), &[public]));
+        assert!(!external_route(None, &[public]));
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_closes_before_ready_completes_as_no_answer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let expected = Registration::new(Role::Phone, RouteId::new([9; 32]).unwrap()).to_wire();
+            let mut registration = vec![0; expected.len()];
+            let mut read = 0;
+            while read < registration.len() {
+                stream.readable().await.unwrap();
+                match stream.try_read(&mut registration[read..]) {
+                    Ok(0) => panic!("registration closed early"),
+                    Ok(count) => read += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(error) => panic!("registration read failed: {error}"),
+                }
+            }
+            assert_eq!(registration, expected);
+            // Dropped here without READY.
+        });
+        let completion = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_dial(
+                Weak::new(),
+                CancellationToken::new(),
+                DialRequest {
+                    reference: reference(),
+                    address,
+                    alternatives: Vec::new(),
+                    route: [9; 32],
+                    generation: 3,
+                    network_stop: CancellationToken::new(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completion.outcome, Err(Some(NativeDialFailure::NoAnswer)));
         server.await.unwrap();
     }
 }

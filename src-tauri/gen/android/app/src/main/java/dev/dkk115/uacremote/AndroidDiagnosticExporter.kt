@@ -11,6 +11,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import dev.dkk115.uacremote.background.PolicyOwnerBounds
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -22,8 +24,21 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 
 internal enum class DiagnosticExportOutcome { SHARED, UNAVAILABLE }
+internal enum class DiagnosticSaveOutcome { SAVED, CANCELLED, UNAVAILABLE }
+
+/** Pure state table: one picker result and terminal reply. Retirement prevents
+ * a new selection or a late success reply; an already-started provider IO may finish. */
+internal class DiagnosticSaveOperationGate {
+    private val completed = AtomicBoolean(false)
+    private val selected = AtomicBoolean(false)
+    fun select(): Boolean = !completed.get() && selected.compareAndSet(false, true)
+    fun isOpen(): Boolean = !completed.get()
+    fun finish(outcome: DiagnosticSaveOutcome): DiagnosticSaveOutcome? =
+        if (completed.compareAndSet(false, true)) outcome else null
+}
 
 /** Pure terminal table for timeout/handoff races. Completion itself always runs
  * on the main thread; atomic identity keeps the invariant explicit in tests. */
@@ -82,6 +97,122 @@ internal object AndroidDiagnosticExporter {
     private fun execute(work: () -> Unit): Boolean = try { worker.execute { work() }; true } catch (_: Exception) { false }
 
     private data class Exported(val uri: Uri, val name: String)
+
+    /** The picker is native-only; the renderer cannot supply a URI or contents.
+     * Retiring an Activity cancels its pending selection. A started provider write
+     * retains the global lease until it returns, even after its bounded UI timeout. */
+    internal class SaveOperation internal constructor(
+        private val context: Context,
+        private val release: () -> Unit,
+        private val completion: (DiagnosticSaveOutcome) -> Unit,
+    ) {
+        private val gate = DiagnosticSaveOperationGate()
+        private val main = Handler(Looper.getMainLooper())
+        private var writing = false
+        private var launcher: ActivityResultLauncher<Intent>? = null
+        private val timeout = Runnable { complete(DiagnosticSaveOutcome.UNAVAILABLE) }
+
+        private fun complete(outcome: DiagnosticSaveOutcome) {
+            val terminal = gate.finish(outcome) ?: return
+            main.removeCallbacks(timeout)
+            launcher?.unregister()
+            launcher = null
+            try { completion(terminal) } catch (_: Exception) { }
+        }
+
+        internal fun launchPicker(
+            activity: MainActivity,
+            stillForeground: () -> Boolean,
+            stillCurrent: () -> Boolean,
+        ) {
+            if (!gate.isOpen()) return
+            if (!foreground(stillForeground) || !foreground(stillCurrent)) { retire(); return }
+            try {
+                // This operation, not its caller, owns the unique registration.
+                // A restored result cannot reach a replacement physical host.
+                launcher = activity.activityResultRegistry.register(
+                    "uac-diagnostic-save-${UUID.randomUUID()}",
+                    ActivityResultContracts.StartActivityForResult(),
+                ) { result ->
+                    if (!gate.isOpen()) return@register
+                    // The picker covers our Activity normally: current identity,
+                    // not foreground focus, determines whether its result is valid.
+                    if (!foreground(stillCurrent)) { retire(); return@register }
+                    selected(
+                        if (result.resultCode == Activity.RESULT_OK) result.data?.data else null,
+                        cancelled = result.resultCode == Activity.RESULT_CANCELED,
+                    )
+                }
+                if (!foreground(stillForeground) || !foreground(stillCurrent)) retire()
+                else launcher?.launch(saveDocumentIntent())
+            } catch (_: Exception) { retire() }
+        }
+
+        fun retire() {
+            complete(DiagnosticSaveOutcome.UNAVAILABLE)
+            if (!writing) release()
+        }
+
+        private fun selected(uri: Uri?, cancelled: Boolean) {
+            if (!gate.select()) return
+            if (cancelled || uri?.scheme != "content") {
+                complete(if (cancelled) DiagnosticSaveOutcome.CANCELLED else DiagnosticSaveOutcome.UNAVAILABLE)
+                release()
+                return
+            }
+            // URI is from ACTION_CREATE_DOCUMENT's result, never from JS. No
+            // persistent grant or broad storage permission is requested.
+            writing = true
+            if (!main.postDelayed(timeout, PolicyOwnerBounds.RESPONSE_TIMEOUT_MILLIS) || !execute {
+                val saved = try {
+                    val bytes = snapshotBytes()
+                    if (bytes == null || !gate.isOpen()) false
+                    else context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                        output.write(bytes)
+                        output.flush()
+                        true
+                    } ?: false
+                } catch (_: Exception) { false }
+                finally { release() }
+                main.post { complete(if (saved) DiagnosticSaveOutcome.SAVED else DiagnosticSaveOutcome.UNAVAILABLE) }
+            }) {
+                writing = false
+                release()
+                complete(DiagnosticSaveOutcome.UNAVAILABLE)
+            }
+        }
+    }
+
+    fun beginSave(
+        activity: MainActivity,
+        stillForeground: () -> Boolean,
+        stillCurrent: () -> Boolean,
+        completion: (DiagnosticSaveOutcome) -> Unit,
+    ): SaveOperation? {
+        if (Looper.myLooper() != Looper.getMainLooper() || !foreground(stillForeground) || !foreground(stillCurrent)) return null
+        val lease = acquire() ?: return null
+        val operation = SaveOperation(activity.applicationContext, lease::release, completion)
+        // Install the caller's operation slot before any result or launch failure
+        // can complete it. An accepted operation always owns its terminal reply.
+        if (!Handler(Looper.getMainLooper()).post { operation.launchPicker(activity, stillForeground, stillCurrent) }) {
+            lease.release()
+            return null
+        }
+        return operation
+    }
+
+    private fun saveDocumentIntent(): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TITLE, diagnosticName(System.currentTimeMillis()))
+    }
+
+    private fun diagnosticName(now: Long): String =
+        "uac-remote-diagnostics-${fileTime.format(Instant.ofEpochMilli(now))}.txt"
+
+    private fun snapshotBytes(now: Long = System.currentTimeMillis()): ByteArray? = render(
+        now, BuildConfig.VERSION_NAME, AndroidDiagnosticStore.snapshot(), nativeLogSnapshot(),
+    )
 
     /**
      * The single production Interface for the complete export operation.
@@ -148,13 +279,8 @@ internal object AndroidDiagnosticExporter {
 
     private fun create(activity: Context): Exported? {
         val now = System.currentTimeMillis()
-        val bytes = render(
-            now,
-            BuildConfig.VERSION_NAME,
-            AndroidDiagnosticStore.snapshot(),
-            nativeLogSnapshot(),
-        ) ?: return null
-        val name = "uac-remote-diagnostics-${fileTime.format(Instant.ofEpochMilli(now))}.txt"
+        val bytes = snapshotBytes(now) ?: return null
+        val name = diagnosticName(now)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")

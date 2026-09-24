@@ -140,6 +140,7 @@ fn durable_label(error: DurableFault) -> &'static str {
             ControllerCheckpointError::LocalKeys(_) => "COMPOSITE_LOCAL_KEYS",
             ControllerCheckpointError::PeerAssociations(_) => "COMPOSITE_PEER_ASSOCIATIONS",
             ControllerCheckpointError::ReceivingSourceMismatch => "COMPOSITE_RECEIVING_SOURCE",
+            ControllerCheckpointError::RoutingCandidates => "COMPOSITE_ROUTING_CANDIDATES",
         },
         DurableFault::History(_) => "DURABLE_HISTORY",
         DurableFault::LifecycleIntegrationRequired => "DURABLE_LIFECYCLE_INTEGRATION",

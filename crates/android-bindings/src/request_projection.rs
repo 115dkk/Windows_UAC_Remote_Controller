@@ -6,7 +6,7 @@ use crate::{
 };
 use android_controller::{AssociatedPendingRequest, DurableInbox, NativePeerLease};
 use approval_protocol::RequestContent;
-use notification_policy::{AlertMode, NotificationPolicy, RequestKey};
+use notification_policy::{AlertMode, NotificationPolicy, RequestKey, RequestOutcome};
 use phone_request_core::PhoneBootId;
 use service_protocol::MappedRequestWindow;
 use std::{
@@ -66,6 +66,34 @@ pub struct NativeRequestCatalogStatus {
     pub attached_peers: u8,
     pub connected_peers: u8,
     pub peers: Vec<NativePairedPc>,
+    pub outcome_receipts: Vec<NativeOutcomeReceipt>,
+    /// None when no PC is paired. Display only, like `peers`.
+    pub connection: Option<crate::NativePcConnection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum NativeOutcomeKind {
+    Approved,
+    Denied,
+    Failed,
+    Cancelled,
+    Expired,
+    ExpiredLocally,
+    PcCompleted,
+}
+
+/// In-process, body-free observation of an owner-accepted terminal result.
+/// A receipt is neither an action capability nor hardware authentication proof.
+#[derive(Clone, uniffi::Record)]
+pub struct NativeOutcomeReceipt {
+    pub delivery_id: Vec<u8>,
+    pub outcome: NativeOutcomeKind,
+    pub observed_at_nanos: u64,
+}
+impl fmt::Debug for NativeOutcomeReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NativeOutcomeReceipt([redacted], display_only)")
+    }
 }
 
 /// Public display metadata only. These fields are not accepted by any action API.
@@ -133,6 +161,31 @@ impl fmt::Debug for NativePendingRequest {
 }
 #[uniffi::export]
 impl NativePendingRequest {
+    /// Expected identities, not outcomes. Includes full binding and issuance,
+    /// so a revised/reissued request cannot complete an earlier local action.
+    pub fn outcome_delivery_ids(&self) -> Vec<Vec<u8>> {
+        [
+            RequestOutcome::ApprovedByPc,
+            RequestOutcome::DeniedByPc,
+            RequestOutcome::FailedByPc,
+            RequestOutcome::CancelledByPc,
+            RequestOutcome::ExpiredByPc,
+            RequestOutcome::ExpiredLocally,
+            RequestOutcome::CompletedByPc,
+        ]
+        .into_iter()
+        .map(|outcome| {
+            phone_request_core::PendingOutcome::delivery_id_for(
+                self.window.binding(),
+                self.window.service_issued_at(),
+                outcome,
+            )
+            .as_bytes()
+            .to_vec()
+        })
+        .collect()
+    }
+
     pub fn same_handle(&self, other: Arc<NativePendingRequest>) -> bool {
         std::ptr::eq(self, Arc::as_ptr(&other))
     }
@@ -307,6 +360,7 @@ pub(crate) struct ProjectionRegistry {
     pub revision: u64,
     pub time_epoch: Option<u64>,
     refresh: Vec<(RequestKey, u64)>,
+    receipts: Vec<NativeOutcomeReceipt>,
 }
 impl Default for ProjectionRegistry {
     fn default() -> Self {
@@ -317,10 +371,50 @@ impl Default for ProjectionRegistry {
             revision: 1,
             time_epoch: None,
             refresh: Vec::new(),
+            receipts: Vec::new(),
         }
     }
 }
 impl ProjectionRegistry {
+    pub(crate) fn outcome_receipts(&self) -> Vec<NativeOutcomeReceipt> {
+        self.receipts.clone()
+    }
+
+    /// Caller holds owner admission and supplies only actual pending outcomes
+    /// after native authenticated protocol/lifecycle acceptance. No UI input.
+    pub(crate) fn observe_outcome(
+        &mut self,
+        outcome: phone_request_core::PendingOutcome,
+        observed_at_nanos: u64,
+    ) -> Result<(), BridgeError> {
+        if self
+            .receipts
+            .iter()
+            .any(|receipt| receipt.delivery_id.as_slice() == outcome.delivery_id().as_bytes())
+        {
+            return Ok(());
+        }
+        let kind = match outcome.outcome() {
+            RequestOutcome::ApprovedByPc => NativeOutcomeKind::Approved,
+            RequestOutcome::DeniedByPc => NativeOutcomeKind::Denied,
+            RequestOutcome::FailedByPc => NativeOutcomeKind::Failed,
+            RequestOutcome::CancelledByPc => NativeOutcomeKind::Cancelled,
+            RequestOutcome::ExpiredByPc => NativeOutcomeKind::Expired,
+            RequestOutcome::ExpiredLocally => NativeOutcomeKind::ExpiredLocally,
+            RequestOutcome::CompletedByPc => NativeOutcomeKind::PcCompleted,
+        };
+        // Same bound as the live native request catalog, independent of history.
+        if self.receipts.len() == 32 {
+            self.receipts.remove(0);
+        }
+        self.receipts.push(NativeOutcomeReceipt {
+            delivery_id: outcome.delivery_id().as_bytes().to_vec(),
+            outcome: kind,
+            observed_at_nanos,
+        });
+        self.bump()
+    }
+
     pub(crate) fn keys(&self) -> Vec<RequestKey> {
         self.entries.iter().map(|entry| entry.key()).collect()
     }

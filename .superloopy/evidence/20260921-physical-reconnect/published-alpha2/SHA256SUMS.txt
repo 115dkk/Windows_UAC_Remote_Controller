@@ -1,0 +1,4 @@
+eb594b2d6041a2783f3c7cb22b2d06591056a400bfb7040064bb3c4e5a740c53  uac-remote-controller-windows-x64-setup.exe
+730dd43040bc9d9b8cee75253833ca266f736863147d9743edaa22ddd0245a68  uac-remote-controller-android-arm64.apk
+5e1437c81a26ba94eab7b05d14053d6e055e1e1422ee05469e82ec625f3f5764  uac-relay-windows-x64.exe
+53a49a57b6e5265bffdc7b6532f4a7f2eea5d046b30bc3cbd8013ae737f51cd4  uac-relay-linux-x64

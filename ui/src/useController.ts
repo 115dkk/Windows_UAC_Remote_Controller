@@ -1,17 +1,47 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AppSnapshot, ControllerBridge, NotificationPolicy, ServiceAction } from './contracts';
+import type { AppSnapshot, ControllerBridge, ExternalAccessInput, NotificationPolicy, RequestDetailsView, ServiceAction } from './contracts';
+import { isAuthoredCopy } from './i18n';
 import { ko } from './messages.ko';
 import { ageRequestPresentation, withoutRequestBodies } from './requestPresentation';
+
+/** A failure line: catalogue keys, rendered through tr(). */
+export interface Failure { readonly message: string; readonly nextAction: string | null }
+
+const generic = (message: string): Failure => ({ message, nextAction: null });
+const ISSUE_FIELDS = ['code', 'message', 'nextAction'] as const;
+const MAX_ISSUE_TEXT = 400;
+
+function authoredText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_ISSUE_TEXT && isAuthoredCopy(value);
+}
+
+/** The native owner's own refusal, when a command rejection is exactly a
+ * serialized AppIssue ({code, message, nextAction}) whose text is catalogued
+ * authored copy. Timeouts, transport errors, extra or missing fields and any
+ * text outside the catalogue return null, and the caller shows its generic line. */
+export function authoredIssue(rejection: unknown): Failure | null {
+  if (rejection === null || typeof rejection !== 'object' || Array.isArray(rejection)) return null;
+  const prototype: unknown = Object.getPrototypeOf(rejection);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const fields = Object.keys(rejection);
+  if (fields.length !== ISSUE_FIELDS.length || !ISSUE_FIELDS.every((field) => fields.includes(field))) return null;
+  const { code, message, nextAction } = rejection as Record<(typeof ISSUE_FIELDS)[number], unknown>;
+  if (typeof code !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/u.test(code) || !authoredText(message)) return null;
+  if (nextAction === null) return { message, nextAction: null };
+  return authoredText(nextAction) ? { message, nextAction } : null;
+}
 
 export type ClientCommand =
   | { readonly kind: 'service'; readonly action: ServiceAction }
   | { readonly kind: 'pair'; readonly transport?: 'usb' }
   | { readonly kind: 'remove'; readonly deviceId: string }
   | { readonly kind: 'relay'; readonly address: string }
+  | { readonly kind: 'external-access'; readonly access: ExternalAccessInput }
   | { readonly kind: 'clear' }
   | { readonly kind: 'diagnostics-folder' }
   | { readonly kind: 'diagnostics-export' }
+  | { readonly kind: 'diagnostics-save' }
   | { readonly kind: 'decision'; readonly requestId: string; readonly decision: 'approve' | 'deny' }
   | { readonly kind: 'policy'; readonly policy: NotificationPolicy }
   | { readonly kind: 'lock-settings' }
@@ -30,7 +60,7 @@ interface ViewState {
   readonly refreshing: boolean;
   readonly busy: ClientCommand['kind'] | null;
   readonly stale: boolean;
-  readonly error: string | null;
+  readonly error: Failure | null;
   readonly notice: string | null;
   readonly requestObservedAt: number;
   readonly scannerFocusRevision: number;
@@ -54,6 +84,14 @@ async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
   }
 }
 
+/** The relay and external-access settings share one installed-helper owner. */
+function networkOwnerAvailable(snapshot: AppSnapshot): boolean {
+  return snapshot.platform === 'windows' && snapshot.service?.controlHint === 'available'
+    && ((snapshot.service.installed === false && snapshot.service.state === null)
+      || snapshot.service.state === 'stopped'
+      || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
+}
+
 // These are presentation gates only. Every command is checked again by its native owner.
 function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boolean {
   switch (command.kind) {
@@ -63,14 +101,11 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
       : snapshot.service?.allowedActions.includes(command.action) === true;
     case 'pair': return snapshot.canPair;
     case 'remove': return snapshot.dataAvailability.devices === 'available' && snapshot.canUnpair && snapshot.devices.some((device) => device.id === command.deviceId);
-    case 'relay': return snapshot.platform === 'windows' && snapshot.service?.controlHint === 'available'
-      && command.address.trim().length > 0
-      && ((snapshot.service.installed === false && snapshot.service.state === null)
-        || snapshot.service.state === 'stopped'
-        || (snapshot.service.state === 'running' && snapshot.dataAvailability.devices === 'available'));
+    case 'relay': return command.address.trim().length > 0 && networkOwnerAvailable(snapshot);
+    case 'external-access': return networkOwnerAvailable(snapshot);
     case 'clear': return snapshot.dataAvailability.activity === 'available' && snapshot.canClearActivity;
     case 'diagnostics-folder': return snapshot.platform === 'windows';
-    case 'diagnostics-export': return snapshot.platform === 'android';
+    case 'diagnostics-export': case 'diagnostics-save': return snapshot.platform === 'android';
     case 'decision': {
       const request = snapshot.requests.find((item) => item.id === command.requestId);
       return snapshot.dataAvailability.requests === 'available' && request !== undefined
@@ -83,12 +118,13 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
   }
 }
 
-function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' }>): Promise<AppSnapshot> {
+function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' | 'diagnostics-save' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
     case 'pair': return command.transport === 'usb' ? bridge.beginPairing('usb') : bridge.beginPairing();
     case 'remove': return bridge.removeDevice(command.deviceId);
     case 'relay': return bridge.setRelay(command.address);
+    case 'external-access': return bridge.setExternalAccess(command.access);
     case 'clear': return bridge.clearActivity();
     case 'decision': return bridge.decide(command.requestId, command.decision);
     case 'policy': return bridge.savePolicy(command.policy);
@@ -98,8 +134,7 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
 function scannerFailure(error: unknown, transport?: 'usb'): string {
   const code = error !== null && typeof error === 'object' && 'code' in error ? error.code : null;
   return code === 'pairing_scanner_busy' || code === 'app_busy' ? ko.pairingScannerBusy
-    : transport === 'usb' ? 'USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.'
-      : ko.pairingScannerFailure;
+    : transport === 'usb' ? ko.pairingUsbFailure : ko.pairingScannerFailure;
 }
 
 export function useController(bridge: ControllerBridge) {
@@ -110,6 +145,12 @@ export function useController(bridge: ControllerBridge) {
   const readPending = useRef(false);
   const activeRead = useRef<{ owner: ControllerBridge; promise: Promise<AppSnapshot> } | null>(null);
   const commandPending = useRef(false);
+  // Every snapshot read, command and details read shares one native command
+  // admission. A change reported while it is held is remembered here and read
+  // once the work in flight lets go, instead of waiting for the periodic read.
+  const refreshWanted = useRef(false);
+  const detailsReads = useRef<{ owner: ControllerBridge | null; count: number }>({ owner: null, count: 0 });
+  const resumeRefresh = useRef<() => void>(() => undefined);
   const scannerReturn = useRef({ pending: false, opened: false, wake: false });
   const scannerFocusRevision = useRef(0);
   const dismissScannerReturnFocus = useCallback(() => {
@@ -132,7 +173,16 @@ export function useController(bridge: ControllerBridge) {
   }, []);
 
   const refresh = useCallback(async (announce = false) => {
-    if (liveOwner.current !== bridge || commandPending.current || readPending.current) return;
+    if (liveOwner.current !== bridge) return;
+    // Dropping this call lost the native wake that announces a new request
+    // whenever any other read was running, and the card then waited for the
+    // periodic read. The work in flight may already have read past the change.
+    if (commandPending.current || readPending.current || activeRead.current !== null
+      || (detailsReads.current.owner === bridge && detailsReads.current.count > 0)) {
+      refreshWanted.current = true;
+      return;
+    }
+    refreshWanted.current = false;
     readPending.current = true;
     const attempt = ++revision.current;
     const previous = current.current.owner === bridge ? current.current : emptyState(bridge);
@@ -142,16 +192,48 @@ export function useController(bridge: ControllerBridge) {
     try {
       const snapshot = await read.promise;
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
+      const latest = current.current;
+      // The wake for a new request is sent while the native intake still holds
+      // the owner, so the read it starts can find the owner busy. That answer
+      // observes nothing: keep what is on screen, whose display lease timers
+      // still run from its own observation, and let the owner's next wake read
+      // again. Only an explicit refresh reports the busy owner.
+      if (!announce && snapshot.issue?.code === 'app_busy' && latest.owner === bridge && latest.snapshot !== null) {
+        publish({ ...latest, refreshing: false });
+        return;
+      }
       publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
-    } catch {
+    } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
       const latest = current.current;
-      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: ko.loadFailure, notice: null });
+      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
     } finally {
       if (activeRead.current === read) activeRead.current = null;
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
+      resumeRefresh.current();
     }
   }, [bridge, publish, scannerReturnRevision]);
+
+  /** Original command text is still read only on demand. It shares the native
+   * admission with the snapshot read, and a notification review opens the
+   * disclosure the moment its snapshot is published, often while the next read
+   * is already running. So it waits for the exact read holding the admission
+   * instead of colliding with it and showing the retry state. The wait counts
+   * against the body's own display lease, never extends it. */
+  const readDetails = useCallback(async (requestId: string): Promise<RequestDetailsView> => {
+    if (detailsReads.current.owner !== bridge) detailsReads.current = { owner: bridge, count: 0 };
+    const reads = detailsReads.current;
+    reads.count += 1;
+    try {
+      for (let held = activeRead.current; held?.owner === bridge; held = activeRead.current) {
+        try { await held.promise; } catch { /* The details read reports its own failure. */ }
+      }
+      return await bridge.requestDetails(requestId);
+    } finally {
+      reads.count -= 1;
+      resumeRefresh.current();
+    }
+  }, [bridge]);
 
   const run = useCallback(async (command: ClientCommand): Promise<AppSnapshot | null> => {
     const previous = current.current;
@@ -168,7 +250,7 @@ export function useController(bridge: ControllerBridge) {
     // its fresh capability. Never queue approval/denial or a generic command.
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const exportRead = command.kind === 'diagnostics-export' && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -180,12 +262,12 @@ export function useController(bridge: ControllerBridge) {
       if (scannerRead) {
         let snapshot: AppSnapshot;
         try { snapshot = await scannerRead.promise; }
-        catch {
+        catch (failure) {
           if (liveOwner.current !== bridge || attempt !== revision.current) return null;
           scannerReturn.current = { pending: false, opened: false, wake: false };
           const latest = current.current;
           publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
-            refreshing: false, busy: null, stale: true, error: ko.loadFailure, notice: null });
+            refreshing: false, busy: null, stale: true, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
           return null;
         }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -219,17 +301,22 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
-      if (command.kind === 'diagnostics-export') {
+      if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
         // Native export shares command admission with the current read, but is
         // independent of service/activity readiness and does not mutate either.
         if (exportRead) {
           try { await exportRead.promise; } catch { /* Logs remain useful after a failed service read. */ }
           if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         }
-        await bridge.exportAndroidDiagnostics();
+        let notice: string = ko.diagnosticsExported;
+        if (command.kind === 'diagnostics-save') {
+          const result = await bridge.saveAndroidDiagnostics();
+          if (result !== 'saved' && result !== 'cancelled') throw new Error('invalid_save_result');
+          notice = result === 'saved' ? ko.diagnosticsSaved : ko.diagnosticsSaveCancelled;
+        } else await bridge.exportAndroidDiagnostics();
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         // Preserve any request-body withdrawal while the Sharesheet was open.
-        publish({ ...current.current, refreshing: false, busy: null, error: null, notice: ko.diagnosticsExported });
+        publish({ ...current.current, refreshing: false, busy: null, error: null, notice });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
@@ -254,8 +341,8 @@ export function useController(bridge: ControllerBridge) {
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-      if (command.kind === 'diagnostics-export') {
-        publish({ ...current.current, refreshing: false, busy: null, error: ko.diagnosticsExportFailure, notice: null });
+      if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
+        publish({ ...current.current, refreshing: false, busy: null, error: generic(command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure), notice: null });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
@@ -269,12 +356,12 @@ export function useController(bridge: ControllerBridge) {
         // Closed diagnosis only: no path, exception text or arbitrary native code.
         console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}${numeric}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
-        publish({ ...previous, refreshing: false, busy: null, error: ko.diagnosticsFolderFailure, notice: null });
+        publish({ ...previous, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
         return null;
       }
       if (command.kind === 'scan_pairing' && !scannerOpened) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
-        const error = scannerFailure(failure, command.transport);
+        const error = generic(scannerFailure(failure, command.transport));
         let snapshot: AppSnapshot | null = null;
         try { snapshot = await readSnapshot(bridge); } catch { /* Keep recovery, never raw native errors. */ }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -284,12 +371,16 @@ export function useController(bridge: ControllerBridge) {
           requestObservedAt: snapshot ? performance.now() : latest.requestObservedAt });
         return null;
       }
+      // The owner's own refusal names its reason and next step. Anything else,
+      // a timeout or a transport failure among them, keeps the generic line.
       const latest = current.current;
       publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
-        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' || command.kind === 'relay' ? ko.saveFailure : ko.actionFailure, notice: null });
+        error: authoredIssue(failure) ?? generic(scannerOpened ? ko.loadFailure
+          : command.kind === 'policy' || command.kind === 'relay' || command.kind === 'external-access' ? ko.saveFailure : ko.actionFailure), notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
+      resumeRefresh.current();
     }
   }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision]);
 
@@ -320,11 +411,23 @@ export function useController(bridge: ControllerBridge) {
     return () => { window.clearTimeout(early); window.clearTimeout(withdraw); };
   }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot]);
 
+  // One more read for the changes remembered while the admission was held. A
+  // hidden page reads nothing; becoming visible reads anyway.
+  useEffect(() => {
+    resumeRefresh.current = () => {
+      if (!refreshWanted.current || liveOwner.current !== bridge) return;
+      if (document.visibilityState !== 'visible') { refreshWanted.current = false; return; }
+      void refresh();
+    };
+    return () => { resumeRefresh.current = () => undefined; };
+  }, [bridge, refresh]);
+
   useEffect(() => {
     liveOwner.current = bridge;
     readPending.current = false;
     activeRead.current = null;
     commandPending.current = false;
+    refreshWanted.current = false;
     scannerReturn.current = { pending: false, opened: false, wake: false };
     scannerFocusRevision.current = 0;
     // Defer the initial presentation update; the first render already is loading.
@@ -361,5 +464,5 @@ export function useController(bridge: ControllerBridge) {
     };
   }, [bridge, dismissScannerReturnFocus, publish, refresh]);
 
-  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, dismissScannerReturnFocus };
+  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, readDetails, dismissScannerReturnFocus };
 }

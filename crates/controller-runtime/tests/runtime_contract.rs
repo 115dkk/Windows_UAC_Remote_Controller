@@ -23,6 +23,7 @@ struct SyntheticOwnerState {
     controls: AtomicUsize,
     removals: AtomicUsize,
     relay_changes: AtomicUsize,
+    external_changes: Mutex<Vec<controller_runtime::ExternalAccess>>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ impl SyntheticOwner {
             controls: AtomicUsize::new(0),
             removals: AtomicUsize::new(0),
             relay_changes: AtomicUsize::new(0),
+            external_changes: Mutex::new(Vec::new()),
         }))
     }
 
@@ -101,6 +103,13 @@ impl PlatformAdapter for SyntheticOwner {
         self.0.relay_changes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    fn set_external_access(
+        &self,
+        access: controller_runtime::ExternalAccess,
+    ) -> Result<(), PlatformError> {
+        self.0.external_changes.lock().unwrap().push(access);
+        Ok(())
+    }
 }
 
 fn absent(control: ControlHint) -> ServiceObservation {
@@ -120,8 +129,10 @@ fn installed(state: ServiceState) -> ServiceObservation {
 fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> ManagementObservation {
     ManagementObservation {
         activity: None,
+        external_access: None,
         relay_configured,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::External,
             state: if relay_configured {
                 RelayState::ExternalConfigured
@@ -490,6 +501,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
     assert_eq!(
         selected.relay_status.unwrap(),
         RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::Stopped,
         }
@@ -505,8 +517,10 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
         activity: None,
+        external_access: None,
         relay_configured: false,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::WaitingNetwork,
         },
@@ -520,8 +534,10 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
         activity: None,
+        external_access: None,
         relay_configured: true,
         relay_status: RelayStatusView {
+            internet_state: None,
             mode: RelayMode::Embedded,
             state: RelayState::Listening,
         },
@@ -594,11 +610,11 @@ fn running_management_snapshot_presents_two_valid_devices_and_preserves_revision
     assert!(snapshot.relay_configured);
     assert!(snapshot.can_unpair);
     assert_eq!(snapshot.devices.len(), 2);
-    assert_eq!(snapshot.devices[0].name, "01010101번 휴대폰");
+    assert_eq!(snapshot.devices[0].name, "휴대폰 01010101");
     assert_eq!(snapshot.devices[0].revision, 7);
     assert!(snapshot.devices[0].route_present);
     assert!(snapshot.devices[0].connected);
-    assert_eq!(snapshot.devices[1].name, "abababab번 휴대폰");
+    assert_eq!(snapshot.devices[1].name, "휴대폰 abababab");
     assert_eq!(snapshot.devices[1].revision, 19);
     let wire = serde_json::to_value(&snapshot).expect("management snapshot JSON");
     assert_eq!(wire["devices"][0]["revision"], 7);
@@ -741,6 +757,142 @@ fn embedded_relay_uses_the_same_checked_management_owner_without_an_address() {
     owner.set_observation(Err(PlatformError::StatusUnavailable));
     assert!(runtime.set_relay("embedded").is_err());
     assert_eq!(owner.0.relay_changes.load(Ordering::SeqCst), 1);
+}
+
+fn external_view() -> controller_runtime::ExternalAccessView {
+    controller_runtime::ExternalAccessView {
+        mode: controller_runtime::ExternalAccessMode::RouterForward,
+        external_port: Some(8443),
+        fixed_address: None,
+        external_address: Some("93.184.216.34:8443".into()),
+        source: Some(controller_runtime::ExternalCandidateSource::Stun),
+        lan_address: Some("192.168.1.50".into()),
+        relay_port: 7443,
+        failure: None,
+    }
+}
+
+#[test]
+fn external_access_is_presented_only_from_a_current_running_observation() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut observation = management(Vec::new(), true);
+    observation.external_access = Some(external_view());
+    owner.set_management(Ok(observation.clone()));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    let view = runtime.snapshot();
+    assert_eq!(view.external_access, Some(external_view()));
+    let wire = serde_json::to_value(&view).unwrap();
+    assert_eq!(wire["externalAccess"]["mode"], "router_forward");
+    assert_eq!(wire["externalAccess"]["externalPort"], 8443);
+    assert_eq!(wire["externalAccess"]["lanAddress"], "192.168.1.50");
+    assert_eq!(wire["externalAccess"]["relayPort"], 7443);
+
+    // An inconsistent optional read is dropped without losing the device list.
+    let mut contradictory = observation.clone();
+    contradictory.external_access = Some(controller_runtime::ExternalAccessView {
+        external_port: None,
+        ..external_view()
+    });
+    owner.set_management(Ok(contradictory));
+    let view = runtime.snapshot();
+    assert_eq!(view.external_access, None);
+    assert_eq!(view.data_availability.devices, Availability::Available);
+
+    owner.set_management(Err(PlatformError::StatusUnavailable));
+    assert_eq!(runtime.snapshot().external_access, None);
+    owner.set_management(Ok(observation));
+    assert!(runtime.snapshot().external_access.is_some());
+    owner.set_observation(Ok(installed(ServiceState::Stopped)));
+    let stopped = runtime.snapshot();
+    assert_eq!(stopped.external_access, None);
+    assert!(serde_json::to_value(&stopped).unwrap()["externalAccess"].is_null());
+}
+
+#[test]
+fn external_access_validates_before_the_adapter_and_requeries_only_while_running() {
+    use controller_runtime::ExternalAccess;
+    let fixed = ExternalAccess::Fixed {
+        address: "93.184.216.34:7443".parse().unwrap(),
+    };
+    let stopped_directory = tempfile::tempdir().unwrap();
+    let stopped_owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
+    let mut stopped = windows_runtime(&stopped_directory, stopped_owner.clone());
+    let snapshot = stopped
+        .set_external_access(ExternalAccess::RouterForward {
+            external_port: 8443,
+        })
+        .unwrap();
+    assert_eq!(snapshot.external_access, None);
+    assert_eq!(stopped_owner.0.management_reads.load(Ordering::SeqCst), 0);
+    for invalid in [
+        ExternalAccess::RouterForward { external_port: 0 },
+        ExternalAccess::Fixed {
+            address: "192.168.1.20:7443".parse().unwrap(),
+        },
+        ExternalAccess::Fixed {
+            address: "93.184.216.34:0".parse().unwrap(),
+        },
+    ] {
+        assert_eq!(
+            stopped
+                .set_external_access(invalid)
+                .expect_err("invalid external access")
+                .code,
+            "invalid_external_access"
+        );
+    }
+    assert_eq!(
+        *stopped_owner.0.external_changes.lock().unwrap(),
+        [ExternalAccess::RouterForward {
+            external_port: 8443
+        }]
+    );
+
+    let running_directory = tempfile::tempdir().unwrap();
+    let running_owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    running_owner.set_management(Ok(management(Vec::new(), true)));
+    let mut running = windows_runtime(&running_directory, running_owner.clone());
+    running.set_external_access(fixed).unwrap();
+    assert_eq!(*running_owner.0.external_changes.lock().unwrap(), [fixed]);
+    assert_eq!(running_owner.0.management_reads.load(Ordering::SeqCst), 2);
+
+    running_owner.set_observation(Ok(installed(ServiceState::StartPending)));
+    assert_eq!(
+        running
+            .set_external_access(ExternalAccess::Automatic)
+            .expect_err("pending service")
+            .code,
+        "external_access_change_unavailable"
+    );
+    running_owner.set_observation(Err(PlatformError::StatusUnavailable));
+    assert!(
+        running
+            .set_external_access(ExternalAccess::Automatic)
+            .is_err()
+    );
+    assert_eq!(running_owner.0.external_changes.lock().unwrap().len(), 1);
+
+    let android_directory = tempfile::tempdir().unwrap();
+    let mut android = AppRuntime::open(
+        AppPrivateDirectory::from_native_app_data(android_directory.path()).unwrap(),
+        Platform::Android,
+        None,
+        Box::new(UnavailablePlatformAdapter),
+    )
+    .unwrap();
+    assert_eq!(
+        android
+            .set_external_access(ExternalAccess::Automatic)
+            .unwrap_err()
+            .code,
+        "service_control_unsupported"
+    );
+    // The default adapter implementation never claims success.
+    assert_eq!(
+        UnavailablePlatformAdapter.set_external_access(ExternalAccess::Automatic),
+        Err(PlatformError::Unsupported)
+    );
 }
 
 #[test]
@@ -890,7 +1042,8 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "phoneService": null, "mobile": null,
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
             "relayConfigured": false,
-            "relayStatus": {"mode": "unknown", "state": "unknown"},
+            "relayStatus": {"mode": "unknown", "state": "unknown", "internetState": null},
+            "externalAccess": null,
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,
             "dataAvailability": {"devices": "unavailable", "requests": "unavailable", "activity": "unavailable"},

@@ -50,6 +50,8 @@ internal class DeviceStateActivityCommands(
             webView.context === activity && !activity.isDestroyed && !activity.isFinishing
     internal fun retire() {
         binding.retire()
+        diagnosticSave?.retire()
+        diagnosticSave = null
         (activity.application as? ControllerApplication)?.retirePairingScanner(activity, binding)
         (activity.application as? ControllerApplication)?.observeRequestChanges(activity, null)
     }
@@ -57,6 +59,7 @@ internal class DeviceStateActivityCommands(
     // Accessed only on Android's main thread. A later foreground lifecycle entry
     // permits another explicit settings request; resuming never launches one.
     private var settingsLaunchPending = false
+    private var diagnosticSave: AndroidDiagnosticExporter.SaveOperation? = null
     private val serviceMain = Handler(Looper.getMainLooper())
     private val serviceCommandPending = AtomicBoolean(false)
     private val serviceStopPending = AtomicBoolean(false)
@@ -581,6 +584,20 @@ internal class DeviceStateActivityCommands(
             }
         }
         if (!accepted) reject()
+    }
+
+    fun saveAndroidDiagnostics(invoke: Invoke) {
+        if (!acceptsNoArguments(invoke)) return
+        fun reject() { try { invoke.reject("diagnostics_save_unavailable", "diagnostics_save_unavailable") } catch (_: Exception) { } }
+        if (!isForeground() || diagnosticSave != null) { reject(); return }
+        diagnosticSave = AndroidDiagnosticExporter.beginSave(activity, ::isForeground, { matches(webView) }) { outcome ->
+            diagnosticSave = null
+            when (outcome) {
+                DiagnosticSaveOutcome.SAVED -> try { invoke.resolveObject("saved") } catch (_: Exception) { }
+                DiagnosticSaveOutcome.CANCELLED -> try { invoke.resolveObject("cancelled") } catch (_: Exception) { }
+                DiagnosticSaveOutcome.UNAVAILABLE -> reject()
+            }
+        } ?: run { reject(); return }
     }
 
     private fun deviceSecure(): Boolean? {

@@ -8,11 +8,11 @@
     },
     {
       "path": "crates/secure-channel/src/config.rs",
-      "sha256": "74fa7b6a75483a1bb27ccad82781f83f27aa31394a92fc9bcc6951d7172d071d"
+      "sha256": "0b0331976ed45faa1c43a2e61d10fcab2b9280d4f0a2eb7e1e2829fa94bc1ec7"
     },
     {
       "path": "crates/secure-channel/src/channel.rs",
-      "sha256": "910667dc62db172835763f250227c6690aaa7ca39b43a6ed8237f7e9482ffa80"
+      "sha256": "cce5f24c8aff212ce32b08dee04fa91769b75ec024a08117edbcb611413ead6e"
     },
     {
       "path": "crates/approval-protocol/src/lib.rs",
@@ -32,7 +32,7 @@
     },
     {
       "path": "crates/windows-service-host/src/peer_runtime.rs",
-      "sha256": "a741e4ed3ce038945fe13eb9abaafa17873b8f23ca4f4bc0262df31a72a59143"
+      "sha256": "8bd73e194b8529e8a2303499eea5a0ab6d6cd16e3e3a6d063b4ab25ee9c303e0"
     },
     {
       "path": "crates/windows-prompt-probe/src/ffi/watch.rs",

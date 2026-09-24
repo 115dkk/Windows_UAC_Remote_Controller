@@ -28,20 +28,22 @@ const MAGIC: &[u8; 8] = b"WUACQRI\0";
 const VERSION: u16 = 1;
 const KIND: u8 = 1;
 const DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pairing-invitation/v1\0";
+const DOMAIN_V2: &[u8] = b"Windows-UAC-Remote-Controller/pairing-invitation/v2\0";
+const QR_PREFIX_V2: &str = "uac-remote:v2:";
 const FIXED_BYTES: usize = 12 + 32 + 32 + 32 + 16 + SPKI_BYTES * 2 + 1 + 2 + 32;
 
 /// Exact IPv4 form: fixed fields341 + four address bytes.
 pub const MIN_PAIRING_INVITATION_BYTES: usize = FIXED_BYTES + 4;
-/// Exact IPv6 form: fixed fields341 + sixteen address bytes. No other wire size
-/// is accepted in v1, even if it falls between these bounds.
-pub const MAX_PAIRING_INVITATION_BYTES: usize = FIXED_BYTES + 16;
+const MAX_V1_BYTES: usize = FIXED_BYTES + 16;
+/// V2 allows at most three alternatives in addition to the primary endpoint.
+pub const MAX_PAIRING_INVITATION_BYTES: usize = MAX_V1_BYTES + 1 + 3 * 19;
 pub const PAIRING_INVITATION_QR_PREFIX: &str = "uac-remote:v1:";
-/// Both permitted binary lengths are multiples of three: no base64 padding or
-/// partial final symbol is necessary. Bounds include the exact14-byte prefix.
+/// V1 lengths are multiples of three. V2 also permits partial final symbols;
+/// URL-safe base64 remains unpadded/canonical. Bounds include the14-byte prefix.
 pub const MIN_PAIRING_INVITATION_QR_TEXT_BYTES: usize =
     PAIRING_INVITATION_QR_PREFIX.len() + MIN_PAIRING_INVITATION_BYTES / 3 * 4;
 pub const MAX_PAIRING_INVITATION_QR_TEXT_BYTES: usize =
-    PAIRING_INVITATION_QR_PREFIX.len() + MAX_PAIRING_INVITATION_BYTES / 3 * 4;
+    PAIRING_INVITATION_QR_PREFIX.len() + (MAX_PAIRING_INVITATION_BYTES * 4).div_ceil(3);
 
 /// Freely constructible original-invitation inputs, never a trust witness.
 /// The PC native ceremony supplies the fresh non-reused nonce/challenge and
@@ -101,32 +103,71 @@ impl fmt::Debug for PairingInvitationFields {
 #[derive(Clone, Eq, PartialEq)]
 pub struct PairingInvitation {
     fields: PairingInvitationFields,
+    alternatives: Vec<SocketAddr>,
 }
 
 impl PairingInvitation {
     pub fn new(fields: PairingInvitationFields) -> Result<Self, PairingInvitationError> {
         fields.validate()?;
-        Ok(Self { fields })
+        Ok(Self {
+            fields,
+            alternatives: Vec::new(),
+        })
     }
 
     pub const fn fields(&self) -> &PairingInvitationFields {
         &self.fields
     }
 
-    /// Check exact permitted lengths before key parsing or any allocation. The
-    /// common header and endpoint family determine one unique v1 interpretation.
+    /// Empty alternatives preserve the exact v1 bytes and invitation digest.
+    /// V2 endpoints are unicast hints only; reachability remains native policy.
+    pub fn with_alternatives(
+        mut self,
+        alternatives: Vec<SocketAddr>,
+    ) -> Result<Self, PairingInvitationError> {
+        if alternatives.len() >= crate::MAX_ADDRESS_CANDIDATES {
+            return Err(PairingInvitationError::InvalidEndpoint);
+        }
+        if !alternatives.is_empty() {
+            crate::address::validate_endpoint(self.fields.relay_address)
+                .map_err(|_| PairingInvitationError::InvalidEndpoint)?;
+        }
+        for (index, endpoint) in alternatives.iter().enumerate() {
+            crate::address::validate_endpoint(*endpoint)
+                .map_err(|_| PairingInvitationError::InvalidEndpoint)?;
+            if *endpoint == self.fields.relay_address || alternatives[..index].contains(endpoint) {
+                return Err(PairingInvitationError::InvalidEndpoint);
+            }
+        }
+        self.alternatives = alternatives;
+        Ok(self)
+    }
+
+    pub fn candidates(&self) -> Vec<SocketAddr> {
+        std::iter::once(self.fields.relay_address)
+            .chain(self.alternatives.iter().copied())
+            .collect()
+    }
+
+    /// Bound length before key parsing or allocation. V1 accepts only its two
+    /// original lengths; V2 adds a nonempty, bounded canonical endpoint suffix.
     pub fn from_wire(bytes: &[u8]) -> Result<Self, PairingInvitationError> {
-        if bytes.len() != MIN_PAIRING_INVITATION_BYTES
-            && bytes.len() != MAX_PAIRING_INVITATION_BYTES
-        {
+        if !(MIN_PAIRING_INVITATION_BYTES..=MAX_PAIRING_INVITATION_BYTES).contains(&bytes.len()) {
             return Err(PairingInvitationError::InvalidLength);
         }
         let mut reader = Reader::new(bytes);
         if array::<8>(&mut reader)? != *MAGIC {
             return Err(PairingInvitationError::InvalidEncoding);
         }
-        if u16::from_be_bytes(array(&mut reader)?) != VERSION {
+        let version = u16::from_be_bytes(array(&mut reader)?);
+        if version != VERSION && version != 2 {
             return Err(PairingInvitationError::UnsupportedVersion);
+        }
+        if version == VERSION
+            && bytes.len() != MIN_PAIRING_INVITATION_BYTES
+            && bytes.len() != MAX_V1_BYTES
+        {
+            return Err(PairingInvitationError::InvalidLength);
         }
         if array::<1>(&mut reader)? != [KIND] {
             return Err(PairingInvitationError::UnsupportedKind);
@@ -154,6 +195,19 @@ impl PairingInvitation {
             _ => return Err(PairingInvitationError::InvalidEndpoint),
         };
         let route = array(&mut reader)?;
+        let mut alternatives = Vec::new();
+        if version == 2 {
+            let count = usize::from(array::<1>(&mut reader)?[0]);
+            if count == 0 || count >= crate::MAX_ADDRESS_CANDIDATES {
+                return Err(PairingInvitationError::InvalidEndpoint);
+            }
+            for _ in 0..count {
+                alternatives.push(
+                    crate::address::read_endpoint(&mut reader)
+                        .map_err(|_| PairingInvitationError::InvalidEndpoint)?,
+                );
+            }
+        }
         reader
             .finish()
             .map_err(|_| PairingInvitationError::InvalidLength)?;
@@ -166,7 +220,8 @@ impl PairingInvitation {
             pc_transport_key,
             relay_address: SocketAddr::new(ip, port),
             route,
-        })
+        })?
+        .with_alternatives(alternatives)
     }
 
     /// Canonical body: header; nonce; challenge; PC ID; original recipient ID;
@@ -175,11 +230,18 @@ impl PairingInvitation {
         let fields = &self.fields;
         let capacity = match fields.relay_address {
             SocketAddr::V4(_) => MIN_PAIRING_INVITATION_BYTES,
-            SocketAddr::V6(_) => MAX_PAIRING_INVITATION_BYTES,
+            SocketAddr::V6(_) => MAX_V1_BYTES,
         };
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_be_bytes());
+        bytes.extend_from_slice(
+            &(if self.alternatives.is_empty() {
+                VERSION
+            } else {
+                2
+            })
+            .to_be_bytes(),
+        );
         bytes.extend_from_slice(&[KIND, 0]);
         bytes.extend_from_slice(fields.ceremony_nonce.as_bytes());
         bytes.extend_from_slice(fields.attestation_challenge.as_bytes());
@@ -200,6 +262,12 @@ impl PairingInvitation {
             }
         }
         bytes.extend_from_slice(&fields.route);
+        if !self.alternatives.is_empty() {
+            bytes.push(self.alternatives.len() as u8);
+            for endpoint in &self.alternatives {
+                crate::address::write_endpoint(&mut bytes, *endpoint);
+            }
+        }
         bytes
     }
 
@@ -208,13 +276,18 @@ impl PairingInvitation {
     /// Bound text before decoding into a fixed stack buffer, then reuse the wire
     /// parser. The decoded bytes confer no scanner/native provenance.
     pub fn from_qr_text(text: &str) -> Result<Self, PairingInvitationError> {
-        if text.len() != MIN_PAIRING_INVITATION_QR_TEXT_BYTES
-            && text.len() != MAX_PAIRING_INVITATION_QR_TEXT_BYTES
+        if !(MIN_PAIRING_INVITATION_QR_TEXT_BYTES..=MAX_PAIRING_INVITATION_QR_TEXT_BYTES)
+            .contains(&text.len())
         {
             return Err(PairingInvitationError::InvalidLength);
         }
+        let (prefix, version) = if text.starts_with(PAIRING_INVITATION_QR_PREFIX) {
+            (PAIRING_INVITATION_QR_PREFIX, VERSION)
+        } else {
+            (QR_PREFIX_V2, 2)
+        };
         let payload = text
-            .strip_prefix(PAIRING_INVITATION_QR_PREFIX)
+            .strip_prefix(prefix)
             .filter(|payload| {
                 payload
                     .bytes()
@@ -227,6 +300,9 @@ impl PairingInvitation {
         let length = URL_SAFE_NO_PAD
             .decode_slice(payload, &mut bytes)
             .map_err(|_| PairingInvitationError::InvalidQrText)?;
+        if bytes.get(8..10) != Some(version.to_be_bytes().as_slice()) {
+            return Err(PairingInvitationError::InvalidQrText);
+        }
         Self::from_wire(&bytes[..length])
     }
 
@@ -235,7 +311,11 @@ impl PairingInvitation {
         let wire = self.to_wire();
         let mut text =
             String::with_capacity(PAIRING_INVITATION_QR_PREFIX.len() + wire.len() / 3 * 4);
-        text.push_str(PAIRING_INVITATION_QR_PREFIX);
+        text.push_str(if self.alternatives.is_empty() {
+            PAIRING_INVITATION_QR_PREFIX
+        } else {
+            QR_PREFIX_V2
+        });
         URL_SAFE_NO_PAD.encode_string(&wire, &mut text);
         text
     }
@@ -246,7 +326,11 @@ impl PairingInvitation {
     /// never on a digest or reconstructed context learned from a frozen reply.
     pub fn context_digest(&self) -> InvitationContextDigest {
         let mut digest = Sha256::new();
-        digest.update(DOMAIN);
+        digest.update(if self.alternatives.is_empty() {
+            DOMAIN
+        } else {
+            DOMAIN_V2
+        });
         digest.update(self.to_wire());
         InvitationContextDigest::from_bytes(digest.finalize().into())
     }

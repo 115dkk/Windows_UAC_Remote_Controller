@@ -13,12 +13,12 @@ test('native gallery rejects real, ambiguous, unauthorized and missing devices',
     'List of devices attached\nemulator-5554\tdevice\nreal-phone\tdevice\n']) assert.equal(onlyIsolatedEmulator(list), false);
 });
 test('actual UI evidence cannot be absent or called withdrawn while still visible', () => {
-  assert.doesNotThrow(() => checkNotificationUi('<hierarchy><node package="com.android.systemui" text="UAC 인증 요청 PowerShell"/></hierarchy>', 'sound'));
+  assert.doesNotThrow(() => checkNotificationUi('<hierarchy><node package="com.android.systemui" text="관리자 권한 승인 요청 PowerShell"/></hierarchy>', 'sound'));
   assert.doesNotThrow(() => checkNotificationUi('<hierarchy><node package="com.android.systemui"/></hierarchy>', 'withdrawn'));
   assert.throws(() => checkNotificationUi('<hierarchy></hierarchy>', 'sound'));
-  assert.throws(() => checkNotificationUi('<hierarchy><node text="UAC 인증 요청"/></hierarchy>', 'withdrawn'));
+  assert.throws(() => checkNotificationUi('<hierarchy><node text="관리자 권한 승인 요청"/></hierarchy>', 'withdrawn'));
   assert.throws(() => checkNotificationUi('synthetic summary is not UI XML', 'sound'));
-  assert.throws(() => checkNotificationUi('<hierarchy><node package="dev.dkk115.uacremote.gallery" text="UAC 인증 요청 PowerShell"/></hierarchy>', 'sound'));
+  assert.throws(() => checkNotificationUi('<hierarchy><node package="dev.dkk115.uacremote.gallery" text="관리자 권한 승인 요청 PowerShell"/></hierarchy>', 'sound'));
   assert.throws(() => checkNotificationUi('<hierarchy><node package="dev.dkk115.uacremote.gallery"/></hierarchy>', 'withdrawn'));
 });
 test('same-case prior receipt cannot prove a fresh native launch', () => {
@@ -99,11 +99,13 @@ test('status cases are appended after the five unchanged request cases and requi
       assert.equal(notificationActionsMatch(withAction, selected), false);
       assert.throws(() => checkNotificationUi(withAction, selected, expected));
     }
-    assert.throws(() => checkNotificationUi(ui(expected.title, expected.body, '<node text="UAC 인증 요청"/>'), selected, expected));
+    assert.throws(() => checkNotificationUi(ui(expected.title, expected.body, '<node text="관리자 권한 승인 요청"/>'), selected, expected));
   }
   assert.throws(() => checkNotificationUi(ui('휴대폰 승인', '준비'), 'unknown'));
   assert.throws(() => notificationActionsMatch('', 'unknown'));
-  assert.ok(expectedStatus['status-ready'].body.includes('설정'), 'local settings readiness is not remote approval readiness');
+  // The ready notification names the state the app shows for local_settings_ready.
+  assert.equal(expectedStatus['status-ready'].body, '휴대폰 승인 켜짐');
+  assert.doesNotMatch(expectedStatus['status-ready'].body, /PC|연결|요청|준비됨/u, 'local settings readiness is not remote approval readiness');
 });
 
 test('status text comes from bounded exact product resources, never native result-selected expected strings', () => {

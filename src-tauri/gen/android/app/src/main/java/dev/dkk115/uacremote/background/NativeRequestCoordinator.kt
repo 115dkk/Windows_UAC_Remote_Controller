@@ -32,6 +32,8 @@ internal class NativeRequestCoordinator(
     private val externalProgress: () -> Unit,
     private val ownerFailed: (Throwable) -> Unit,
     private val maintenanceFailed: (Throwable) -> Unit,
+    // A PC session ended; the actor owns the one connection maintenance path.
+    private val sessionEnded: () -> Unit,
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
@@ -66,7 +68,7 @@ internal class NativeRequestCoordinator(
                     val controller = owner() ?: throw BridgeException.Closed()
                     platform.refreshPresentationClock()
                     val catalog = controller.maintainNativeRequests()
-                    platform.requests.catalogMaintained(catalog)
+                    if (platform.requests.catalogMaintained(catalog)) sessionEnded()
                     advanceDeliveries(controller)
                     externalProgress()
                     maintenanceFailures.set(0)
@@ -153,7 +155,7 @@ internal class NativeRequestCoordinator(
                 platform.refreshPresentationClock()
                 val value = if (locator == null) {
                     val catalog = controller.requestCatalogStatus()
-                    platform.requests.catalogMaintained(catalog)
+                    if (platform.requests.catalogMaintained(catalog)) sessionEnded()
                     val secure = platform.secureLockConfigured()
                     platform.requests.snapshot(catalog, { secure && canApprove(it) }, { secure && canDeny(it) })
                 } else {
@@ -192,16 +194,26 @@ internal class NativeRequestCoordinator(
                 if (!NativeRequestIdentity.same(selected, claim.selection) || !platform.requests.current(claim)) throw BridgeException.RequestUnavailable()
                 if (action == NativeRequestAction.APPROVE && (!canApprove(selected) || claim.entry.phase != NativeRequestPhase.PENDING)) throw BridgeException.Busy()
                 if (action == NativeRequestAction.DENY) {
+                    val observation = NativeDecisionObservation()
+                    val generation = NativeActionGeneration()
                     dispatched = true
-                    val admitted = denial(selected) { result ->
-                        val phase = when (result) {
-                            NativeDenialReply.PREPARED, NativeDenialReply.WAITING, NativeDenialReply.BUSY -> NativeRequestPhase.WAITING
-                            NativeDenialReply.SENDING -> NativeRequestPhase.SENDING
-                            NativeDenialReply.AWAITING_OUTCOME -> NativeRequestPhase.AWAITING_OUTCOME
-                            NativeDenialReply.CANCELLED, NativeDenialReply.RELEASED -> NativeRequestPhase.PENDING
-                            NativeDenialReply.UNAVAILABLE -> NativeRequestPhase.UNAVAILABLE
+                    val admitted = synchronized(claim.entry.actionAdmissionLock) {
+                        val result = denial(selected) { reply ->
+                            if (reply == NativeDenialReply.PREPARED) platform.requests.decisionPrepared(locator, observation)
+                            val phase = when (reply) {
+                                NativeDenialReply.PREPARED, NativeDenialReply.WAITING, NativeDenialReply.BUSY -> NativeRequestPhase.WAITING
+                                NativeDenialReply.SENDING -> NativeRequestPhase.SENDING
+                                NativeDenialReply.AWAITING_OUTCOME -> NativeRequestPhase.AWAITING_OUTCOME
+                                NativeDenialReply.CANCELLED, NativeDenialReply.RELEASED -> NativeRequestPhase.PENDING
+                                NativeDenialReply.UNAVAILABLE -> NativeRequestPhase.UNAVAILABLE
+                            }
+                            platform.requests.phase(locator, generation, phase, observation); changed()
                         }
-                        platform.requests.phase(locator, phase); changed()
+                        if (result == NativeDenialReply.WAITING) {
+                            platform.requests.actionAdmitted(claim, generation, NativeRequestPhase.WAITING)
+                            platform.requests.decisionAccepted(claim, action, observation)
+                        }
+                        result
                     }
                     actionReply(callback, if (admitted == NativeDenialReply.WAITING) NativeRequestActionResult.QUEUED else if (admitted == NativeDenialReply.BUSY) NativeRequestActionResult.BUSY else NativeRequestActionResult.UNAVAILABLE, claim.entry)
                 } else {
@@ -218,8 +230,16 @@ internal class NativeRequestCoordinator(
                                 actionReply(callback, NativeRequestActionResult.BUSY)
                             } else {
                                 platform.requests.openReview(claim)
-                                platform.requests.phase(locator, NativeRequestPhase.AUTHENTICATING); changed()
-                                val admitted = approval(selected, host) { result -> approvalResult(locator, result) }
+                                val observation = NativeDecisionObservation()
+                                val generation = NativeActionGeneration()
+                                val admitted = synchronized(claim.entry.actionAdmissionLock) {
+                                    val accepted = approval(selected, host) { result -> approvalResult(locator, generation, observation, result) }
+                                    if (accepted) {
+                                        platform.requests.actionAdmitted(claim, generation, NativeRequestPhase.AUTHENTICATING)
+                                        platform.requests.decisionAccepted(claim, action, observation)
+                                    }
+                                    accepted
+                                }
                                 actionReply(callback, if (admitted) NativeRequestActionResult.QUEUED else NativeRequestActionResult.BUSY, claim.entry)
                             }
                         } catch (_: Exception) { actionReply(callback, NativeRequestActionResult.UNAVAILABLE) }
@@ -301,20 +321,37 @@ internal class NativeRequestCoordinator(
         }) notificationRefreshQueued.set(false)
     }
 
-    private fun approvalResult(locator: String, result: NativeApprovalReply) {
+    private fun approvalResult(locator: String, generation: NativeActionGeneration, observation: NativeDecisionObservation, result: NativeApprovalReply) {
         when (result) {
             is NativeApprovalReply.Prepared -> {
-                if (!platform.requests.keepDelivery(locator, result.submission)) return
-                platform.requests.phase(locator, NativeRequestPhase.WAITING)
+                platform.requests.decisionPrepared(locator, observation, result.authenticatedAtNanos, result.signedAtNanos)
+                if (!platform.requests.keepDelivery(locator, generation, result.submission, observation)) {
+                    platform.requests.decisionLocalStatus(locator, observation); changed(); return
+                }
+                platform.requests.phase(locator, generation, NativeRequestPhase.WAITING, observation)
                 progress() // Actual retained submission is driven on the same worker.
             }
-            NativeApprovalReply.Cancelled, NativeApprovalReply.Busy -> platform.requests.phase(locator, NativeRequestPhase.PENDING)
-            NativeApprovalReply.Unavailable, NativeApprovalReply.LockRequired -> platform.requests.phase(locator, NativeRequestPhase.UNAVAILABLE)
+            NativeApprovalReply.Cancelled, NativeApprovalReply.Busy -> {
+                platform.requests.decisionLocalStatus(locator, observation)
+                platform.requests.phase(locator, generation, NativeRequestPhase.PENDING, observation)
+            }
+            NativeApprovalReply.AuthenticationCancelled -> {
+                platform.requests.decisionLocalStatus(locator, observation, authenticationCancelled = true)
+                platform.requests.phase(locator, generation, NativeRequestPhase.PENDING, observation)
+            }
+            NativeApprovalReply.Unavailable, NativeApprovalReply.LockRequired -> {
+                platform.requests.decisionLocalStatus(locator, observation)
+                platform.requests.phase(locator, generation, NativeRequestPhase.UNAVAILABLE, observation)
+            }
         }
         changed()
     }
     private fun advanceDeliveries(controller: MobileController) {
-        for ((locator, submission) in platform.requests.deliveries()) {
+        for (delivery in platform.requests.deliveries()) {
+            val locator = delivery.locator
+            val submission = delivery.submission
+            val generation = delivery.generation
+            val observation = delivery.observation
             val claim = platform.requests.acquire(locator) ?: continue
             try {
                 controller.checkPendingRequest(claim.handle)
@@ -323,14 +360,14 @@ internal class NativeRequestCoordinator(
                 val progress = if (current == NativeDecisionProgress.PREPARED || current == NativeDecisionProgress.WAITING_FOR_PEER) {
                     controller.requestApprovalDelivery(submission)
                 } else current
-                platform.requests.phase(locator, when (progress) {
+                platform.requests.phase(locator, generation, when (progress) {
                     NativeDecisionProgress.PREPARED, NativeDecisionProgress.WAITING_FOR_PEER -> NativeRequestPhase.WAITING
                     NativeDecisionProgress.QUEUED -> NativeRequestPhase.SENDING
                     NativeDecisionProgress.WRITTEN_TO_SOCKET -> NativeRequestPhase.AWAITING_OUTCOME
                     NativeDecisionProgress.STOPPED, NativeDecisionProgress.REJECTED -> NativeRequestPhase.UNAVAILABLE
-                })
+                }, observation)
             } catch (_: BridgeException.Busy) { }
-            catch (_: Exception) { platform.requests.phase(locator, NativeRequestPhase.UNAVAILABLE) }
+            catch (_: Exception) { platform.requests.phase(locator, generation, NativeRequestPhase.UNAVAILABLE, observation) }
             finally { claim.close() }
         }
     }

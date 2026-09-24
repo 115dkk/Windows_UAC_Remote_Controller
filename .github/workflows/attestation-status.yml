@@ -1,13 +1,9 @@
 name: Attestation status interoperability
 
 on:
+  # A release gate: every PR commit needs its own run, so no path filter.
+  pull_request:
   workflow_dispatch:
-  push:
-    branches: [main, 'codex/native-runtime']
-    paths:
-      - 'crates/android-attestation/**'
-      - 'Cargo.lock'
-      - '.github/workflows/attestation-status.yml'
 
 permissions:
   contents: read

@@ -64,13 +64,14 @@ internal object AndroidDiagnosticStore {
         "BOOTSTRAP_TOO_MANY_ENTRIES", "BOOTSTRAP_NON_UNICODE_ENTRY", "BOOTSTRAP_UNKNOWN_ENTRY", "BOOTSTRAP_EXISTING_KEYS", "BOOTSTRAP_LEGACY_POLICY", "BOOTSTRAP_MARKER_LENGTH", "BOOTSTRAP_MARKER_CONTENTS", "BOOTSTRAP_UNSAFE_FILE", "BOOTSTRAP_LINK_COUNT", "BOOTSTRAP_REPARSE_POINT", "BOOTSTRAP_IO_PERMISSION_DENIED", "BOOTSTRAP_IO_NOT_FOUND", "BOOTSTRAP_IO_ALREADY_EXISTS", "BOOTSTRAP_IO_OTHER",
         "RESOLVED_INTERRUPTED_COMMIT", "RESOLVED_ABANDONED_PREPARATIONS",
         "STORE_DIRECTORY_UNAVAILABLE", "STORE_UNSUPPORTED_PLATFORM", "STORE_UNSAFE_ENTRY", "STORE_STATE_ALREADY_EXISTS", "STORE_MISSING_STATE", "STORE_WRITER_LOCKED", "STORE_RECOVERY_REQUIRED", "STORE_INTERRUPTED_COMMIT", "STORE_CORRUPT_SNAPSHOT", "STORE_UNSUPPORTED_VERSION", "STORE_SNAPSHOT_TOO_LARGE", "STORE_EXTERNAL_CHANGE", "STORE_READ_FAILED", "STORE_WRITE_FAILED", "STORE_COMMIT_UNCERTAIN", "STORE_POISONED", "STORE_GENERATION_EXHAUSTED",
-        "COMPOSITE_INVALID_ENCODING", "COMPOSITE_UNSUPPORTED_VERSION", "COMPOSITE_TOO_LARGE", "COMPOSITE_LEGACY_HISTORY", "COMPOSITE_HISTORY_PROFILE", "COMPOSITE_RECORDED_PENDING_OVERLAP", "COMPOSITE_HISTORY", "COMPOSITE_LOCAL_KEYS", "COMPOSITE_PEER_ASSOCIATIONS", "COMPOSITE_RECEIVING_SOURCE",
+        "COMPOSITE_INVALID_ENCODING", "COMPOSITE_UNSUPPORTED_VERSION", "COMPOSITE_TOO_LARGE", "COMPOSITE_LEGACY_HISTORY", "COMPOSITE_HISTORY_PROFILE", "COMPOSITE_RECORDED_PENDING_OVERLAP", "COMPOSITE_HISTORY", "COMPOSITE_LOCAL_KEYS", "COMPOSITE_PEER_ASSOCIATIONS", "COMPOSITE_RECEIVING_SOURCE", "COMPOSITE_ROUTING_CANDIDATES",
         "DURABLE_HISTORY", "DURABLE_LIFECYCLE_INTEGRATION", "DURABLE_LOCAL_KEY_RECONCILIATION", "DURABLE_NATIVE_LOCAL_KEYS", "DURABLE_LOCAL_KEYS", "DURABLE_DIRECTORY_SYNCHRONIZATION", "DURABLE_TRANSITION_INCOMPLETE",
         "CHECKPOINT_INVALID_BOOT", "CHECKPOINT_MISSING_BOOT", "CHECKPOINT_CLOCK_REGRESSED", "CHECKPOINT_INVALID_STATE", "CHECKPOINT_UNSUPPORTED_VERSION", "CHECKPOINT_TOO_LARGE", "CHECKPOINT_LEGACY_OUTCOME", "CHECKPOINT_OUTCOME_RETENTION",
     )
     private val measurementNames = mapOf("APPROVAL_EXPIRED_ON_WORKER" to "phase", "APPROVAL_CLEANUP_REFUSED" to "reason", "APPROVAL_CLEANUP_COMPLETE" to "admission_waits", "APPROVAL_RETIRE_BUSY" to "waits", "APPROVAL_CLEANUP_WAKE" to "posted", "NOTIFICATION_REMAINING" to "millis")
     private val throwSites = setOf("INTAKE_PROGRESS", "PRESENTATION_CLOCK", "PUBLISH_PENDING_REQUEST", "WITHDRAW_REQUESTS", "CLOCK", "REGISTRY_PUBLISH_CAUSE", "APPROVAL_CLOSE_SUBMISSION", "APPROVAL_RETIRE", "APPROVAL_CLOSE_ATTEMPT", "APPROVAL_CLOSE_PLAN", "APPROVAL_CLEANUP_COMPLETE")
     private val nativePatterns = listOf(
+        Regex("UAC_NATIVE_DECISION_V1 sample=[0-9]+ action=(?:approve|deny) outcome=(?:approved|denied|failed|cancelled|expired|expired_locally|pc_completed) timing_eligible=(?:true|false) action_to_receipt_ms=[0-9]+ action_to_auth_ms=(?:none|[0-9]+) auth_to_receipt_ms=(?:none|[0-9]+) local_ready_to_receipt_ms=(?:none|[0-9]+)"),
         Regex("UAC_NATIVE_INTAKE_V1 site=[A-Z0-9_]+ error=[A-Z0-9_]+"),
         Regex("UAC_NATIVE_STEP_V1 step=[A-Z0-9_]+ error=[A-Z0-9_]+"),
         Regex("UAC_NATIVE_STARTUP_V1 stage=[A-Z0-9_]+ reason=[A-Z0-9_]+"),
@@ -196,6 +197,23 @@ internal object AndroidDiagnosticStore {
         val parts = line.split(' ')
         val fields = parts.drop(1).associate { it.substringBefore('=') to it.substringAfter('=') }
         return when (parts[0]) {
+            "UAC_NATIVE_DECISION_V1" -> {
+                val total = fields["action_to_receipt_ms"]?.toLongOrNull()
+                val auth = fields["action_to_auth_ms"]?.toLongOrNull()
+                val after = fields["auth_to_receipt_ms"]?.toLongOrNull()
+                fields["sample"]?.toIntOrNull()?.let { it in 1..1_000_000 } == true &&
+                    total != null && total in 0..300_000 &&
+                    listOf("action_to_auth_ms", "auth_to_receipt_ms", "local_ready_to_receipt_ms").all { key ->
+                        fields[key] == "none" || fields[key]?.toLongOrNull()?.let { it in 0..total } == true
+                    } && (auth == null) == (after == null) &&
+                    (auth == null || after != null && total - auth - after in 0..1) &&
+                    (fields["action"] != "deny" || auth == null) &&
+                    (if (fields["timing_eligible"] == "true") {
+                        fields["local_ready_to_receipt_ms"] != "none" &&
+                            ((fields["action"] == "approve" && fields["outcome"] == "approved" && auth != null) ||
+                                (fields["action"] == "deny" && fields["outcome"] == "denied"))
+                    } else auth == null)
+            }
             "UAC_NATIVE_INTAKE_V1" -> fields["site"] in intakeSites && fields["error"] in errors
             "UAC_NATIVE_STEP_V1" -> fields["step"] in steps && fields["error"] in errors
             "UAC_NATIVE_STARTUP_V1" -> fields["stage"] in setOf("DIRECTORY", "BOOTSTRAP", "OPEN_EXISTING", "CREATE_FRESH") && fields["reason"] in startupReasons

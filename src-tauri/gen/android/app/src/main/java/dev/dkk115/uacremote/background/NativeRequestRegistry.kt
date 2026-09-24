@@ -30,6 +30,10 @@ internal class NativeRequestPayload(val json: String, val generation: Long, val 
     override fun toString(): String = "NativeRequestPayload([redacted])"
 }
 internal class NativeRequestReview(val locator: String?, val revision: String)
+internal class NativeRetainedDelivery(val locator: String, val submission: NativeApprovalSubmission,
+                                    val generation: NativeActionGeneration, val observation: NativeDecisionObservation?) {
+    override fun toString(): String = "NativeRetainedDelivery([redacted])"
+}
 internal class NativeNotificationRoute(val key: String, val locator: String, val action: NativeRequestAction)
 
 /** Locator/formatting rules only: no request, signing or enrollment authority. */
@@ -74,6 +78,17 @@ internal object NativeRequestRules {
         return ((difference + 999_999_999uL) / 1_000_000_000uL).toLong()
     }
     fun refreshMillis(until: ULong, now: ULong): Long = if (until <= now) 0 else ((until - now) / 1_000_000uL).coerceAtMost(60_000uL).toLong()
+    fun connectionFailure(value: NativeDialFailure): String = when (value) {
+        NativeDialFailure.UNREACHABLE -> "unreachable"
+        NativeDialFailure.REFUSED -> "refused"
+        NativeDialFailure.NO_ANSWER -> "no_answer"
+    }
+    /** Dialing and failures describe unconnected paired PCs only; a summary that
+     * says otherwise is dropped from the display, never shown. */
+    fun connectionConsistent(configured: UByte, connected: UByte, value: NativePcConnection): Boolean =
+        configured != 0.toUByte() && (connected < configured || (!value.dialing && value.lastFailure == null))
+    /** A PC connected at the previous catalogue and not at this one: its session ended. */
+    fun sessionEnded(previous: Set<String>, current: Set<String>): Boolean = previous.any { it !in current }
 }
 
 /** Duplicate intent prevention only; owning live-handle checks remain mandatory. */
@@ -84,6 +99,10 @@ internal class NativeRequestActionClaims {
 
 internal class NativeRequestEntry(val key: String, val locator: String, val selection: NativeRequestSelection, val handle: NativePendingRequest) {
     val lock = Any()
+    // Serializes bounded native action admission plus phase-owner publication.
+    // Never acquired while holding registry/handle locks. Callbacks do not
+    // acquire it; no signing, IO or prompt lifetime runs under this lock.
+    val actionAdmissionLock = Any()
     // Serializes ONLY this generation's OS post/cancel. Never acquired while
     // holding the registry/handle lock, or used to release a body borrow.
     val notificationLock = Any()
@@ -102,6 +121,9 @@ internal class NativeRequestEntry(val key: String, val locator: String, val sele
     var cancelledIntents = 0
     val notificationClaims = NativeRequestActionClaims()
     @Volatile var delivery: NativeApprovalSubmission? = null
+    @Volatile var deliveryObservation: NativeDecisionObservation? = null
+    @Volatile var deliveryGeneration: NativeActionGeneration? = null
+    var phaseOwner = NativeActionPhaseOwner()
     override fun toString(): String = "NativeRequestEntry([redacted])"
 }
 
@@ -130,6 +152,7 @@ internal class NativeRequestRegistry(
     private val deferredClose = ArrayList<AutoCloseable>()
     private val renderer = RequestNotificationRenderer(application)
     private val random = SecureRandom()
+    private val decisions = NativeDecisionMeasurements()
     private var generation = 1L
     private var failed = false
     private var stopping = false
@@ -138,6 +161,7 @@ internal class NativeRequestRegistry(
     private var clearFailed = false
     private var allNotificationsCleared = false
     private var lastCatalog: String? = null
+    private var connectedPeers: Set<String> = emptySet()
     private var catalogReady = false
     private var reviewLocator: String? = null
     private var reviewRevision = 0uL
@@ -165,6 +189,9 @@ internal class NativeRequestRegistry(
                     if (current != null) {
                         synchronized(current.lock) {
                             next.phase = current.phase; next.delivery = current.delivery; current.delivery = null
+                            next.deliveryObservation = current.deliveryObservation; current.deliveryObservation = null
+                            next.deliveryGeneration = current.deliveryGeneration; current.deliveryGeneration = null
+                            next.phaseOwner = current.phaseOwner.replaceForDelivery(next.deliveryGeneration)
                             next.postedFresh = current.postedFresh
                         }
                         retireLocked(current)
@@ -280,24 +307,56 @@ internal class NativeRequestRegistry(
         if (claim.isClosed()) throw BridgeException.RequestUnavailable()
         return checkedPreview(claim.entry)
     }
-    fun phase(locator: String, value: NativeRequestPhase) {
+    /** Called only after the real native action coordinator reports admission. */
+    fun actionAdmitted(claim: NativeRequestClaim, generation: NativeActionGeneration, initial: NativeRequestPhase) {
         val modified = synchronized(lock) {
-            val entry = entries.values.singleOrNull { it.locator == locator } ?: return@synchronized false
-            synchronized(entry.lock) { if (entry.phase == value) false else { entry.phase = value; bump(); true } }
+            val entry = entries[claim.entry.key] ?: return@synchronized false
+            if (entry !== claim.entry || claim.isClosed()) return@synchronized false
+            synchronized(entry.lock) {
+                if (!entry.active || entry.closed || !entry.phaseOwner.admitted(generation)) false
+                else { entry.phase = initial; bump(); true }
+            }
         }
         if (modified) changed()
     }
-    fun keepDelivery(locator: String, value: NativeApprovalSubmission): Boolean {
+    fun phase(locator: String, generation: NativeActionGeneration, value: NativeRequestPhase, observation: NativeDecisionObservation? = null) {
+        if (observation != null) decisions.progress(locator, observation, value, SystemClock.elapsedRealtimeNanos())
+        val modified = synchronized(lock) {
+            val entry = entries.values.singleOrNull { it.locator == locator } ?: return@synchronized false
+            synchronized(entry.lock) {
+                if (!entry.active || entry.closed || !entry.phaseOwner.owns(generation) || entry.phase == value) false
+                else {
+                    entry.phase = value
+                    if (value == NativeRequestPhase.PENDING) entry.phaseOwner.completed(generation)
+                    bump(); true
+                }
+            }
+        }
+        if (modified) changed()
+    }
+    fun decisionAccepted(claim: NativeRequestClaim, action: NativeRequestAction, observation: NativeDecisionObservation) {
+        decisions.accepted(claim.locator, action, claim.handle.outcomeDeliveryIds(), SystemClock.elapsedRealtimeNanos(), observation)
+    }
+    fun decisionLocalStatus(locator: String, observation: NativeDecisionObservation, authenticationCancelled: Boolean = false) {
+        decisions.localStatus(locator, observation, authenticationCancelled, SystemClock.elapsedRealtimeNanos())
+    }
+    fun decisionPrepared(locator: String, observation: NativeDecisionObservation, authenticatedAtNanos: Long? = null, signedAtNanos: Long? = null) {
+        decisions.prepared(locator, observation, authenticatedAtNanos, signedAtNanos ?: SystemClock.elapsedRealtimeNanos())
+    }
+    fun keepDelivery(locator: String, generation: NativeActionGeneration, value: NativeApprovalSubmission, observation: NativeDecisionObservation): Boolean {
         val entry = synchronized(lock) { entries.values.singleOrNull { it.locator == locator && it.active } }
         if (entry == null) { closeTemporary(value); return false }
         val accepted = synchronized(entry.lock) {
-            if (!entry.active || entry.closed || entry.delivery != null) false else { entry.delivery = value; true }
+            if (!entry.active || entry.closed || !entry.phaseOwner.owns(generation) || entry.delivery != null) false
+            else { entry.delivery = value; entry.deliveryObservation = observation; entry.deliveryGeneration = generation; true }
         }
         if (!accepted) closeTemporary(value)
         return accepted
     }
-    fun deliveries(): List<Pair<String, NativeApprovalSubmission>> = synchronized(lock) {
-        entries.values.mapNotNull { entry -> synchronized(entry.lock) { entry.delivery?.let { entry.locator to it } } }
+    fun deliveries(): List<NativeRetainedDelivery> = synchronized(lock) {
+        entries.values.mapNotNull { entry -> synchronized(entry.lock) {
+            entry.deliveryGeneration?.let { generation -> entry.delivery?.let { NativeRetainedDelivery(entry.locator, it, generation, entry.deliveryObservation) } }
+        } }
     }
     fun nextWake(): ULong? {
         val all = synchronized(lock) { if (stopping || failed || temporalInvalid) return null; entries.values.toList() }
@@ -357,8 +416,13 @@ internal class NativeRequestRegistry(
                 .put("routePresent", peer.routePresent).put("connected", peer.connected))
         }
         if (peers.length() != catalog.configuredPeers.toInt() || catalog.peers.count { it.connected } != catalog.connectedPeers.toInt()) throw BridgeException.NativeUnavailable()
+        val connection = catalog.connection?.takeIf { NativeRequestRules.connectionConsistent(catalog.configuredPeers, catalog.connectedPeers, it) }
+            ?.let { JSONObject().put("dialing", it.dialing).put("externalRoute", it.externalRoute)
+                .put("lastFailure", it.lastFailure?.let(NativeRequestRules::connectionFailure) ?: JSONObject.NULL) }
         val root = JSONObject().put("version", 2).put("status", status).put("revision", catalog.revision.toString()).put("peers", peers)
             .put("peerCount", catalog.configuredPeers.toInt()).put("connectedPeerCount", catalog.connectedPeers.toInt()).put("requests", rows)
+            .put("decisions", decisions.snapshot(observed.elapsedAfterNanos.toLong()))
+            .put("connection", connection ?: JSONObject.NULL)
         return payload(root, NativeRequestRules.MAX_LIST_JSON, observed, until, originalGeneration)
     }
     fun details(claim: NativeRequestClaim): NativeRequestPayload {
@@ -404,17 +468,24 @@ internal class NativeRequestRegistry(
         return selected.any { synchronized(it.notificationLock) { it.notificationFailed } }
     }
     fun invalidateTime() { synchronized(lock) { temporalInvalid = true; bump() }; changed() }
-    fun catalogMaintained(catalog: NativeRequestCatalogStatus) {
-        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}"
+    /** True when a PC connected at the previous catalogue no longer is. */
+    fun catalogMaintained(catalog: NativeRequestCatalogStatus): Boolean {
+        val receiptChanged = decisions.observe(catalog.outcomeReceipts)
+        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}:${catalog.connection}"
+        val connected = catalog.peers.filter { it.connected }.mapTo(HashSet()) { it.id }
+        var ended = false
         val modified = synchronized(lock) {
-            val result = (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
+            val result = receiptChanged || (temporalInvalid && catalog.state == NativeRequestCatalogState.READY) || lastCatalog != identity
             catalogReady = catalog.state == NativeRequestCatalogState.READY
             if (catalogReady) temporalInvalid = false
             lastCatalog = identity
+            ended = NativeRequestRules.sessionEnded(connectedPeers, connected)
+            connectedPeers = connected
             if (result) bump()
             result
         }
         if (modified) changed()
+        return ended
     }
     fun clear() {
         synchronized(lock) { for (entry in entries.values.toList()) retireLocked(entry); entries.clear(); if (!allNotificationsCleared) clearRequested = true; bump() }
@@ -476,6 +547,7 @@ internal class NativeRequestRegistry(
     private fun retireLocked(entry: NativeRequestEntry) {
         synchronized(entry.lock) {
             entry.active = false
+            entry.phaseOwner.retire()
         }
         if (reviewLocator == entry.locator) reviewLocator = null
         if (!retired.contains(entry)) retired.add(entry)

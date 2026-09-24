@@ -6,7 +6,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::Path,
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows::Win32::Foundation::{
     ERROR_BUSY, ERROR_NO_MORE_FILES, ERROR_SERVICE_ALREADY_RUNNING,
@@ -15,9 +15,10 @@ use windows::Win32::Foundation::{
 };
 use windows_service::{
     service::{
-        Service, ServiceAccess, ServiceConfig, ServiceControlAccept, ServiceErrorControl,
-        ServiceInfo, ServiceSidType, ServiceStartType, ServiceState as NativeState, ServiceStatus,
-        ServiceType, UserEventCode,
+        Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceConfig,
+        ServiceControlAccept, ServiceErrorControl, ServiceFailureActions,
+        ServiceFailureResetPeriod, ServiceInfo, ServiceSidType, ServiceStartType,
+        ServiceState as NativeState, ServiceStatus, ServiceType, UserEventCode,
     },
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
@@ -104,30 +105,94 @@ fn initialization_complete(status: &ServiceStatus) -> bool {
             .contains(ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN)
 }
 
+/// Closed diagnostic reason naming which fixed registration term disagreed.
+/// It carries no path, account, display name, SID or descriptor content, is
+/// never an authorization input, and never changes the refusal it accompanies.
+/// Callers that do not diagnose keep passing the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RegistrationRejection {
+    #[default]
+    None,
+    Open,
+    NotInstalled,
+    ConfigQuery,
+    BinaryEncoding,
+    BinaryPath,
+    ServiceType,
+    Account,
+    DisplayName,
+    Dependencies,
+    LoadOrderGroup,
+    ErrorControl,
+    StartType,
+    Security,
+    SidTypeQuery,
+    SidType,
+}
+
 fn verify_config(
     service: &Service,
     executable: &Path,
     allow_disabled: bool,
 ) -> Result<ServiceConfig, ServiceError> {
-    let config = service
-        .query_config()
-        .map_err(|e| scm_error(ServiceOperation::QueryConfiguration, e))?;
+    verify_config_reported(
+        service,
+        executable,
+        allow_disabled,
+        &mut RegistrationRejection::None,
+    )
+}
+
+/// Same admission as before: every term below must hold, and any single
+/// disagreement is the one existing `ConfigurationConflict`. The terms are
+/// evaluated one at a time only so that a refusal can name itself.
+fn verify_config_reported(
+    service: &Service,
+    executable: &Path,
+    allow_disabled: bool,
+    reason: &mut RegistrationRejection,
+) -> Result<ServiceConfig, ServiceError> {
+    let config = service.query_config().map_err(|e| {
+        *reason = RegistrationRejection::ConfigQuery;
+        scm_error(ServiceOperation::QueryConfiguration, e)
+    })?;
+    let refuse = |reason: &mut RegistrationRejection, value| {
+        *reason = value;
+        ServiceError::ConfigurationConflict
+    };
     let binary = config
         .executable_path
         .to_str()
-        .ok_or(ServiceError::ConfigurationConflict)?;
-    let expected = executable.to_str().ok_or(ServiceError::UnsafePath)?;
-    if !policy::command_matches(binary, expected)
-        || config.service_type != ServiceType::OWN_PROCESS
-        || config.account_name.as_deref() != Some(OsStr::new("LocalSystem"))
-        || config.display_name != OsStr::new(SERVICE_DISPLAY_NAME)
-        || !config.dependencies.is_empty()
-        || config.load_order_group.is_some()
-        || config.error_control != ServiceErrorControl::Normal
-        || !(config.start_type == ServiceStartType::AutoStart
-            || (allow_disabled && config.start_type == ServiceStartType::Disabled))
+        .ok_or_else(|| refuse(reason, RegistrationRejection::BinaryEncoding))?;
+    let expected = executable.to_str().ok_or_else(|| {
+        *reason = RegistrationRejection::BinaryPath;
+        ServiceError::UnsafePath
+    })?;
+    if !policy::command_matches(binary, expected) {
+        return Err(refuse(reason, RegistrationRejection::BinaryPath));
+    }
+    if config.service_type != ServiceType::OWN_PROCESS {
+        return Err(refuse(reason, RegistrationRejection::ServiceType));
+    }
+    if config.account_name.as_deref() != Some(OsStr::new("LocalSystem")) {
+        return Err(refuse(reason, RegistrationRejection::Account));
+    }
+    if config.display_name != OsStr::new(SERVICE_DISPLAY_NAME) {
+        return Err(refuse(reason, RegistrationRejection::DisplayName));
+    }
+    if !config.dependencies.is_empty() {
+        return Err(refuse(reason, RegistrationRejection::Dependencies));
+    }
+    if config.load_order_group.is_some() {
+        return Err(refuse(reason, RegistrationRejection::LoadOrderGroup));
+    }
+    if config.error_control != ServiceErrorControl::Normal {
+        return Err(refuse(reason, RegistrationRejection::ErrorControl));
+    }
+    if !(config.start_type == ServiceStartType::AutoStart
+        || (allow_disabled && config.start_type == ServiceStartType::Disabled))
     {
-        return Err(ServiceError::ConfigurationConflict);
+        return Err(refuse(reason, RegistrationRejection::StartType));
     }
     Ok(config)
 }
@@ -158,18 +223,38 @@ pub(crate) fn running_service_for_probe(executable: &Path) -> Result<Service, Se
 /// every ordinary probe caller still uses the strict function above.
 #[cfg(target_pointer_width = "64")]
 pub(crate) fn registered_service_for_probe(executable: &Path) -> Result<Service, ServiceError> {
+    registered_service_for_probe_reported(executable, &mut RegistrationRejection::None)
+}
+
+/// Identical admission to the function above. The out parameter exists only so
+/// that the owning startup path can report which fixed term refused it; no
+/// caller may treat it as permission, and it never alters the returned error.
+#[cfg(target_pointer_width = "64")]
+pub(crate) fn registered_service_for_probe_reported(
+    executable: &Path,
+    reason: &mut RegistrationRejection,
+) -> Result<Service, ServiceError> {
     let service = open(
         &manager(false)?,
         ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::READ_CONTROL,
-    )?
-    .ok_or(ServiceError::NotInstalled)?;
-    verify_config(&service, executable, false)?;
-    ffi::verify_service_security(&service)?;
-    if service
-        .get_config_service_sid_info()
-        .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
-        != ServiceSidType::Unrestricted
+    )
+    .inspect_err(|_| {
+        *reason = RegistrationRejection::Open;
+    })?
+    .ok_or_else(|| {
+        *reason = RegistrationRejection::NotInstalled;
+        ServiceError::NotInstalled
+    })?;
+    verify_config_reported(&service, executable, false, reason)?;
+    ffi::verify_service_security(&service).inspect_err(|_| {
+        *reason = RegistrationRejection::Security;
+    })?;
+    if service.get_config_service_sid_info().map_err(|error| {
+        *reason = RegistrationRejection::SidTypeQuery;
+        scm_error(ServiceOperation::QueryConfiguration, error)
+    })? != ServiceSidType::Unrestricted
     {
+        *reason = RegistrationRejection::SidType;
         return Err(ServiceError::ConfigurationConflict);
     }
     Ok(service)
@@ -276,6 +361,41 @@ pub(crate) fn configure_relay_for_running_service(
     directory.write_relay_configuration(endpoint)
 }
 
+/// Same elevation, installation and service-state rules as `relay`. A running
+/// service persists and applies the choice itself on its one worker thread:
+/// a CLI-side staging file would be an unknown entry to that service's own
+/// directory checks. A stopped or absent service's configuration is written here.
+pub(crate) fn configure_external_access(
+    access: direct_network::ExternalAccess,
+) -> Result<(), ServiceError> {
+    let access = access
+        .validated()
+        .map_err(|_| ServiceError::InvalidArguments)?;
+    ffi::require_elevated()?;
+    let _installation = ffi::validate_installation(true)?;
+    let status = query_status()?;
+    if status.state == Some(ServiceState::Running) {
+        return crate::management_mutation(
+            crate::management_protocol::ManagementRequest::SetExternalAccess { access },
+        );
+    }
+    if status.state != Some(ServiceState::Stopped)
+        && status.installation != crate::InstallationState::NotInstalled
+    {
+        return Err(ServiceError::UnexpectedState);
+    }
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_external_access(access)
+}
+
+pub(crate) fn configure_external_access_for_running_service(
+    access: direct_network::ExternalAccess,
+) -> Result<(), ServiceError> {
+    windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
+    let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
+    directory.write_external_access(access)
+}
+
 pub(crate) fn remove_device(device: approval_protocol::DeviceId) -> Result<(), ServiceError> {
     ffi::require_elevated()?;
     let _installation = ffi::validate_installation(true)?;
@@ -356,6 +476,59 @@ pub(crate) fn probe_control_registration_ready(executable: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Two bounded automatic restarts, then Windows stops trying until the next
+/// boot or the next hour-scale quiet period. Without this an automatic start
+/// that fails once for a transient host condition leaves the service stopped
+/// until a person turns it back on, which is the observed reboot outage.
+///
+/// This grants no admission: every restart re-runs the whole fail-closed
+/// startup sequence, including installation, registration, identity and ACL
+/// verification. It also adds no reboot action and no command line.
+///
+/// Windows refuses restart actions with access denied unless the handle
+/// carries SERVICE_START as well as SERVICE_CHANGE_CONFIG; see `INSTALL_ACCESS`.
+fn configure_recovery(service: &Service) -> Result<(), ServiceError> {
+    service
+        .update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(RECOVERY_RESET_PERIOD),
+            // Both stay unchanged: this contract has no reboot or command
+            // action, so it has nothing to write there. The actions and the
+            // reset period are replaced wholesale, and a registration this
+            // product did not create is already refused before reaching here.
+            reboot_msg: None,
+            command: None,
+            actions: Some(
+                RECOVERY_DELAYS
+                    .iter()
+                    .map(|delay| ServiceAction {
+                        action_type: ServiceActionType::Restart,
+                        delay: *delay,
+                    })
+                    .collect(),
+            ),
+        })
+        .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
+    // A refused startup reports SERVICE_STOPPED with a service-specific code,
+    // which Windows does not classify as a crash. Without this flag the
+    // actions above would never apply to exactly the failure they exist for.
+    service
+        .set_failure_actions_on_non_crash_failures(true)
+        .map_err(|e| scm_error(ServiceOperation::HardenService, e))
+}
+
+const RECOVERY_RESET_PERIOD: Duration = Duration::from_secs(86_400);
+const RECOVERY_DELAYS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// One handle serves creation, hardening and recovery. SERVICE_START is here
+/// only because `configure_recovery` cannot set restart actions without it;
+/// install never starts the service, and it takes no stop or delete right.
+const INSTALL_ACCESS: ServiceAccess = ServiceAccess::QUERY_STATUS
+    .union(ServiceAccess::QUERY_CONFIG)
+    .union(ServiceAccess::READ_CONTROL)
+    .union(ServiceAccess::CHANGE_CONFIG)
+    .union(ServiceAccess::WRITE_DAC)
+    .union(ServiceAccess::START);
+
 fn service_info(executable: &Path, start_type: ServiceStartType) -> ServiceInfo {
     ServiceInfo {
         name: OsString::from(SERVICE_NAME),
@@ -431,11 +604,7 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
 fn install() -> Result<ServiceSnapshot, ServiceError> {
     let installation = ffi::validate_installation(true)?;
     let manager = manager(true)?;
-    let access = ServiceAccess::QUERY_STATUS
-        | ServiceAccess::QUERY_CONFIG
-        | ServiceAccess::READ_CONTROL
-        | ServiceAccess::CHANGE_CONFIG
-        | ServiceAccess::WRITE_DAC;
+    let access = INSTALL_ACCESS;
     let service = match open(&manager, access)? {
         Some(service) => {
             let config = verify_config(&service, installation.executable(), true)?;
@@ -450,6 +619,10 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
                     if sid != ServiceSidType::Unrestricted {
                         return Err(ServiceError::ConfigurationConflict);
                     }
+                    // A registration installed before the recovery contract
+                    // existed still needs it. This repairs the already verified
+                    // running service without stopping or reconfiguring it.
+                    configure_recovery(&service)?;
                     return Ok(snapshot(status(&service)?));
                 }
                 return Err(ServiceError::UnexpectedState);
@@ -476,6 +649,7 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
         service
             .set_config_service_sid_info(ServiceSidType::Unrestricted)
             .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
+        configure_recovery(&service)?;
         ffi::provision_activity_directory()?;
         ffi::provision_trust_directory()?;
         ffi::provision_embedded_relay_firewall()?;
@@ -706,5 +880,67 @@ mod tests {
             ServiceSnapshot::installed(ServiceState::Stopped, Some(42)).process_id,
             None
         );
+    }
+
+    #[test]
+    fn recovery_is_bounded_and_never_reboots_or_runs_a_command() {
+        assert_eq!(RECOVERY_RESET_PERIOD, Duration::from_secs(86_400));
+        assert_eq!(
+            RECOVERY_DELAYS,
+            [Duration::from_secs(5), Duration::from_secs(30)]
+        );
+        // Two attempts is a bounded recovery from a transient boot condition,
+        // not a restart loop that could hide a real refusal.
+        assert_eq!(RECOVERY_DELAYS.len(), 2);
+        assert!(
+            RECOVERY_DELAYS
+                .iter()
+                .all(|delay| *delay >= Duration::from_secs(1) && *delay <= RECOVERY_RESET_PERIOD)
+        );
+        assert!(RECOVERY_DELAYS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn the_install_handle_can_set_restart_recovery() {
+        // Without SERVICE_START, ChangeServiceConfig2 refuses the restart
+        // actions with access denied, and the Windows UAC lab install failed
+        // exactly that way.
+        assert!(INSTALL_ACCESS.contains(ServiceAccess::START | ServiceAccess::CHANGE_CONFIG));
+        assert!(INSTALL_ACCESS.contains(ServiceAccess::WRITE_DAC | ServiceAccess::READ_CONTROL));
+        assert!(!INSTALL_ACCESS.intersects(ServiceAccess::STOP | ServiceAccess::DELETE));
+    }
+
+    #[test]
+    fn a_registration_refusal_names_exactly_one_fixed_term() {
+        // The reported term is a closed diagnostic label with no path, account
+        // or descriptor content, and the default never claims a refusal.
+        assert_eq!(
+            RegistrationRejection::default(),
+            RegistrationRejection::None
+        );
+        let terms = [
+            RegistrationRejection::Open,
+            RegistrationRejection::NotInstalled,
+            RegistrationRejection::ConfigQuery,
+            RegistrationRejection::BinaryEncoding,
+            RegistrationRejection::BinaryPath,
+            RegistrationRejection::ServiceType,
+            RegistrationRejection::Account,
+            RegistrationRejection::DisplayName,
+            RegistrationRejection::Dependencies,
+            RegistrationRejection::LoadOrderGroup,
+            RegistrationRejection::ErrorControl,
+            RegistrationRejection::StartType,
+            RegistrationRejection::Security,
+            RegistrationRejection::SidTypeQuery,
+            RegistrationRejection::SidType,
+        ];
+        for (index, term) in terms.iter().enumerate() {
+            assert_ne!(*term, RegistrationRejection::None);
+            for other in &terms[index + 1..] {
+                assert_ne!(term, other);
+            }
+            assert!(!format!("{term:?}").is_empty());
+        }
     }
 }

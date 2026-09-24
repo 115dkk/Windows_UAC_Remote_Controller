@@ -106,7 +106,6 @@ describe('native request presentation integration', () => {
   it('shows empty requests alongside connection state, but not during reconciliation', async () => {
     const states = [
       { status: 'ready' as const, peerCount: 0, connectedPeerCount: 0, title: ko.noComputers },
-      { status: 'ready' as const, peerCount: 1, connectedPeerCount: 0, title: ko.requestDisconnected },
       { status: 'reconciling' as const, peerCount: 1, connectedPeerCount: 1, title: ko.requestReconciling },
     ];
     for (const { title, ...catalog } of states) {
@@ -116,6 +115,12 @@ describe('native request presentation integration', () => {
       else expect(screen.queryByText(ko.requestEmpty)).not.toBeInTheDocument();
       rendered.unmount();
     }
+    // A fresh disconnection is a progress row beside the empty list, not a notice.
+    const rendered = view({ ...pending(), requests: [], requestCatalog: { status: 'ready', revision: '1', peerCount: 1, connectedPeerCount: 0 } });
+    expect(await screen.findByText('PC에 연결하는 중')).toBeInTheDocument();
+    expect(screen.getByText(ko.requestEmpty)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'PC에 연결하지 못했습니다' })).not.toBeInTheDocument();
+    rendered.unmount();
   });
 
   it('brings the selected notification request first and keeps recovery on that page after withdrawal', async () => {
@@ -173,6 +178,136 @@ describe('native request presentation integration', () => {
     // A read that never answers extends nothing. The lease is still the lease.
     expect(await screen.findByText(ko.requestUnavailable, {}, { timeout: 2000 })).toBeInTheDocument();
     await act(() => { answer(short); return Promise.resolve(); });
+  });
+
+  // Native catalogue changes arrive as an empty wake. On 1.5.0 the wake never
+  // reached the page, and the card waited for the five-second periodic read.
+  function wakeable() {
+    const wake = { notify: () => undefined as void };
+    const watchRequests: ControllerBridge['watchRequests'] = (notify) => {
+      wake.notify = notify;
+      return Promise.resolve(() => Promise.resolve());
+    };
+    return { wake, watchRequests };
+  }
+  const settled = () => screen.findByRole('button', { name: ko.refresh });
+  const busyOwner = { code: 'app_busy', message: '앱이 다른 작업을 처리하는 중입니다.', nextAction: '잠시 후 다시 시도하십시오.' };
+
+  it('shows a request the native owner announces without waiting for the periodic read', async () => {
+    const empty = { ...pending(), requests: [] };
+    const { wake, watchRequests } = wakeable();
+    const reads = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(empty).mockResolvedValue(pending());
+    view(empty, { snapshot: reads, watchRequests });
+    expect(await screen.findByRole('heading', { name: ko.requestEmpty })).toBeInTheDocument();
+    await settled();
+    act(() => { wake.notify(); });
+    expect(await screen.findByText('설정 도우미.exe', {}, { timeout: 500 })).toBeInTheDocument();
+    expect(reads).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads again for a wake that arrives while another read is still running', async () => {
+    const empty = { ...pending(), requests: [] };
+    const { wake, watchRequests } = wakeable();
+    let answer: (value: AppSnapshot) => void = () => {};
+    const reads = vi.fn<ControllerBridge['snapshot']>()
+      .mockResolvedValueOnce(empty)
+      .mockImplementationOnce(() => new Promise<AppSnapshot>((resolve) => { answer = resolve; }))
+      .mockResolvedValue(pending());
+    view(empty, { snapshot: reads, watchRequests });
+    await settled();
+    act(() => { wake.notify(); });
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
+    // This read may already have passed the catalogue when the request landed.
+    act(() => { wake.notify(); });
+    expect(reads).toHaveBeenCalledTimes(2);
+    await act(async () => { answer(empty); await Promise.resolve(); });
+    expect(await screen.findByText('설정 도우미.exe', {}, { timeout: 500 })).toBeInTheDocument();
+    expect(reads).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the request on screen when a wake finds the owner busy, and still reports it on an explicit refresh', async () => {
+    const shown = pending();
+    const busy: AppSnapshot = { ...shown, requests: [], requestCatalog: null, issue: busyOwner,
+      dataAvailability: { ...shown.dataAvailability, requests: 'unavailable' } };
+    const { wake, watchRequests } = wakeable();
+    const reads = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(shown).mockResolvedValue(busy);
+    const user = userEvent.setup();
+    view(shown, { snapshot: reads, watchRequests });
+    await screen.findByText('설정 도우미.exe');
+    await settled();
+    act(() => { wake.notify(); });
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
+    await settled();
+    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+    expect(screen.queryByText(/앱이 다른 작업을 처리하는 중/u)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    expect(await screen.findByText(/앱이 다른 작업을 처리하는 중/u)).toBeInTheDocument();
+  });
+
+  it('reads details after the snapshot read that holds the native admission instead of failing', async () => {
+    const shown = pending();
+    const original = createQaBridge(shown);
+    const { wake, watchRequests } = wakeable();
+    let holding = false;
+    let answer: (value: AppSnapshot) => void = () => {};
+    const reads = vi.fn<ControllerBridge['snapshot']>()
+      .mockResolvedValueOnce(shown)
+      .mockImplementationOnce(() => {
+        holding = true;
+        return new Promise<AppSnapshot>((resolve) => { answer = (value) => { holding = false; resolve(value); }; });
+      })
+      .mockResolvedValue(shown);
+    // The native command admission refuses a second command while a read holds it.
+    const requestDetails = vi.fn((id: string) => holding
+      ? Promise.reject(Object.assign(new Error('busy'), { code: 'app_busy' })) : original.requestDetails(id));
+    const user = userEvent.setup();
+    view(shown, { snapshot: reads, requestDetails, watchRequests });
+    await screen.findByRole('button', { name: ko.details });
+    await settled();
+    act(() => { wake.notify(); });
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
+    await user.click(screen.getByRole('button', { name: ko.details }));
+    expect(await screen.findByText(ko.detailsLoading)).toBeInTheDocument();
+    expect(requestDetails).not.toHaveBeenCalled();
+    await act(async () => { answer(shown); await Promise.resolve(); });
+    expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
+    expect(requestDetails).toHaveBeenCalledExactlyOnceWith('synthetic-request-1');
+    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
+  });
+
+  it('opens a notification review with its details once, while the next read still holds the admission', async () => {
+    const shown = pending();
+    const reviewed = { ...shown, requestReview: { locator: 'synthetic-request-1', revision: '7' } };
+    const original = createQaBridge(reviewed);
+    const { wake, watchRequests } = wakeable();
+    let holding = false;
+    let answerReview: (value: AppSnapshot) => void = () => {};
+    let answerNext: (value: AppSnapshot) => void = () => {};
+    const held = (store: (answer: (value: AppSnapshot) => void) => void) => () => {
+      holding = true;
+      return new Promise<AppSnapshot>((resolve) => { store((value) => { holding = false; resolve(value); }); });
+    };
+    const reads = vi.fn<ControllerBridge['snapshot']>()
+      .mockResolvedValueOnce(shown)
+      .mockImplementationOnce(held((answer) => { answerReview = answer; }))
+      .mockImplementationOnce(held((answer) => { answerNext = answer; }))
+      .mockResolvedValue(reviewed);
+    const requestDetails = vi.fn((id: string) => holding
+      ? Promise.reject(Object.assign(new Error('busy'), { code: 'app_busy' })) : original.requestDetails(id));
+    view(shown, { snapshot: reads, requestDetails, watchRequests });
+    await settled();
+    // The native review and its action reply each send a wake.
+    act(() => { wake.notify(); });
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
+    act(() => { wake.notify(); });
+    await act(async () => { answerReview(reviewed); await Promise.resolve(); });
+    expect(await screen.findByRole('region', { name: ko.commandDetails })).toBeInTheDocument();
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(3); });
+    expect(requestDetails).not.toHaveBeenCalled();
+    await act(async () => { answerNext(reviewed); await Promise.resolve(); });
+    expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
+    expect(requestDetails).toHaveBeenCalledExactlyOnceWith('synthetic-request-1');
+    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
   });
 
   it('subtracts bridge latency without extending display validity or declaring expiry', () => {

@@ -8,6 +8,7 @@ use std::{
 };
 
 use approval_protocol::DeviceId;
+use direct_network::{CandidateSource, DirectFailure, ExternalAccess};
 
 pub const MAX_MANAGEMENT_FRAME: usize = 16 * 1024;
 const MAGIC: &[u8; 4] = b"UCMG";
@@ -22,9 +23,125 @@ const MAX_DEVICES: usize = 32;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ManagementRequest {
     Query,
-    RemoveDevice { device: DeviceId },
-    SetRelay { address: SocketAddr },
+    /// Separate optional read so legacy Snapshot bytes remain unchanged.
+    QueryDirect,
+    RemoveDevice {
+        device: DeviceId,
+    },
+    SetRelay {
+        address: SocketAddr,
+    },
     UseEmbeddedRelay,
+    /// Separate optional read, like `QueryDirect`; older services refuse it.
+    QueryExternal,
+    /// Elevated CLI only. The value is validated on both encode and decode.
+    SetExternalAccess {
+        access: ExternalAccess,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DirectConnectionState {
+    Unknown = 0,
+    Discovering = 1,
+    LanOnly = 2,
+    Candidate = 3,
+    Unavailable = 4,
+    Stopped = 5,
+}
+
+fn direct_state(value: u8) -> Result<DirectConnectionState, ManagementCodecError> {
+    Ok(match value {
+        0 => DirectConnectionState::Unknown,
+        1 => DirectConnectionState::Discovering,
+        2 => DirectConnectionState::LanOnly,
+        3 => DirectConnectionState::Candidate,
+        4 => DirectConnectionState::Unavailable,
+        5 => DirectConnectionState::Stopped,
+        _ => return Err(ManagementCodecError::Malformed),
+    })
+}
+
+fn candidate_source(value: u8) -> Result<Option<CandidateSource>, ManagementCodecError> {
+    Ok(Some(match value {
+        0 => return Ok(None),
+        1 => CandidateSource::Pcp,
+        2 => CandidateSource::Upnp,
+        3 => CandidateSource::Stun,
+        4 => CandidateSource::Fixed,
+        5 => CandidateSource::PublicInterface,
+        _ => return Err(ManagementCodecError::Malformed),
+    }))
+}
+
+fn candidate_source_byte(value: Option<CandidateSource>) -> u8 {
+    match value {
+        None => 0,
+        Some(CandidateSource::Pcp) => 1,
+        Some(CandidateSource::Upnp) => 2,
+        Some(CandidateSource::Stun) => 3,
+        Some(CandidateSource::Fixed) => 4,
+        Some(CandidateSource::PublicInterface) => 5,
+    }
+}
+
+fn direct_failure(value: u8) -> Result<Option<DirectFailure>, ManagementCodecError> {
+    Ok(Some(match value {
+        0 => return Ok(None),
+        1 => DirectFailure::NoMappingProtocol,
+        2 => DirectFailure::PrivateExternalAddress,
+        3 => DirectFailure::PublicAddressUnavailable,
+        _ => return Err(ManagementCodecError::Malformed),
+    }))
+}
+
+fn direct_failure_byte(value: Option<DirectFailure>) -> u8 {
+    match value {
+        None => 0,
+        Some(DirectFailure::NoMappingProtocol) => 1,
+        Some(DirectFailure::PrivateExternalAddress) => 2,
+        Some(DirectFailure::PublicAddressUnavailable) => 3,
+    }
+}
+
+/// A published candidate always names its source, and a failure is reported
+/// only while no candidate is published. Addresses follow the relay rules.
+fn validate_external(
+    external: Option<SocketAddr>,
+    source: Option<CandidateSource>,
+    failure: Option<DirectFailure>,
+    lan: Option<SocketAddr>,
+) -> Result<(), ManagementCodecError> {
+    if external.is_some() != source.is_some()
+        || (external.is_some() && failure.is_some())
+        || external
+            .into_iter()
+            .chain(lan)
+            .any(|address| crate::contract::validate_relay_endpoint(address).is_err())
+    {
+        return Err(ManagementCodecError::Malformed);
+    }
+    Ok(())
+}
+
+fn validate_direct(
+    embedded: bool,
+    listening: bool,
+    state: DirectConnectionState,
+) -> Result<(), ManagementCodecError> {
+    if (!embedded && listening)
+        || (matches!(
+            state,
+            DirectConnectionState::Discovering
+                | DirectConnectionState::LanOnly
+                | DirectConnectionState::Candidate
+        ) && (!embedded || !listening))
+        || (state == DirectConnectionState::Stopped && listening)
+    {
+        return Err(ManagementCodecError::Malformed);
+    }
+    Ok(())
 }
 
 impl ManagementRequest {
@@ -65,6 +182,22 @@ impl fmt::Debug for DeviceRow {
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum ManagementResponse {
+    DirectStatus {
+        embedded_relay: bool,
+        relay_listening: bool,
+        state: DirectConnectionState,
+    },
+    /// Local clients of this PC only. `access` is the configured mode; the
+    /// rest is the current gateway owner's observation, `None` without one.
+    /// `external` is a published candidate, not proof of reachability.
+    ExternalStatus {
+        access: ExternalAccess,
+        external: Option<SocketAddr>,
+        source: Option<CandidateSource>,
+        failure: Option<DirectFailure>,
+        /// The owner's internal endpoint: this PC's routed address and port.
+        lan: Option<SocketAddr>,
+    },
     Snapshot {
         relay: Option<SocketAddr>,
         /// Selected service mode, independent of advertised relay readiness.
@@ -85,6 +218,17 @@ pub enum ManagementResponse {
 impl fmt::Debug for ManagementResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DirectStatus { state, .. } => f
+                .debug_tuple("ManagementResponse::DirectStatus")
+                .field(state)
+                .finish(),
+            Self::ExternalStatus {
+                source, failure, ..
+            } => f
+                .debug_struct("ManagementResponse::ExternalStatus")
+                .field("source", source)
+                .field("failure", failure)
+                .finish_non_exhaustive(),
             Self::Snapshot { devices, .. } => f
                 .debug_struct("ManagementResponse::Snapshot")
                 .field("devices", &devices.len())
@@ -105,7 +249,13 @@ pub fn encode_request(request: &ManagementRequest) -> Result<Vec<u8>, Management
     let mut writer = Writer::new();
     match request {
         ManagementRequest::Query => writer.byte(1),
+        ManagementRequest::QueryDirect => writer.byte(5),
+        ManagementRequest::QueryExternal => writer.byte(6),
         ManagementRequest::UseEmbeddedRelay => writer.byte(4),
+        ManagementRequest::SetExternalAccess { access } => {
+            writer.byte(7);
+            writer.external_access(*access)?;
+        }
         ManagementRequest::RemoveDevice { device } => {
             writer.byte(2);
             writer.bytes(device.as_bytes());
@@ -124,7 +274,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
         1 => ManagementRequest::Query,
+        5 => ManagementRequest::QueryDirect,
+        6 => ManagementRequest::QueryExternal,
         4 => ManagementRequest::UseEmbeddedRelay,
+        7 => ManagementRequest::SetExternalAccess {
+            access: reader.external_access()?,
+        },
         2 => ManagementRequest::RemoveDevice {
             device: DeviceId::from_bytes(reader.array()?)
                 .map_err(|_| ManagementCodecError::Malformed)?,
@@ -141,6 +296,32 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
 pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, ManagementCodecError> {
     let mut writer = Writer::new();
     match response {
+        ManagementResponse::DirectStatus {
+            embedded_relay,
+            relay_listening,
+            state,
+        } => {
+            validate_direct(*embedded_relay, *relay_listening, *state)?;
+            writer.byte(0x84);
+            writer.boolean(*embedded_relay);
+            writer.boolean(*relay_listening);
+            writer.byte(*state as u8);
+        }
+        ManagementResponse::ExternalStatus {
+            access,
+            external,
+            source,
+            failure,
+            lan,
+        } => {
+            validate_external(*external, *source, *failure, *lan)?;
+            writer.byte(0x85);
+            writer.external_access(*access)?;
+            writer.optional_address(*external);
+            writer.byte(candidate_source_byte(*source));
+            writer.byte(direct_failure_byte(*failure));
+            writer.optional_address(*lan);
+        }
         ManagementResponse::Snapshot {
             relay,
             embedded_relay,
@@ -236,6 +417,32 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
 pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCodecError> {
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
+        0x84 => {
+            let embedded_relay = reader.boolean()?;
+            let relay_listening = reader.boolean()?;
+            let state = direct_state(reader.byte()?)?;
+            validate_direct(embedded_relay, relay_listening, state)?;
+            ManagementResponse::DirectStatus {
+                embedded_relay,
+                relay_listening,
+                state,
+            }
+        }
+        0x85 => {
+            let access = reader.external_access()?;
+            let external = reader.optional_address()?;
+            let source = candidate_source(reader.byte()?)?;
+            let failure = direct_failure(reader.byte()?)?;
+            let lan = reader.optional_address()?;
+            validate_external(external, source, failure, lan)?;
+            ManagementResponse::ExternalStatus {
+                access,
+                external,
+                source,
+                failure,
+                lan,
+            }
+        }
         0x81 => {
             let relay = reader.optional_address()?;
             let embedded_relay = reader.boolean()?;
@@ -373,6 +580,23 @@ impl Writer {
         }
         self.u16(value.port());
     }
+    fn external_access(&mut self, value: ExternalAccess) -> Result<(), ManagementCodecError> {
+        match value
+            .validated()
+            .map_err(|_| ManagementCodecError::Malformed)?
+        {
+            ExternalAccess::Automatic => self.byte(0),
+            ExternalAccess::RouterForward { external_port } => {
+                self.byte(1);
+                self.u16(external_port);
+            }
+            ExternalAccess::Fixed { address } => {
+                self.byte(2);
+                self.address(address);
+            }
+        }
+        Ok(())
+    }
     fn finish(self) -> Result<Vec<u8>, ManagementCodecError> {
         if self.0.len() > MAX_MANAGEMENT_FRAME {
             Err(ManagementCodecError::Oversized)
@@ -472,6 +696,20 @@ impl<'a> Reader<'a> {
             .map_err(|_| ManagementCodecError::Malformed)?;
         Ok(address)
     }
+    fn external_access(&mut self) -> Result<ExternalAccess, ManagementCodecError> {
+        match self.byte()? {
+            0 => ExternalAccess::Automatic,
+            1 => ExternalAccess::RouterForward {
+                external_port: self.u16()?,
+            },
+            2 => ExternalAccess::Fixed {
+                address: self.address()?,
+            },
+            _ => return Err(ManagementCodecError::Malformed),
+        }
+        .validated()
+        .map_err(|_| ManagementCodecError::Malformed)
+    }
     fn finish(self) -> Result<(), ManagementCodecError> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -484,6 +722,62 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_direct_query_keeps_ordinary_query_wire_unchanged() {
+        assert_eq!(
+            encode_request(&ManagementRequest::Query).unwrap(),
+            b"UCMG\x03\x01"
+        );
+        let wire = encode_request(&ManagementRequest::QueryDirect).unwrap();
+        assert_eq!(wire, b"UCMG\x03\x05");
+        assert_eq!(
+            decode_request(&wire).unwrap(),
+            ManagementRequest::QueryDirect
+        );
+        let mut extra = wire;
+        extra.push(0);
+        assert!(decode_request(&extra).is_err());
+    }
+
+    #[test]
+    fn direct_status_is_bounded_and_not_a_connection_claim() {
+        for state in [
+            DirectConnectionState::Discovering,
+            DirectConnectionState::LanOnly,
+            DirectConnectionState::Candidate,
+            DirectConnectionState::Unavailable,
+            DirectConnectionState::Unknown,
+        ] {
+            let status = ManagementResponse::DirectStatus {
+                embedded_relay: true,
+                relay_listening: true,
+                state,
+            };
+            let wire = encode_response(&status).unwrap();
+            assert_eq!(wire.len(), 9);
+            assert_eq!(decode_response(&wire).unwrap(), status);
+            let mut bad = wire;
+            bad[8] = 255;
+            assert!(decode_response(&bad).is_err());
+        }
+        assert!(
+            encode_response(&ManagementResponse::DirectStatus {
+                embedded_relay: false,
+                relay_listening: false,
+                state: DirectConnectionState::Candidate
+            })
+            .is_err()
+        );
+        assert!(
+            encode_response(&ManagementResponse::DirectStatus {
+                embedded_relay: true,
+                relay_listening: true,
+                state: DirectConnectionState::Stopped
+            })
+            .is_err()
+        );
+    }
 
     fn device(value: u8) -> DeviceId {
         DeviceId::from_bytes([value; 16]).unwrap()
@@ -805,5 +1099,285 @@ mod tests {
         let mut done = encode_response(&ManagementResponse::Done).unwrap();
         done.push(0);
         assert!(decode_response(&done).is_err());
+    }
+
+    fn public() -> SocketAddr {
+        "93.184.216.34:7443".parse().unwrap()
+    }
+
+    fn external_status(
+        access: ExternalAccess,
+        external: Option<SocketAddr>,
+        source: Option<CandidateSource>,
+        failure: Option<DirectFailure>,
+        lan: Option<SocketAddr>,
+    ) -> ManagementResponse {
+        ManagementResponse::ExternalStatus {
+            access,
+            external,
+            source,
+            failure,
+            lan,
+        }
+    }
+
+    #[test]
+    fn external_requests_use_new_tags_and_validate_the_access_both_ways() {
+        assert_eq!(
+            encode_request(&ManagementRequest::QueryExternal).unwrap(),
+            b"UCMG\x03\x06"
+        );
+        assert_eq!(
+            decode_request(b"UCMG\x03\x06"),
+            Ok(ManagementRequest::QueryExternal)
+        );
+        assert!(decode_request(b"UCMG\x03\x06\x00").is_err());
+        let v6: SocketAddr = "[2606:4700::1111]:443".parse().unwrap();
+        for (access, wire) in [
+            (ExternalAccess::Automatic, b"UCMG\x03\x07\x00".to_vec()),
+            (
+                ExternalAccess::RouterForward {
+                    external_port: 7443,
+                },
+                b"UCMG\x03\x07\x01\x1d\x13".to_vec(),
+            ),
+            (
+                ExternalAccess::Fixed { address: public() },
+                b"UCMG\x03\x07\x02\x04\x5d\xb8\xd8\x22\x1d\x13".to_vec(),
+            ),
+        ] {
+            let request = ManagementRequest::SetExternalAccess { access };
+            assert_eq!(encode_request(&request).unwrap(), wire);
+            assert_eq!(decode_request(&wire), Ok(request));
+            for end in 0..wire.len() {
+                assert!(decode_request(&wire[..end]).is_err());
+            }
+            let mut trailing = wire.clone();
+            trailing.push(0);
+            assert!(decode_request(&trailing).is_err());
+            assert_eq!(format!("{request:?}"), "ManagementRequest(redacted)");
+        }
+        let request = ManagementRequest::SetExternalAccess {
+            access: ExternalAccess::Fixed { address: v6 },
+        };
+        assert_eq!(
+            decode_request(&encode_request(&request).unwrap()),
+            Ok(request)
+        );
+        for access in [
+            ExternalAccess::RouterForward { external_port: 0 },
+            ExternalAccess::Fixed {
+                address: "192.168.1.20:7443".parse().unwrap(),
+            },
+            ExternalAccess::Fixed {
+                address: "93.184.216.34:0".parse().unwrap(),
+            },
+        ] {
+            assert_eq!(
+                encode_request(&ManagementRequest::SetExternalAccess { access }),
+                Err(ManagementCodecError::Malformed)
+            );
+        }
+        for wire in [
+            &b"UCMG\x03\x07\x01\x00\x00"[..],
+            b"UCMG\x03\x07\x02\x04\xc0\xa8\x01\x14\x1d\x13",
+            b"UCMG\x03\x07\x02\x04\x5d\xb8\xd8\x22\x00\x00",
+            b"UCMG\x03\x07\x02\x05\x5d\xb8\xd8\x22\x1d\x13",
+            b"UCMG\x03\x07\x03",
+            b"UCMG\x03\x07\x00\x00",
+            b"UCMG\x03\x07",
+        ] {
+            assert_eq!(decode_request(wire), Err(ManagementCodecError::Malformed));
+        }
+    }
+
+    #[test]
+    fn external_status_round_trips_every_mode_source_and_failure() {
+        let lan: SocketAddr = "192.168.1.50:7443".parse().unwrap();
+        let responses = [
+            external_status(ExternalAccess::Automatic, None, None, None, None),
+            external_status(
+                ExternalAccess::Automatic,
+                None,
+                None,
+                Some(DirectFailure::NoMappingProtocol),
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::Automatic,
+                None,
+                None,
+                Some(DirectFailure::PrivateExternalAddress),
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::Automatic,
+                Some(public()),
+                Some(CandidateSource::Pcp),
+                None,
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::Automatic,
+                Some(public()),
+                Some(CandidateSource::Upnp),
+                None,
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::RouterForward {
+                    external_port: 8443,
+                },
+                Some("93.184.216.34:8443".parse().unwrap()),
+                Some(CandidateSource::Stun),
+                None,
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::RouterForward {
+                    external_port: 8443,
+                },
+                Some("93.184.216.34:8443".parse().unwrap()),
+                Some(CandidateSource::PublicInterface),
+                None,
+                Some("93.184.216.34:7443".parse().unwrap()),
+            ),
+            external_status(
+                ExternalAccess::RouterForward {
+                    external_port: 8443,
+                },
+                None,
+                None,
+                Some(DirectFailure::PublicAddressUnavailable),
+                Some(lan),
+            ),
+            external_status(
+                ExternalAccess::Fixed { address: public() },
+                Some(public()),
+                Some(CandidateSource::Fixed),
+                None,
+                Some("[2606:4700::5]:7443".parse().unwrap()),
+            ),
+        ];
+        for response in responses {
+            let wire = encode_response(&response).unwrap();
+            assert_eq!(wire[5], 0x85);
+            assert_eq!(decode_response(&wire), Ok(response.clone()));
+            for end in 0..wire.len() {
+                assert!(decode_response(&wire[..end]).is_err());
+            }
+            let mut trailing = wire.clone();
+            trailing.push(0);
+            assert!(decode_response(&trailing).is_err());
+            assert!(!format!("{response:?}").contains("93.184"));
+            assert!(!format!("{response:?}").contains("192.168"));
+        }
+        assert_eq!(
+            encode_response(&external_status(
+                ExternalAccess::Automatic,
+                None,
+                None,
+                None,
+                None
+            ))
+            .unwrap(),
+            b"UCMG\x03\x85\x00\x00\x00\x00\x00"
+        );
+    }
+
+    #[test]
+    fn contradictory_or_unknown_external_status_fields_are_rejected_both_ways() {
+        for response in [
+            // A candidate without a source, and a source without a candidate.
+            external_status(ExternalAccess::Automatic, Some(public()), None, None, None),
+            external_status(
+                ExternalAccess::Automatic,
+                None,
+                Some(CandidateSource::Pcp),
+                None,
+                None,
+            ),
+            // A failure is reported only while nothing is published.
+            external_status(
+                ExternalAccess::Automatic,
+                Some(public()),
+                Some(CandidateSource::Pcp),
+                Some(DirectFailure::NoMappingProtocol),
+                None,
+            ),
+            external_status(
+                ExternalAccess::Automatic,
+                None,
+                None,
+                None,
+                Some("0.0.0.0:7443".parse().unwrap()),
+            ),
+            external_status(
+                ExternalAccess::Automatic,
+                Some("93.184.216.34:0".parse().unwrap()),
+                Some(CandidateSource::Pcp),
+                None,
+                None,
+            ),
+            external_status(
+                ExternalAccess::RouterForward { external_port: 0 },
+                None,
+                None,
+                None,
+                None,
+            ),
+            external_status(
+                ExternalAccess::Fixed {
+                    address: "10.1.2.3:7443".parse().unwrap(),
+                },
+                None,
+                None,
+                None,
+                None,
+            ),
+        ] {
+            assert_eq!(
+                encode_response(&response),
+                Err(ManagementCodecError::Malformed)
+            );
+        }
+        let valid = encode_response(&external_status(
+            ExternalAccess::Automatic,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        // access, external flag, source, failure, lan flag.
+        for (offset, value) in [(6, 3), (7, 2), (8, 6), (9, 4), (10, 2)] {
+            let mut invalid = valid.clone();
+            invalid[offset] = value;
+            assert_eq!(
+                decode_response(&invalid),
+                Err(ManagementCodecError::Malformed)
+            );
+        }
+        // Source byte set while no candidate is present.
+        let mut orphan_source = valid.clone();
+        orphan_source[8] = 1;
+        assert_eq!(
+            decode_response(&orphan_source),
+            Err(ManagementCodecError::Malformed)
+        );
+        let mut candidate_and_failure = encode_response(&external_status(
+            ExternalAccess::Automatic,
+            Some(public()),
+            Some(CandidateSource::Upnp),
+            None,
+            None,
+        ))
+        .unwrap();
+        let failure_offset = candidate_and_failure.len() - 2;
+        candidate_and_failure[failure_offset] = 1;
+        assert_eq!(
+            decode_response(&candidate_and_failure),
+            Err(ManagementCodecError::Malformed)
+        );
     }
 }

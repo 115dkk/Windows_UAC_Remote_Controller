@@ -31,5 +31,6 @@ test('only shell opening is explicitly deferred; native authorization gates rema
   assert.match(lab, /steps\.probe\.outputs\.probe_observed != 'true'/u);
   assert.doesNotMatch(lab, /continue-on-error:\s*true/u);
   assert.match(read('tools/windows-medium-client.ps1'), /\$logReader\.RequirePublicDiagnosticsReadOnly\(\)/u);
-  assert.match(read('docs/RELEASE_NOTES_TEMPLATE.md'), /설치 후 확인합니다/u);
+  assert.match(read('docs/RELEASE_NOTES_TEMPLATE.md'), /\{\{VERIFICATION_URL\}\}/u);
+  assert.match(read('docs/release-verification.md'), /설치 후 확인합니다/u);
 });

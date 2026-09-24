@@ -33,7 +33,7 @@ function DetailsBody({ request, read, retry }: { request: RequestView; read: Con
       {request.programElided && <div><dt>{ko.program}</dt><dd className="original-text" dir="ltr">{displayText(body.programName)}</dd></div>}
       {request.pathElided && <div><dt>{ko.executable}</dt><dd className="path-output original-text" dir="ltr">{displayText(body.executablePath)}</dd></div>}
     </dl>}
-    {hasDirectionControls(body.details) && <p className="supporting-text" role="note">{tr('숨은 방향 제어 문자를 눈에 보이게 표시했어요.')}</p>}
+    {hasDirectionControls(body.details) && <p className="supporting-text" role="note">{tr('프로그램 이름이나 경로에 글자 순서를 바꾸는 숨은 문자가 있어 [U+…] 형태로 표시했습니다. 요청한 프로그램이 확실하지 않으면 거부하십시오.')}</p>}
     <pre className="original-text" dir="ltr">{displayText(body.details)}</pre>
   </>;
 }

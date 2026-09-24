@@ -62,6 +62,9 @@ impl fmt::Debug for ExpectedOriginal {
 
 pub(super) struct EnrollmentInputs {
     pub(super) relay: SocketAddr,
+    /// Trusted embedded-listener owner chooses only the fixed local dial target.
+    /// `relay` stays the canonical original invitation endpoint above the wire.
+    pub(super) embedded_loopback: bool,
     pub(super) route: RouteId,
     pub(super) invitation: PairingInvitation,
     pub(super) expected: ExpectedOriginal,
@@ -111,6 +114,16 @@ pub(super) fn ci_verification() -> Result<TestVerification, VerificationError> {
 impl fmt::Debug for EnrollmentInputs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("EnrollmentInputs([redacted])")
+    }
+}
+
+impl EnrollmentInputs {
+    fn dial_endpoint(&self) -> SocketAddr {
+        if self.embedded_loopback {
+            super::dialer::embedded_endpoint()
+        } else {
+            self.relay
+        }
     }
 }
 
@@ -495,7 +508,7 @@ async fn run(
     stop: CancellationToken,
 ) -> Result<(), EnrollmentError> {
     let carrier = connect_rendezvous(
-        inputs.relay,
+        inputs.dial_endpoint(),
         Registration::new(Role::Pc, inputs.route),
         stop.clone(),
     )
@@ -950,6 +963,7 @@ mod tests {
         Fixture {
             inputs: EnrollmentInputs {
                 relay,
+                embedded_loopback: false,
                 route,
                 invitation,
                 expected,
@@ -966,6 +980,24 @@ mod tests {
             identity,
             candidate: verification,
         }
+    }
+
+    #[test]
+    fn embedded_enrollment_dials_local_without_mutating_original_invitation() {
+        let advertised: SocketAddr = "192.168.1.50:7443".parse().unwrap();
+        let mut fixture = fixture(advertised, Instant::now() + Duration::from_secs(30));
+        let original = fixture.inputs.invitation.to_wire();
+        let digest = fixture.inputs.invitation.context_digest();
+        assert_eq!(fixture.inputs.dial_endpoint(), advertised);
+        fixture.inputs.embedded_loopback = true;
+        assert_eq!(
+            fixture.inputs.dial_endpoint(),
+            super::super::dialer::embedded_endpoint()
+        );
+        assert_eq!(fixture.inputs.relay, advertised);
+        assert_eq!(fixture.inputs.invitation.fields().relay_address, advertised);
+        assert_eq!(fixture.inputs.invitation.to_wire(), original);
+        assert_eq!(fixture.inputs.invitation.context_digest(), digest);
     }
 
     fn drain(carrier: &mut EnrollmentCarrier) {

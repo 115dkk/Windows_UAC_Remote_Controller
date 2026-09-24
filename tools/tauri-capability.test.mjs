@@ -4,7 +4,7 @@
 // of an unlisted app command at the IPC boundary, which the client only sees as a
 // generic failure: the phone's QR scanner button did exactly that (run 34620877616).
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -54,5 +54,46 @@ test('the capability does not allow a command that is not registered', () => {
   const registered = new Set(registeredCommands().map((command) => `allow-${command.replaceAll('_', '-')}`));
   for (const permission of capability.permissions) {
     assert.ok(registered.has(permission), `${permission} allows a command that the handler does not register`);
+  }
+});
+
+// The phone page subscribes to the device-state plugin's empty request-change
+// event. Tauri 2 checks plugin commands against the ACL too, and this one was
+// never granted, so the subscription failed silently and the request screen
+// only caught up on its five-second poll (1.5.0 on a real phone: notification
+// at 09:57:14.8, card at the next poll, 09:57:18.0). The grant is the listener
+// pair and nothing else: the plugin's native commands must stay reachable only
+// through the app's own typed commands.
+const wakeCapability = 'src-tauri/capabilities/android-request-wake.json';
+const wakePermissions = ['device-state:allow-register-listener', 'device-state:allow-remove-listener'];
+
+test('the phone page may subscribe to the native request wake and to nothing else of device-state', () => {
+  const capability = JSON.parse(readFileSync(join(root, wakeCapability), 'utf8'));
+  assert.equal(capability.identifier, 'android-request-wake');
+  assert.deepEqual(capability.platforms, ['android']);
+  assert.deepEqual(capability.windows, ['main']);
+  assert.equal(capability.remote, undefined, 'remote content must never reach the plugin');
+  assert.deepEqual([...capability.permissions].sort(), wakePermissions);
+});
+
+test('the inlined device-state manifest declares exactly the listener pair', () => {
+  const source = readFileSync(join(root, 'src-tauri/build.rs'), 'utf8');
+  const declared = /InlinedPlugin::new\(\)\s*\.commands\(&\[([^\]]*)\]\)/u.exec(source);
+  assert.ok(declared, 'device-state must be declared as an inlined plugin');
+  assert.deepEqual([...declared[1].matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]), ['register_listener', 'remove_listener']);
+  assert.match(source, /\.plugin\("device-state", device_state\)/u);
+});
+
+test('no capability grants a plugin permission beyond the request wake', () => {
+  const directory = join(root, 'src-tauri/capabilities');
+  const files = readdirSync(directory).filter((name) => name.endsWith('.json')).sort();
+  assert.deepEqual(files, ['android-request-wake.json', 'main.json']);
+  for (const name of files) {
+    const capability = JSON.parse(readFileSync(join(directory, name), 'utf8'));
+    for (const permission of capability.permissions) {
+      if (typeof permission !== 'string' || permission.includes(':')) {
+        assert.ok(name === 'android-request-wake.json' && wakePermissions.includes(permission), `${name}: ${JSON.stringify(permission)} is not the request wake`);
+      }
+    }
   }
 });

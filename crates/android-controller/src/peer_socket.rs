@@ -3,7 +3,9 @@
 //! bare-frame promotion, generic outbound payload, native UI or approval API.
 #![forbid(unsafe_code)]
 
+mod addresses;
 mod delivery;
+pub use addresses::ReceivedAddressAdvertisement;
 pub use delivery::{
     ApprovalSendOutcome, ApprovalSendTransition, ApprovalWriteProgress, DenialSendOutcome,
     DenialSendTransition, DenialWriteProgress, QueuedApproval, QueuedDenial, SendIssue, SendRetry,
@@ -142,6 +144,7 @@ impl fmt::Debug for ReceivedPcEvent {
 pub enum PcSocketEvent {
     Ready,
     Message(Box<ReceivedPcEvent>),
+    Addresses(Box<ReceivedAddressAdvertisement>),
     OutboundDrained,
     PeerClosed,
     LocallyClosed,
@@ -193,6 +196,7 @@ pub struct AssociatedPcSocket {
     probe: Option<ClockProbe>,
     correlation: Option<ClockCorrelation>,
     outbound_decision: Option<delivery::WriteState>,
+    addresses: addresses::AddressExchange,
 }
 
 impl fmt::Debug for AssociatedPcSocket {
@@ -240,6 +244,7 @@ impl AssociatedPcSocket {
             probe: None,
             correlation: None,
             outbound_decision: None,
+            addresses: Default::default(),
         })
     }
 
@@ -262,8 +267,12 @@ impl AssociatedPcSocket {
         match event {
             SocketEvent::Ready => Ok(PcSocketEvent::Ready),
             SocketEvent::Frame(frame) => {
+                let bytes = frame.into_bytes();
+                if service_protocol::address_control_kind(&bytes).is_some() {
+                    return self.receive_addresses(&bytes);
+                }
                 let verified = match VerifiedPcEvent::from_wire(
-                    &frame.into_bytes(),
+                    &bytes,
                     self.context.association.descriptor().pc(),
                     &self.context.verification_key,
                 ) {
@@ -459,6 +468,7 @@ impl AssociatedPcSocket {
         self.context.stop.cancel();
         self.probe.take();
         self.correlation.take();
+        self.addresses = Default::default();
         self.driver.abort();
     }
 
@@ -489,6 +499,8 @@ fn receiving_error(error: crate::RequestSourceFailure) -> PeerSocketError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PeerSocketError {
+    #[error("the address exchange failed its current connection context check")]
+    AddressContext,
     #[error("the message does not match the request's original receiving source")]
     ReceivingSource(InboxIssue),
     #[error("the originating connection was cancelled, closed or failed")]

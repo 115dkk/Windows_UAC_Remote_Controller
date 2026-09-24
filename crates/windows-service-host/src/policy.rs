@@ -46,8 +46,26 @@ pub(crate) fn checked_dos_path(path: &str) -> Result<&str, ServiceError> {
     Ok(path)
 }
 
+/// The quoting shape and the single fixed argument stay exact. Only the path
+/// itself is compared the way Windows itself compares paths, and the way this
+/// crate's own binary-identity check already does: ASCII case-insensitively.
+/// Two spellings that differ only in ASCII case name the same file, so this
+/// admits no path the strict comparison would have rejected as a different
+/// target. It does not accept a short 8.3 alias, a relative or device path, an
+/// extra argument, or an unquoted command.
 pub(crate) fn command_matches(actual: &str, executable: &str) -> bool {
-    checked_dos_path(executable).is_ok() && actual == format!("\"{executable}\" service")
+    if checked_dos_path(executable).is_err() {
+        return false;
+    }
+    let Some(rest) = actual.strip_prefix('"') else {
+        return false;
+    };
+    // `checked_dos_path` rejects a quote inside either path, so the first
+    // closing quote always ends the registered binary path.
+    let Some((path, arguments)) = rest.split_once('"') else {
+        return false;
+    };
+    arguments == " service" && path.eq_ignore_ascii_case(executable)
 }
 
 pub(crate) fn trusted_system_sids() -> Vec<Vec<u8>> {
@@ -257,14 +275,34 @@ mod tests {
             &format!("\"{executable}\" service"),
             executable
         ));
+        // Windows stores and reports the same file under either ASCII case.
+        // The registration check must not disagree with the binary-identity
+        // check, which already accepts a case variant of the same path.
+        assert!(command_matches(
+            &format!(
+                "\"{}\" service",
+                r"c:\program files\휴대폰 승인\UAC-Service.exe"
+            ),
+            executable
+        ));
         for bad in [
             format!("{executable} service"),
             format!("\"{executable}\" service extra"),
             format!("\"{executable}\""),
             format!("\"{executable}\" service "),
+            format!("\"{executable}\"  service"),
+            format!("\"{executable}\" Service"),
+            format!("\"{}\" service", r"C:\PROGRA~1\휴대폰 승인\uac-service.exe"),
+            format!(
+                "\"{}\" service",
+                r"C:\Program Files\다른 폴더\uac-service.exe"
+            ),
+            format!("\"{executable}\" service\0"),
         ] {
-            assert!(!command_matches(&bad, executable));
+            assert!(!command_matches(&bad, executable), "{bad}");
         }
+        // A rejected expected path never admits any registration.
+        assert!(!command_matches("\"C:/app.exe\" service", "C:/app.exe"));
     }
 
     #[test]

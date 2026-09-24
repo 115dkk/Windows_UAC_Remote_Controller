@@ -39,7 +39,7 @@ for (const selected of headerCases) {
     const first = await anchor(page, locale === 'ar');
     await gallery.capture('initial-anchor', 'CLIENT/SYNTHETIC · title-row controls, independent full-width description');
     const pages = selected.fixture.startsWith('phone-')
-      ? ['알림 시간', '연결된 PC', '기록', '요청'] : ['PC 상태', '활동 기록', '휴대폰 관리'];
+      ? ['알림 시간', '연결된 PC', '기록', '요청'] : ['PC 상태', '활동 기록', '외부 연결', '휴대폰 관리'];
     for (const source of pages) {
       await page.getByRole('navigation').getByRole('button', { name: galleryText(locale, source), exact: true }).click();
       const next = await anchor(page, locale === 'ar');

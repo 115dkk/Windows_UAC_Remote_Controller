@@ -6,15 +6,15 @@
     <string name="controller_service_channel_description">スマートフォン承認の有効状態とアプリの準備状況を表示します。</string>
     <string name="controller_service_locked">スマートフォンのロックを解除するとアプリを準備します。</string>
     <string name="controller_service_preparing">アプリを準備しています。</string>
-    <string name="controller_service_ready">アプリの設定を使用できます。</string>
+    <string name="controller_service_ready">スマートフォン承認はオン</string>
     <string name="controller_service_cleanup">前の処理を終了しています。</string>
     <string name="controller_service_unavailable">アプリを準備できませんでした。アプリを開いて状態を確認してください。</string>
     <string name="controller_service_stopping">スマートフォン承認をオフにしています。</string>
     <string name="request_channel_sound">リクエスト通知・音</string>
     <string name="request_channel_vibration">リクエスト通知・振動</string>
     <string name="request_channel_silent">リクエスト通知・サイレント</string>
-    <string name="request_channel_description">PC からのリクエストを通知します。</string>
-    <string name="request_notification_title">UAC 承認リクエスト</string>
+    <string name="request_channel_description">PC からの管理者権限のリクエストを通知します。</string>
+    <string name="request_notification_title">管理者権限の承認リクエスト</string>
     <string name="request_computer_context">接続済みの PC</string>
     <string name="request_notification_public_body">詳細はアプリで確認してください。</string>
     <string name="request_action_approve">承認</string>
@@ -42,7 +42,7 @@
     <string name="pairing_scanner_scanning">PC の接続画面に表示された QR にカメラを向けてください。</string>
     <string name="pairing_scanner_reading">QR の内容を確認しています。</string>
     <string name="pairing_scanner_read">PC 接続用 QR を読み取りました。</string>
-    <string name="pairing_scanner_read_detail">PC との接続はまだ完了していません。</string>
+    <string name="pairing_scanner_read_detail">PC との接続を開始します。</string>
     <string name="pairing_scanner_connecting">PC に接続しています。</string>
     <string name="pairing_scanner_connecting_detail">しばらくお待ちください。</string>
     <string name="pairing_scanner_compare">PC 画面の 6 桁の数字と一致しているか確認してください。</string>
@@ -55,11 +55,11 @@
     <string name="pairing_scanner_failed">PC に接続できませんでした。</string>
     <string name="pairing_scanner_failed_cancelled">接続をキャンセルしました。</string>
     <string name="pairing_scanner_failed_expired">確認の制限時間を過ぎました。PC で再度お試しください。</string>
-    <string name="pairing_scanner_failed_network">PC または中継サーバーに接続できませんでした。ネットワークを確認して再度お試しください。</string>
+    <string name="pairing_scanner_failed_network">PC に接続できませんでした。PC の電源が入っているか、スマートフォンが PC と同じ Wi-Fi に接続しているかを確認して、再度お試しください。</string>
     <string name="pairing_scanner_failed_rejected">PC が接続を受け付けませんでした。PC 画面の案内を確認してください。</string>
     <string name="pairing_scanner_failed_mismatch">PC とスマートフォンの情報が一致しないため接続を中断しました。再度お試しください。</string>
-    <string name="pairing_scanner_failed_storage">スマートフォンに接続情報を保存できませんでした。</string>
-    <string name="pairing_scanner_failed_unavailable">現在は接続を進められません。</string>
+    <string name="pairing_scanner_failed_storage">スマートフォンに接続情報を保存できませんでした。アプリを閉じて開き直してから、再度お試しください。</string>
+    <string name="pairing_scanner_failed_unavailable">現在は接続を進められません。この画面を閉じて、スマートフォン承認がオンになっているか確認してから、再度お試しください。</string>
     <string name="pairing_scanner_invalid">この QR は読み取れません。PC の接続画面の QR であることを確認し、この画面を開き直してください。</string>
     <string name="pairing_scanner_expired">読み取りの制限時間を過ぎました。この画面を閉じて開き直してください。</string>
     <string name="pairing_scanner_closed">QR の読み取りを終了しました。</string>
@@ -73,5 +73,5 @@
     <string name="request_notification_summary">%1$s\n%2$s</string>
     <string name="pairing_usb_title">USBでPCに接続</string>
     <string name="pairing_usb_waiting">ケーブルを接続してPCでUSBを選択し、Androidでアクセスを許可してください。最大30秒待機します。</string>
-    <string name="pairing_usb_unavailable">USB接続情報を読み取れませんでした。ケーブルとUSB権限を確認するか、QRコードで接続してください。</string>
+    <string name="pairing_usb_unavailable">PC の接続情報を受け取れませんでした。ケーブルとUSB権限を確認するか、QRコードで接続してください。</string>
 </resources>

@@ -68,7 +68,7 @@ export function TaskbarSuggestion({ client = bridge }: { client?: TaskbarBridge 
     <h2 id={heading}>{tr('작업 표시줄에서 바로 열기')}</h2>
     <p id={description} className="supporting-text" role={unavailable ? 'status' : undefined}>{unavailable
       ? <>{tr(offer.status === 'declined' ? '작업 표시줄에 추가되지 않았어요.' : '지금은 앱에서 작업 표시줄 고정을 마무리할 수 없어요.')} {tr('실행 중인 UAC 원격 승인 아이콘을 마우스 오른쪽 버튼으로 누르고 ‘작업 표시줄에 고정’을 선택할 수 있어요.')}</>
-      : tr('설치할 때 선택한 작업 표시줄 고정을 마무리할 수 있어요. 시작 메뉴에 앱이 등록되어 있고 Windows 알림이 켜져 있어야 해요. 아래 버튼을 누르면 Windows가 다시 확인해요.')}</p>
+      : tr('설치할 때 선택한 작업 표시줄 고정을 마치려면 아래 버튼을 누르십시오. Windows가 확인 창을 표시합니다.')}</p>
     {!unavailable && <button type="button" className="button primary" disabled={busy}
       aria-describedby={description} onClick={() => { void request(); }}>{tr(busy ? 'Windows에서 확인 중…' : '작업 표시줄에 고정')}</button>}
     <button type="button" className="button quiet" disabled={busy} onClick={dismiss}>{tr(unavailable ? '닫기' : '나중에')}</button>

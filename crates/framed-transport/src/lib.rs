@@ -42,6 +42,9 @@ pub const MAX_RECEIVED_FRAMES_PER_WINDOW: usize = 128;
 
 const _: () = assert!(MAX_DECRYPTED_SUFFIX_BYTES <= service_protocol::MAX_STREAM_CHUNK_BYTES);
 const _: () = assert!(MAX_DECRYPTED_SUFFIX_BYTES <= secure_channel::MAX_PLAINTEXT_WRITE_BYTES);
+const _: () = assert!(
+    service_protocol::MAX_ADDRESS_ADVERTISEMENT_BYTES <= service_protocol::MAX_PC_EVENT_BYTES
+);
 
 #[cfg(test)]
 mod test_support;

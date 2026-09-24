@@ -42,6 +42,8 @@ use std::{
 use super::*;
 use crate::ProbeSupervisorError;
 
+mod direct;
+
 const TEST_LIMIT: Duration = Duration::from_secs(15);
 fn public(seed: u8) -> TlsPublicKey {
     let key = SigningKey::from_slice(&[seed; 32]).unwrap();
@@ -62,6 +64,7 @@ pub(super) struct Identity {
     key: SigningKey,
     last_clock: RefCell<Option<Vec<u8>>>,
     after_clock: RefCell<Option<Box<dyn FnMut()>>>,
+    after_protocol: RefCell<Option<Box<dyn FnMut()>>>,
 }
 impl Identity {
     pub(super) fn new() -> Self {
@@ -70,10 +73,14 @@ impl Identity {
             key: SigningKey::from_slice(&[20; 32]).unwrap(),
             last_clock: RefCell::new(None),
             after_clock: RefCell::new(None),
+            after_protocol: RefCell::new(None),
         }
     }
     pub(super) fn sign_protocol(&self, bytes: &[u8]) -> Vec<u8> {
         let signature: Signature = self.key.sign(bytes);
+        if let Some(hook) = self.after_protocol.borrow_mut().as_mut() {
+            hook();
+        }
         signature.to_der().as_bytes().to_vec()
     }
     pub(super) fn sign_event(
@@ -110,7 +117,6 @@ pub(super) struct RegistryFixture {
     pub(super) transport: BTreeMap<DeviceId, TlsPublicKey>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     pub(super) relay: Option<std::net::SocketAddr>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
     pub(super) routes: BTreeMap<DeviceId, (std::net::SocketAddr, relay_service::RouteId)>,
     after_checkpoint: RefCell<Option<Box<dyn FnMut()>>>,
 }
@@ -145,7 +151,6 @@ fn registry() -> Rc<RefCell<RegistryFixture>> {
         transport: [(device(1), public(5)), (device(2), public(8))].into(),
         #[cfg(all(windows, target_pointer_width = "64"))]
         relay: None,
-        #[cfg(all(windows, target_pointer_width = "64"))]
         routes: BTreeMap::new(),
         after_checkpoint: RefCell::new(None),
     }))

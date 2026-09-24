@@ -29,6 +29,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * One Application-lifetime worker and one real generated controller. No Activity,
@@ -74,7 +75,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
         { lifecycle.phase() == PolicyOwnerPhase.READY }, approvals::request, denials::request,
         approvals::canRequest, denials::canRequest, denials::externalProgress,
         { failure -> failOwner(PolicyStatus.UNAVAILABLE, OwnerFailureOrigin.REQUEST_MAINTENANCE, failure) },
-        ::traceMaintenanceFailure)
+        ::traceMaintenanceFailure, ::peerSessionEnded)
     private val keyReferenceCleanup = KeyReferenceCleanupState()
     private val cleanup = ControllerCleanupState()
     private val explicitCleanupRetry = AtomicBoolean(false)
@@ -315,8 +316,25 @@ internal class ApplicationPolicyActor(private val application: Application) {
     )
 
     private val connectivityPending = AtomicBoolean(false)
+    private class NetworkUpdate(val available: Boolean)
+    private val networkUpdate = AtomicReference<NetworkUpdate?>(null)
+    private val networkRecoveryPending = AtomicBoolean(false)
+    private val networkRetries = AtomicInteger(0)
+    private val networkRetry = Runnable { maintainConnections() }
+    private val sessionRedial = PromptRedialGate(1_000L)
+    private val sessionRedialRun = Runnable { sessionRedial.ran(SystemClock.elapsedRealtime()); maintainConnections() }
     @Volatile private var connectivityFailures = 0L
     internal fun connectivityFailureCount(): Long = connectivityFailures
+
+    /** Service/default-network callback only; one latest update on the owner.
+     * A change never invokes a request action or repeats biometric approval. */
+    internal fun networkChanged(available: Boolean) {
+        networkUpdate.set(NetworkUpdate(available))
+        networkRecoveryPending.set(true)
+        networkRetries.set(0)
+        main.removeCallbacks(networkRetry)
+        maintainConnections()
+    }
 
     /** Fixed, coalesced maintenance; no connection error escapes to the service. */
     internal fun maintainConnections() {
@@ -324,17 +342,47 @@ internal class ApplicationPolicyActor(private val application: Application) {
         try {
             worker.execute {
                 try {
-                    if (lifecycle.phase() == PolicyOwnerPhase.READY) controller?.maintainConnections()
+                    if (lifecycle.phase() == PolicyOwnerPhase.READY) {
+                        val owner = controller ?: throw BridgeException.Closed()
+                        val update = networkUpdate.get()
+                        if (update != null) {
+                            owner.networkChanged(update.available)
+                            networkUpdate.compareAndSet(update, null)
+                        }
+                        owner.maintainConnections()
+                        networkRecoveryPending.set(false)
+                    }
                 } catch (_: BridgeException) {
                     if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
                 } catch (_: Exception) {
                     if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
                 } finally {
                     connectivityPending.set(false)
+                    scheduleNetworkRetry()
                     resumeQueuedWork(); cleanupIfStopped()
                 }
             }
-        } catch (_: RejectedExecutionException) { connectivityPending.set(false) }
+        } catch (_: RejectedExecutionException) { connectivityPending.set(false); scheduleNetworkRetry() }
+    }
+
+    /** A PC session that was connected has ended. Redial through the same
+     * coalesced maintenance now instead of on the 15 s tick, at most once per
+     * second. Nothing else changes: no new dial owner, address or action. */
+    private fun peerSessionEnded() {
+        if (lifecycle.phase() != PolicyOwnerPhase.READY) return
+        val delay = sessionRedial.request(SystemClock.elapsedRealtime()) ?: return
+        if (!main.postDelayed(sessionRedialRun, delay)) sessionRedial.abandoned()
+    }
+
+    private fun scheduleNetworkRetry() {
+        // Busy admission/queue pressure gets four prompt retries, then the
+        // existing 15s maintenance tick. No unbounded callback retry loop.
+        if ((networkUpdate.get() != null || networkRecoveryPending.get()) &&
+            lifecycle.phase() == PolicyOwnerPhase.READY &&
+            networkRetries.getAndUpdate { if (it < 4) it + 1 else 4 } < 4) {
+            main.removeCallbacks(networkRetry)
+            main.postDelayed(networkRetry, 250L)
+        }
     }
 
     /** Only cancel is allowed concurrently with the worker; Rust implements it atomically. */

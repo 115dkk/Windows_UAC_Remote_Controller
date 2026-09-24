@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { DevicesPanel } from './CollectionPanels';
+import { RelaySettings } from './RelaySettings';
 import type { AppSnapshot, ControllerBridge, PairingView, ServiceAction } from './contracts';
 import { ko, serviceActionText, serviceStateText } from './messages';
 import { createQaBridge, exampleSnapshot, qaCase } from './qa-fixtures';
@@ -49,13 +50,13 @@ describe('native snapshot truth in the client', () => {
 
   it('does not equate a running service with remote readiness', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
-    expect(await screen.findByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: 'UAC 원격 승인기' })).toBeInTheDocument();
-    expect(screen.queryByText(ko.homePurpose)).not.toBeInTheDocument();
+    expect(screen.queryByText('PC에 표시되는 관리자 권한 요청을 휴대폰에서 승인하거나 거부하기 위한 앱입니다.')).not.toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
     expect(screen.getByText('휴대폰 연결 안 됨')).toBeInTheDocument();
     expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
+    expect(screen.queryByText('요청 전송 준비됨')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
@@ -67,15 +68,15 @@ describe('native snapshot truth in the client', () => {
     render(<App bridge={bridgeFor(ready)} />);
     expect(await screen.findByText('휴대폰 연결 안 됨')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteReadyBody)).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
+    expect(screen.queryByText('관리자 권한 요청이 생기면 연결한 휴대폰에서 확인하십시오.')).not.toBeInTheDocument();
+    expect(screen.queryByText('요청 전송 준비 안 됨')).not.toBeInTheDocument();
+    expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
   });
 
   it('shows a connected phone even when the legacy readiness flag is false', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-connected').snapshot)} />);
     expect(await screen.findByText('휴대폰 연결됨')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
     expect(screen.queryByText(/별도로 확인/)).not.toBeInTheDocument();
     expect(screen.queryByText(/지금은 PC의 관리자 권한 창에서/)).not.toBeInTheDocument();
@@ -91,8 +92,12 @@ describe('native snapshot truth in the client', () => {
     for (const other of (['install', 'start', 'restart', 'stop', 'uninstall'] as const).filter((item) => item !== action)) {
       expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
     }
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
-    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨' : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeInTheDocument();
+    // A stopped PC service is the one cause the screen can name, so it offers
+    // the next step instead of only reporting that it cannot tell.
+    expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨'
+      : snapshot.service!.state === 'stopped' ? '휴대폰 승인을 켜면 연결 상태를 확인합니다'
+      : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
   });
 
   it('offers lock setup only for an explicitly missing lock with native capability', async () => {
@@ -179,9 +184,9 @@ describe('pairing progress in the device collection', () => {
         const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair,
           dataAvailability: { devices, requests: 'available', activity: 'available' } };
         const onPair = vi.fn();
-        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} />);
         expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
-        expect(screen.queryByText(ko.pairingUnavailable)).not.toBeInTheDocument();
+        expect(screen.queryByText('지금은 새 기기를 연결할 수 없습니다.')).not.toBeInTheDocument();
         if (devices === 'unavailable') expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
         const button = screen.getByRole('button', { name: ko.pairPhone });
         expect(button).toBeDisabled(); fireEvent.click(button);
@@ -197,16 +202,16 @@ describe('pairing progress in the device collection', () => {
       const snapshot: AppSnapshot = { ...exampleSnapshot(), schemaVersion: 4, pairing, canPair: true, relayConfigured: true,
         dataAvailability: { devices, requests: 'available', activity: 'available' } };
       const onPair = vi.fn(), onRemove = vi.fn();
-      const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={onRemove} />);
       expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
       expect(screen.queryByText('user_cancelled')).not.toBeInTheDocument();
       const button = screen.getByRole('button', { name: ko.pairPhone });
       expect(button).toBeEnabled(); fireEvent.click(button);
       expect(onPair).toHaveBeenCalledOnce();
-      view.rerender(<DevicesPanel snapshot={snapshot} disabled onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      view.rerender(<DevicesPanel snapshot={snapshot} disabled onPair={onPair} onRemove={onRemove} />);
       expect(button).toBeDisabled(); fireEvent.click(button);
       expect(onPair).toHaveBeenCalledOnce();
-      view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} onSetRelay={vi.fn()} />);
+      view.rerender(<DevicesPanel snapshot={{ ...snapshot, canPair: false }} disabled={false} onPair={onPair} onRemove={onRemove} />);
       expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
       expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
       view.unmount();
@@ -218,15 +223,16 @@ describe('pairing progress in the device collection', () => {
       for (const canPair of [true, false]) {
         const snapshot: AppSnapshot = { ...exampleSnapshot(platform), schemaVersion: 4, pairing: null, canPair, relayConfigured: true,
           dataAvailability: { devices: 'unavailable', requests: 'available', activity: 'available' } };
-        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+        const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} />);
         expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
         expect(screen.queryByRole('heading', { name: ko.noPhones })).not.toBeInTheDocument();
         expect(screen.queryByRole('heading', { name: ko.noComputers })).not.toBeInTheDocument();
         if (platform === 'windows' && canPair) expect(screen.getByRole('button', { name: ko.pairPhone })).toBeEnabled();
         else if (platform === 'windows') expect(screen.getByRole('button', { name: ko.pairPhone })).toBeDisabled();
         else expect(screen.queryByRole('button', { name: ko.pairComputer })).not.toBeInTheDocument();
-        if (platform === 'windows') expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
-        else expect(screen.queryByRole('button')).not.toBeInTheDocument();
+        // Relay settings moved to the external-access tab.
+        expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
+        if (platform === 'android') expect(screen.queryByRole('button')).not.toBeInTheDocument();
         view.unmount();
       }
     }
@@ -234,11 +240,13 @@ describe('pairing progress in the device collection', () => {
 });
 
 describe('Windows relay address settings', () => {
+  // The external-access form on the same tab has its own Save button.
+  const relaySave = (name: string = ko.save) => within(screen.getByRole('form', { name: ko.relayAddress })).getByRole('button', { name });
   it('selects the bundled relay without requiring an address field', async () => {
     const snapshot = qaCase('desktop-running').snapshot;
     const onSetRelay = vi.fn().mockResolvedValue(snapshot);
-    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
-    fireEvent.click(screen.getByRole('button', { name: '이 PC의 내장 중계 사용' }));
+    render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
+    fireEvent.click(screen.getByRole('button', { name: '이 PC 사용' }));
     await waitFor(() => expect(onSetRelay).toHaveBeenCalledWith('embedded'));
     expect(screen.getByRole('textbox', { name: ko.relayAddress })).toHaveValue('');
   });
@@ -248,12 +256,12 @@ describe('Windows relay address settings', () => {
 
   it.each([false, true])('shows configured=%s without loading an invented address', (relayConfigured) => {
     const snapshot = { ...managementSnapshot(), relayConfigured };
-    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+    render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={vi.fn()} />);
     const input = screen.getByRole('textbox', { name: ko.relayAddress });
     expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress)).toBe(input);
     expect(input).toHaveValue('');
     expect(input).not.toHaveAttribute('placeholder');
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     expect(screen.getByText(relayConfigured ? ko.relayConfigured : ko.relayUnconfigured)).toBeInTheDocument();
     expect(screen.queryByText(relayConfigured ? ko.relayUnconfigured : ko.relayConfigured)).not.toBeInTheDocument();
     expect(screen.queryByText(ko.connected)).not.toBeInTheDocument();
@@ -261,11 +269,11 @@ describe('Windows relay address settings', () => {
 
   it('rejects empty and whitespace-only form submissions', () => {
     const onSetRelay = vi.fn();
-    render(<DevicesPanel snapshot={managementSnapshot()} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    render(<RelaySettings snapshot={managementSnapshot()} disabled={false} onSetRelay={onSetRelay} />);
     const form = screen.getByRole('form', { name: ko.relayAddress });
     fireEvent.submit(form);
     fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '   ' } });
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     fireEvent.submit(form);
     expect(onSetRelay).not.toHaveBeenCalled();
   });
@@ -275,12 +283,12 @@ describe('Windows relay address settings', () => {
     const snapshot = managementSnapshot();
     const pending = deferred<AppSnapshot>();
     const setRelay = vi.fn<ControllerBridge['setRelay']>(() => pending.promise);
-    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="network" />);
     const input = await screen.findByRole('textbox', { name: ko.relayAddress });
     await user.type(input, '203.0.113.10:443');
     await user.keyboard('{Enter}');
     expect(setRelay).toHaveBeenCalledExactlyOnceWith('203.0.113.10:443');
-    expect(screen.getByRole('button', { name: ko.saving })).toBeDisabled();
+    expect(relaySave(ko.saving)).toBeDisabled();
     expect(input).toBeDisabled();
     expect(input).toHaveValue('203.0.113.10:443');
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
@@ -289,18 +297,18 @@ describe('Windows relay address settings', () => {
     await act(async () => { pending.resolve({ ...snapshot, relayConfigured: true }); await pending.promise; });
     expect(screen.getByText(ko.relayConfigured)).toBeInTheDocument();
     expect(input).toHaveValue('');
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
   });
 
   it('keeps the local draft across refreshes and blocks globally disabled submissions', () => {
     const snapshot = managementSnapshot();
     const onSetRelay = vi.fn();
-    const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    const view = render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
     const input = within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress);
     fireEvent.change(input, { target: { value: '203.0.113.10:443' } });
-    view.rerender(<DevicesPanel snapshot={{ ...snapshot, relayConfigured: true }} disabled onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    view.rerender(<RelaySettings snapshot={{ ...snapshot, relayConfigured: true }} disabled onSetRelay={onSetRelay} />);
     expect(input).toHaveValue('203.0.113.10:443');
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(onSetRelay).not.toHaveBeenCalled();
   });
@@ -310,9 +318,9 @@ describe('Windows relay address settings', () => {
     const snapshot: AppSnapshot = { ...initial,
       dataAvailability: { ...initial.dataAvailability, devices: 'unavailable' } };
     const onSetRelay = vi.fn();
-    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
     fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(onSetRelay).not.toHaveBeenCalled();
   });
@@ -326,9 +334,9 @@ describe('Windows relay address settings', () => {
       service: { ...initial.service!, installed, state },
       dataAvailability: { ...initial.dataAvailability, devices: 'unavailable' } };
     const onSetRelay = vi.fn(() => Promise.resolve({ ...snapshot, relayConfigured: true }));
-    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
     fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
-    expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
+    expect(relaySave()).toBeEnabled();
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(onSetRelay).toHaveBeenCalledExactlyOnceWith('203.0.113.10:443');
   });
@@ -338,9 +346,9 @@ describe('Windows relay address settings', () => {
     const snapshot: AppSnapshot = { ...initial,
       service: { ...initial.service!, controlHint: 'needs_installer' } };
     const onSetRelay = vi.fn();
-    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={onSetRelay} />);
+    render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
     fireEvent.change(within(screen.getByRole('form', { name: ko.relayAddress })).getByLabelText(ko.relayAddress), { target: { value: '203.0.113.10:443' } });
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(onSetRelay).not.toHaveBeenCalled();
   });
@@ -349,15 +357,15 @@ describe('Windows relay address settings', () => {
     const user = userEvent.setup();
     const snapshot = managementSnapshot();
     const setRelay = vi.fn<ControllerBridge['setRelay']>(() => Promise.reject(new Error('RAW_RELAY_ERROR private endpoint')));
-    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="network" />);
     const input = await screen.findByRole('textbox', { name: ko.relayAddress });
     await user.type(input, '203.0.113.10:443');
-    await user.click(screen.getByRole('button', { name: ko.save }));
+    await user.click(relaySave());
     expect(await screen.findByText(ko.saveFailure)).toBeInTheDocument();
     expect(screen.queryByText(/RAW_RELAY_ERROR/)).not.toBeInTheDocument();
     expect(screen.getByText(ko.stale)).toBeInTheDocument();
     expect(input).toHaveValue('203.0.113.10:443');
-    expect(screen.getByRole('button', { name: ko.save })).toBeDisabled();
+    expect(relaySave()).toBeDisabled();
     fireEvent.submit(screen.getByRole('form', { name: ko.relayAddress }));
     expect(setRelay).toHaveBeenCalledOnce();
   });
@@ -367,17 +375,17 @@ describe('Windows relay address settings', () => {
     const snapshot = { ...managementSnapshot(), relayConfigured: true };
     const setRelay = vi.fn<ControllerBridge['setRelay']>(() => Promise.resolve({ ...snapshot,
       issue: { code: 'synthetic_relay_cancelled', message: '주소 저장을 취소했어요.', nextAction: null } }));
-    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="devices" />);
+    render(<App bridge={bridgeFor(snapshot, { setRelay })} initialPage="network" />);
     const input = await screen.findByRole('textbox', { name: ko.relayAddress });
     await user.type(input, '203.0.113.10:443');
-    await user.click(screen.getByRole('button', { name: ko.save }));
+    await user.click(relaySave());
     expect(await screen.findByText('주소 저장을 취소했어요.')).toBeInTheDocument();
     expect(input).toHaveValue('203.0.113.10:443');
-    expect(screen.getByRole('button', { name: ko.save })).toBeEnabled();
+    expect(relaySave()).toBeEnabled();
   });
 
   it('does not show relay controls on Android', () => {
-    render(<DevicesPanel snapshot={exampleSnapshot('android')} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} onSetRelay={vi.fn()} />);
+    render(<RelaySettings snapshot={exampleSnapshot('android')} disabled={false} onSetRelay={vi.fn()} />);
     expect(screen.queryByLabelText(ko.relayAddress)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: ko.save })).not.toBeInTheDocument();
     expect(screen.queryByText(ko.relayConfigured)).not.toBeInTheDocument();
@@ -478,7 +486,7 @@ describe('destructive action confirmation', () => {
     const result = deferred<AppSnapshot>();
     const removeDevice = vi.fn<ControllerBridge['removeDevice']>(() => result.promise);
     render(<App bridge={bridgeFor(fixture.snapshot, { removeDevice })} initialPage={fixture.page} />);
-    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 연결 해제' });
+    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 등록 삭제' });
     await user.click(trigger);
     let dialog = screen.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?' });
     expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
@@ -549,7 +557,7 @@ describe('destructive action confirmation', () => {
     const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
     render(<App bridge={bridgeFor(snapshot, { controlService })} />);
     await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
-    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능 제거' });
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거하시겠습니까?' });
     expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
     expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
     expect(controlService).not.toHaveBeenCalled();
@@ -562,7 +570,7 @@ describe('destructive action confirmation', () => {
       await pending.promise;
     });
     expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'PC 연결 기능 설치' })).toBeEnabled();
   });
 });

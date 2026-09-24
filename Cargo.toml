@@ -23,12 +23,13 @@ members = [
     "tools/controller-uniffi-bindgen",
     "tools/ci-phone-fixture",
     "crates/relay-service",
+    "crates/direct-network",
     "crates/framed-transport",
     "src-tauri",
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.97"
 license = "GPL-2.0-or-later"

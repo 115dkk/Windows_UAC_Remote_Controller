@@ -229,11 +229,26 @@ fn provision(trace: &mut diagnostics::Trace, startup_began: Instant) -> Result<(
         windows_identity::verify_service_context().map_err(ServiceError::from_identity)
     )?;
     let installation = observe!(trace, Installation, super::validate_installation(true))?;
-    let service = observe!(
-        trace,
-        Scm,
-        crate::native::registered_service_for_probe(installation.executable())
-    )?;
+    trace.enter(diagnostics::Phase::Scm);
+    let mut rejection = crate::native::RegistrationRejection::None;
+    let registered = crate::native::registered_service_for_probe_reported(
+        installation.executable(),
+        &mut rejection,
+    );
+    // Failure only, and only to name the already refused fixed term. Nothing
+    // here retries, repairs or relaxes the registration contract.
+    if registered.is_err() {
+        trace.classify_registration(rejection);
+    }
+    #[cfg(feature = "lab-software-identity")]
+    note(
+        diagnostics::Phase::Scm.name(),
+        registered
+            .as_ref()
+            .err()
+            .map_or(0, |error: &ServiceError| error.service_diagnostic_code()),
+    );
+    let service = registered?;
     // The entry callback has acknowledged SetServiceStatus, but SCM observation
     // can still lag during automatic boot. Wait ONLY for StartPending or a missing PID with no
     // controls. No process/ACL/key operation is permitted until Running names

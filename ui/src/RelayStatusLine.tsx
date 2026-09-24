@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { AppSnapshot } from './contracts';
 import { tr } from './i18n';
+import { hasLiveEmbeddedListener } from './directConnection';
 
 /** Settings and legacy readiness do not establish a live listener. */
-export function RelayStatusLine({ snapshot }: { snapshot: AppSnapshot }) {
+export function RelayStatusLine({ snapshot, stale = false }: { snapshot: AppSnapshot; stale?: boolean }) {
   const relay = snapshot.relayStatus;
   // Native unknown takes priority over a cached SCM stopped observation.
   const stopped = relay?.state !== 'unknown'
     && (snapshot.service?.state === 'stopped' || relay?.state === 'stopped');
-  const listening = !stopped && snapshot.service?.state === 'running'
-    && relay?.mode === 'embedded' && relay.state === 'listening';
-  const message = stopped ? '내장 중계 중지됨 · 수신 대기하지 않아요.'
-    : listening ? '내장 중계 수신 대기 중'
-    : relay?.mode === 'external' && relay.state === 'external_configured' ? '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았어요.'
-    : relay?.mode === 'embedded' && relay.state === 'waiting_network' ? '내장 중계가 네트워크를 기다리고 있어요.'
-    : relay?.mode === 'embedded' && relay.state === 'unavailable' ? '내장 중계를 준비하지 못했어요. PC의 네트워크와 중계 설정을 확인해 주세요.'
-    : '중계 실행 상태를 확인하지 못했어요. 다시 확인해 주세요.';
+  const listening = !stale && !stopped && hasLiveEmbeddedListener(snapshot);
+  const unknown = '휴대폰 연결 대기 상태 확인 불가 · [다시 확인]을 누르십시오.';
+  const message = stale ? unknown
+    : stopped ? '휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.'
+    : listening ? '휴대폰 연결 대기 중'
+    // The product never checks an external relay; say which one is in use, nothing more.
+    : relay?.mode === 'external' && relay.state === 'external_configured' ? '외부 중계 서버 사용'
+    : relay?.mode === 'embedded' && relay.state === 'waiting_network' ? '네트워크 연결 대기 중 · PC의 네트워크 연결을 확인하십시오.'
+    // The service retries the listener on its own every few seconds.
+    : relay?.mode === 'embedded' && relay.state === 'unavailable' ? '휴대폰 연결을 받지 못하고 있습니다. PC의 네트워크 연결을 확인하십시오. 연결되면 자동으로 다시 시도합니다.'
+    : unknown;
   return <p className={`state-line relay-state ${listening ? 'is-success' : ''}`} role="status">
     <span className="state-dot" aria-hidden="true" />{tr(message)}
   </p>;

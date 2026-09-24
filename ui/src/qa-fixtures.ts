@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // SYNTHETIC CLIENT STATE ONLY. Imported exclusively by qa-preview and client tests.
 // This adapter performs no OS operation, networking, authentication or persistence.
-import type { AppSnapshot, ControllerBridge, RequestView, ServiceState } from './contracts';
+import type { AppSnapshot, ControllerBridge, DecisionFeedbackView, ExternalAccessView, PairedDeviceView, PcConnectionView, RequestView, ServiceState } from './contracts';
 import type { ClientPage } from './App';
 
-export interface QaCase { readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable'; readonly diagnosticsExportPending?: true }
+export interface QaCase {
+  readonly snapshot: AppSnapshot; readonly page: ClientPage; readonly scannerFailure?: 'unavailable'; readonly diagnosticsExportPending?: true;
+  /** Synthetic second observation: every read after the first returns it. */
+  readonly later?: AppSnapshot;
+}
 
 export function exampleSnapshot(platform: 'windows' | 'android' = 'windows'): AppSnapshot {
   return {
@@ -30,6 +34,13 @@ const pendingRequest = {
   remainingSeconds: 42, refreshAfterMillis: 30000, state: 'pending', canApprove: true, canDeny: true,
 } as const;
 
+/** Synthetic body-free decision view. Never a native result or timing sample. */
+function decisionView(id: string, action: DecisionFeedbackView['action'], phase: DecisionFeedbackView['phase']): DecisionFeedbackView {
+  return { id, action, phase, elapsedMillis: 1200, authenticationMillis: null, afterAuthenticationMillis: null, timingAvailable: false };
+}
+/** A paired phone that is not connected now. Synthetic inventory only. */
+const offlinePhones: readonly PairedDeviceView[] = [{ id: 'synthetic-offline-phone', name: '화면 예시 휴대폰', revision: 1, connected: false, routePresent: true, lastSeenLabel: null }];
+
 // Extra body exists only inside this synthetic adapter; the production view DTO
 // never contains it. requestDetails below models the separate native read.
 function withSyntheticDetails(value: RequestView & { readonly details: string }): RequestView { return value; }
@@ -40,23 +51,57 @@ export function qaCase(name: string): QaCase {
   const relayRunning: AppSnapshot = { ...windows, relayConfigured: true,
     service: { installed: true, state: 'running', allowedActions: ['restart', 'stop'], controlHint: 'available', remoteRequestsReady: false },
     relayStatus: { mode: 'embedded', state: 'listening' } };
+  const externalAccess: ExternalAccessView = { mode: 'automatic', externalPort: null, fixedAddress: null,
+    externalAddress: null, source: null, lanAddress: '192.168.0.23', relayPort: 7443, failure: null };
+  const relayWithPhone: AppSnapshot = { ...relayRunning, devices: offlinePhones };
   const relayStopped: AppSnapshot = { ...relayRunning, relayConfigured: false,
     service: { ...relayRunning.service!, state: 'stopped', allowedActions: ['start', 'uninstall'] },
     relayStatus: { mode: 'embedded', state: 'stopped' } };
   switch (name) {
-    case 'desktop-relay-stopped': return { page: 'devices', snapshot: relayStopped };
-    case 'desktop-relay-listening': return { page: 'devices', snapshot: relayRunning };
-    case 'desktop-relay-waiting': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };
-    case 'desktop-relay-unknown': return { page: 'devices', snapshot: { ...relayRunning, relayConfigured: false,
+    case 'desktop-relay-wan-candidate': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' } } };
+    case 'desktop-relay-wan-lan': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' } } };
+    case 'desktop-relay-wan-unavailable': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'unavailable' } } };
+    case 'desktop-relay-wan-stale': return { page: 'network', snapshot: { ...relayRunning,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      dataAvailability: { ...relayRunning.dataAvailability, devices: 'unavailable' } } };
+    // PC status beside a paired phone that is not connected: the firewall paragraph applies.
+    case 'desktop-status-phone-offline': return { page: 'status', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' } } };
+    case 'desktop-relay-stopped': return { page: 'network', snapshot: relayStopped };
+    case 'desktop-relay-listening': return { page: 'network', snapshot: relayRunning };
+    case 'desktop-relay-waiting': return { page: 'network', snapshot: { ...relayRunning, relayConfigured: false, relayStatus: { mode: 'embedded', state: 'waiting_network' } } };
+    case 'desktop-relay-unknown': return { page: 'network', snapshot: { ...relayRunning, relayConfigured: false,
       service: { ...relayRunning.service!, state: null, allowedActions: [] }, relayStatus: { mode: 'unknown', state: 'unknown' },
       dataAvailability: { ...windows.dataAvailability, devices: 'unavailable' } } };
-    case 'desktop-relay-external': return { page: 'devices', snapshot: { ...relayRunning, relayStatus: { mode: 'external', state: 'external_configured' } } };
+    case 'desktop-relay-external': return { page: 'network', snapshot: { ...relayRunning, relayStatus: { mode: 'external', state: 'external_configured' } } };
+    // Synthetic external-access observations. Documentation addresses only;
+    // a candidate here is neither a reachable route nor a native result.
+    case 'desktop-network-auto-no-mapping': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
+      externalAccess: { ...externalAccess, failure: 'no_mapping_protocol' } } };
+    case 'desktop-network-auto-upnp': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, externalAddress: '203.0.113.7:7443', source: 'upnp' } } };
+    case 'desktop-network-forward-stun': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 17443, externalAddress: '198.51.100.24:17443', source: 'stun' } } };
+    case 'desktop-network-forward-unavailable': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 7443, failure: 'public_address_unavailable' } } };
+    case 'desktop-network-fixed': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, mode: 'fixed', fixedAddress: '203.0.113.7:7443', externalAddress: '203.0.113.7:7443', source: 'fixed' } } };
     case 'desktop-start-failed': return { page: 'status', snapshot: { ...relayStopped,
       service: { ...relayStopped.service!, actionIssue: { code: 'synthetic_start_failed', message: '작업 결과를 확인하지 못했어요. 다시 확인한 뒤 시도해 주세요.', nextAction: null } } } };
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-connected': return { page: 'status', snapshot: { ...relayRunning,
       devices: [{ id: 'synthetic-connected-phone', name: '화면 예시 휴대폰', revision: 1, connected: true, routePresent: true, lastSeenLabel: null }] } };
     case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
+      service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
+    case 'desktop-pairing-relay-first': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: false,
       service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-setup-missing': return { page: 'devices', snapshot: { ...windows,
       dataAvailability: { devices: 'unavailable', requests: 'unavailable', activity: 'unavailable' } } };
@@ -135,15 +180,65 @@ export function qaCase(name: string): QaCase {
     case 'phone-lock-unknown': return { page: 'requests', snapshot: { ...phone, mobile: { screenLock: 'unavailable', notifications: 'unavailable', canOpenLockSettings: false, canOpenNotificationSettings: false, canOpenPairingScanner: false } } };
     case 'phone-notifications-denied': return { page: 'schedule', snapshot: { ...phone, mobile: { screenLock: 'configured', notifications: 'denied', canOpenLockSettings: false, canOpenNotificationSettings: true, canOpenPairingScanner: false } } };
     case 'errors': return { page: 'requests', snapshot: { ...phone, dataAvailability: { ...phone.dataAvailability, requests: 'unavailable' }, issue: { code: 'synthetic_unavailable', message: '요청 상태를 확인하지 못했어요.', nextAction: '연결을 확인한 뒤 다시 시도해 주세요.' } } };
-    default: return { page: 'status', snapshot: windows };
+    default: return feedbackCase(name, phone) ?? { page: 'status', snapshot: windows };
   }
 }
 
-export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure'], diagnosticsExportPending?: QaCase['diagnosticsExportPending']): ControllerBridge {
+const decisionFixtures: Record<string, { readonly action: DecisionFeedbackView['action']; readonly phase: DecisionFeedbackView['phase'];
+  /** Present: the request is still listed in this state. Absent: it has left the list. */
+  readonly listed?: Pick<RequestView, 'state' | 'canApprove' | 'canDeny'> }> = {
+  'phone-decision-authenticating': { action: 'approve', phase: 'authenticating', listed: { state: 'authenticating', canApprove: false, canDeny: true } },
+  'phone-decision-preparing': { action: 'deny', phase: 'preparing', listed: { state: 'waiting', canApprove: false, canDeny: false } },
+  'phone-decision-sending': { action: 'deny', phase: 'sending', listed: { state: 'sending', canApprove: false, canDeny: false } },
+  'phone-decision-awaiting-pc': { action: 'approve', phase: 'awaiting_pc', listed: { state: 'awaiting_outcome', canApprove: false, canDeny: false } },
+  'phone-decision-authentication-cancelled': { action: 'approve', phase: 'authentication_cancelled', listed: { state: 'pending', canApprove: true, canDeny: true } },
+  'phone-decision-approved': { action: 'approve', phase: 'approved' },
+  'phone-decision-denied': { action: 'deny', phase: 'denied' },
+  'phone-decision-failed': { action: 'approve', phase: 'failed' },
+  'phone-decision-cancelled': { action: 'approve', phase: 'cancelled' },
+  'phone-decision-expired': { action: 'approve', phase: 'expired' },
+  'phone-decision-pc-completed': { action: 'deny', phase: 'pc_completed' },
+  'phone-decision-local-unconfirmed': { action: 'deny', phase: 'local_unconfirmed' },
+};
+
+const connectionFixtures: Record<string, PcConnectionView> = {
+  'phone-connection-connecting': { dialing: true, lastFailure: null, externalRoute: false },
+  'phone-connection-refused': { dialing: false, lastFailure: 'refused', externalRoute: true },
+  'phone-connection-no-answer': { dialing: false, lastFailure: 'no_answer', externalRoute: true },
+  'phone-connection-unreachable': { dialing: false, lastFailure: 'unreachable', externalRoute: false },
+  'phone-connection-unreachable-route': { dialing: false, lastFailure: 'unreachable', externalRoute: true },
+  'phone-connection-dialing': { dialing: true, lastFailure: 'unreachable', externalRoute: false },
+};
+
+/** Synthetic decision receipts and PC connection diagnoses for the phone shell. */
+function feedbackCase(name: string, phone: AppSnapshot): QaCase | null {
+  const decision = decisionFixtures[name];
+  if (decision) {
+    // A request that has left the list keeps no body; only its locator remains in the view.
+    const id = decision.listed ? pendingRequest.id : 'synthetic-request-finished';
+    return { page: 'requests', snapshot: { ...phone,
+      requests: decision.listed ? [{ ...pendingRequest, ...decision.listed }] : [],
+      requestCatalog: { ...phone.requestCatalog!, decisions: [decisionView(id, decision.action, decision.phase)] } } };
+  }
+  const disconnected = (connection?: PcConnectionView): AppSnapshot => ({ ...phone,
+    requestCatalog: { status: 'ready', revision: '2', peerCount: 1, connectedPeerCount: 0, ...(connection ? { connection } : {}) } });
+  if (name === 'phone-connection-reconnecting') {
+    return { page: 'requests', snapshot: phone, later: disconnected({ dialing: true, lastFailure: null, externalRoute: true }) };
+  }
+  const connection = connectionFixtures[name];
+  return connection ? { page: 'requests', snapshot: disconnected(connection) } : null;
+}
+
+export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure'], diagnosticsExportPending?: QaCase['diagnosticsExportPending'], later?: AppSnapshot): ControllerBridge {
   let value = initial;
+  let next = later;
   function reply(next: AppSnapshot): Promise<AppSnapshot> { value = next; return Promise.resolve(value); }
   return {
-    snapshot: () => Promise.resolve(value),
+    snapshot: () => {
+      const current = value;
+      if (next) { value = next; next = undefined; }
+      return Promise.resolve(current);
+    },
     savePolicy: (policy) => reply({ ...value, policy, issue: null }),
     controlService: (action) => {
       if (value.platform === 'android') {
@@ -163,7 +258,19 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     beginPairing: () => reply({ ...value, issue: { code: 'synthetic_only', message: '이 화면 예시에서는 실제 기기를 연결하지 않아요.', nextAction: null } }),
     removeDevice: (id) => reply({ ...value, devices: value.devices.filter((device) => device.id !== id) }),
     setRelay: () => reply({ ...value, relayConfigured: true, issue: null }),
-    decide: (id) => reply({ ...value, requests: value.requests.map((request) => request.id === id ? { ...request, state: 'sending', canApprove: false, canDeny: false } : request) }),
+    // Records the requested mode only. No address, source or reachability is invented.
+    setExternalAccess: (input) => reply({ ...value, issue: null, externalAccess: value.externalAccess ? {
+      ...value.externalAccess, mode: input.mode, externalAddress: null, source: null, failure: null,
+      externalPort: input.mode === 'router_forward' ? input.externalPort : null,
+      fixedAddress: input.mode === 'fixed' ? input.fixedAddress : null,
+    } : null }),
+    // Simulates only the native owner's first reported stage, never a PC result.
+    decide: (id, decision) => reply({ ...value,
+      requests: value.requests.map((request) => request.id === id ? { ...request, state: decision === 'approve' ? 'authenticating' : 'sending', canApprove: false, canDeny: decision === 'approve' } : request),
+      requestCatalog: value.requestCatalog ? { ...value.requestCatalog, decisions: [
+        ...(value.requestCatalog.decisions ?? []).filter((view) => view.id !== id),
+        decisionView(id, decision, decision === 'approve' ? 'authenticating' : 'sending'),
+      ] } : null }),
     requestDetails: (id) => {
       // Synthetic-only extra fixture text. Production snapshots contain no body.
       const request = value.requests.find((item) => item.id === id);
@@ -177,6 +284,7 @@ export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['sc
     openDiagnosticsFolder: () => Promise.resolve(),
     // Synthetic acknowledgement only; does not save or share an Android file.
     exportAndroidDiagnostics: () => diagnosticsExportPending ? new Promise<void>(() => { /* Held synthetic owner for pending-state gallery only. */ }) : Promise.resolve(),
+    saveAndroidDiagnostics: () => Promise.resolve('saved'),
     openLockSettings: () => Promise.resolve(),
     openNotificationSettings: () => Promise.resolve(),
     // Client/synthetic acknowledgement only; no camera surface or pairing result.

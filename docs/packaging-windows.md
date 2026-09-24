@@ -169,7 +169,9 @@ Rule `dev.dkk115.uacremote.embedded-relay.v1` allows inbound TCP **7443** only f
 that executable **and** service `UacRemoteController`, on **Private** profiles
 only, with edge traversal disabled. A detached rule is fully configured before
 publication and its stored tuple is checked. Firewall failure stops installation;
-no global policy, Public profile, UPnP/router, or NAT setting is modified.
+no global policy, Public profile, router or NAT setting is modified. At run time
+the service may ask the router for a TCP mapping to port 7443 (PCP, then UPnP) while
+the external-access mode is automatic; it never changes router settings.
 
 Uninstall removes only that named rule through `INetFwRules::Remove`. Windows
 documents a missing rule as a no-op; permission/COM failures remain errors. This

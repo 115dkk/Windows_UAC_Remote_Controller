@@ -115,8 +115,8 @@ pub(crate) fn open_lock_settings(
 const fn mobile_issue() -> AppIssue {
     AppIssue {
         code: "mobile_state_unavailable",
-        message: "휴대폰 상태를 확인하지 못했어요.",
-        next_action: Some("휴대폰에서 앱을 다시 열어 주세요."),
+        message: "휴대폰 상태를 확인하지 못했습니다.",
+        next_action: Some("앱을 닫았다가 다시 여십시오."),
     }
 }
 
@@ -170,11 +170,45 @@ const fn diagnostics_export_issue() -> AppIssue {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiagnosticSaveOutcome {
+    Saved,
+    Cancelled,
+}
+
+pub(crate) fn save_android_diagnostics(
+    app: &tauri::AppHandle,
+    origin: &CommandOrigin,
+) -> Result<DiagnosticSaveOutcome, AppIssue> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        app.state::<DeviceState>()
+            .0
+            .run_mobile_plugin_from_origin(&origin.native, "saveAndroidDiagnostics", ())
+            .map_err(|_| diagnostics_save_issue())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, origin);
+        Err(diagnostics_save_issue())
+    }
+}
+
+const fn diagnostics_save_issue() -> AppIssue {
+    AppIssue {
+        code: "diagnostics_save_unavailable",
+        message: "진단 로그를 저장하지 못했습니다. 저장 위치와 여유 공간을 확인한 뒤 다시 시도하십시오.",
+        next_action: None,
+    }
+}
+
 const fn pairing_scanner_issue() -> AppIssue {
     AppIssue {
         code: "pairing_scanner_unavailable",
-        message: "QR 읽기 화면을 열지 못했어요.",
-        next_action: Some("휴대폰 상태를 다시 확인한 뒤 시도해 주세요."),
+        message: "QR 읽기 화면을 열지 못했습니다.",
+        next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
     }
 }
 
@@ -193,8 +227,8 @@ impl ScannerLaunchReply {
             Self::Opened {} => Ok(()), // Actual native Dialog acknowledgement only.
             Self::Busy {} => Err(AppIssue {
                 code: "pairing_scanner_busy",
-                message: "앞서 요청한 작업이 아직 끝나지 않았어요.",
-                next_action: Some("작업이 끝난 뒤 QR 읽기를 다시 시도해 주세요."),
+                message: "앱이 다른 작업을 처리하는 중입니다.",
+                next_action: Some("잠시 후 [PC의 QR 코드 촬영]을 다시 누르십시오."),
             }),
             Self::Unavailable {} => Err(pairing_scanner_issue()),
         }
@@ -220,8 +254,8 @@ pub(crate) fn open_pairing_scanner(
         let _ = (app, origin);
         Err(AppIssue {
             code: "pairing_scanner_unsupported",
-            message: "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있어요.",
-            next_action: Some("Android 휴대폰에서 앱을 열어 주세요."),
+            message: "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있습니다.",
+            next_action: Some("Android 휴대폰에서 앱을 여십시오."),
         })
     }
 }
@@ -302,7 +336,7 @@ enum PeerRemovalReply {
 fn peer_removal_issue() -> AppIssue {
     AppIssue {
         code: "peer_removal_unconfirmed",
-        message: "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.",
+        message: "PC 등록 삭제 결과를 확인하지 못했습니다. [다시 확인]을 눌러 [연결된 PC] 목록을 확인하십시오.",
         next_action: None,
     }
 }
@@ -731,6 +765,35 @@ mod tests {
         ] {
             assert!(!native.contains(&format!("AndroidDiagnosticExporter{shallow}")));
         }
+    }
+
+    #[test]
+    fn diagnostic_save_has_only_saved_and_cancelled_success_outcomes() {
+        for value in ["saved", "cancelled"] {
+            let outcome: super::DiagnosticSaveOutcome =
+                serde_json::from_value(serde_json::json!(value)).unwrap();
+            assert_eq!(serde_json::to_value(outcome).unwrap(), value);
+        }
+        for value in [
+            serde_json::json!("shared"),
+            serde_json::json!("unavailable"),
+            serde_json::json!({"status": "saved"}),
+            serde_json::json!({"path": "Download/private.txt"}),
+            serde_json::Value::Null,
+        ] {
+            assert!(serde_json::from_value::<super::DiagnosticSaveOutcome>(value).is_err());
+        }
+        let declaration = include_str!("commands.rs")
+            .split("pub(crate) async fn save_android_diagnostics(")
+            .nth(1)
+            .unwrap()
+            .split("#[tauri::command]")
+            .next()
+            .unwrap();
+        assert!(declaration.contains("origin: crate::mobile::CommandOrigin"));
+        assert!(declaration.contains("_arguments: crate::mobile::EmptyArguments"));
+        assert!(declaration.contains("state.admission.try_enter()"));
+        assert!(declaration.contains("spawn_blocking"));
     }
 
     #[test]

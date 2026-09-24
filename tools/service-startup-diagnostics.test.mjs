@@ -19,7 +19,13 @@ test('startup diagnostic parser accepts only bounded closed records', { skip: pr
       ('x' * 257)
     )
     $rejected = @($bad | ForEach-Object { if ($null -eq (ConvertFrom-UacStartupDiagnostic $_)) { 1 } })
-    $phases = @('scm_status','scm_state','scm_process','scm_controls') | ForEach-Object {
+    $phases = @(
+      'scm','scm_open','scm_absent','scm_config_query','scm_config_binary_encoding',
+      'scm_config_binary_path','scm_config_service_type','scm_config_account',
+      'scm_config_display_name','scm_config_dependencies','scm_config_load_order',
+      'scm_config_error_control','scm_config_start_type','scm_security',
+      'scm_sid_type_query','scm_sid_type','scm_status','scm_state','scm_process','scm_controls'
+    ) | ForEach-Object {
       (ConvertFrom-UacStartupDiagnostic ($good -replace 'phase=merge', ('phase=' + $_))).phase
     }
     @{ row=$valid; rejected=$rejected.Count; phases=@($phases) } | ConvertTo-Json -Depth 4 -Compress
@@ -29,6 +35,14 @@ test('startup diagnostic parser accepts only bounded closed records', { skip: pr
   assert.equal(result.row.policyReason, 10);
   assert.equal(result.row.processId, 42);
   assert.equal(result.rejected, 7);
-  assert.deepEqual(result.phases, ['scm_status', 'scm_state', 'scm_process', 'scm_controls']);
+  // Every registration term the owning startup path can name must survive the
+  // closed projection, and 'scm' must not swallow the longer literals.
+  assert.deepEqual(result.phases, [
+    'scm', 'scm_open', 'scm_absent', 'scm_config_query', 'scm_config_binary_encoding',
+    'scm_config_binary_path', 'scm_config_service_type', 'scm_config_account',
+    'scm_config_display_name', 'scm_config_dependencies', 'scm_config_load_order',
+    'scm_config_error_control', 'scm_config_start_type', 'scm_security',
+    'scm_sid_type_query', 'scm_sid_type', 'scm_status', 'scm_state', 'scm_process', 'scm_controls',
+  ]);
   assert.deepEqual(Object.keys(result.row).sort(), ['schema', 'version', 'processId', 'startupStage', 'phase', 'category', 'nativeCode', 'policyReason'].sort());
 });

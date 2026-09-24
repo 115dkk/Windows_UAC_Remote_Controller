@@ -6,16 +6,16 @@
     <string name="controller_service_channel_description">Mostra se a aprovação pelo celular está ativada e o app está pronto.</string>
     <string name="controller_service_locked">Desbloqueie o celular para preparar o app.</string>
     <string name="controller_service_preparing">Preparando o app.</string>
-    <string name="controller_service_ready">As configurações do app estão disponíveis.</string>
+    <string name="controller_service_ready">Aprovação pelo celular ativada</string>
     <string name="controller_service_cleanup">Finalizando a operação anterior.</string>
     <string name="controller_service_unavailable">Não foi possível preparar o app. Abra-o para verificar o status.</string>
     <string name="controller_service_stopping">Desativando a aprovação pelo celular.</string>
     <string name="request_channel_sound">Alertas de solicitação · Som</string>
     <string name="request_channel_vibration">Alertas de solicitação · Vibração</string>
     <string name="request_channel_silent">Alertas de solicitação · Silencioso</string>
-    <string name="request_channel_description">Notifica sobre solicitações do computador.</string>
-    <string name="request_notification_title">Solicitação de aprovação do UAC</string>
-    <string name="request_computer_context">Computador pareado</string>
+    <string name="request_channel_description">Notifica sobre solicitações de permissão de administrador do PC.</string>
+    <string name="request_notification_title">Solicitação de aprovação de permissão de administrador</string>
+    <string name="request_computer_context">PC pareado</string>
     <string name="request_notification_public_body">Abra o app para ver os detalhes.</string>
     <string name="request_action_approve">Aprovar</string>
     <string name="request_action_deny">Recusar</string>
@@ -25,7 +25,7 @@
     <string name="request_permission_missing">Permita as notificações de solicitações.</string>
     <string name="request_notifications_disabled">As notificações de solicitações estão desativadas.</string>
     <string name="request_notifications_next">Verifique as configurações de notificações do celular.</string>
-    <string name="approval_auth_title">Aprovar solicitação do computador</string>
+    <string name="approval_auth_title">Aprovar solicitação do PC</string>
     <string name="approval_auth_description">Autentique-se no celular para aprovar esta solicitação.</string>
     <string name="lock_settings_pending">As configurações de segurança já estão sendo abertas.</string>
     <string name="invalid_device_state_arguments">Não foi possível processar esta solicitação. Tente novamente no app.</string>
@@ -42,7 +42,7 @@
     <string name="pairing_scanner_scanning">Aponte a câmera para o QR na tela de pareamento do PC.</string>
     <string name="pairing_scanner_reading">Verificando o QR.</string>
     <string name="pairing_scanner_read">QR de pareamento do PC lido.</string>
-    <string name="pairing_scanner_read_detail">O PC ainda não está pareado.</string>
+    <string name="pairing_scanner_read_detail">Iniciando o pareamento com o PC.</string>
     <string name="pairing_scanner_connecting">Conectando ao PC.</string>
     <string name="pairing_scanner_connecting_detail">Aguarde um momento.</string>
     <string name="pairing_scanner_compare">Confira se estes seis dígitos são iguais aos do PC.</string>
@@ -55,11 +55,11 @@
     <string name="pairing_scanner_failed">Não foi possível parear o PC.</string>
     <string name="pairing_scanner_failed_cancelled">Pareamento cancelado.</string>
     <string name="pairing_scanner_failed_expired">O tempo de confirmação acabou. Tente novamente no PC.</string>
-    <string name="pairing_scanner_failed_network">Não foi possível acessar o PC ou o servidor de retransmissão. Verifique a rede e tente novamente.</string>
+    <string name="pairing_scanner_failed_network">Não foi possível acessar o PC. Verifique se o PC está ligado e se o celular está na mesma rede Wi-Fi que o PC e tente novamente.</string>
     <string name="pairing_scanner_failed_rejected">O PC recusou o pareamento. Confira as instruções na tela dele.</string>
     <string name="pairing_scanner_failed_mismatch">As informações do PC e do celular não coincidiram, então o pareamento foi interrompido. Tente novamente.</string>
-    <string name="pairing_scanner_failed_storage">Não foi possível salvar os dados de pareamento no celular.</string>
-    <string name="pairing_scanner_failed_unavailable">O pareamento não está disponível agora.</string>
+    <string name="pairing_scanner_failed_storage">Não foi possível salvar os dados de pareamento no celular. Feche e reabra o app e tente novamente.</string>
+    <string name="pairing_scanner_failed_unavailable">O pareamento não está disponível agora. Feche esta tela, verifique se a aprovação pelo celular está ativada e tente novamente.</string>
     <string name="pairing_scanner_invalid">Não foi possível ler este QR. Confira se ele está na tela de pareamento do PC e reabra esta tela.</string>
     <string name="pairing_scanner_expired">O tempo de leitura acabou. Feche e reabra esta tela.</string>
     <string name="pairing_scanner_closed">Leitura do QR encerrada.</string>
@@ -73,5 +73,5 @@
     <string name="request_notification_summary">%1$s\n%2$s</string>
     <string name="pairing_usb_title">Conectar PC por USB</string>
     <string name="pairing_usb_waiting">Conecte o cabo, selecione USB no PC e permita o acesso no Android. Espera máxima: 30 segundos.</string>
-    <string name="pairing_usb_unavailable">Não foi possível ler os dados USB. Verifique o cabo e a permissão USB ou conecte pelo código QR.</string>
+    <string name="pairing_usb_unavailable">Não foi possível receber os dados de conexão do PC. Verifique o cabo e a permissão USB ou conecte pelo código QR.</string>
 </resources>

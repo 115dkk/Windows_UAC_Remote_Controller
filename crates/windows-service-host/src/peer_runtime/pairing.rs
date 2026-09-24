@@ -1133,6 +1133,8 @@ impl ServicePairing {
     pub(super) fn begin_enrollment(
         &mut self,
         relay: std::net::SocketAddr,
+        alternatives: Vec<std::net::SocketAddr>,
+        embedded_loopback: bool,
         policy: VerificationPolicy,
         signer: std::sync::Arc<crate::tls_signer::ServiceTlsSigner>,
         pc_transport_key: TlsPublicKey,
@@ -1160,6 +1162,8 @@ impl ServicePairing {
             relay_address: relay,
             route: *original.route.as_bytes(),
         })
+        .map_err(|_| Failure::Protocol)?
+        .with_alternatives(alternatives)
         .map_err(|_| Failure::Protocol)?;
         let invitation_text =
             InvitationText::new(invitation.to_qr_text()).map_err(|_| Failure::Protocol)?;
@@ -1176,6 +1180,7 @@ impl ServicePairing {
         let usb_invocation = renderer.request.invocation;
         let enrollment = EnrollmentCarrier::start(EnrollmentInputs {
             relay,
+            embedded_loopback,
             route: original.route,
             invitation,
             expected,

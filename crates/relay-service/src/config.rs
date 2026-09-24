@@ -153,7 +153,10 @@ pub struct RelayReport {
     pub accept_failures: u64,
     pub rejected_capacity: u64,
     pub rejected_waiting_rooms: u64,
+    /// A second registration for a role that is still waiting on its route.
     pub rejected_duplicates: u64,
+    /// Active pairs closed because a fresh registration arrived on their route.
+    pub evicted_pairs: u64,
     pub paired: u64,
     pub invalid_registrations: u64,
     pub header_timeouts: u64,

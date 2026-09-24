@@ -201,12 +201,14 @@ impl fmt::Debug for PeerAssociation {
 pub struct PeerAssociationLedger {
     entries: BTreeMap<PcIdentity, PeerAssociation>,
     next_generation: u64,
+    pub(crate) candidates: crate::routing_candidates::RoutingCandidates,
 }
 impl Default for PeerAssociationLedger {
     fn default() -> Self {
         Self {
             entries: BTreeMap::new(),
             next_generation: 1,
+            candidates: Default::default(),
         }
     }
 }
@@ -238,6 +240,10 @@ impl PeerAssociationLedger {
     }
     pub fn lookup_current(&self, pc: PcIdentity) -> Option<&PeerAssociation> {
         self.entries.get(&pc)
+    }
+    /// Last-known coordinates, never evidence of reachability or authorization.
+    pub fn routing_candidates(&self, reference: PeerAssociationRef) -> &[SocketAddr] {
+        self.candidates.get(reference)
     }
     /// Local membership/generation lookup only. The composite must already have
     /// validated local-key relationships; current native/peer authority is a
@@ -306,6 +312,7 @@ impl PeerAssociationLedger {
             return PeerAssociationRemoval::NotCurrent;
         }
         self.entries.remove(&reference.pc);
+        self.candidates.remove(reference.pc);
         PeerAssociationRemoval::Removed
     }
 
@@ -428,6 +435,7 @@ impl PeerAssociationLedger {
         let ledger = Self {
             entries,
             next_generation,
+            candidates: Default::default(),
         };
         ledger.validate_shape()?;
         Ok(ledger)

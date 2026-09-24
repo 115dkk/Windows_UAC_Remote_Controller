@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "target": "x86_64-pc-windows-msvc",
+  "mode": "assembled",
+  "signing": "not-attested",
+  "payload": [
+    {
+      "name": "controller-app.exe",
+      "bytes": 33002496,
+      "sha256": "ecd7641395c4c2ef032195fd6d31e407a4c930e97b9a327c1683b7e2f49a58ee",
+      "sourceSha256": "188dfaf358e2d8b80cbd9440c70f255232d2b1734e62d5b1e5c3609bdd865f1b",
+      "transformation": {
+        "kind": "tauri-bundler-2.9.4-nsis-marker-v1",
+        "offset": 31246386,
+        "from": "__TAURI_BUNDLE_TYPE_VAR_UNK",
+        "to": "__TAURI_BUNDLE_TYPE_VAR_NSS"
+      }
+    },
+    {
+      "name": "uac-service.exe",
+      "bytes": 59218432,
+      "sha256": "4a5cad0c313dcb57e91d0bc58c413da4185ef93d6083d856f79e99d49d0939db",
+      "sourceSha256": "4a5cad0c313dcb57e91d0bc58c413da4185ef93d6083d856f79e99d49d0939db",
+      "transformation": {
+        "kind": "identity"
+      }
+    },
+    {
+      "name": "uac-prompt-probe.exe",
+      "bytes": 305664,
+      "sha256": "a314726fa2e8cbe1b4895dd12d23bde55eec4fe11b3850d2ab2dbe42a1b08d76",
+      "sourceSha256": "a314726fa2e8cbe1b4895dd12d23bde55eec4fe11b3850d2ab2dbe42a1b08d76",
+      "transformation": {
+        "kind": "identity"
+      }
+    }
+  ],
+  "installer": {
+    "name": "controller-setup.exe",
+    "bytes": 48792613,
+    "sha256": "eb594b2d6041a2783f3c7cb22b2d06591056a400bfb7040064bb3c4e5a740c53"
+  }
+}

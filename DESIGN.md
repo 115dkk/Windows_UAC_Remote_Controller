@@ -253,3 +253,43 @@ tokens retained. Offline PC removal reuses the existing confirmation dialog,
 cancel-first focus and explicit local-only explanation. No new visual token,
 palette, typography or authorization owner. Connection display continuity is
 bounded to10seconds and never changes raw native action admission.
+
+## 2026-09-22 direct-network status and firewall guidance
+
+PC status and phone management add a passive external-network output below the
+existing listener state. Use `--text-small`, `--muted`, `--space-3`/`--space-4`
+outer spacing and `--space-2` between its paragraphs. Candidate addresses retain
+neutral text: they do not inherit connection-success styling from a LAN peer.
+Missing observations, stale reads and stopped service state cannot establish an
+external route. The output stays in normal main-page scrolling, with wrapping,
+no fixed height, additional focus stop, takeover, timer or new animation.
+Program-specific V3/firewall guidance accompanies a freshly observed embedded
+listener. Android shows PC-prompt recovery only with a known paired disconnected
+catalogue and active local service, preserving the existing disconnected notice.
+All added copy uses the eleven locale catalogues; the executable identifier is
+`uac-service.exe`. Existing external-relay configuration remains available.
+No new design token, palette, font, icon, security owner or authorization action.
+
+## 2026-09-23 external-access tab
+
+The desktop rail gains `외부 연결` (icon `globe`) between phone management and history;
+phone navigation is unchanged, and below 42rem the desktop top navigation sets its four
+items two by two. Sections put their heading above their cards: 현재 상태 (relay and direct
+lines, a failure reason only while no external address exists, a facts list with `bdi`
+addresses), 외부에서 연결하는 방법 (a native radio fieldset; the selected option reveals its
+port or address field and router instructions; client validation; saved only after Rust
+confirms), then 중계 (embedded-relay card and external-relay form moved from phone
+management) and the V3/firewall guidance. Missing or stale views read 확인 불가, never 없음.
+PC status and phone management link here with a secondary button. Text and number inputs
+share one bordered 44px style. No new token, color, font, icon style or motion.
+
+## 2026-09-24 decision receipt and connection states
+
+A listed request card replaces its generic busy line with the decision phase (icon, title, body);
+the tap shows its first phase on the next frame. A request that has left the list leaves a
+`notice-box` receipt at the top of the requests page, carrying no program, path or PC name, until
+`확인`, another decision or a new review. Only the PC's authenticated approval uses `--success`.
+The phone's connection row is a `state-line` with a 1 s CSS ring (the clock icon under reduced
+motion); after 60 s (120 s while a dial is in flight) a warning notice gives failure-specific
+guidance. The PC firewall paragraph needs a paired phone and none connected. Receipts and the
+connection area are persistent `role="status"` regions. No new token, colour, font or spacing.

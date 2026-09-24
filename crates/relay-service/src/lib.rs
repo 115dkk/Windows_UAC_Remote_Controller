@@ -11,7 +11,7 @@ mod wire;
 
 pub use client::{
     CLIENT_RENDEZVOUS_TIMEOUT, CONNECT_TIMEOUT, RendezvousCarrier, RendezvousError,
-    connect_rendezvous,
+    connect_rendezvous, connect_rendezvous_any,
 };
 pub use config::{
     MAX_ACCEPTED_CONNECTIONS, MAX_WAITING_ROOMS, RelayError, RelayLimits, RelayLimitsError,
@@ -19,7 +19,7 @@ pub use config::{
 };
 // Resilience policy, not tunable configuration: an operator cannot widen these.
 pub(crate) use config::{ACCEPT_BACKOFF, MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES};
-pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay, local_endpoint};
+pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay};
 pub use relay::run;
 pub use tokio_util::sync::CancellationToken;
 pub use wire::{

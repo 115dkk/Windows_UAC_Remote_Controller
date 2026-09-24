@@ -3,7 +3,9 @@
 function ConvertFrom-UacStartupDiagnostic {
     param([AllowNull()][object]$Value)
     if ($Value -isnot [string] -or $Value.Length -gt 256) { return $null }
-    $phases = 'context|installation|scm|scm_status|scm_state|scm_process|scm_controls|startup_before|service_sid|subject_before|logon_before|read_before|merge|merged_shape|native_acl_validation|startup_before_set|read_before_set|descriptor_drift|subject_before_set|stop_before_set|set_dacl|subject_after|read_after|readback|startup_after'
+    # Longer registration phases precede the coarse 'scm' so the alternation
+    # matches the whole authored literal rather than its prefix.
+    $phases = 'context|installation|scm_open|scm_absent|scm_config_query|scm_config_binary_encoding|scm_config_binary_path|scm_config_service_type|scm_config_account|scm_config_display_name|scm_config_dependencies|scm_config_load_order|scm_config_error_control|scm_config_start_type|scm_security|scm_sid_type_query|scm_sid_type|scm_status|scm_state|scm_process|scm_controls|scm|startup_before|service_sid|subject_before|logon_before|read_before|merge|merged_shape|native_acl_validation|startup_before_set|read_before_set|descriptor_drift|subject_before_set|stop_before_set|set_dacl|subject_after|read_after|readback|startup_after'
     $classes = 'windows|identity_windows|permissions|path|installation|configuration|identity_policy|identity_malformed|service'
     $pattern = '\AUAC_STARTUP_V1 version=(?<version>[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:-alpha\.[0-9]{1,5})?) pid=(?<pid>[0-9]{1,10}) stage=7 phase=(?<phase>' + $phases + ') class=(?<class>' + $classes + ') code=(?<code>[0-9a-f]{8}) policy=(?<policy>0|[1-9]|1[0-9])\z'
     $match = [regex]::Match($Value, $pattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)

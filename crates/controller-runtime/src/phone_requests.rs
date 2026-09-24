@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AppIssue, PairedDeviceView, RequestState, RequestView};
+use crate::{
+    AppIssue, DecisionFeedbackAction, DecisionFeedbackPhase, DecisionFeedbackView,
+    PairedDeviceView, PcConnectionView, RequestState, RequestView,
+};
 
 pub const MAX_PHONE_REQUESTS_JSON_BYTES: usize = 512 * 1024;
 pub const MAX_PHONE_REQUEST_DETAILS_JSON_BYTES: usize = 2 * 1024 * 1024;
@@ -27,6 +30,9 @@ pub struct RequestCatalogView {
     pub revision: String,
     pub peer_count: u8,
     pub connected_peer_count: u8,
+    pub decisions: Vec<DecisionFeedbackView>,
+    /// None: no paired PC, no current observation, or an older native side.
+    pub connection: Option<PcConnectionView>,
 }
 
 #[derive(Debug)]
@@ -59,6 +65,10 @@ struct CatalogDocument {
     connected_peer_count: u8,
     peers: Vec<PeerDocument>,
     requests: Vec<RequestView>,
+    #[serde(default)]
+    decisions: Vec<DecisionFeedbackView>,
+    #[serde(default)]
+    connection: Option<PcConnectionView>,
 }
 
 #[derive(Deserialize)]
@@ -91,8 +101,8 @@ impl std::fmt::Debug for RequestDetailsView {
 pub const fn phone_request_issue() -> AppIssue {
     AppIssue {
         code: "phone_request_unavailable",
-        message: "요청을 확인할 수 없어요.",
-        next_action: Some("컴퓨터에서 요청 상태를 확인하세요."),
+        message: "요청을 확인할 수 없습니다.",
+        next_action: Some("PC 화면에서 요청 창을 확인하십시오."),
     }
 }
 
@@ -137,11 +147,61 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         || document.peers.iter().filter(|peer| peer.connected).count()
             != usize::from(document.connected_peer_count)
         || document.requests.len() > MAX_REQUESTS
+        || document.decisions.len() > MAX_REQUESTS
         || document.peer_count == 0 && !document.requests.is_empty()
+        // Dialing and failures describe unconnected paired PCs only.
+        || document.connection.is_some_and(|connection| {
+            document.peer_count == 0
+                || document.connected_peer_count == document.peer_count
+                    && (connection.dialing || connection.last_failure.is_some())
+        })
     {
         return Err(phone_request_issue());
     }
     let mut seen_peers = BTreeSet::new();
+    let mut seen_decisions = BTreeSet::new();
+    for decision in &document.decisions {
+        check_request_locator(&decision.id)?;
+        if !seen_decisions.insert(&decision.id)
+            || decision.elapsed_millis > 300_000
+            || decision.after_authentication_millis.is_some() && !decision.timing_available
+            || decision.timing_available
+                && !(decision.action == DecisionFeedbackAction::Approve
+                    && decision.phase == DecisionFeedbackPhase::Approved
+                    && decision.authentication_millis.is_some()
+                    && decision.after_authentication_millis.is_some()
+                    || decision.action == DecisionFeedbackAction::Deny
+                        && decision.phase == DecisionFeedbackPhase::Denied)
+            || decision
+                .authentication_millis
+                .is_some_and(|auth| auth > decision.elapsed_millis)
+            || decision.after_authentication_millis.is_some_and(|after| {
+                decision.authentication_millis.is_none_or(|auth| {
+                    auth.checked_add(after) != Some(decision.elapsed_millis)
+                        && auth.checked_add(after).and_then(|sum| sum.checked_add(1))
+                            != Some(decision.elapsed_millis)
+                }) || matches!(
+                    decision.phase,
+                    DecisionFeedbackPhase::Authenticating
+                        | DecisionFeedbackPhase::Preparing
+                        | DecisionFeedbackPhase::Sending
+                        | DecisionFeedbackPhase::AwaitingPc
+                        | DecisionFeedbackPhase::AuthenticationCancelled
+                        | DecisionFeedbackPhase::LocalUnconfirmed
+                )
+            })
+            || decision.action == DecisionFeedbackAction::Deny
+                && (decision.authentication_millis.is_some()
+                    || decision.after_authentication_millis.is_some()
+                    || matches!(
+                        decision.phase,
+                        DecisionFeedbackPhase::Authenticating
+                            | DecisionFeedbackPhase::AuthenticationCancelled
+                    ))
+        {
+            return Err(phone_request_issue());
+        }
+    }
     let mut devices = Vec::with_capacity(document.peers.len());
     for peer in document.peers {
         let revision = peer
@@ -205,6 +265,14 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
             revision: document.revision,
             peer_count: document.peer_count,
             connected_peer_count: document.connected_peer_count,
+            decisions: if document.status == RequestCatalogState::Unavailable {
+                Vec::new()
+            } else {
+                document.decisions
+            },
+            connection: document
+                .connection
+                .filter(|_| document.status != RequestCatalogState::Unavailable),
         },
     })
 }

@@ -107,6 +107,8 @@ struct Platform {
     request: Mutex<Option<Arc<NativeKeyCreationRequest>>>,
     transport_binding: Mutex<Option<Arc<NativeTransportBinding>>>,
     transport_releases: AtomicUsize,
+    transport_signs: AtomicUsize,
+    reject_transport_signature: AtomicBool,
     intake_notices: sync_mpsc::SyncSender<()>,
 }
 
@@ -314,6 +316,10 @@ impl NativePlatform for Platform {
             return Err(BridgeError::InvalidObservation);
         }
         let bytes = input.take_bytes()?;
+        self.transport_signs.fetch_add(1, Ordering::AcqRel);
+        if self.reject_transport_signature.load(Ordering::Acquire) {
+            return Err(BridgeError::NativeUnavailable);
+        }
         let signature: Signature = SigningKey::from_slice(&[5; 32])
             .map_err(|_| BridgeError::NativeUnavailable)?
             .sign(&bytes);
@@ -424,6 +430,8 @@ impl Fixture {
             request: Mutex::new(None),
             transport_binding: Mutex::new(None),
             transport_releases: AtomicUsize::new(0),
+            transport_signs: AtomicUsize::new(0),
+            reject_transport_signature: AtomicBool::new(false),
             intake_notices: intake_progress,
         });
         let (boot, reading) = map_clock(platform.clock().unwrap()).unwrap();
@@ -1137,6 +1145,112 @@ fn ceremony_loopback_commits_endpoint_and_releases_the_created_signer() {
 }
 
 #[test]
+fn pairing_ready_impostor_falls_back_before_signing_and_signer_failure_never_retries() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for reject_signature in [false, true] {
+        let fixture = Fixture::new();
+        fixture
+            .platform
+            .reject_transport_signature
+            .store(reject_signature, Ordering::Release);
+        let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let alternate = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addresses = [
+            primary.local_addr().unwrap(),
+            alternate.local_addr().unwrap(),
+        ];
+        let invitation = ceremony_invitation(addresses[0]);
+        let first = start_ceremony_pc(
+            primary,
+            invitation.clone(),
+            if reject_signature {
+                CeremonyPcMode::WrongFrozenContext
+            } else {
+                CeremonyPcMode::EofBeforeCandidate
+            },
+            Arc::new(Barrier::new(1)),
+        );
+        let mut unused_listener = None;
+        let second = if reject_signature {
+            alternate.set_nonblocking(true).unwrap();
+            unused_listener = Some(alternate);
+            None
+        } else {
+            Some(start_ceremony_pc(
+                alternate,
+                invitation.clone(),
+                CeremonyPcMode::WaitAtCompare,
+                Arc::new(Barrier::new(1)),
+            ))
+        };
+        let scan = fixture.controller.begin_pairing_scan().unwrap();
+        assert_eq!(
+            scan.accept_invitation(invitation.to_qr_text()),
+            NativePairingScanResult::Read
+        );
+        let (original, intent) = fixture.controller.take_pairing_scan(&scan).unwrap();
+        let created = fixture.controller.create_pairing_keys(intent).unwrap();
+        let submission = super::ceremony::make_submission(&original, &created).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                super::ceremony::select_pairing_transport(
+                    &original,
+                    &submission,
+                    &created,
+                    &scan,
+                    fixture.platform.clone(),
+                    scan.ceremony_clock(),
+                    &CancellationToken::new(),
+                    scan.ceremony_deadline(),
+                    &addresses,
+                ),
+            )
+            .await
+            .unwrap();
+            if reject_signature {
+                assert!(result.is_err());
+            } else {
+                let mut driver = result.unwrap();
+                loop {
+                    if let framed_transport::SocketEvent::Frame(_) =
+                        driver.next_event().await.unwrap()
+                    {
+                        break;
+                    }
+                }
+                driver.abort();
+            }
+        });
+        assert_eq!(fixture.platform.transport_signs.load(Ordering::Acquire), 1);
+        assert!(first.join().unwrap().confirmation.is_none());
+        if let Some(second) = second {
+            assert!(second.join().unwrap().confirmation.is_none());
+        }
+        if let Some(listener) = unused_listener {
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        assert!(
+            fixture
+                .controller
+                .with_inbox(|owner| Ok(owner.peer_associations().unwrap().is_empty()))
+                .unwrap()
+        );
+        drop(created);
+        drop(scan);
+    }
+}
+
+#[test]
 fn ceremony_consumes_a_read_scan_exactly_once() {
     let _serial = crate::tests::SERIAL
         .lock()
@@ -1365,7 +1479,7 @@ fn preparing_precedes_one_callback_and_created_keys_reuse_real_pending_acceptanc
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let f = Fixture::new();
-    assert_eq!(bridge_version(), 13);
+    assert_eq!(bridge_version(), 15);
     let before = f.bytes();
     let intent = f.intent();
     assert_eq!(f.bytes(), before);

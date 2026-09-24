@@ -200,33 +200,118 @@ async fn duplicate_waiting_role_cannot_replace_or_disconnect_the_first_participa
     assert_eq!(&byte, b"O");
     let report = server.shutdown().await;
     assert_eq!(report.rejected_duplicates, 1);
+    assert_eq!(report.evicted_pairs, 0);
     assert_eq!(report.paired, 1);
 }
 
 #[tokio::test]
-async fn active_route_rejects_new_roles_without_kicking_the_connected_pair() {
+async fn duplicate_waiting_phone_is_rejected_as_well() {
+    let server = Server::start(RelayLimits::default()).await;
+    let mut original = server.register(Role::Phone, 1).await;
+    remains_waiting(&mut original).await;
+    let mut duplicate = server.register(Role::Phone, 1).await;
+    closed(&mut duplicate).await;
+    let mut pc = server.register(Role::Pc, 1).await;
+    ready(&mut original).await;
+    ready(&mut pc).await;
+    exchange(&mut original, &mut pc, b"original phone").await;
+    let report = server.shutdown().await;
+    assert_eq!(report.rejected_duplicates, 1);
+    assert_eq!(report.evicted_pairs, 0);
+    assert_eq!(report.paired, 1);
+}
+
+/// Opaque bytes cross the pair whole, however the OS chunks them.
+async fn exchange(from: &mut TcpStream, to: &mut TcpStream, bytes: &[u8]) {
+    from.write_all(bytes).await.expect("synthetic fixture send");
+    let mut received = vec![0; bytes.len()];
+    timeout(Duration::from_secs(2), to.read_exact(&mut received))
+        .await
+        .expect("local forward deadline")
+        .expect("synthetic bytes forwarded");
+    assert_eq!(received.as_slice(), bytes);
+}
+
+fn counterpart(role: Role) -> Role {
+    match role {
+        Role::Pc => Role::Phone,
+        Role::Phone => Role::Pc,
+    }
+}
+
+/// A pair whose far side went silent without a FIN, then a fresh registration
+/// in `evicting` role: the stale pair closes on both sockets, the newcomer
+/// waits, and the next counterpart pairs with it.
+async fn fresh_registration_evicts_a_silent_pair(evicting: Role) {
+    let server = Server::start(RelayLimits::default()).await;
+    let mut stale = server.register(evicting, 1).await;
+    let mut survivor = server.register(counterpart(evicting), 1).await;
+    ready(&mut stale).await;
+    ready(&mut survivor).await;
+    exchange(&mut stale, &mut survivor, b"before the path died").await;
+    // `stale` stays open and says nothing, like a phone whose Wi-Fi dropped.
+    let mut fresh = server.register(evicting, 1).await;
+    closed(&mut survivor).await;
+    closed(&mut stale).await;
+    remains_waiting(&mut fresh).await;
+    let mut rejoined = server.register(counterpart(evicting), 1).await;
+    ready(&mut fresh).await;
+    ready(&mut rejoined).await;
+    exchange(&mut fresh, &mut rejoined, b"after eviction").await;
+    exchange(&mut rejoined, &mut fresh, b"and back").await;
+    let report = server.shutdown().await;
+    assert_eq!(report.evicted_pairs, 1);
+    assert_eq!(report.rejected_duplicates, 0);
+    assert_eq!(report.paired, 2);
+    assert_eq!(report.remaining_connections, 0);
+}
+
+#[tokio::test]
+async fn fresh_phone_registration_evicts_a_silent_active_pair() {
+    fresh_registration_evicts_a_silent_pair(Role::Phone).await;
+}
+
+#[tokio::test]
+async fn fresh_pc_registration_evicts_a_silent_active_pair() {
+    fresh_registration_evicts_a_silent_pair(Role::Pc).await;
+}
+
+#[tokio::test]
+async fn evicted_generations_never_disturb_the_pairs_that_replaced_them() {
     let server = Server::start(RelayLimits::default()).await;
     let mut pc = server.register(Role::Pc, 1).await;
     let mut phone = server.register(Role::Phone, 1).await;
     ready(&mut pc).await;
     ready(&mut phone).await;
-    for role in [Role::Pc, Role::Phone] {
-        let mut duplicate = server.register(role, 1).await;
-        closed(&mut duplicate).await;
+    let generations = 4;
+    for generation in 0..generations {
+        // Both replacements dial at once, so the old tasks may exit before or
+        // after the new pair forms. Either order must leave the new pair alone.
+        let (first, second) = if generation % 2 == 0 {
+            (Role::Phone, Role::Pc)
+        } else {
+            (Role::Pc, Role::Phone)
+        };
+        let mut new_first = server.register(first, 1).await;
+        let mut new_second = server.register(second, 1).await;
+        ready(&mut new_first).await;
+        ready(&mut new_second).await;
+        closed(&mut pc).await;
+        closed(&mut phone).await;
+        (pc, phone) = if first == Role::Pc {
+            (new_first, new_second)
+        } else {
+            (new_second, new_first)
+        };
+        // Every old socket has closed, so every old task has been retired.
+        exchange(&mut pc, &mut phone, b"new pair").await;
+        exchange(&mut phone, &mut pc, b"still relaying").await;
     }
-    phone
-        .write_all(b"S")
-        .await
-        .expect("original pair still sends");
-    let mut byte = [0];
-    timeout(Duration::from_secs(2), pc.read_exact(&mut byte))
-        .await
-        .expect("original pair still receives")
-        .expect("original pair byte");
-    assert_eq!(&byte, b"S");
     let report = server.shutdown().await;
-    assert_eq!(report.rejected_duplicates, 2);
-    assert_eq!(report.paired, 1);
+    assert_eq!(report.evicted_pairs, generations);
+    assert_eq!(report.rejected_duplicates, 0);
+    assert_eq!(report.paired, generations + 1);
+    assert_eq!(report.remaining_connections, 0);
 }
 
 #[tokio::test]

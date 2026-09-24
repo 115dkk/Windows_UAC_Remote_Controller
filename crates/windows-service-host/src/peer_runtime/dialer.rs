@@ -21,6 +21,10 @@ use super::ServicePeerCarrier;
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const TICK: Duration = Duration::from_millis(100);
+/// A dial that waited this long reached the relay and outlived its room, so no
+/// phone came. That is not a fault: rejoin at once, or a phone that arrives
+/// during a backoff finds the room empty and gives up after its own bound.
+const ROOM_EXPIRED: Duration = Duration::from_secs(15);
 const MAX_DEVICES: usize = 32;
 
 enum Command {
@@ -37,6 +41,7 @@ struct ResultMessage {
     route: RouteId,
     generation: u64,
     stream: Option<std::net::TcpStream>,
+    waited: Duration,
 }
 struct Entry {
     relay: SocketAddr,
@@ -50,6 +55,7 @@ struct Entry {
 
 pub(super) struct DeviceDialer {
     relay: SocketAddr,
+    embedded: bool,
     commands: mpsc::Sender<Command>,
     results: std::sync::mpsc::Receiver<ResultMessage>,
     stop: CancellationToken,
@@ -69,6 +75,14 @@ impl fmt::Debug for DeviceDialer {
 
 impl DeviceDialer {
     pub(super) fn new(relay: SocketAddr) -> Result<Self, super::PeerRuntimeError> {
+        Self::start(relay, false)
+    }
+
+    pub(super) fn new_embedded() -> Result<Self, super::PeerRuntimeError> {
+        Self::start(embedded_endpoint(), true)
+    }
+
+    fn start(relay: SocketAddr, embedded: bool) -> Result<Self, super::PeerRuntimeError> {
         let stop = CancellationToken::new();
         let thread_stop = stop.clone();
         let (command_sender, commands) = mpsc::channel(MAX_DEVICES + 2);
@@ -97,6 +111,7 @@ impl DeviceDialer {
         }
         Ok(Self {
             relay,
+            embedded,
             commands: command_sender,
             results,
             stop,
@@ -111,12 +126,7 @@ impl DeviceDialer {
         now: Instant,
     ) -> Vec<ServicePeerCarrier> {
         self.flush_releases();
-        let mut bounded: Vec<_> = routes
-            .iter()
-            .filter(|(_, relay, _)| *relay == self.relay)
-            .take(MAX_DEVICES)
-            .cloned()
-            .collect();
+        let mut bounded = selected_routes(routes, self.relay, self.embedded);
         bounded.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
         let _ = self.commands.try_send(Command::Poll {
             routes: bounded,
@@ -175,6 +185,36 @@ impl DeviceDialer {
         usize::from(self.thread.is_some())
     }
 }
+
+pub(super) fn embedded_endpoint() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], relay_service::EMBEDDED_RELAY_PORT))
+}
+
+fn selected_routes(
+    routes: &[(DeviceId, SocketAddr, RouteId)],
+    relay: SocketAddr,
+    embedded: bool,
+) -> Vec<(DeviceId, SocketAddr, RouteId)> {
+    // These routes come only from the current privileged registry. Embedded
+    // rendezvous always stays local; old advertised coordinates are immutable
+    // enrollment history, not a reason to suppress the enrolled device's route.
+    routes
+        .iter()
+        .filter(|(_, recorded, _)| embedded || *recorded == relay)
+        .take(MAX_DEVICES)
+        .map(|(device, recorded, route)| {
+            (
+                *device,
+                if embedded {
+                    embedded_endpoint()
+                } else {
+                    *recorded
+                },
+                *route,
+            )
+        })
+        .collect()
+}
 impl Drop for DeviceDialer {
     fn drop(&mut self) {
         self.cancel();
@@ -223,7 +263,7 @@ async fn run(
                             entry.delivered = true;
                             entry.backoff = FIRST_BACKOFF;
                         } else if let Ok((next_attempt, next_backoff)) =
-                            retry_after(Instant::now(), entry.backoff)
+                            retry_after(Instant::now(), entry.backoff, message.waited)
                         {
                             entry.next_attempt = next_attempt;
                             entry.backoff = next_backoff;
@@ -261,6 +301,7 @@ fn start_due_dials(
         let generation = entry.generation;
         let task_stop = stop.child_token();
         tasks.spawn(async move {
+            let began = Instant::now();
             let stream = match connect_rendezvous(
                 relay,
                 Registration::new(Role::Pc, route),
@@ -281,12 +322,20 @@ fn start_due_dials(
                 route,
                 generation,
                 stream,
+                waited: began.elapsed(),
             }
         });
     }
 }
 
-fn retry_after(now: Instant, backoff: Duration) -> Result<(Instant, Duration), ()> {
+fn retry_after(
+    now: Instant,
+    backoff: Duration,
+    waited: Duration,
+) -> Result<(Instant, Duration), ()> {
+    if waited >= ROOM_EXPIRED {
+        return Ok((now, FIRST_BACKOFF));
+    }
     Ok((
         now.checked_add(backoff).ok_or(())?,
         backoff.saturating_mul(2).min(MAX_BACKOFF),
@@ -350,11 +399,46 @@ mod tests {
         let mut backoff = FIRST_BACKOFF;
         for expected in [5, 10, 20, 40, 60, 60] {
             assert_eq!(backoff, Duration::from_secs(expected));
-            let (next, doubled) = retry_after(now, backoff).unwrap();
+            let (next, doubled) = retry_after(now, backoff, Duration::ZERO).unwrap();
             assert_eq!(next.duration_since(now), backoff);
             backoff = doubled;
         }
         assert_eq!(backoff, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn expired_room_rejoins_at_once_and_resets_backoff() {
+        let now = Instant::now();
+        let quick = ROOM_EXPIRED - Duration::from_millis(1);
+        assert_eq!(
+            retry_after(now, MAX_BACKOFF, quick).unwrap(),
+            (now + MAX_BACKOFF, MAX_BACKOFF)
+        );
+        for waited in [ROOM_EXPIRED, relay_service::CLIENT_RENDEZVOUS_TIMEOUT] {
+            assert_eq!(
+                retry_after(now, MAX_BACKOFF, waited).unwrap(),
+                (now, FIRST_BACKOFF)
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_routes_keep_old_enrollment_addresses_but_only_dial_local_listener() {
+        let old = "192.168.1.50:7443".parse().unwrap();
+        let other = "192.168.2.50:7443".parse().unwrap();
+        let routes = vec![
+            (device(1), old, RouteId::new([1; 32]).unwrap()),
+            (device(2), other, RouteId::new([2; 32]).unwrap()),
+        ];
+        let selected = selected_routes(&routes, embedded_endpoint(), true);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|(_, address, _)| *address
+            == SocketAddr::from(([127, 0, 0, 1], relay_service::EMBEDDED_RELAY_PORT))));
+        assert_eq!(selected[0].2, routes[0].2);
+        assert_eq!(selected[1].2, routes[1].2);
+        assert_eq!(selected_routes(&routes, old, false), vec![routes[0]]);
+        assert_eq!(routes[0].1, old);
+        assert_eq!(routes[1].1, other);
     }
 
     #[test]

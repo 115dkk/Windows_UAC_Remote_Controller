@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { nextVersion, stableVersion, stampMetadata, verifyTaggedMetadata, VERSION_FILES } from './release-version.mjs';
-import { RELEASE_GATES, selectRun } from './release-gates.mjs';
+import { mergeRunTestsExactTree, RELEASE_GATES, selectRun } from './release-gates.mjs';
 import { shouldBeLatest, releaseTagsArguments } from './release-latest.mjs';
 
 test('first stable is 1.0.0; later significance follows breaking, feat, then patch', () => {
@@ -170,6 +170,26 @@ test('gates require exact SHA and never select an older success instead of a new
   assert.equal(selectRun(rows, 'new', 'workflow_dispatch', new Set([2])), null, 'Rerun must wait for its fresh dispatch registration');
   assert.equal(new Set(RELEASE_GATES).size, 10);
   for (const gate of ['quality.yml', 'android-release-startup.yml', 'windows-uac-lab.yml', 'windows-package.yml']) assert.ok(RELEASE_GATES.includes(gate));
+});
+
+test('a PR run counts for a tag only when its merge with main is the tagged tree', () => {
+  assert.equal(mergeRunTestsExactTree('ahead'), true);
+  assert.equal(mergeRunTestsExactTree('identical'), true);
+  for (const status of ['behind', 'diverged', '', undefined]) assert.equal(mergeRunTestsExactTree(status), false);
+});
+
+test('every release gate runs on its own for each PR commit and main never runs it twice', () => {
+  for (const gate of RELEASE_GATES) {
+    const workflow = readFileSync(new URL(`../.github/workflows/${gate}`, import.meta.url), 'utf8');
+    const triggers = /^on:\n((?:[ #].*\n|\n)*)/mu.exec(workflow)?.[1];
+    assert.ok(triggers, gate);
+    const events = [...triggers.matchAll(/^ {2}([a-z_]+):/gmu)].map(match => match[1]).sort();
+    // main-release.yml dispatches every gate on the exact release commit, so a
+    // push trigger would run it twice; a path filter would leave a PR commit
+    // with no run at all and make a branch tag unpublishable.
+    assert.deepEqual(events, ['pull_request', 'workflow_dispatch'], gate);
+    assert.doesNotMatch(triggers, /^\s+(?:paths|paths-ignore|branches):/mu, gate);
+  }
 });
 
 test('stable publication cannot overwrite assets or silently change the Android signer', () => {

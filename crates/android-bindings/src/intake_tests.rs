@@ -891,6 +891,13 @@ fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_bod
     assert_eq!(status.peers.len(), 1);
     assert!(!status.peers[0].connected);
     assert_eq!(status.peers[0].id.len(), 64);
+    // No relay address is stored: nothing is dialled and there is no route.
+    let idle = Some(crate::NativePcConnection {
+        dialing: false,
+        last_failure: None,
+        external_route: false,
+    });
+    assert_eq!(status.connection, idle);
     let peer = fixture.connect();
     peer.send(opened(3).0);
     let view = fixture.projection();
@@ -898,6 +905,7 @@ fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_bod
     assert_eq!(connected.peers.len(), 1);
     assert!(connected.peers[0].connected);
     assert_eq!(connected.peers[0].id, status.peers[0].id);
+    assert_eq!(connected.connection, idle);
     let policy = serde_json::to_string(&NotificationPolicy::new(
         Some(Schedule::Never),
         AlertMode::Silent,

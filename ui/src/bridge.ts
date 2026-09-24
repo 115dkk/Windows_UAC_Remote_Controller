@@ -16,6 +16,7 @@ export const controllerBridge: ControllerBridge = {
   beginPairing: (transport) => native<AppSnapshot>(transport === 'usb' ? 'begin_pairing_usb' : 'begin_pairing'),
   removeDevice: (deviceId) => native<AppSnapshot>('remove_device', { deviceId }),
   setRelay: (address) => native<AppSnapshot>('set_relay', { address }),
+  setExternalAccess: (input) => native<AppSnapshot>('set_external_access', { accessJson: JSON.stringify(input) }),
   decide: (requestId, decision) => native<AppSnapshot>('decide_request', { requestId, decision }),
   requestDetails: (requestId) => native<RequestDetailsView>('request_details', { requestId }),
   watchRequests: async (notify) => {
@@ -26,6 +27,7 @@ export const controllerBridge: ControllerBridge = {
   clearActivity: () => native<AppSnapshot>('clear_activity'),
   openDiagnosticsFolder: () => native<void>('open_diagnostics_folder'),
   exportAndroidDiagnostics: () => native<void>('export_android_diagnostics'),
+  saveAndroidDiagnostics: () => native<'saved' | 'cancelled'>('save_android_diagnostics'),
   openLockSettings: () => native<void>('open_lock_settings'),
   openNotificationSettings: () => native<void>('open_notification_settings'),
   openPairingScanner: (transport) => native<void>(transport === 'usb' ? 'open_pairing_usb' : 'open_pairing_scanner'),

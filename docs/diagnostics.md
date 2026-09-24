@@ -17,7 +17,9 @@ Explorer or relaunch the app without administrator elevation.
 ## Contents and access
 
 - Committed activity outcomes, service startup failure codes, process-startup
-  guard phases and native prompt refusal reasons.
+  guard phases and native prompt refusal reasons. A stored external-access
+  setting the service could not parse is recorded as `configuration_ignored`;
+  the service then starts in automatic mode.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.
@@ -52,3 +54,10 @@ records and the app's own currently available `UacNative` log buffer are
 considered. The exported file contains no request bodies, program details,
 device identities, keys, credentials or signatures. Export is explicit; the app
 never uploads the file or chooses a recipient.
+
+The separate **Save diagnostic log to file** action opens Android's system file
+picker. Choose device storage/Downloads or another available document provider.
+The app reports success after writing to that selected document; cancelling the
+picker is not an error. It does not open the Sharesheet. The existing export
+action remains available when sharing is wanted. Both actions work independently
+of service/history readiness and serialize repeated requests.

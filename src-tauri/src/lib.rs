@@ -126,6 +126,7 @@ pub fn run() {
             commands::open_pairing_usb,
             commands::remove_device,
             commands::set_relay,
+            commands::set_external_access,
             taskbar::taskbar_offer,
             taskbar::request_taskbar_pin,
             commands::decide_request,
@@ -135,6 +136,7 @@ pub fn run() {
             commands::open_lock_settings,
             commands::open_notification_settings,
             commands::export_android_diagnostics,
+            commands::save_android_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("native application host could not run");
