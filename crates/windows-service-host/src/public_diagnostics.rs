@@ -102,6 +102,11 @@ fn append(file: &mut File, record: &Record) -> io::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn record(event: Event) {
+    // Unit tests reach this through the refusal and startup paths; the
+    // installed product's journal in ProgramData is not theirs to append to.
+    if cfg!(test) {
+        return;
+    }
     let Ok(mut opened) = crate::ffi::public_diagnostics::open_file() else {
         return;
     };

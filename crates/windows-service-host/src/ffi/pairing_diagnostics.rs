@@ -157,6 +157,11 @@ fn record_text(point: Point, class: &'static str, stage: &str, code: u32) -> Opt
 }
 
 fn emit(point: Point, class: &'static str, stage: &str, code: u32) {
+    // Unit tests drive the callers of this writer; this machine's real log
+    // is not theirs to fill (fixture rows once looked like a real prompt).
+    if cfg!(test) {
+        return;
+    }
     if !reserve(&COUNT) {
         return;
     }

@@ -126,6 +126,11 @@ fn admit() -> bool {
 }
 
 fn emit(message: &str) {
+    // Unit tests drive the callers of this writer; this machine's real log
+    // is not theirs to fill (fixture rows once looked like a real prompt).
+    if cfg!(test) {
+        return;
+    }
     if !message.is_ascii() || message.len() > 256 {
         return;
     }
