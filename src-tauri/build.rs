@@ -25,6 +25,18 @@ fn main() {
         "taskbar_offer",
         "request_taskbar_pin",
     ]);
-    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
-        .expect("Tauri application build configuration must be valid");
+    // The phone's request screen hears native catalogue changes through the
+    // device-state plugin's empty "request-review" event. Tauri 2 checks plugin
+    // commands against the ACL, so without these two the page's subscription was
+    // refused and the screen only caught up on its five-second poll. Only the
+    // listener pair gets a permission; the plugin's native commands stay
+    // reachable through the app's own typed commands alone.
+    let device_state =
+        tauri_build::InlinedPlugin::new().commands(&["register_listener", "remove_listener"]);
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(manifest)
+            .plugin("device-state", device_state),
+    )
+    .expect("Tauri application build configuration must be valid");
 }

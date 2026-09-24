@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AppSnapshot, ControllerBridge, ExternalAccessInput, NotificationPolicy, ServiceAction } from './contracts';
+import type { AppSnapshot, ControllerBridge, ExternalAccessInput, NotificationPolicy, RequestDetailsView, ServiceAction } from './contracts';
 import { ko } from './messages.ko';
 import { ageRequestPresentation, withoutRequestBodies } from './requestPresentation';
 
@@ -118,6 +118,12 @@ export function useController(bridge: ControllerBridge) {
   const readPending = useRef(false);
   const activeRead = useRef<{ owner: ControllerBridge; promise: Promise<AppSnapshot> } | null>(null);
   const commandPending = useRef(false);
+  // Every snapshot read, command and details read shares one native command
+  // admission. A change reported while it is held is remembered here and read
+  // once the work in flight lets go, instead of waiting for the periodic read.
+  const refreshWanted = useRef(false);
+  const detailsReads = useRef<{ owner: ControllerBridge | null; count: number }>({ owner: null, count: 0 });
+  const resumeRefresh = useRef<() => void>(() => undefined);
   const scannerReturn = useRef({ pending: false, opened: false, wake: false });
   const scannerFocusRevision = useRef(0);
   const dismissScannerReturnFocus = useCallback(() => {
@@ -140,7 +146,16 @@ export function useController(bridge: ControllerBridge) {
   }, []);
 
   const refresh = useCallback(async (announce = false) => {
-    if (liveOwner.current !== bridge || commandPending.current || readPending.current) return;
+    if (liveOwner.current !== bridge) return;
+    // Dropping this call lost the native wake that announces a new request
+    // whenever any other read was running, and the card then waited for the
+    // periodic read. The work in flight may already have read past the change.
+    if (commandPending.current || readPending.current || activeRead.current !== null
+      || (detailsReads.current.owner === bridge && detailsReads.current.count > 0)) {
+      refreshWanted.current = true;
+      return;
+    }
+    refreshWanted.current = false;
     readPending.current = true;
     const attempt = ++revision.current;
     const previous = current.current.owner === bridge ? current.current : emptyState(bridge);
@@ -150,6 +165,16 @@ export function useController(bridge: ControllerBridge) {
     try {
       const snapshot = await read.promise;
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
+      const latest = current.current;
+      // The wake for a new request is sent while the native intake still holds
+      // the owner, so the read it starts can find the owner busy. That answer
+      // observes nothing: keep what is on screen, whose display lease timers
+      // still run from its own observation, and let the owner's next wake read
+      // again. Only an explicit refresh reports the busy owner.
+      if (!announce && snapshot.issue?.code === 'app_busy' && latest.owner === bridge && latest.snapshot !== null) {
+        publish({ ...latest, refreshing: false });
+        return;
+      }
       publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
     } catch {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
@@ -158,8 +183,30 @@ export function useController(bridge: ControllerBridge) {
     } finally {
       if (activeRead.current === read) activeRead.current = null;
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
+      resumeRefresh.current();
     }
   }, [bridge, publish, scannerReturnRevision]);
+
+  /** Original command text is still read only on demand. It shares the native
+   * admission with the snapshot read, and a notification review opens the
+   * disclosure the moment its snapshot is published, often while the next read
+   * is already running. So it waits for the exact read holding the admission
+   * instead of colliding with it and showing the retry state. The wait counts
+   * against the body's own display lease, never extends it. */
+  const readDetails = useCallback(async (requestId: string): Promise<RequestDetailsView> => {
+    if (detailsReads.current.owner !== bridge) detailsReads.current = { owner: bridge, count: 0 };
+    const reads = detailsReads.current;
+    reads.count += 1;
+    try {
+      for (let held = activeRead.current; held?.owner === bridge; held = activeRead.current) {
+        try { await held.promise; } catch { /* The details read reports its own failure. */ }
+      }
+      return await bridge.requestDetails(requestId);
+    } finally {
+      reads.count -= 1;
+      resumeRefresh.current();
+    }
+  }, [bridge]);
 
   const run = useCallback(async (command: ClientCommand): Promise<AppSnapshot | null> => {
     const previous = current.current;
@@ -303,6 +350,7 @@ export function useController(bridge: ControllerBridge) {
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
+      resumeRefresh.current();
     }
   }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision]);
 
@@ -333,11 +381,23 @@ export function useController(bridge: ControllerBridge) {
     return () => { window.clearTimeout(early); window.clearTimeout(withdraw); };
   }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot]);
 
+  // One more read for the changes remembered while the admission was held. A
+  // hidden page reads nothing; becoming visible reads anyway.
+  useEffect(() => {
+    resumeRefresh.current = () => {
+      if (!refreshWanted.current || liveOwner.current !== bridge) return;
+      if (document.visibilityState !== 'visible') { refreshWanted.current = false; return; }
+      void refresh();
+    };
+    return () => { resumeRefresh.current = () => undefined; };
+  }, [bridge, refresh]);
+
   useEffect(() => {
     liveOwner.current = bridge;
     readPending.current = false;
     activeRead.current = null;
     commandPending.current = false;
+    refreshWanted.current = false;
     scannerReturn.current = { pending: false, opened: false, wake: false };
     scannerFocusRevision.current = 0;
     // Defer the initial presentation update; the first render already is loading.
@@ -374,5 +434,5 @@ export function useController(bridge: ControllerBridge) {
     };
   }, [bridge, dismissScannerReturnFocus, publish, refresh]);
 
-  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, dismissScannerReturnFocus };
+  return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, readDetails, dismissScannerReturnFocus };
 }

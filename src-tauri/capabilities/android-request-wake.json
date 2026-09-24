@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/android-schema.json",
+  "identifier": "android-request-wake",
+  "description": "The phone page may subscribe to and leave the native owner's empty request-change event, nothing else of the device-state plugin.",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": ["device-state:allow-register-listener", "device-state:allow-remove-listener"]
+}

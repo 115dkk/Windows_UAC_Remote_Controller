@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { TaskbarSuggestion } from './TaskbarSuggestion';
 import type { TaskbarBridge } from './TaskbarSuggestion';
 import type { AppSnapshot, ControllerBridge, PairedDeviceView, ServiceAction } from './contracts';
@@ -48,7 +48,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
     document.title = tr('UAC 원격 승인');
   }, [language]);
   const controller = useController(bridge);
-  const readDetails = useCallback((id: string) => bridge.requestDetails(id), [bridge]);
+  const { readDetails } = controller;
   const [navigationState, setNavigationState] = useState<{ page: ClientPage | null; reviewKey: string | null }>({ page: initialPage ?? null, reviewKey: null });
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const { snapshot, refreshing, busy, stale, error, notice } = controller;
