@@ -227,6 +227,8 @@ struct PeerSlot {
     advertised: Option<Vec<std::net::SocketAddr>>,
     /// A query on this connection lapsed unanswered after `advertised`.
     query_lapsed: bool,
+    /// That query, while it may still be answered.
+    deferred_query: Option<direct::DeferredQuery>,
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
@@ -769,6 +771,11 @@ impl<'key> ServiceSession<'key> {
             // not TPM/service startup. Retry is bounded and never kills an owner.
             self.embedded_relay =
                 relay_service::HostedRelay::start_embedded(relay_service::EMBEDDED_RELAY_PORT).ok();
+            if self.embedded_relay.is_none() {
+                // Phones redial within a second of a service restart; a port
+                // the previous process only just released gets the same pace.
+                self.relay_retry_at = now + Duration::from_secs(1);
+            }
         }
         let endpoint = if self
             .embedded_relay
@@ -1335,6 +1342,7 @@ impl<'key> ServiceSession<'key> {
             clock_since: None,
             advertised: None,
             query_lapsed: false,
+            deferred_query: None,
         });
         Ok(())
     }
@@ -1398,6 +1406,7 @@ impl<'key> ServiceSession<'key> {
                 self.poll_direct_gateway(None);
             }
             self.poll_embedded_relay(now)?;
+            self.answer_deferred_queries(now)?;
             self.refresh_stale_hints(now);
             self.pairing.poll(self.engine.boot_epoch(), now);
             if self.pairing.wants_preparation_context() {
