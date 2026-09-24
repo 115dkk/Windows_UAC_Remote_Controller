@@ -212,6 +212,16 @@ const connectionFixtures: Record<string, PcConnectionView> = {
 
 /** Synthetic decision receipts and PC connection diagnoses for the phone shell. */
 function feedbackCase(name: string, phone: AppSnapshot): QaCase | null {
+  if (name === 'phone-decision-reissued') {
+    // The approval was sent; the PC's window changed first, so the PC refused it
+    // and listed the same program again under a new request id.
+    const catalog = phone.requestCatalog!;
+    return { page: 'requests',
+      snapshot: { ...phone, requests: [{ ...pendingRequest, state: 'awaiting_outcome', canApprove: false, canDeny: false }],
+        requestCatalog: { ...catalog, decisions: [decisionView(pendingRequest.id, 'approve', 'awaiting_pc')] } },
+      later: { ...phone, requests: [{ ...pendingRequest, id: 'synthetic-request-2' }],
+        requestCatalog: { ...catalog, decisions: [decisionView(pendingRequest.id, 'approve', 'failed')] } } };
+  }
   const decision = decisionFixtures[name];
   if (decision) {
     // A request that has left the list keeps no body; only its locator remains in the view.

@@ -2,9 +2,8 @@
 // Body-free decision feedback. A receipt carries the chosen action and the PC's
 // result only: no program name, path or computer name is kept for it.
 import { useEffect, useId, useRef } from 'react';
-import type { DecisionFeedbackView } from './contracts';
-import { decisionCopy } from './decisionFeedback';
-import type { DecisionAction, DecisionPhase } from './decisionFeedback';
+import { decisionCopy, reissuedCopy } from './decisionFeedback';
+import type { DecisionAction, DecisionPhase, ReceiptView } from './decisionFeedback';
 import { Icon } from './icons';
 import { tr } from './i18n';
 
@@ -17,10 +16,11 @@ export function DecisionPhaseLine({ action, phase }: { action: DecisionAction; p
   </div>;
 }
 
-function Receipt({ view, onDismiss }: { view: DecisionFeedbackView; onDismiss: (id: string) => void }) {
+function Receipt({ view, onDismiss }: { view: ReceiptView; onDismiss: (id: string) => void }) {
   const titleId = useId();
-  const copy = decisionCopy(view.action, view.phase);
-  return <section className={`notice-box decision-receipt tone-${copy.tone}`} aria-labelledby={titleId} data-phase={view.phase}>
+  const copy = view.reissued ? reissuedCopy() : decisionCopy(view.action, view.phase);
+  return <section className={`notice-box decision-receipt tone-${copy.tone}`} aria-labelledby={titleId} data-phase={view.phase}
+    data-reissued={view.reissued ? 'true' : undefined}>
     <Icon name={copy.icon} />
     <div>
       <h2 id={titleId}>{tr(copy.title)}</h2>
@@ -35,7 +35,7 @@ function Receipt({ view, onDismiss }: { view: DecisionFeedbackView; onDismiss: (
  * on the requests page, so a result that arrives as its card disappears is
  * announced once, and so is each later phase change.
  */
-export function DecisionReceipts({ receipts, onDismiss }: { receipts: readonly DecisionFeedbackView[]; onDismiss: (id: string) => void }) {
+export function DecisionReceipts({ receipts, onDismiss }: { receipts: readonly ReceiptView[]; onDismiss: (id: string) => void }) {
   const list = useRef<HTMLDivElement>(null);
   const focusAfter = useRef<string | null | undefined>(undefined);
   useEffect(() => {

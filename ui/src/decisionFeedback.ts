@@ -2,7 +2,7 @@
 // Presentation of the native, body-free decision views. Nothing here admits,
 // signs, resends or expires a request; the native owners decide all of that.
 import { useCallback, useState } from 'react';
-import type { AppSnapshot, DecisionFeedbackView } from './contracts';
+import type { AppSnapshot, DecisionFeedbackView, RequestView } from './contracts';
 import type { IconName } from './icons';
 
 export type DecisionAction = DecisionFeedbackView['action'];
@@ -40,12 +40,24 @@ export function decisionCopy(action: DecisionAction, phase: DecisionPhase): Deci
   }
 }
 
+/**
+ * A failed choice whose request the PC sent again: soon after the failure a
+ * different request from the same PC for the same program and path is listed.
+ * The PC does this when its approval window changed before the choice arrived.
+ */
+export function reissuedCopy(): DecisionCopy {
+  return { title: 'PC가 같은 요청을 다시 보냈습니다',
+    body: 'PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.', icon: 'alert', tone: 'warning' };
+}
+
 /** What the tap itself establishes before any bridge reply: the native owner's first phase. */
 export function tapPhase(action: DecisionAction): DecisionPhase {
   return action === 'approve' ? 'authenticating' : 'preparing';
 }
 
 const RETAINED = 32;
+/** How soon after a failure the same program counts as the same request sent again. */
+export const REISSUE_WINDOW_MILLIS = 15_000;
 
 export interface ReceiptMemory {
   readonly source: AppSnapshot | null;
@@ -53,17 +65,34 @@ export interface ReceiptMemory {
   readonly views: readonly DecisionFeedbackView[];
   readonly dismissed: ReadonlySet<string>;
   readonly reviewKey: string | null;
+  /** One-way 32-bit marks of PC, program and path per request id; never the text. */
+  readonly marks: ReadonlyMap<string, number>;
+  /** When this app session first saw each failure. */
+  readonly failedAt: ReadonlyMap<string, number>;
+  /** Failed request id to the request the PC listed in its place. */
+  readonly reissued: ReadonlyMap<string, string>;
 }
-export const emptyReceiptMemory: ReceiptMemory = { source: null, views: [], dismissed: new Set(), reviewKey: null };
+export const emptyReceiptMemory: ReceiptMemory = {
+  source: null, views: [], dismissed: new Set(), reviewKey: null, marks: new Map(), failedAt: new Map(), reissued: new Map(),
+};
+
+/** FNV-1a over the fields that name a request; equal marks mean the same program asked again. */
+function markOf(request: RequestView): number {
+  const text = [request.computerName, request.programName, request.executablePath].join('\u0000');
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+  return hash;
+}
 
 function reviewKeyOf(snapshot: AppSnapshot): string | null {
   return snapshot.requestReview ? `${snapshot.requestReview.revision}:${snapshot.requestReview.locator}` : null;
 }
 
-function withoutListedReceipts(views: readonly DecisionFeedbackView[], dismissed: ReadonlySet<string>, snapshot: AppSnapshot): ReadonlySet<string> {
+function withoutListedReceipts(views: readonly DecisionFeedbackView[], dismissed: ReadonlySet<string>, snapshot: AppSnapshot,
+  spared: ReadonlySet<string> = new Set()): ReadonlySet<string> {
   const listed = new Set(snapshot.requests.map((request) => request.id));
   const next = new Set(dismissed);
-  for (const view of views) if (!listed.has(view.id)) next.add(view.id);
+  for (const view of views) if (!listed.has(view.id) && !spared.has(view.id)) next.add(view.id);
   return next;
 }
 
@@ -73,7 +102,7 @@ function withoutListedReceipts(views: readonly DecisionFeedbackView[], dismissed
  * until dismissed, because it cannot change any more; a stage the owner stopped
  * reporting is dropped, because showing it would claim progress nobody sees.
  */
-export function nextReceiptMemory(memory: ReceiptMemory, snapshot: AppSnapshot): ReceiptMemory {
+export function nextReceiptMemory(memory: ReceiptMemory, snapshot: AppSnapshot, now: number = Date.now()): ReceiptMemory {
   if (memory.source === snapshot) return memory;
   const reported = snapshot.requestCatalog?.decisions;
   let views = memory.views;
@@ -82,18 +111,39 @@ export function nextReceiptMemory(memory: ReceiptMemory, snapshot: AppSnapshot):
     const kept = memory.views.filter((view) => !latest.has(view.id) && !isDecisionInProgress(view.phase));
     views = [...kept, ...reported].slice(-RETAINED);
   }
+  const retained = new Set(views.map((view) => view.id));
+  const marks = new Map([...memory.marks].filter(([id]) => retained.has(id)));
+  for (const request of snapshot.requests) marks.set(request.id, markOf(request));
+  const failedAt = new Map<string, number>();
+  const reissued = new Map<string, string>();
+  for (const view of views) {
+    if (view.phase !== 'failed') continue;
+    const at = memory.failedAt.get(view.id) ?? now;
+    failedAt.set(view.id, at);
+    const mark = marks.get(view.id);
+    const successor = memory.reissued.get(view.id)
+      ?? (mark === undefined || now - at > REISSUE_WINDOW_MILLIS ? undefined
+        : snapshot.requests.find((request) => request.id !== view.id && marks.get(request.id) === mark)?.id);
+    if (successor !== undefined) reissued.set(view.id, successor);
+  }
   const reviewKey = reviewKeyOf(snapshot);
-  // A request opened for review supersedes the receipts of requests that have left.
+  // A request opened for review supersedes the receipts of requests that have
+  // left, except the one explaining why the reviewed request was sent again.
+  const reviewed = snapshot.requestReview?.locator;
+  const spared = new Set([...reissued].filter(([, successor]) => successor === reviewed).map(([id]) => id));
   const dismissed = reviewKey !== null && reviewKey !== memory.reviewKey
-    ? withoutListedReceipts(views, memory.dismissed, snapshot) : memory.dismissed;
-  return { source: snapshot, views, dismissed, reviewKey };
+    ? withoutListedReceipts(views, memory.dismissed, snapshot, spared) : memory.dismissed;
+  return { source: snapshot, views, dismissed, reviewKey, marks, failedAt, reissued };
 }
+
+/** A receipt as shown: the native view, marked when the PC sent its request again. */
+export type ReceiptView = DecisionFeedbackView & { readonly reissued?: true };
 
 export interface DecisionReceipts {
   /** The latest view for a request id, dismissed or not. */
   readonly byId: ReadonlyMap<string, DecisionFeedbackView>;
   /** Receipts for requests that are no longer listed, newest first. */
-  readonly receipts: readonly DecisionFeedbackView[];
+  readonly receipts: readonly ReceiptView[];
   readonly dismiss: (id: string) => void;
   /** Called when the user moves on to another request. */
   readonly dismissUnlisted: () => void;
@@ -103,7 +153,8 @@ export function receiptsFor(memory: ReceiptMemory, snapshot: AppSnapshot | null)
   const listed = new Set(snapshot?.requests.map((request) => request.id) ?? []);
   return {
     byId: new Map(memory.views.map((view) => [view.id, view])),
-    receipts: memory.views.filter((view) => !listed.has(view.id) && !memory.dismissed.has(view.id)).reverse(),
+    receipts: memory.views.filter((view) => !listed.has(view.id) && !memory.dismissed.has(view.id)).reverse()
+      .map((view): ReceiptView => memory.reissued.has(view.id) ? { ...view, reissued: true } : view),
   };
 }
 

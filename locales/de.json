@@ -323,6 +323,8 @@
   "PC의 처리 결과를 기다리는 중입니다.": "Warten auf das Ergebnis vom PC.",
   "PC에서 처리하지 못했습니다": "Der PC konnte die Anfrage nicht verarbeiten",
   "PC 화면에서 요청 창을 확인하십시오.": "Prüfen Sie das Anfragefenster auf dem PC-Bildschirm.",
+  "PC가 같은 요청을 다시 보냈습니다": "Der PC hat dieselbe Anfrage erneut gesendet",
+  "PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.": "Der Dialog für Administratorrechte am PC hat sich geändert, daher wurde Ihre vorherige Auswahl nicht übernommen. Wählen Sie in der neuen Anfrage erneut.",
   "PC에서 요청이 닫혔습니다": "Die Anfrage wurde am PC geschlossen",
   "PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.": "Sie wurde direkt am PC bearbeitet, oder das anfragende Programm hat sein Fenster geschlossen.",
   "요청 시간이 지났습니다": "Die Anfrage ist abgelaufen",
