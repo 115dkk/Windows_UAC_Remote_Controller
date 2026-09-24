@@ -11,7 +11,7 @@ import { hasPairedPc } from './phoneConnection';
 import { displayText, hasDirectionControls } from './displayText';
 import { tr } from './i18n';
 import { emptyReceiptMemory, nextReceiptMemory, receiptsFor, tapPhase } from './decisionFeedback';
-import type { DecisionAction, DecisionPhase } from './decisionFeedback';
+import type { DecisionAction, DecisionPhase, ReceiptView } from './decisionFeedback';
 import { DecisionPhaseLine, DecisionReceipts } from './DecisionReceipt';
 import { initialConnectionClock, knownDisconnected, pcConnectionPresentation } from './pcConnection';
 import type { PcConnectionClock } from './pcConnection';
@@ -60,7 +60,7 @@ interface RequestPanelProps {
   snapshot: AppSnapshot; disabled: boolean; onDecision: Decide;
   readDetails: ControllerBridge['requestDetails'];
   /** App-session receipt memory; without it only the current snapshot is shown. */
-  decisions?: { readonly byId: ReadonlyMap<string, DecisionFeedbackView>; readonly receipts: readonly DecisionFeedbackView[]; readonly dismiss: (id: string) => void } | undefined;
+  decisions?: { readonly byId: ReadonlyMap<string, DecisionFeedbackView>; readonly receipts: readonly ReceiptView[]; readonly dismiss: (id: string) => void } | undefined;
   pendingDecision?: PendingDecision | null | undefined;
   connectionClock?: PcConnectionClock | undefined;
 }

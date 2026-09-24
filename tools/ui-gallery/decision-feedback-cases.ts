@@ -33,6 +33,8 @@ export const feedbackCases: readonly FeedbackCase[] = [
   row('decision', 'decision-awaiting-pc-text-200-390', 'phone-decision-awaiting-pc', 390, { large: true, height: 1000 }),
   row('decision', 'decision-local-unconfirmed-de-320', 'phone-decision-local-unconfirmed', 320, { locale: 'de' }),
   row('decision', 'decision-cancelled-ar-390', 'phone-decision-cancelled', 390, { locale: 'ar' }),
+  row('decision', 'decision-reissued-390', 'phone-decision-reissued', 390),
+  row('decision', 'decision-reissued-de-320', 'phone-decision-reissued', 320, { locale: 'de' }),
   row('connection', 'connection-connecting-390', 'phone-connection-connecting', 390),
   row('connection', 'connection-connecting-motion-390', 'phone-connection-connecting', 390, { motion: true }),
   row('connection', 'connection-reconnecting-390', 'phone-connection-reconnecting', 390),

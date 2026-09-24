@@ -21,6 +21,8 @@ const decisions: Record<string, { readonly title: string; readonly body: string;
   'phone-decision-pc-completed': { title: 'PC에서 요청이 끝났습니다', body: '처리 결과는 PC에서 확인하십시오.', listed: false },
   'phone-decision-local-unconfirmed': { title: 'PC의 결과를 아직 확인하지 못했습니다', body: '선택이 PC에 전달되었는지 확인하지 못했습니다. 요청이 남아 있으면 다시 선택할 수 있습니다.', listed: false },
 };
+const reissued = { title: 'PC가 같은 요청을 다시 보냈습니다',
+  body: 'PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.' };
 const failed = 'PC에 연결하지 못했습니다';
 const guidance: Record<string, readonly string[]> = {
   'phone-connection-refused': ['PC는 응답했지만 휴대폰 승인이 연결을 받지 않습니다. PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.'],
@@ -44,7 +46,27 @@ async function reachable(target: Locator, minimum: number): Promise<void> {
   expect(box!.height).toBeGreaterThanOrEqual(minimum);
 }
 
+async function sentAgain(page: Page, locale: GalleryLocale, capture: (stage: string, caption: string) => Promise<void>): Promise<void> {
+  await expect(page.getByText(galleryText(locale, '승인을 보냈습니다'), { exact: true })).toBeVisible();
+  // The next synthetic observation: the choice failed and the same program is listed again.
+  await page.getByRole('button', { name: galleryText(locale, '다시 확인'), exact: true }).click();
+  const receipt = page.getByRole('region', { name: galleryText(locale, reissued.title), exact: true });
+  await expect(receipt).toContainText(galleryText(locale, reissued.body));
+  await expect(receipt).toHaveAttribute('data-reissued', 'true');
+  await expect(receipt.getByText(/설정 도우미|Program Files|화면 예시 PC/u)).toHaveCount(0);
+  const card = page.getByRole('article');
+  await expect(card).toHaveCount(1);
+  await expect(card.getByRole('button', { name: galleryText(locale, '승인'), exact: true })).toBeEnabled();
+  const ok = receipt.getByRole('button', { name: galleryText(locale, '확인'), exact: true });
+  await reachable(ok, 48);
+  await receipt.scrollIntoViewIfNeeded();
+  await capture('decision-reissued', 'CLIENT/SYNTHETIC · a failed choice whose request the PC listed again, above the new request; not a native PC result');
+  await card.scrollIntoViewIfNeeded();
+  await capture('decision-reissued-new-request', 'CLIENT/SYNTHETIC · the new request below the explanation, with approve available');
+}
+
 async function decision(page: Page, selected: FeedbackCase, locale: GalleryLocale, capture: (stage: string, caption: string) => Promise<void>): Promise<void> {
+  if (selected.fixture === 'phone-decision-reissued') return sentAgain(page, locale, capture);
   const want = decisions[selected.fixture]!;
   const title = page.getByText(galleryText(locale, want.title), { exact: true });
   await expect(title).toBeVisible();

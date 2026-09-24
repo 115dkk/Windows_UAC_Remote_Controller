@@ -52,6 +52,8 @@ pub fn run_watch_helper() -> supervision::HelperExit {
 mod ffi;
 #[cfg(any(all(windows, target_pointer_width = "64"), test))]
 mod policy;
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+mod settle;
 
 pub const MAX_TOP_LEVEL_WINDOWS: usize = 128;
 pub const MAX_UIA_ELEMENTS: usize = 128;

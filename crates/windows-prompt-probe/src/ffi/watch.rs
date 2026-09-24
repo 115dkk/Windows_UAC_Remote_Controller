@@ -11,6 +11,7 @@ use super::{
 };
 use crate::{
     NativeOperation, ProbeCounts, ProbeFailure, ProbeReport,
+    settle::{SettleGate, Settled},
     supervision::{
         ApplyOutcome, GoneReason, HelperMessage, RefusalReason, ServiceMessage, TargetIdentity,
     },
@@ -68,6 +69,12 @@ pub(super) fn run(
     let image = system_consent_path().map_err(|_| ())?;
     lab_note!("watch helper started: session={session} own_pid={own_pid}");
     let mut tracked: Option<Tracked> = None;
+    // A new or changed prompt waits here until its content stops changing;
+    // only then is it published. While it waits, nothing is tracked.
+    let mut settling = SettleGate::new();
+    // After apply refused a changed dialog, look at its content on the very next
+    // cycle instead of at the next heartbeat, so the phone is asked again soon.
+    let mut recheck_content = false;
     let mut sequence = 0u32;
     let mut last_output = Instant::now();
     let mut last_desktop = String::new();
@@ -95,6 +102,12 @@ pub(super) fn run(
                 }
                 channel.write(&HelperMessage::Applied { target, outcome })?;
                 last_output = Instant::now();
+                if matches!(
+                    outcome,
+                    ApplyOutcome::Refused(RefusalReason::ContentChanged)
+                ) {
+                    recheck_content = true;
+                }
                 if matches!(outcome, ApplyOutcome::Gone)
                     && tracked.as_ref().map(|current| current.identity) == Some(target)
                 {
@@ -120,6 +133,7 @@ pub(super) fn run(
             break;
         }
         if !desktop_name.eq_ignore_ascii_case("Winlogon") {
+            settling.clear();
             if let Some(current) = tracked.take() {
                 channel.write(&HelperMessage::Gone {
                     target: current.identity,
@@ -135,10 +149,11 @@ pub(super) fn run(
                 session,
                 &image,
                 tracked.as_ref(),
-                heartbeat_due,
+                heartbeat_due || recheck_content,
                 next_sequence,
                 cleanup,
             )?;
+            recheck_content = false;
             if began.elapsed() >= MAX_LIFETIME {
                 drop(desktop);
                 break;
@@ -146,6 +161,7 @@ pub(super) fn run(
             lab_note!("winlogon census: {}", census_kind(&census));
             match census {
                 Census::None => {
+                    settling.clear();
                     if let Some(current) = tracked.take() {
                         channel.write(&HelperMessage::Gone {
                             target: current.identity,
@@ -155,6 +171,7 @@ pub(super) fn run(
                     }
                 }
                 Census::Ambiguous => {
+                    settling.clear();
                     if let Some(current) = tracked.take() {
                         channel.write(&HelperMessage::Gone {
                             target: current.identity,
@@ -164,6 +181,7 @@ pub(super) fn run(
                     }
                 }
                 Census::VerificationFailed => {
+                    settling.clear();
                     if let Some(current) = tracked.take() {
                         channel.write(&HelperMessage::Gone {
                             target: current.identity,
@@ -190,19 +208,30 @@ pub(super) fn run(
                     identity,
                     report: Some(report),
                 } => {
+                    // The phone's copy of a changed prompt is withdrawn at once;
+                    // its replacement is published once it has settled.
                     if let Some(current) = tracked.take() {
                         channel.write(&HelperMessage::Gone {
                             target: current.identity,
                             reason: GoneReason::Replaced,
                         })?;
+                        last_output = Instant::now();
                     }
-                    channel.write(&HelperMessage::Appeared {
-                        target: identity,
-                        report: report.clone(),
-                    })?;
-                    sequence = identity.sequence;
-                    tracked = Some(Tracked { identity, report });
-                    last_output = Instant::now();
+                    let window = (identity.hwnd, identity.pid, identity.created);
+                    let settled =
+                        settling.observe(Instant::now(), window, report, |held, fresh| {
+                            fresh.content() == held.content()
+                                && fresh.counts().describes_the_same_prompt(held.counts())
+                        });
+                    if let Settled::Publish(report) = settled {
+                        channel.write(&HelperMessage::Appeared {
+                            target: identity,
+                            report: report.clone(),
+                        })?;
+                        sequence = identity.sequence;
+                        tracked = Some(Tracked { identity, report });
+                        last_output = Instant::now();
+                    }
                 }
             }
         }

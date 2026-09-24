@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, DecisionFeedbackView } from './contracts';
-import { decisionCopy, emptyReceiptMemory, nextReceiptMemory, receiptsFor } from './decisionFeedback';
+import { decisionCopy, emptyReceiptMemory, nextReceiptMemory, receiptsFor, REISSUE_WINDOW_MILLIS } from './decisionFeedback';
 import type { DecisionPhase } from './decisionFeedback';
 import { Icon } from './icons';
 import type { IconName } from './icons';
@@ -193,5 +193,78 @@ describe('receipt memory', () => {
     expect(receiptsFor(memory, base).receipts.map((item) => item.id)).toEqual(['a']);
     memory = nextReceiptMemory(memory, reported([view('a', 'approve', 'failed')]));
     expect(receiptsFor(memory, base).byId.get('a')?.phase).toBe('failed');
+  });
+
+  // The PC withdraws a request whose approval window changed and lists it again
+  // under a new id. Same PC, program and path soon after a failure is that case.
+  const pending = qaCase('phone-pending').snapshot;
+  const first = pending.requests[0]!;
+  const at = (requests: AppSnapshot['requests'], decisions: readonly DecisionFeedbackView[], review: string | null = null): AppSnapshot =>
+    ({ ...pending, requests, requestReview: review ? { locator: review, revision: review } : null,
+      requestCatalog: { ...pending.requestCatalog!, decisions } });
+  const failed = [view(first.id, 'approve', 'failed')];
+  const again = { ...first, id: 'synthetic-request-2' };
+
+  it('marks a failed choice whose request the PC listed again soon after', () => {
+    let memory = nextReceiptMemory(emptyReceiptMemory, at([first], [view(first.id, 'approve', 'awaiting_pc')]), 0);
+    memory = nextReceiptMemory(memory, at([], failed), 1_000);
+    expect(receiptsFor(memory, at([], failed)).receipts[0]?.reissued).toBeUndefined();
+    const listed = at([again], failed);
+    memory = nextReceiptMemory(memory, listed, 2_500);
+    expect(receiptsFor(memory, listed).receipts).toEqual([{ ...failed[0], reissued: true }]);
+    // Once explained, the explanation stays for the life of the receipt.
+    memory = nextReceiptMemory(memory, at([], failed), 60_000);
+    expect(receiptsFor(memory, at([], failed)).receipts[0]?.reissued).toBe(true);
+  });
+
+  it('does not call a different program, a late request or another outcome the same request sent again', () => {
+    const cases: readonly [AppSnapshot['requests'], readonly DecisionFeedbackView[], number][] = [
+      [[{ ...again, programName: '다른 프로그램.exe' }], failed, 2_500],
+      [[{ ...again, computerName: '다른 PC' }], failed, 2_500],
+      [[again], failed, 1_000 + REISSUE_WINDOW_MILLIS + 1],
+      [[again], [view(first.id, 'approve', 'expired')], 2_500],
+    ];
+    for (const [requests, decisions, now] of cases) {
+      let memory = nextReceiptMemory(emptyReceiptMemory, at([first], [view(first.id, 'approve', 'awaiting_pc')]), 0);
+      memory = nextReceiptMemory(memory, at([], decisions), 1_000);
+      memory = nextReceiptMemory(memory, at(requests, decisions), now);
+      expect(receiptsFor(memory, at(requests, decisions)).receipts[0]?.reissued).toBeUndefined();
+    }
+  });
+
+  it('keeps the explanation when its new request is opened for review, and only then', () => {
+    let memory = nextReceiptMemory(emptyReceiptMemory, at([first], [view(first.id, 'approve', 'awaiting_pc')]), 0);
+    memory = nextReceiptMemory(memory, at([], failed), 1_000);
+    memory = nextReceiptMemory(memory, at([again], failed), 2_000);
+    const reviewed = nextReceiptMemory(memory, at([again], failed, again.id), 3_000);
+    expect(receiptsFor(reviewed, at([again], failed, again.id)).receipts.map((item) => item.id)).toEqual([first.id]);
+    const other = { ...first, id: 'synthetic-request-3', programName: '다른 프로그램.exe' };
+    const elsewhere = nextReceiptMemory(memory, at([again, other], failed, other.id), 3_000);
+    expect(receiptsFor(elsewhere, at([again, other], failed, other.id)).receipts).toEqual([]);
+  });
+});
+
+describe('a request the PC sent again', () => {
+  it('explains the failure beside the new request without naming the program', async () => {
+    const user = userEvent.setup();
+    const pending = qaCase('phone-pending').snapshot;
+    const first = pending.requests[0]!;
+    const catalog = pending.requestCatalog!;
+    const awaiting: AppSnapshot = { ...pending, requestCatalog: { ...catalog, decisions: [view(first.id, 'approve', 'awaiting_pc')] } };
+    const failedNow: AppSnapshot = { ...pending, requests: [], requestCatalog: { ...catalog, decisions: [view(first.id, 'approve', 'failed')] } };
+    const sentAgain: AppSnapshot = { ...failedNow, requests: [{ ...first, id: 'synthetic-request-2' }] };
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(awaiting).mockResolvedValueOnce(failedNow).mockResolvedValue(sentAgain);
+    render(<App bridge={{ ...createQaBridge(awaiting), snapshot: read }} />);
+    expect(await screen.findByText('승인을 보냈습니다')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    expect(await screen.findByRole('region', { name: 'PC에서 처리하지 못했습니다' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: ko.refresh }));
+    const receipt = await screen.findByRole('region', { name: 'PC가 같은 요청을 다시 보냈습니다' });
+    expect(receipt).toHaveTextContent('PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.');
+    expect(receipt).toHaveAttribute('data-reissued', 'true');
+    expect(receipt).not.toHaveTextContent(program);
+    expect(receipt).not.toHaveTextContent(path);
+    expect(screen.queryByRole('region', { name: 'PC에서 처리하지 못했습니다' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: ko.approve })).toBeEnabled();
   });
 });

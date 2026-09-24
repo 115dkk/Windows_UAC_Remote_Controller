@@ -323,6 +323,8 @@
   "PC의 처리 결과를 기다리는 중입니다.": "A aguardar o resultado do PC.",
   "PC에서 처리하지 못했습니다": "O PC não conseguiu processar o pedido",
   "PC 화면에서 요청 창을 확인하십시오.": "Verifique a janela do pedido no ecrã do PC.",
+  "PC가 같은 요청을 다시 보냈습니다": "O PC enviou o mesmo pedido novamente",
+  "PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.": "A janela de privilégios de administrador do PC mudou, pelo que a sua escolha anterior não foi aplicada. Escolha novamente no novo pedido.",
   "PC에서 요청이 닫혔습니다": "O pedido foi fechado no PC",
   "PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.": "Foi tratado diretamente no PC ou o programa que o fez fechou a janela.",
   "요청 시간이 지났습니다": "O pedido expirou",

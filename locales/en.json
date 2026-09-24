@@ -323,6 +323,8 @@
   "PC의 처리 결과를 기다리는 중입니다.": "Waiting for the result from the PC.",
   "PC에서 처리하지 못했습니다": "The PC could not process the request",
   "PC 화면에서 요청 창을 확인하십시오.": "Check the request window on the PC screen.",
+  "PC가 같은 요청을 다시 보냈습니다": "The PC sent the same request again",
+  "PC의 승인 창이 바뀌어 앞서 한 선택을 적용하지 못했습니다. 새 요청에서 다시 선택하십시오.": "The administrator permission dialog on the PC changed, so your earlier choice was not applied. Choose again on the new request.",
   "PC에서 요청이 닫혔습니다": "The request was closed on the PC",
   "PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.": "It was handled directly on the PC, or the requesting program closed its window.",
   "요청 시간이 지났습니다": "The request expired",
