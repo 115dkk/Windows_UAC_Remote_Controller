@@ -89,6 +89,45 @@ describe('native request presentation integration', () => {
     expect(screen.queryByRole('region', { name: ko.commandDetails })).not.toBeInTheDocument();
   });
 
+  it('reads the details again when their minute ends instead of reporting a failure', async () => {
+    const body = (details: string, refreshAfterMillis: number): RequestDetailsView => ({
+      version: 1, id: 'synthetic-request-1', programName: '', executablePath: '', details, remainingSeconds: 40, refreshAfterMillis });
+    const requestDetails = vi.fn<ControllerBridge['requestDetails']>()
+      .mockResolvedValueOnce(body('FIRST_MINUTE', 60))
+      .mockResolvedValue(body('NEXT_MINUTE', 30000));
+    const user = userEvent.setup();
+    view(pending(), { requestDetails });
+    await user.click(await screen.findByRole('button', { name: ko.details }));
+    expect(await screen.findByText('FIRST_MINUTE')).toBeInTheDocument();
+    expect(await screen.findByText('NEXT_MINUTE')).toBeInTheDocument();
+    expect(screen.queryByText('FIRST_MINUTE')).not.toBeInTheDocument();
+    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
+    expect(requestDetails).toHaveBeenCalledTimes(2);
+  });
+
+  it('withdraws the details in the background and reads them again when opened on return', async () => {
+    const original = createQaBridge(pending());
+    const requestDetails = vi.fn((id: string) => original.requestDetails(id));
+    const user = userEvent.setup();
+    view(pending(), { requestDetails });
+    await user.click(await screen.findByRole('button', { name: ko.details }));
+    expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+      expect(screen.queryByText(/화면 확인을 위한 예시 문자열/u)).not.toBeInTheDocument();
+      visibility.mockReturnValue('visible');
+      act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+      // The request comes back with its details closed, not as a failure.
+      await user.click(await screen.findByRole('button', { name: ko.details }));
+      expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
+    } finally {
+      visibility.mockRestore();
+    }
+    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
+    expect(requestDetails).toHaveBeenCalledTimes(2);
+  });
+
   it('sticky notification review navigates once and never auto-approves', async () => {
     const initial = pending();
     const snapshot = { ...initial, requestReview: { locator: 'synthetic-request-1', revision: '18446744073709551615' } };

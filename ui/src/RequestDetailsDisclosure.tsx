@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import type { ControllerBridge, RequestDetailsView, RequestView } from './contracts';
 import { Icon } from './icons';
 import { ko } from './messages';
@@ -22,10 +22,12 @@ function DetailsBody({ request, read, retry }: { request: RequestView; read: Con
       if (document.visibilityState !== 'visible' || value.version !== 1 || value.id !== request.id
         || !Number.isFinite(remaining) || remaining <= 0 || remaining > 60000) { invalidate(); return; }
       setBody(value);
-      timer = window.setTimeout(invalidate, remaining);
+      // Details stay valid until the phone's clock reaches the next minute.
+      // That is not a failure: hide them and read them again.
+      timer = window.setTimeout(() => { if (live) retry(); }, remaining);
     }).catch(invalidate);
     return () => { live = false; window.clearTimeout(timer); document.removeEventListener('visibilitychange', onVisibility); };
-  }, [read, request.id]);
+  }, [read, request.id, retry]);
   if (failed) return <><p role="status">{ko.detailsUnavailable}</p><button type="button" className="button quiet" onClick={retry}>{ko.detailsRefresh}</button></>;
   if (!body) return <p role="status">{ko.detailsLoading}</p>;
   return <>
@@ -43,12 +45,13 @@ export function RequestDetailsDisclosure({ request, disabled, read, initiallyOpe
 }) {
   const [expanded, setExpanded] = useState(initiallyOpen);
   const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => { setAttempt((value) => value + 1); }, []);
   const detailsId = useId();
   return <div className="request-disclosure">
     <button type="button" className="disclosure-button" disabled={disabled} aria-expanded={expanded} aria-controls={detailsId}
       onClick={() => setExpanded(!expanded)}>{expanded ? ko.fewerDetails : ko.details}<Icon name="chevron" className={expanded ? 'chevron-expanded' : ''} /></button>
     {expanded && !disabled && <section id={detailsId} className="command-region" role="region" aria-label={ko.commandDetails} tabIndex={0}>
-      <h3>{ko.commandDetails}</h3><DetailsBody key={attempt} request={request} read={read} retry={() => setAttempt(attempt + 1)} />
+      <h3>{ko.commandDetails}</h3><DetailsBody key={attempt} request={request} read={read} retry={retry} />
     </section>}
   </div>;
 }
