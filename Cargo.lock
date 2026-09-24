@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activity-journal"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-protocol",
  "notification-policy",
@@ -56,7 +56,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android-attestation"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-protocol",
  "der 0.8.2",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "android-bindings"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "activity-journal",
  "android-controller",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "android-controller"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "activity-journal",
  "approval-protocol",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "android-log-sink"
-version = "1.5.0"
+version = "1.5.1"
 
 [[package]]
 name = "android_system_properties"
@@ -146,7 +146,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "approval-core"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-protocol",
  "getrandom 0.3.4",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "approval-protocol"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "p256",
  "sha2",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "ci-phone-fixture"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "android-attestation",
  "approval-protocol",
@@ -632,7 +632,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "controller-app"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "controller-runtime",
  "presentation-i18n",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "controller-runtime"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "activity-journal",
  "direct-network",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "controller-uniffi-bindgen"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "uniffi",
 ]
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "direct-network"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "getrandom 0.3.4",
  "ipconfig",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "framed-transport"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-protocol",
  "p256",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "notification-policy"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "phone-request-core"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-protocol",
  "notification-policy",
@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "phone-state-store"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "libc",
  "rustix",
@@ -3007,7 +3007,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "presentation-i18n"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3212,7 +3212,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-service"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "socket2",
  "thiserror 2.0.20",
@@ -3460,7 +3460,7 @@ dependencies = [
 
 [[package]]
 name = "secure-channel"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "p256",
  "rustls",
@@ -3648,7 +3648,7 @@ dependencies = [
 
 [[package]]
 name = "service-protocol"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "approval-core",
  "approval-protocol",
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "windows-identity"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "p256",
  "thiserror 2.0.20",
@@ -5332,7 +5332,7 @@ dependencies = [
 
 [[package]]
 name = "windows-observer"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "thiserror 2.0.20",
  "windows 0.62.2",
@@ -5340,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "windows-prompt-probe"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "sha2",
  "windows 0.62.2",
@@ -5388,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "windows-service-host"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "activity-journal",
  "android-attestation",
