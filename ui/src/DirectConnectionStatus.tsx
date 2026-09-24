@@ -7,7 +7,7 @@ import type { InternetState } from './directConnection';
 const stateCopy: Record<InternetState, string> = {
   discovering: '외부 연결 경로 확인 중',
   lan_only: '외부에서 접속할 주소가 없음',
-  candidate: '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요',
+  candidate: '외부에서 접속할 주소가 있음',
   unavailable: '외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.',
   stopped: '외부 연결 준비 중지됨 · PC 상태에서 휴대폰 승인을 켜십시오.',
   unknown: '외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.',

@@ -25,11 +25,11 @@ interface Expected {
 const expected: Record<string, Expected> = {
   'desktop-network-auto-no-mapping': { mode: '자동', direct: '외부에서 접속할 주소가 없음', address: null, source: null,
     reason: '공유기가 자동 포트 열기(UPnP·PCP)를 지원하지 않거나 꺼져 있습니다. 공유기에서 포트를 직접 열고 아래에서 그 방법을 고르십시오.' },
-  'desktop-network-auto-upnp': { mode: '자동', direct: '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요', address: '203.0.113.7:7443', source: 'UPnP로 공유기에서 받음', reason: null },
-  'desktop-network-forward-stun': { mode: forwardTitle, direct: '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요', address: '198.51.100.24:17443', source: 'STUN 서버로 확인', reason: null, port: 17443 },
+  'desktop-network-auto-upnp': { mode: '자동', direct: '외부에서 접속할 주소가 있음', address: '203.0.113.7:7443', source: 'UPnP로 공유기에서 받음', reason: null },
+  'desktop-network-forward-stun': { mode: forwardTitle, direct: '외부에서 접속할 주소가 있음', address: '198.51.100.24:17443', source: 'STUN 서버로 확인', reason: null, port: 17443 },
   'desktop-network-forward-unavailable': { mode: forwardTitle, direct: '외부에서 접속할 주소가 없음', address: null, source: null,
     reason: '이 집의 공인 IP를 확인하지 못했습니다. 인터넷 연결을 확인하거나 외부 주소를 직접 입력하십시오.', port: 7443 },
-  'desktop-network-fixed': { mode: fixedTitle, direct: '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요', address: '203.0.113.7:7443', source: '직접 입력', reason: null, fixed: '203.0.113.7:7443' },
+  'desktop-network-fixed': { mode: fixedTitle, direct: '외부에서 접속할 주소가 있음', address: '203.0.113.7:7443', source: '직접 입력', reason: null, fixed: '203.0.113.7:7443' },
 };
 
 function fact(page: Page, locale: GalleryLocale, label: string): Locator {

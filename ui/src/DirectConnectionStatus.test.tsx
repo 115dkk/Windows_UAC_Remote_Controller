@@ -10,7 +10,7 @@ import { locales, setPreviewLanguage, tr } from './i18n';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { ServicePanel } from './StatusPanels';
 
-const candidateCopy = '외부 연결 주소 확보 · 모바일망에서 연결 확인 필요';
+const candidateCopy = '외부에서 접속할 주소가 있음';
 const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';
 const phoneCopy = '같은 Wi-Fi에 있다면 PC에 V3나 방화벽의 연결 허용 알림이 떠 있는지 확인하십시오.';
 const candidate = (): AppSnapshot => qaCase('desktop-relay-wan-candidate').snapshot;
