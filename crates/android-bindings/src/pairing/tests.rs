@@ -1436,7 +1436,7 @@ fn maintain_connections_waits_for_ready_then_attaches_and_avoids_a_second_dial()
 }
 
 #[test]
-fn refused_connection_enters_five_second_backoff_without_redialing() {
+fn a_first_refused_dial_keeps_trying_instead_of_backing_off() {
     let _serial = crate::tests::SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1445,6 +1445,57 @@ fn refused_connection_enters_five_second_backoff_without_redialing() {
     let address = listener.local_addr().unwrap();
     drop(listener);
     let reference = enroll_association_with_endpoint(&fixture, address, [89; 32]);
+    let key = crate::connectivity::ConnectivityOwner::key(reference);
+
+    // Nothing has failed yet, as after a lost carrier: the dial stays in
+    // flight across refused attempts and records no backoff.
+    assert_eq!(
+        fixture.controller.maintain_connections().unwrap().dialing,
+        1
+    );
+    let until = Instant::now() + Duration::from_millis(2_500);
+    while Instant::now() < until {
+        assert_eq!(
+            fixture.controller.maintain_connections().unwrap().dialing,
+            1
+        );
+        let state = fixture.controller.connectivity.states.lock().unwrap()[&key];
+        assert!(state.in_flight);
+        assert_eq!(state.failures, 0);
+        assert_eq!(state.retry_at, None);
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_refused_dial_after_a_failure_backs_off_without_redialing() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let reference = enroll_association_with_endpoint(&fixture, address, [89; 32]);
+    let key = crate::connectivity::ConnectivityOwner::key(reference);
+    // One earlier failure: this dial makes a single attempt.
+    fixture
+        .controller
+        .connectivity
+        .states
+        .lock()
+        .unwrap()
+        .insert(
+            key,
+            crate::connectivity::DialState {
+                generation: 0,
+                in_flight: false,
+                failures: 1,
+                candidate_cursor: 0,
+                retry_at: None,
+                failure: None,
+            },
+        );
 
     let first = fixture.controller.maintain_connections().unwrap();
     assert_eq!(first.associations, 1);
@@ -1461,15 +1512,14 @@ fn refused_connection_enters_five_second_backoff_without_redialing() {
         );
         thread::yield_now();
     }
-    let key = crate::connectivity::ConnectivityOwner::key(reference);
     let before = fixture.controller.connectivity.states.lock().unwrap()[&key];
-    assert_eq!(before.failures, 1);
+    assert_eq!(before.failures, 2);
     assert!(before.retry_at.unwrap() > Instant::now());
     let repeated = fixture.controller.maintain_connections().unwrap();
     assert_eq!(repeated.connected, 0);
     assert_eq!(repeated.dialing, 0);
     let after = fixture.controller.connectivity.states.lock().unwrap()[&key];
-    assert_eq!(after.failures, 1);
+    assert_eq!(after.failures, 2);
     assert_eq!(after.retry_at, before.retry_at);
 }
 

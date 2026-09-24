@@ -16,6 +16,21 @@ const HINT_REFRESH_GRACE: Duration = Duration::from_secs(10);
 /// At most one hint refresh per device in this interval.
 #[cfg(all(windows, target_pointer_width = "64"))]
 const HINT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+/// How long after its arrival a query that met a discovering owner may still be
+/// answered. The phone drops its query ten seconds after sending it and ends a
+/// connection that answers one it no longer holds, so this stays well inside.
+const DEFERRED_ANSWER_WINDOW: Duration = Duration::from_secs(6);
+
+/// A query that arrived while the gateway owner was still discovering, kept to
+/// be answered once the owner settles. Without it a phone that reconnects right
+/// after a service start is ended again once the external address appears.
+pub(super) struct DeferredQuery {
+    query: AddressQuery,
+    state: Arc<PeerState>,
+    /// The frame's own lifetime; the answer must drain before it.
+    deadline: Instant,
+    answer_by: Instant,
+}
 
 /// One read of what the gateway owner publishes. Only a test can supply one
 /// in place of the owner.
@@ -106,16 +121,77 @@ impl ServiceSession<'_> {
             now.checked_add(QUERY_INTERVAL)
                 .ok_or(PeerRuntimeError::Clock)?,
         );
+        // A newer query replaces one still kept from before.
+        self.peers[index].deferred_query = None;
         if self.key.public()? != self.pc_key {
             return Err(PeerRuntimeError::Identity);
         }
-        let (endpoints, valid_for_seconds) = self.current_direct_candidates();
-        if endpoints.is_empty() && self.direct_candidates_pending() {
-            // An empty answer is a durable withdrawal on the phone. Let this
-            // query lapse instead; the phone keeps its hints and asks again.
-            self.peers[index].query_lapsed = true;
+        if self.current_direct_candidates().0.is_empty() && self.direct_candidates_pending() {
+            // An empty answer is a durable withdrawal on the phone. Keep this
+            // query for a short while instead: `answer_deferred_queries`
+            // answers it once the owner settles. Unanswered, it lapses; the
+            // phone keeps its hints and asks again.
+            let answer_by = now
+                .checked_add(DEFERRED_ANSWER_WINDOW)
+                .ok_or(PeerRuntimeError::Clock)?
+                .min(deadline);
+            let slot = &mut self.peers[index];
+            slot.query_lapsed = true;
+            slot.deferred_query = Some(DeferredQuery {
+                query,
+                state,
+                deadline,
+                answer_by,
+            });
             return Ok(SessionProgress::Idle);
         }
+        self.answer_query(index, state, &query, deadline)
+    }
+
+    /// Answers each kept query once the gateway owner has settled, while the
+    /// phone still holds it. Nothing is ended here: a query that runs out of
+    /// time stays lapsed and `refresh_stale_hints` decides as before.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn answer_deferred_queries(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
+        for index in 0..self.peers.len() {
+            let Some(deferred) = self.peers[index].deferred_query.take() else {
+                continue;
+            };
+            if now >= deferred.answer_by || !Arc::ptr_eq(&self.peers[index].state, &deferred.state)
+            {
+                continue;
+            }
+            if (self.current_direct_candidates().0.is_empty() && self.direct_candidates_pending())
+                || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
+            {
+                self.peers[index].deferred_query = Some(deferred);
+                continue;
+            }
+            // The same checks the query passed on arrival, without ending a
+            // connection that changed since: its own events decide that.
+            if self.check_peer(&deferred.state).is_err()
+                || !self.address_query_current(&deferred.state, &deferred.query)?
+            {
+                continue;
+            }
+            if self.key.public()? != self.pc_key {
+                return Err(PeerRuntimeError::Identity);
+            }
+            self.answer_query(index, deferred.state, &deferred.query, deferred.deadline)?;
+        }
+        Ok(())
+    }
+
+    /// Signs the current candidates for `query` and queues them on this
+    /// connection. The caller checked the query and the key.
+    fn answer_query(
+        &mut self,
+        index: usize,
+        state: Arc<PeerState>,
+        query: &AddressQuery,
+        deadline: Instant,
+    ) -> Result<SessionProgress, PeerRuntimeError> {
+        let (endpoints, valid_for_seconds) = self.current_direct_candidates();
         let message = UnsignedAddressAdvertisement::new(AddressAdvertisementFields {
             pc: self.engine.pc_identity(),
             epoch: self.engine.boot_epoch(),
@@ -144,7 +220,7 @@ impl ServiceSession<'_> {
         let (current, validity) = self.current_direct_candidates();
         if current != endpoints
             || (!current.is_empty() && validity == 0)
-            || !self.address_query_current(&state, &query)?
+            || !self.address_query_current(&state, query)?
             || self.now()? >= deadline
         {
             state.retire();

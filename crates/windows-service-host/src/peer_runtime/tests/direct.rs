@@ -709,6 +709,81 @@ fn a_lapsed_query_is_refreshed_after_the_grace_and_at_most_once_per_interval() {
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
+fn a_query_met_while_discovering_is_answered_once_the_owner_settles() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        // A phone that redials right after a service start asks before the
+        // owner has settled.
+        embed(session, &registry, discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        let state = Arc::clone(&session.peers[0].state);
+        at(clock, 2);
+        spin(session);
+        assert!(session.peers[0].deferred_query.is_some());
+        assert!(session.peers[0].advertised.is_none());
+
+        session.gateway_fixture = Some(mapped());
+        at(clock, 4);
+        let lan: std::net::SocketAddr = LAN.parse().unwrap();
+        let external: std::net::SocketAddr = EXTERNAL.parse().unwrap();
+        assert_eq!(told(session, key, &clients[0]), vec![lan, external]);
+        assert!(!session.peers[0].query_lapsed);
+        assert!(session.peers[0].deferred_query.is_none());
+        // Told the external address, the connection is not ended for hints.
+        at(clock, 200);
+        spin(session);
+        assert!(state.live());
+        assert!(session.hint_refreshes.is_empty());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_kept_query_gets_whatever_the_owner_settles_on() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        session.gateway_fixture = Some(lan_only());
+        at(clock, 1);
+        let lan: std::net::SocketAddr = LAN.parse().unwrap();
+        assert_eq!(told(session, key, &clients[0]), vec![lan]);
+        assert!(!session.peers[0].query_lapsed);
+        assert!(session.peers[0].deferred_query.is_none());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn a_query_kept_past_its_window_is_left_to_the_hint_refresh() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        let state = Arc::clone(&session.peers[0].state);
+        // The owner settles only once the phone no longer holds its query:
+        // an answer now would end the connection on the phone.
+        at(clock, 6);
+        session.gateway_fixture = Some(mapped());
+        spin(session);
+        assert!(session.peers[0].deferred_query.is_none());
+        assert!(session.peers[0].advertised.is_none());
+        assert!(session.peers[0].responses_in_flight.is_empty());
+        assert!(clients[0].notices.try_iter().all(|notice| !matches!(
+            notice,
+            Notice::Frame(ref bytes) if SignedAddressAdvertisement::from_wire(bytes).is_ok()
+        )));
+        assert!(state.live());
+        // The lapsed query is then refreshed exactly as before.
+        at(clock, 10);
+        session.process_one().unwrap();
+        assert!(!state.live());
+        assert!(session.hint_refreshes.contains_key(&device(1)));
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
 fn without_a_settled_external_address_no_connection_is_ended() {
     use direct_network::{DirectGatewayState, ExternalAccess};
     exercise_timed(|session, key, registry, clients, clock| {

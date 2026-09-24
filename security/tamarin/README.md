@@ -271,6 +271,18 @@ rule, canary, proof budget or expected verdict is changed. All current-source
 normal proof rows must still run in CI; this static alignment is not a proof of
 physical boot, native notification behavior or history persistence.
 
+### 1.5.3 source binding review (2026-09-24)
+
+`peer_runtime.rs` adds one per-connection slot for an address query that
+arrived while the gateway owner was still discovering, calls the routing-hint
+module to answer it once the owner settles (within six seconds of its arrival
+and its own frame lifetime), and retries a failed embedded relay listener start
+after one second instead of five. The answer is the same signed, nonce-bound
+address advertisement as before, produced by the same code after the same
+query, peer and key checks. Peer admission, prompt events, decisions, request
+authorization and lease renewal are unchanged. No theorem, rule, canary, proof
+budget or expected verdict is changed.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |
