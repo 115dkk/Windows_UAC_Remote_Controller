@@ -109,7 +109,7 @@ impl Screen {
     }
 }
 
-const INTRODUCTION_BODY: &str = "QR 코드로 이 컴퓨터에 휴대폰을 등록하는 절차입니다. 휴대폰에서 QR 코드 연결을 켠 다음 진행해 주세요.";
+const INTRODUCTION_BODY: &str = "휴대폰을 이 PC에 등록합니다. [QR 코드 보기]를 누른 뒤 휴대폰의 UAC 원격 승인기에서 [PC의 QR 코드 촬영]을 누르십시오.";
 const INTRODUCTION_EXIT: &str = "ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다.";
 const INTRODUCTION_CAUTION: &str = "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.";
 
@@ -990,7 +990,7 @@ impl WindowOwner {
                 if enrolled {
                     "휴대폰을 연결했어요."
                 } else {
-                    "휴대폰을 연결하지 못했어요. 다시 시도해 주세요."
+                    "휴대폰을 등록하지 못했습니다. PC 앱의 [휴대폰 관리]에서 [QR 코드 보기]를 다시 누르십시오."
                 },
                 scale,
             ),
@@ -999,7 +999,7 @@ impl WindowOwner {
                 left,
                 top,
                 card_width,
-                "확인 시간이 지났어요. PC에서 다시 시도해 주세요.",
+                "확인 시간이 지났습니다. PC 앱의 [휴대폰 관리]에서 [QR 코드 보기]를 다시 누르십시오.",
                 scale,
             ),
         }
@@ -1171,7 +1171,7 @@ impl WindowOwner {
     ) -> Result<(), Error> {
         if self.usb {
             draw_text(dc, self.body_font,
-                self.copy("휴대폰에서 USB 연결을 허용하십시오. 연결 후 두 기기의 비교 코드를 확인하십시오."),
+                self.copy("휴대폰에서 USB 연결을 허용하십시오. 연결되면 두 기기에 표시된 여섯 자리 숫자가 같은지 확인하십시오."),
                 RECT { left: left + scale(36), top: top + scale(140),
                     right: left + card_width - scale(36), bottom: top + scale(280) },
                 MUTED_INK, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction());

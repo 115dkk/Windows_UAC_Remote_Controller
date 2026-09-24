@@ -37,12 +37,12 @@ const expected: readonly { fixture: string; phase: DecisionPhase; title: string;
   { fixture: 'phone-decision-sending', phase: 'sending', title: '거부를 선택했습니다', body: 'PC로 보내는 중입니다.', icon: 'clock', listed: true },
   { fixture: 'phone-decision-awaiting-pc', phase: 'awaiting_pc', title: '승인을 보냈습니다', body: 'PC의 처리 결과를 기다리는 중입니다.', icon: 'clock', listed: true },
   { fixture: 'phone-decision-authentication-cancelled', phase: 'authentication_cancelled', title: '본인 확인을 취소했습니다', body: '요청이 남아 있으면 다시 선택할 수 있습니다.', icon: 'lock', listed: true },
-  { fixture: 'phone-decision-approved', phase: 'approved', title: 'PC에서 승인했습니다', body: 'PC가 승인을 적용했습니다.', icon: 'check', listed: false },
-  { fixture: 'phone-decision-denied', phase: 'denied', title: 'PC에서 거부했습니다', body: 'PC가 요청을 취소했습니다.', icon: 'close', listed: false },
+  { fixture: 'phone-decision-approved', phase: 'approved', title: '승인 완료', body: 'PC에 승인을 적용했습니다.', icon: 'check', listed: false },
+  { fixture: 'phone-decision-denied', phase: 'denied', title: '거부 완료', body: 'PC에서 요청을 취소했습니다.', icon: 'close', listed: false },
   { fixture: 'phone-decision-failed', phase: 'failed', title: 'PC에서 처리하지 못했습니다', body: 'PC 화면에서 요청 창을 확인하십시오.', icon: 'alert', listed: false },
   { fixture: 'phone-decision-cancelled', phase: 'cancelled', title: 'PC에서 요청이 닫혔습니다', body: 'PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.', icon: 'pc', listed: false },
   { fixture: 'phone-decision-expired', phase: 'expired', title: '요청 시간이 지났습니다', body: '필요하면 PC에서 다시 요청하십시오.', icon: 'alert', listed: false },
-  { fixture: 'phone-decision-pc-completed', phase: 'pc_completed', title: 'PC에서 처리를 마쳤습니다', body: 'PC가 요청을 끝냈지만 승인 여부는 알려 주지 않았습니다.', icon: 'pc', listed: false },
+  { fixture: 'phone-decision-pc-completed', phase: 'pc_completed', title: 'PC에서 요청이 끝났습니다', body: '처리 결과는 PC에서 확인하십시오.', icon: 'pc', listed: false },
   { fixture: 'phone-decision-local-unconfirmed', phase: 'local_unconfirmed', title: 'PC의 결과를 아직 확인하지 못했습니다', body: '선택이 PC에 전달되었는지 확인하지 못했습니다. 요청이 남아 있으면 다시 선택할 수 있습니다.', icon: 'alert', listed: false },
 ];
 
@@ -144,19 +144,19 @@ describe('decision phases', () => {
     const live = container.querySelector('.decision-receipts')!;
     expect(live).toHaveAttribute('role', 'status');
     await user.click(screen.getByRole('button', { name: ko.refresh }));
-    const receipt = await screen.findByRole('region', { name: 'PC에서 승인했습니다' });
+    const receipt = await screen.findByRole('region', { name: '승인 완료' });
     expect(live).toContainElement(receipt);
-    expect(receipt).toHaveTextContent('PC가 승인을 적용했습니다.');
+    expect(receipt).toHaveTextContent('PC에 승인을 적용했습니다.');
     expect(container.textContent).not.toContain(program);
     expect(container.textContent).not.toContain(path);
     await user.click(screen.getByRole('button', { name: ko.refresh }));
-    expect(await screen.findByRole('region', { name: 'PC에서 승인했습니다' })).toBeVisible();
+    expect(await screen.findByRole('region', { name: '승인 완료' })).toBeVisible();
     await user.click(within(receipt).getByRole('button', { name: '확인' }));
-    expect(screen.queryByRole('region', { name: 'PC에서 승인했습니다' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '승인 완료' })).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1 })).toHaveFocus();
     await user.click(screen.getByRole('button', { name: ko.refresh }));
     await screen.findByRole('heading', { name: ko.requestEmpty });
-    expect(screen.queryByRole('region', { name: 'PC에서 승인했습니다' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '승인 완료' })).not.toBeInTheDocument();
   });
 
   it('moves on from finished receipts when another request is chosen or opened for review', async () => {
@@ -164,19 +164,19 @@ describe('decision phases', () => {
     const withReceipt: AppSnapshot = { ...pending, requestCatalog: { ...pending.requestCatalog!,
       decisions: [view('synthetic-request-0', 'deny', 'denied')] } };
     const first = render(<App bridge={{ ...createQaBridge(withReceipt), decide: () => new Promise<AppSnapshot>(() => undefined) }} />);
-    expect(await screen.findByRole('region', { name: 'PC에서 거부했습니다' })).toBeVisible();
+    expect(await screen.findByRole('region', { name: '거부 완료' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: ko.approve }));
-    expect(screen.queryByRole('region', { name: 'PC에서 거부했습니다' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '거부 완료' })).not.toBeInTheDocument();
     first.unmount();
 
     const reviewed: AppSnapshot = { ...withReceipt, requestReview: { locator: 'synthetic-request-1', revision: '4' } };
     const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce({ ...withReceipt, requests: [] }).mockResolvedValue(reviewed);
     const user = userEvent.setup();
     render(<App bridge={{ ...createQaBridge(withReceipt), snapshot: read }} />);
-    expect(await screen.findByRole('region', { name: 'PC에서 거부했습니다' })).toBeVisible();
+    expect(await screen.findByRole('region', { name: '거부 완료' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: ko.refresh }));
     expect(await screen.findByRole('heading', { name: program })).toBeVisible();
-    expect(screen.queryByRole('region', { name: 'PC에서 거부했습니다' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '거부 완료' })).not.toBeInTheDocument();
   });
 });
 

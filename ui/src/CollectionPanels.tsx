@@ -2,23 +2,15 @@
 import { useId } from 'react';
 import type { AppSnapshot, PairedDeviceView } from './contracts';
 import { Icon } from './icons';
-import { activityText, activityUnavailableText, devicesUnavailableText, ko } from './messages';
+import { activityText, activityUnavailableText, deviceLabel, devicesUnavailableText, ko } from './messages';
 import { EmptyState } from './StatusPanels';
-import { currentLocale, formatText, tr } from './i18n';
+import { currentLocale, tr } from './i18n';
 import { displayText } from './displayText';
 import { useConnectionDisplay } from './useConnectionDisplay';
 
 function DeviceConnectionLine({ device, active }: { device: PairedDeviceView; active: boolean }) {
   const connected = useConnectionDisplay(active && device.connected, `${device.id}:${device.revision}`, active);
   return <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connected ? ko.connected : ko.disconnected}</p>;
-}
-
-function deviceLabel(device: PairedDeviceView, pc: boolean): string {
-  // Windows management currently has no user-authored friendly-name field;
-  // localize only its exact generated ID label, never Android PC/user names.
-  if (pc && currentLocale() !== 'ko' && /^[a-f0-9]{32}$/u.test(device.id)
-    && device.name === `${device.id.slice(0,8)}번 휴대폰`) return formatText('휴대폰 {id}', {id:device.id.slice(0,8)});
-  return device.name;
 }
 
 export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStatus, onOpenNetwork, onRemove }: {

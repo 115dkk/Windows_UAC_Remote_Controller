@@ -40,17 +40,22 @@ export function ServicePanel({ snapshot, disabled, onAction, onOpenNetwork, stal
   const primary = actions.find((action) => service?.allowedActions.includes(action) && (action === 'install' || action === 'start'));
   const direct = directConnectionState(snapshot, stale);
   const networkSetup = onOpenNetwork && snapshot.platform === 'windows' && (direct === 'lan_only' || direct === 'unavailable');
+  // The heading and description already say phone approval is off; the relay
+  // and direct lines would only repeat it. A connected phone says the relay works.
+  const approvalOff = !stale && snapshot.relayStatus?.state !== 'unknown'
+    && (service?.state === 'stopped' || snapshot.relayStatus?.state === 'stopped');
   return <>
     <section className="surface service-card" aria-labelledby="service-heading">
       <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><h2 id="service-heading">{serviceTitle}</h2></div></div>
       {service && <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connectionText}</p>}
       {description && <p className="service-description">{description}</p>}
-      <RelayStatusLine snapshot={snapshot} stale={stale} />
+      {!approvalOff && connected !== true && <RelayStatusLine snapshot={snapshot} stale={stale} />}
       {/* Never beside a line that still says a phone is connected. */}
-      <DirectConnectionStatus snapshot={snapshot} stale={stale} guidance={connected !== true} />
+      {!approvalOff && <DirectConnectionStatus snapshot={snapshot} stale={stale} guidance={connected !== true} />}
       {networkSetup && <div className="network-setup-action"><button type="button" className="button secondary" disabled={disabled} onClick={onOpenNetwork}>{ko.networkSetup}</button></div>}
       {actionIssue && !issueAlreadyGlobal && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(actionIssue.message)}</p>{actionIssue.nextAction && <p className="supporting-text">{tr(actionIssue.nextAction)}</p>}</div></section>}
-      <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName || '—')}</bdi></dd></div></dl>
+      {/* No computer name is supplied yet; an empty row would read as a failed load. */}
+      {snapshot.computerName && <dl className="status-facts"><div><dt>{ko.thisComputer}</dt><dd><bdi dir="ltr">{displayText(snapshot.computerName === '이 PC' ? tr('이 PC') : snapshot.computerName)}</bdi></dd></div></dl>}
       {service?.controlHint === 'needs_installer' && <p className="supporting-text">{ko.serviceNeedsInstaller}</p>}
       {service?.controlHint === 'unsupported' && <p className="supporting-text">{ko.serviceUnsupported}</p>}
       {service && service.allowedActions.length > 0 && <div className="service-actions">{actions.filter((action) => service.allowedActions.includes(action)).map((action) =>

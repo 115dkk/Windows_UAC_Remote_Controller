@@ -9,6 +9,8 @@ import type { AppSnapshot } from './contracts';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { RelayStatusLine } from './RelayStatusLine';
+import { ServicePanel } from './StatusPanels';
+import { DevicesPanel } from './CollectionPanels';
 import { locales, setPreviewLanguage, tr } from './i18n';
 
 describe('Windows relay observation and service recovery', () => {
@@ -16,16 +18,16 @@ describe('Windows relay observation and service recovery', () => {
     const snapshot = qaCase('desktop-relay-listening').snapshot;
     const view = render(<RelayStatusLine snapshot={snapshot} stale />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
     view.rerender(<RelayStatusLine snapshot={{ ...snapshot, dataAvailability: { ...snapshot.dataAvailability, devices: 'unavailable' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
   });
   it('keeps unknown relay state when the stopped SCM value is only cached', () => {
     const cached = qaCase('desktop-relay-stopped').snapshot;
     render(<RelayStatusLine snapshot={{ ...cached, relayStatus: { mode: 'embedded', state: 'unknown' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.');
-    expect(screen.queryByText('내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가 · [다시 확인]을 누르십시오.');
+    expect(screen.queryByText('휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.')).not.toBeInTheDocument();
   });
   it.each(locales)('translates stopped relay, selected mode and the next step in %s', (locale) => {
     setPreviewLanguage(locale);
@@ -39,11 +41,11 @@ describe('Windows relay observation and service recovery', () => {
   });
 
   it.each([
-    ['desktop-relay-stopped', '내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.'],
-    ['desktop-relay-listening', '내장 중계 수신 대기 중'],
-    ['desktop-relay-waiting', '내장 중계: 네트워크 연결 대기 중'],
-    ['desktop-relay-unknown', '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.'],
-    ['desktop-relay-external', '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았습니다.'],
+    ['desktop-relay-stopped', '휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.'],
+    ['desktop-relay-listening', '휴대폰 연결 대기 중'],
+    ['desktop-relay-waiting', '네트워크 연결 대기 중 · PC의 네트워크 연결을 확인하십시오.'],
+    ['desktop-relay-unknown', '휴대폰 연결 대기 상태 확인 불가 · [다시 확인]을 누르십시오.'],
+    ['desktop-relay-external', '외부 중계 서버 사용'],
   ])('renders %s from observed runtime state', (fixture, message) => {
     render(<RelayStatusLine snapshot={qaCase(fixture).snapshot} />);
     expect(screen.getByRole('status')).toHaveTextContent(message);
@@ -54,27 +56,27 @@ describe('Windows relay observation and service recovery', () => {
   it('never promotes readiness or a stale listening DTO while SCM is stopped', () => {
     const source = qaCase('desktop-relay-stopped').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayConfigured: true, relayStatus: null }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 승인을 켜면 다시 연결을 받습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 승인을 켜면 다시 받습니다.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, relayConfigured: true, relayStatus: { mode: 'embedded', state: 'listening' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 승인을 켜면 다시 연결을 받습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 승인을 켜면 다시 받습니다.');
   });
 
   it('keeps legacy readiness and unknown management distinct from listening', () => {
     const source = qaCase('desktop-running').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayConfigured: true }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
     view.rerender(<RelayStatusLine snapshot={{ ...source, service: null, relayStatus: { mode: 'embedded', state: 'listening' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
   });
 
   it('shows preparation failure and keeps unknown external runtime distinct from reachability', () => {
     const source = qaCase('desktop-relay-listening').snapshot;
     const view = render(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('내장 중계를 준비하지 못했습니다. PC의 네트워크와 중계 설정을 확인하십시오.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결을 받지 못하고 있습니다. PC의 네트워크 연결을 확인하십시오. 연결되면 자동으로 다시 시도합니다.');
     view.rerender(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'external', state: 'unknown' } }} />);
-    expect(screen.getByRole('status')).toHaveTextContent('중계 실행 상태를 확인하지 못했습니다.');
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
   });
 
@@ -90,16 +92,16 @@ describe('Windows relay observation and service recovery', () => {
     const initial: AppSnapshot = { ...stopped, relayStatus: { mode: 'external', state: 'stopped' } };
     const setRelay = vi.fn(() => Promise.resolve(stopped));
     render(<App bridge={{ ...createQaBridge(initial), setRelay }} initialPage="network" />);
-    fireEvent.click(await screen.findByRole('button', { name: '이 PC의 내장 중계 사용' }));
-    const selected = await screen.findByRole('button', { name: '내장 중계 선택됨' });
+    fireEvent.click(await screen.findByRole('button', { name: '이 PC 사용' }));
+    const selected = await screen.findByRole('button', { name: '이 PC 사용 중' });
     expect(selected).toBeDisabled();
     fireEvent.click(selected);
     expect(setRelay).toHaveBeenCalledExactlyOnceWith('embedded');
-    expect(screen.getByText('내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.')).toBeVisible();
-    expect(screen.getByText('내장 중계가 선택되어 있습니다. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비합니다.')).toBeVisible();
+    expect(screen.getByText('휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.')).toBeVisible();
+    expect(screen.getByText('[PC 상태]에서 휴대폰 승인을 켜면 휴대폰이 이 PC에 접속할 수 있습니다.')).toBeVisible();
     expect(screen.queryByText('중계 서버 주소가 설정되어 있습니다.')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeVisible();
     expect(screen.getByRole('button', { name: '휴대폰 승인 켜기' })).toBeEnabled();
   });
 
@@ -110,7 +112,7 @@ describe('Windows relay observation and service recovery', () => {
       : condition === 'unsupported' ? { ...source, service: { ...source.service!, controlHint: 'unsupported' } } : source;
     const onSetRelay = vi.fn();
     render(<RelaySettings snapshot={snapshot} disabled={condition === 'busy'} onSetRelay={onSetRelay} />);
-    const select = screen.getByRole('button', { name: '이 PC의 내장 중계 사용' });
+    const select = screen.getByRole('button', { name: '이 PC 사용' });
     expect(select).toBeDisabled();
     const address = screen.getByRole('textbox', { name: ko.relayAddress });
     expect(address).toBeEnabled();
@@ -151,11 +153,71 @@ describe('Windows relay observation and service recovery', () => {
     expect(await screen.findAllByText(message)).toHaveLength(1);
     fireEvent.focus(window);
     await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(within(screen.getByRole('region', { name: '서비스 중지됨' })).getByText(message)).toBeVisible());
+    await waitFor(() => expect(within(screen.getByRole('region', { name: '휴대폰 승인 꺼짐' })).getByText(message)).toBeVisible());
     expect(screen.getAllByText(message)).toHaveLength(1);
     const retry = screen.getByRole('button', { name: '휴대폰 승인 켜기' });
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
     await waitFor(() => expect(controlService).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe('PC status card says each fact once', () => {
+  const relayLine = (container: HTMLElement) => container.querySelector('.relay-state');
+  const directLine = (container: HTMLElement) => container.querySelector('.direct-connection');
+
+  it('hides the relay and direct lines while phone approval is off, but keeps them on the external access tab', () => {
+    const stopped = qaCase('desktop-relay-stopped').snapshot;
+    const card = render(<ServicePanel snapshot={stopped} disabled={false} onAction={vi.fn()} />);
+    expect(screen.getByRole('heading', { name: '휴대폰 승인 꺼짐' })).toBeVisible();
+    expect(relayLine(card.container)).toBeNull();
+    expect(directLine(card.container)).toBeNull();
+    expect(screen.queryByText('휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.')).not.toBeInTheDocument();
+    expect(screen.queryByText('외부 연결 꺼짐 · 휴대폰 승인을 켜면 다시 준비합니다.')).not.toBeInTheDocument();
+    card.unmount();
+    const tab = render(<ExternalAccessPanel snapshot={stopped} disabled={false} onSave={vi.fn()} onSetRelay={vi.fn()} />);
+    expect(relayLine(tab.container)).toHaveTextContent('휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.');
+    expect(screen.getByText('외부 연결 꺼짐 · 휴대폰 승인을 켜면 다시 준비합니다.')).toBeVisible();
+  });
+
+  it('keeps both lines while stale, since a cached stopped state is not known', () => {
+    const stopped = qaCase('desktop-relay-stopped').snapshot;
+    const card = render(<ServicePanel snapshot={stopped} disabled={false} onAction={vi.fn()} stale />);
+    expect(relayLine(card.container)).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가 · [다시 확인]을 누르십시오.');
+    expect(directLine(card.container)).toHaveTextContent('외부 연결 상태 확인 불가 · [다시 확인]을 누르십시오.');
+  });
+
+  it('shows the relay line while no phone is connected and hides it once one is', async () => {
+    const offline = qaCase('desktop-status-phone-offline').snapshot;
+    const view = render(<ServicePanel snapshot={offline} disabled={false} onAction={vi.fn()} />);
+    expect(screen.getByText('휴대폰 연결 안 됨')).toBeVisible();
+    expect(relayLine(view.container)).toHaveTextContent('휴대폰 연결 대기 중');
+    view.unmount();
+    const connected = qaCase('desktop-connected').snapshot;
+    const card = render(<ServicePanel snapshot={connected} disabled={false} onAction={vi.fn()} />);
+    expect(await screen.findByText('휴대폰 연결됨')).toBeVisible();
+    expect(relayLine(card.container)).toBeNull();
+    expect(directLine(card.container)).not.toBeNull();
+  });
+
+  it('hides the computer-name row while no name is supplied', () => {
+    const running = qaCase('desktop-running').snapshot;
+    const unnamed = render(<ServicePanel snapshot={{ ...running, computerName: '' }} disabled={false} onAction={vi.fn()} />);
+    expect(screen.queryByText(ko.thisComputer, { selector: 'dt' })).not.toBeInTheDocument();
+    expect(unnamed.container.textContent).not.toContain('—');
+    unnamed.unmount();
+    render(<ServicePanel snapshot={{ ...running, computerName: 'OFFICE-PC' }} disabled={false} onAction={vi.fn()} />);
+    expect(screen.getByText(ko.thisComputer, { selector: 'dt' }).nextElementSibling).toHaveTextContent('OFFICE-PC');
+  });
+
+  it.each(['ko', 'en'] as const)('labels a generated phone name as 휴대폰 {id} in %s, never as a serial number', (locale) => {
+    setPreviewLanguage(locale);
+    const id = '3fa9c01b'.padEnd(32, '0');
+    const snapshot: AppSnapshot = { ...qaCase('desktop-running').snapshot, canUnpair: true,
+      devices: [{ id, name: '휴대폰 3fa9c01b', revision: 1, connected: false, routePresent: true, lastSeenLabel: null }] };
+    render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} />);
+    expect(screen.getByRole('heading', { name: tr('휴대폰 {id}').replace('{id}', '3fa9c01b') })).toBeVisible();
+    expect(screen.queryByText(/3fa9c01b번/u)).not.toBeInTheDocument();
+    setPreviewLanguage('ko');
   });
 });

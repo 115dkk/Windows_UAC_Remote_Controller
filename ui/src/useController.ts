@@ -1,8 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSnapshot, ControllerBridge, ExternalAccessInput, NotificationPolicy, RequestDetailsView, ServiceAction } from './contracts';
+import { isAuthoredCopy } from './i18n';
 import { ko } from './messages.ko';
 import { ageRequestPresentation, withoutRequestBodies } from './requestPresentation';
+
+/** A failure line: catalogue keys, rendered through tr(). */
+export interface Failure { readonly message: string; readonly nextAction: string | null }
+
+const generic = (message: string): Failure => ({ message, nextAction: null });
+const ISSUE_FIELDS = ['code', 'message', 'nextAction'] as const;
+const MAX_ISSUE_TEXT = 400;
+
+function authoredText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_ISSUE_TEXT && isAuthoredCopy(value);
+}
+
+/** The native owner's own refusal, when a command rejection is exactly a
+ * serialized AppIssue ({code, message, nextAction}) whose text is catalogued
+ * authored copy. Timeouts, transport errors, extra or missing fields and any
+ * text outside the catalogue return null, and the caller shows its generic line. */
+export function authoredIssue(rejection: unknown): Failure | null {
+  if (rejection === null || typeof rejection !== 'object' || Array.isArray(rejection)) return null;
+  const prototype: unknown = Object.getPrototypeOf(rejection);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const fields = Object.keys(rejection);
+  if (fields.length !== ISSUE_FIELDS.length || !ISSUE_FIELDS.every((field) => fields.includes(field))) return null;
+  const { code, message, nextAction } = rejection as Record<(typeof ISSUE_FIELDS)[number], unknown>;
+  if (typeof code !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/u.test(code) || !authoredText(message)) return null;
+  if (nextAction === null) return { message, nextAction: null };
+  return authoredText(nextAction) ? { message, nextAction } : null;
+}
 
 export type ClientCommand =
   | { readonly kind: 'service'; readonly action: ServiceAction }
@@ -32,7 +60,7 @@ interface ViewState {
   readonly refreshing: boolean;
   readonly busy: ClientCommand['kind'] | null;
   readonly stale: boolean;
-  readonly error: string | null;
+  readonly error: Failure | null;
   readonly notice: string | null;
   readonly requestObservedAt: number;
   readonly scannerFocusRevision: number;
@@ -106,8 +134,7 @@ function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { ki
 function scannerFailure(error: unknown, transport?: 'usb'): string {
   const code = error !== null && typeof error === 'object' && 'code' in error ? error.code : null;
   return code === 'pairing_scanner_busy' || code === 'app_busy' ? ko.pairingScannerBusy
-    : transport === 'usb' ? 'USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.'
-      : ko.pairingScannerFailure;
+    : transport === 'usb' ? ko.pairingUsbFailure : ko.pairingScannerFailure;
 }
 
 export function useController(bridge: ControllerBridge) {
@@ -176,10 +203,10 @@ export function useController(bridge: ControllerBridge) {
         return;
       }
       publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
-    } catch {
+    } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
       const latest = current.current;
-      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: ko.loadFailure, notice: null });
+      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
     } finally {
       if (activeRead.current === read) activeRead.current = null;
       if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
@@ -235,12 +262,12 @@ export function useController(bridge: ControllerBridge) {
       if (scannerRead) {
         let snapshot: AppSnapshot;
         try { snapshot = await scannerRead.promise; }
-        catch {
+        catch (failure) {
           if (liveOwner.current !== bridge || attempt !== revision.current) return null;
           scannerReturn.current = { pending: false, opened: false, wake: false };
           const latest = current.current;
           publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
-            refreshing: false, busy: null, stale: true, error: ko.loadFailure, notice: null });
+            refreshing: false, busy: null, stale: true, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
           return null;
         }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -315,7 +342,7 @@ export function useController(bridge: ControllerBridge) {
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
-        publish({ ...current.current, refreshing: false, busy: null, error: command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure, notice: null });
+        publish({ ...current.current, refreshing: false, busy: null, error: generic(command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure), notice: null });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
@@ -329,12 +356,12 @@ export function useController(bridge: ControllerBridge) {
         // Closed diagnosis only: no path, exception text or arbitrary native code.
         console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}${numeric}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
-        publish({ ...previous, refreshing: false, busy: null, error: ko.diagnosticsFolderFailure, notice: null });
+        publish({ ...previous, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
         return null;
       }
       if (command.kind === 'scan_pairing' && !scannerOpened) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
-        const error = scannerFailure(failure, command.transport);
+        const error = generic(scannerFailure(failure, command.transport));
         let snapshot: AppSnapshot | null = null;
         try { snapshot = await readSnapshot(bridge); } catch { /* Keep recovery, never raw native errors. */ }
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -344,9 +371,12 @@ export function useController(bridge: ControllerBridge) {
           requestObservedAt: snapshot ? performance.now() : latest.requestObservedAt });
         return null;
       }
+      // The owner's own refusal names its reason and next step. Anything else,
+      // a timeout or a transport failure among them, keeps the generic line.
       const latest = current.current;
       publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
-        error: scannerOpened ? ko.loadFailure : command.kind === 'policy' || command.kind === 'relay' || command.kind === 'external-access' ? ko.saveFailure : ko.actionFailure, notice: null });
+        error: authoredIssue(failure) ?? generic(scannerOpened ? ko.loadFailure
+          : command.kind === 'policy' || command.kind === 'relay' || command.kind === 'external-access' ? ko.saveFailure : ko.actionFailure), notice: null });
       return null;
     } finally {
       if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;

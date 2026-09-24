@@ -47,7 +47,7 @@ describe('direct WAN observation boundaries', () => {
     expect(directConnectionState(snapshot)).toBe('unknown');
     expect(screen.queryByText(candidateCopy)).not.toBeInTheDocument();
     expect(screen.queryByText(firewallCopy)).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('PC 상태를 다시 확인하십시오.');
+    expect(screen.getByRole('status')).toHaveTextContent('[다시 확인]을 누르십시오.');
   });
 
   it('keeps native unknown ahead of a cached stopped SCM observation', () => {
@@ -64,7 +64,7 @@ describe('direct WAN observation boundaries', () => {
     render(<App bridge={{ ...createQaBridge(source), snapshot }} initialPage={initialPage} />);
     expect(await screen.findByText(candidateCopy)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '다시 확인' }));
-    expect(await screen.findByText('외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.')).toBeVisible();
+    expect(await screen.findByText('외부 연결 상태 확인 불가 · [다시 확인]을 누르십시오.')).toBeVisible();
     expect(screen.queryByText(candidateCopy)).not.toBeInTheDocument();
     expect(screen.queryByText(firewallCopy)).not.toBeInTheDocument();
   });

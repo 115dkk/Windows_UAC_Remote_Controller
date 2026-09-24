@@ -27,8 +27,8 @@ for (const selected of directConnectionCases) {
 
     const region = page.getByRole('region', { name: galleryText(locale, '외부 네트워크 연결'), exact: true });
     const source = selected.fixture === 'desktop-relay-wan-lan' ? '외부에서 접속할 주소가 없음'
-      : selected.fixture === 'desktop-relay-wan-unavailable' ? '외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.'
-      : selected.fixture === 'desktop-relay-wan-stale' ? '외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.' : candidateCopy;
+      : selected.fixture === 'desktop-relay-wan-unavailable' ? '외부 주소를 확인하지 못했습니다. PC의 인터넷 연결과 공유기 설정을 확인하십시오.'
+      : selected.fixture === 'desktop-relay-wan-stale' ? '외부 연결 상태 확인 불가 · [다시 확인]을 누르십시오.' : candidateCopy;
     const status = region.getByRole('status');
     await expect(status).toHaveText(galleryText(locale, source));
     await expect(region.locator('.is-success, button, a, input')).toHaveCount(0);

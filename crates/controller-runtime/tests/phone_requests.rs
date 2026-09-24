@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 const LOCATOR: &str = "0123456789abcdef0123456789abcdef";
 
 fn row() -> Value {
-    json!({"id":LOCATOR,"computerName":"연결한 컴퓨터","programName":"PowerShell",
+    json!({"id":LOCATOR,"computerName":"연결한 PC","programName":"PowerShell",
         "executablePath":"C:\\example\\pwsh.exe","programElided":false,"pathElided":false,
         "hasDetails":true,"remainingSeconds":42,"refreshAfterMillis":1000,
         "state":"pending","canApprove":true,"canDeny":true})
@@ -300,12 +300,7 @@ fn paired_pc_rows_require_complete_bounded_metadata_and_observed_connection() {
 
 #[test]
 fn localized_native_computer_labels_do_not_hide_the_paired_pc_catalogue() {
-    for label in [
-        "연결한 컴퓨터",
-        "Paired computer",
-        "Gekoppelter Computer",
-        "接続済みの PC",
-    ] {
+    for label in ["연결한 PC", "Paired PC", "Gekoppelter PC", "接続済みの PC"] {
         let mut document = catalog();
         document["requests"][0]["computerName"] = json!(label);
         let value = decode_phone_requests_json(&serde_json::to_vec(&document).unwrap()).unwrap();

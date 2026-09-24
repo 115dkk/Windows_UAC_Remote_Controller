@@ -25,8 +25,8 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
       }
       const ready = selected.fixture === 'phone-service-ready';
       if (ready) {
-        await expect(panel.getByText('서비스 실행 중', { exact: true })).toBeVisible();
-        await expect(panel.getByText('앱 설정을 사용할 수 있습니다. 받은 요청은 요청 화면에서 확인하십시오.', { exact: true })).toBeVisible();
+        await expect(panel.getByText('휴대폰 승인 켜짐', { exact: true })).toBeVisible();
+        await expect(panel.getByText('받은 요청은 [요청] 화면에 표시됩니다.', { exact: true })).toBeVisible();
         await expect(page.getByRole('radio', { name: '항상', exact: true })).toBeChecked();
         await expect(panel.getByText('켜짐', { exact: true })).toBeVisible();
       } else {
@@ -35,7 +35,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
       }
       if (selected.fixture === 'phone-service-stopped') {
-        await expect(panel.getByText('서비스 중지됨', { exact: true })).toBeVisible();
+        await expect(panel.getByText('휴대폰 승인 꺼짐', { exact: true })).toBeVisible();
         await expect(panel.getByText('꺼짐', { exact: true })).toBeVisible();
         await expect(panel.getByRole('button', { name: '휴대폰 승인 켜기', exact: true })).toBeEnabled();
         await expect(panel.getByRole('button', { name: '휴대폰 승인 끄기', exact: true })).toHaveCount(0);
@@ -77,7 +77,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await expect(panel.getByText('켜짐', { exact: true })).toBeVisible();
         await expect(panel.getByRole('button', { name: '휴대폰 승인 켜기', exact: true })).toHaveCount(0);
         await expect(page.getByRole('radio')).toHaveCount(0);
-        await expect(panel.getByText('서비스 실행 중', { exact: true })).toHaveCount(0);
+        await expect(panel.getByText('휴대폰 승인 켜짐', { exact: true })).toHaveCount(0);
         await gallery.capture('start-request-simulated', '합성 시작 응답은 준비 중일 뿐 실행 완료가 아님');
       }
       if (ready) {
@@ -85,7 +85,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await stop.scrollIntoViewIfNeeded();
         await stop.focus();
         await page.keyboard.press('Enter');
-        let dialog = page.getByRole('dialog', { name: '휴대폰 서비스 중지', exact: true });
+        let dialog = page.getByRole('dialog', { name: '휴대폰 승인을 끄시겠습니까?', exact: true });
         await expect(dialog).toBeVisible();
         await expect(dialog).toContainText('휴대폰을 다시 켜거나 앱을 열어도 자동으로 시작하지 않습니다.');
         await expect(dialog).not.toContainText('이 PC');
@@ -95,7 +95,7 @@ export function registerPhoneServiceGallery(test: typeof GalleryTest): void {
         await expect(dialog).toHaveCount(0);
         await expect(stop).toBeFocused();
         await page.keyboard.press('Enter');
-        dialog = page.getByRole('dialog', { name: '휴대폰 서비스 중지', exact: true });
+        dialog = page.getByRole('dialog', { name: '휴대폰 승인을 끄시겠습니까?', exact: true });
         await dialog.getByRole('button', { name: '휴대폰 승인 끄기', exact: true }).click();
         await expect(panel.getByText('이전 작업을 정리 중입니다', { exact: true })).toBeVisible();
         await expect(panel.getByText('꺼짐', { exact: true })).toBeVisible();

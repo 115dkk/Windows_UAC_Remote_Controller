@@ -186,7 +186,7 @@ describe('Android diagnostic log export handoff', () => {
     expect(result.current.snapshot).toBe(value);
     expect(result.current.stale).toBe(false);
     expect(result.current.busy).toBeNull();
-    expect(result.current.error).toBe(fails ? ko.diagnosticsExportFailure : null);
+    expect(result.current.error).toEqual(fails ? { message: ko.diagnosticsExportFailure, nextAction: null } : null);
     expect(result.current.notice).toBe(fails ? null : ko.diagnosticsExported);
   });
 

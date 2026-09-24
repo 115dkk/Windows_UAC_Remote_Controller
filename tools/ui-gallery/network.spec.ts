@@ -25,8 +25,8 @@ interface Expected {
 const expected: Record<string, Expected> = {
   'desktop-network-auto-no-mapping': { mode: '자동', direct: '외부에서 접속할 주소가 없음', address: null, source: null,
     reason: '공유기가 자동 포트 열기(UPnP·PCP)를 지원하지 않거나 꺼져 있습니다. 공유기에서 포트를 직접 열고 아래에서 그 방법을 고르십시오.' },
-  'desktop-network-auto-upnp': { mode: '자동', direct: '외부에서 접속할 주소가 있음', address: '203.0.113.7:7443', source: 'UPnP로 공유기에서 받음', reason: null },
-  'desktop-network-forward-stun': { mode: forwardTitle, direct: '외부에서 접속할 주소가 있음', address: '198.51.100.24:17443', source: 'STUN 서버로 확인', reason: null, port: 17443 },
+  'desktop-network-auto-upnp': { mode: '자동', direct: '외부에서 접속할 주소가 있음', address: '203.0.113.7:7443', source: '공유기 자동 포트 열기(UPnP)', reason: null },
+  'desktop-network-forward-stun': { mode: forwardTitle, direct: '외부에서 접속할 주소가 있음', address: '198.51.100.24:17443', source: '외부 서버에 물어 확인', reason: null, port: 17443 },
   'desktop-network-forward-unavailable': { mode: forwardTitle, direct: '외부에서 접속할 주소가 없음', address: null, source: null,
     reason: '이 집의 공인 IP를 확인하지 못했습니다. 인터넷 연결을 확인하거나 외부 주소를 직접 입력하십시오.', port: 7443 },
   'desktop-network-fixed': { mode: fixedTitle, direct: '외부에서 접속할 주소가 있음', address: '203.0.113.7:7443', source: '직접 입력', reason: null, fixed: '203.0.113.7:7443' },
@@ -47,8 +47,8 @@ async function reachable(target: Locator, minimum = 44): Promise<void> {
 async function phoneShortcut(page: Page, selected: NetworkCase, gallery: { capture(stage: string, caption: string): Promise<void> }): Promise<void> {
   const { locale } = selected;
   const entry = page.getByRole('region', { name: galleryText(locale, 'QR 코드 보기'), exact: true });
-  await expect(entry.getByText(galleryText(locale, '네트워크 연결을 확인하고 외부 연결 화면에서 내장 중계를 사용한 뒤 QR 코드를 표시하십시오.'), { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: galleryText(locale, '이 PC의 내장 중계 사용'), exact: true })).toHaveCount(0);
+  await expect(entry.getByText(galleryText(locale, '휴대폰이 접속할 준비가 되지 않아 QR 코드를 표시할 수 없습니다. PC의 네트워크 연결과 [외부 연결] 설정을 확인하십시오.'), { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: galleryText(locale, '이 PC 사용'), exact: true })).toHaveCount(0);
   await expect(page.locator('.relay-advanced')).toHaveCount(0);
   const shortcut = entry.getByRole('button', { name: galleryText(locale, '외부 연결 설정'), exact: true });
   await expect(shortcut).toHaveClass(/\bsecondary\b/u);
@@ -56,7 +56,7 @@ async function phoneShortcut(page: Page, selected: NetworkCase, gallery: { captu
   await gallery.capture('phone-page-shortcut', 'CLIENT/SYNTHETIC · pairing waits for the relay; the relay controls now live on the external-access tab');
   await shortcut.click();
   await expect(page.getByRole('heading', { level: 1, name: galleryText(locale, '외부 연결'), exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: galleryText(locale, '이 PC의 내장 중계 사용'), exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: galleryText(locale, '이 PC 사용'), exact: true })).toBeEnabled();
 }
 
 for (const selected of networkCases) {
@@ -74,7 +74,7 @@ for (const selected of networkCases) {
       .toHaveText(galleryText(locale, want.direct));
     await expect(status.locator('.status-facts .is-success, .direct-connection .is-success')).toHaveCount(0);
     await expect(fact(page, locale, '외부 주소')).toHaveText(want.address ?? galleryText(locale, '없음'));
-    await expect(fact(page, locale, '확인 방법')).toHaveText(galleryText(locale, want.source ?? '없음'));
+    await expect(fact(page, locale, '주소를 얻은 방법')).toHaveText(galleryText(locale, want.source ?? '없음'));
     await expect(fact(page, locale, '이 PC의 내부 주소')).toHaveText('192.168.0.23:7443');
     if (want.address) await expect(fact(page, locale, '외부 주소').locator('bdi')).toHaveAttribute('dir', 'ltr');
     if (want.reason) {
@@ -136,10 +136,10 @@ for (const selected of networkCases) {
       await group.getByRole('radio', { name: fixedTitle, exact: true }).check();
       await address.fill('192.168.0.23:7443');
       await save.click();
-      await expect(method.getByText('공인 IP와 포트를 203.0.113.7:7443 형식으로 입력하십시오.', { exact: true })).toBeVisible();
+      await expect(method.getByText('이 주소로는 외부에서 연결할 수 없습니다. 공유기 관리 페이지에 표시된 공인 IP를 입력하십시오.', { exact: true })).toBeVisible();
       await expect(address).toBeFocused();
       await gallery.capture('invalid-address', 'CLIENT/SYNTHETIC · a LAN address is not a public address; no save requested');
-      await address.fill('203.0.113.7:7443');
+      await address.fill('1.2.3.4:7443');
       await save.click();
       await expect(save).toBeDisabled();
       await expect(group.getByRole('radio', { name: fixedTitle, exact: true })).toBeChecked();
@@ -156,8 +156,8 @@ for (const selected of networkCases) {
     }
 
     // 3. Relay controls, moved unchanged, and 4. the firewall guidance last.
-    const relay = page.getByRole('region', { name: galleryText(locale, '중계'), exact: true });
-    const embedded = relay.getByRole('button', { name: galleryText(locale, '내장 중계 선택됨'), exact: true });
+    const relay = page.getByRole('region', { name: galleryText(locale, '휴대폰이 접속할 곳'), exact: true });
+    const embedded = relay.getByRole('button', { name: galleryText(locale, '이 PC 사용 중'), exact: true });
     await expect(embedded).toBeDisabled();
     await reachable(embedded);
     const relayInput = relay.getByRole('textbox', { name: galleryText(locale, '중계 서버 주소'), exact: true });

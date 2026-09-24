@@ -94,7 +94,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     await gallery.open(selected);
     const fixture = selected.fixture;
     if (fixture === 'desktop-connected') {
-      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.getByText('휴대폰 연결됨', { exact: true })).toBeVisible();
       await expect(page.getByText('PC 서비스', { exact: true })).toHaveCount(0);
       await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toHaveCount(0);
@@ -106,7 +106,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       }
     }
     if (fixture === 'phone-devices-offline') {
-      const trigger = page.getByRole('button', { name: '화면 예시 PC 연결 해제', exact: true });
+      const trigger = page.getByRole('button', { name: '화면 예시 PC 등록 삭제', exact: true });
       await trigger.click();
       const dialog = page.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?', exact: true });
       await expect(dialog).toBeVisible();
@@ -198,7 +198,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await page.getByRole('navigation').getByRole('button', { name: 'PC 상태', exact: true }).click();
     }
     if (fixture === 'desktop-running') {
-      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.getByText('휴대폰 연결 안 됨', { exact: true })).toBeVisible();
       await expect(page.getByText('요청 전송 준비 안 됨', { exact: true })).toHaveCount(0);
       await expect(page.getByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.', { exact: true })).toHaveCount(0);
@@ -219,7 +219,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       }
     }
     if (fixture === 'desktop-history') {
-      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await expect(page.locator('time')).toHaveCount(2);
       await expect(page.locator('time').first()).toHaveAttribute('datetime', '2026-09-08T12:30:00.000Z');
       const logs = page.getByRole('button', { name: '로그 폴더 열기', exact: true });
@@ -235,7 +235,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     const intakeCopy: Record<string, string> = {
       'phone-unpaired': 'PC와 아직 연결하지 않았습니다', 'phone-disconnected': 'PC에 연결하는 중',
       'phone-reconciling': '받은 요청을 확인 중입니다', 'phone-authenticating': '본인 확인을 진행하십시오.',
-      'phone-waiting': '앞선 작업이 끝나기를 대기 중입니다.', 'phone-awaiting-outcome': 'Windows 처리 결과 대기 중입니다.',
+      'phone-waiting': '선택을 PC로 보낼 준비를 하는 중입니다.', 'phone-awaiting-outcome': 'Windows 처리 결과 대기 중입니다.',
     };
     if (intakeCopy[fixture]) {
       await expect(page.getByText(intakeCopy[fixture], { exact: true })).toBeVisible();
@@ -258,7 +258,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('button', { name: '기록 지우기', exact: true })).toHaveCount(0);
     }
     if (fixture === 'phone-unavailable') {
-      await expect(page.getByRole('heading', { name: '요청을 받을 준비가 필요합니다', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '요청 확인 불가', exact: true })).toBeVisible();
       await expect(page.getByRole('navigation').locator('button:enabled')).toHaveCount(3);
       await expect(page.getByRole('navigation').locator('button:disabled')).toHaveCount(1);
     }
@@ -294,21 +294,21 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByRole('alert')).toContainText('요청 상태를 확인하지 못했어요.');
       await expect(page.getByText('연결을 확인한 뒤 다시 시도해 주세요.', { exact: true })).toBeVisible();
       await expect(page.getByText('synthetic_unavailable', { exact: true })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: '요청을 받을 준비가 필요합니다', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '요청 확인 불가', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: '승인 요청 없음', exact: true })).toHaveCount(0);
     }
     if (fixture.startsWith('desktop-')) await expect(page.locator('button[data-pairing-scanner="open"]')).toHaveCount(0);
     await gallery.capture('overview', '합성 클라이언트 초기 화면');
     if (fixture.startsWith('desktop-relay-')) {
-      const card = page.getByRole('region', { name: 'PC 내장 중계', exact: true });
+      const card = page.getByRole('region', { name: '이 PC (기본)', exact: true });
       // The observation line sits in the tab's current-status section, once.
       const status = page.locator('.relay-state');
       const expected: Record<string, string> = {
-        'desktop-relay-stopped': '내장 중계도 함께 중지됨 · 휴대폰 승인을 켜면 다시 연결을 받습니다.',
-        'desktop-relay-listening': '내장 중계 수신 대기 중',
-        'desktop-relay-waiting': '내장 중계: 네트워크 연결 대기 중',
-        'desktop-relay-unknown': '중계 실행 상태를 확인하지 못했습니다. 다시 확인하십시오.',
-        'desktop-relay-external': '외부 중계 설정됨 · 연결 가능 여부는 아직 확인되지 않았습니다.',
+        'desktop-relay-stopped': '휴대폰 연결 받지 않음 · 휴대폰 승인을 켜면 다시 받습니다.',
+        'desktop-relay-listening': '휴대폰 연결 대기 중',
+        'desktop-relay-waiting': '네트워크 연결 대기 중 · PC의 네트워크 연결을 확인하십시오.',
+        'desktop-relay-unknown': '휴대폰 연결 대기 상태 확인 불가 · [다시 확인]을 누르십시오.',
+        'desktop-relay-external': '외부 중계 서버 사용',
       };
       await expect(status).toHaveText(expected[fixture]!);
       await status.scrollIntoViewIfNeeded();
@@ -316,7 +316,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       if (fixture === 'desktop-relay-listening') await expect(status).toHaveClass(/is-success/u);
       else await expect(status).not.toHaveClass(/is-success/u);
       const selectedMode = ['desktop-relay-stopped', 'desktop-relay-listening', 'desktop-relay-waiting'].includes(fixture);
-      const choice = card.getByRole('button', { name: selectedMode ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용', exact: true });
+      const choice = card.getByRole('button', { name: selectedMode ? '이 PC 사용 중' : '이 PC 사용', exact: true });
       if (selectedMode || fixture === 'desktop-relay-unknown') await expect(choice).toBeDisabled();
       else await expect(choice).toBeEnabled();
       await gallery.capture('relay-observation', 'CLIENT/SYNTHETIC · 중계 설정과 실제 수신 상태 구분');
@@ -357,7 +357,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
     }
     if (fixture === 'desktop-devices' || fixture === 'desktop-pairing-ready' || fixture === 'desktop-setup-missing') {
       // Relay controls moved to the external-access tab.
-      await expect(page.getByRole('button', { name: '이 PC의 내장 중계 사용' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '이 PC 사용' })).toHaveCount(0);
     }
     if (selected.id === 'desktop-running-980' || selected.id === 'phone-terminal-390') {
       await recordClientFontProof(page, info, selected.id === 'desktop-running-980' ? 'desktop' : 'phone');
@@ -431,7 +431,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await trigger.scrollIntoViewIfNeeded();
       await trigger.focus();
       await page.keyboard.press('Enter');
-      const dialog = page.getByRole('dialog', { name: 'PC 연결 기능 제거', exact: true });
+      const dialog = page.getByRole('dialog', { name: 'PC 연결 기능을 제거하시겠습니까?', exact: true });
       await expect(dialog).toBeVisible();
       await expect(dialog).toContainText('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
       await expect(dialog).not.toContainText(/키|데이터|기록/u);
@@ -445,7 +445,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
       await expect(trigger).toBeFocused();
-      await expect(page.getByRole('heading', { name: '승인기 실행 중', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '휴대폰 승인 켜짐', exact: true })).toBeVisible();
       await gallery.capture('remove-feature-cancelled', 'Escape 취소와 초점 복귀 · 제거 명령 실행 없음');
     }
 
@@ -489,15 +489,15 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await gallery.capture('schedule-footer', '시간대와 알림 방식 · 변경 전 저장 비활성');
     }
     if (selected.action === 'dialog') {
-      const trigger = page.getByRole('button', { name: '화면 예시 휴대폰 연결 해제', exact: true });
+      const trigger = page.getByRole('button', { name: '화면 예시 휴대폰 등록 삭제', exact: true });
       await trigger.focus();
       await page.keyboard.press('Enter');
-      const dialog = page.getByRole('dialog', { name: '기기 연결 해제', exact: true });
+      const dialog = page.getByRole('dialog', { name: '이 휴대폰의 등록을 삭제하시겠습니까?', exact: true });
       const cancel = dialog.getByRole('button', { name: '취소', exact: true });
       await expect(dialog).toBeVisible();
       await expect(cancel).toBeFocused();
       await page.keyboard.press('Tab');
-      await expect(dialog.getByRole('button', { name: '연결 해제', exact: true })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: '등록 삭제', exact: true })).toBeFocused();
       await page.keyboard.press('Shift+Tab');
       await expect(cancel).toBeFocused();
       await gallery.capture('dialog-cancel-focus', '강제 색상 · 합성 연결 해제 확인, 취소에 키보드 초점');
@@ -562,7 +562,7 @@ for (const selected of [...galleryCases.filter((item) => !item.id.startsWith('ph
       await expect(page.getByText('상태를 새로 확인했어요.', { exact: true })).toHaveCount(0);
       if (fixture === 'phone-scanner-launch-error') {
         const error = page.getByRole('alert').filter({ hasText: 'QR 읽기 화면을 열지 못했습니다.' });
-        await expect(error).toContainText('휴대폰 상태를 다시 확인한 뒤 시도하십시오.');
+        await expect(error).toContainText('[다시 확인]을 누른 뒤 다시 시도하십시오.');
         await error.scrollIntoViewIfNeeded();
         await expect(error).toBeInViewport({ ratio: 1 });
       }

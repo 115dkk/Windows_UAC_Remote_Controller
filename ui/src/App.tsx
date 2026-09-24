@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import type { Confirmation } from './ConfirmDialog';
 import { Icon } from './icons';
 import type { IconName } from './icons';
-import { ko, policyUnavailableText, policyUnavailableTitleText, serviceActionText, serviceConfirmText } from './messages';
+import { deviceLabel, ko, policyUnavailableText, policyUnavailableTitleText, serviceActionText, serviceConfirmText } from './messages';
 import { PolicyEditor } from './PolicyEditor';
 import { PhoneServicePanel } from './PhoneServicePanel';
 import { PairingEntry } from './PairingEntry';
@@ -98,7 +98,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   function removeDevice(device: PairedDeviceView) {
     setConfirmation({ title: phone ? tr('이 PC의 등록을 휴대폰에서 삭제하시겠습니까?') : ko.removeTitle,
       body: phone ? tr('이 휴대폰의 PC 등록만 삭제합니다. PC에 연결할 필요는 없습니다. 다시 사용하려면 QR 또는 USB로 등록하십시오.') : ko.removeBody,
-      subject: device.name, confirmLabel: ko.removeDevice,
+      subject: deviceLabel(device, !phone), confirmLabel: ko.removeDevice,
       onConfirm: () => { void controller.run({ kind: 'remove', deviceId: device.id }); } });
   }
   function clearActivity() {
@@ -110,7 +110,7 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
   const refreshButton = <div className="header-actions"><button className="button quiet refresh-button" type="button" aria-label={refreshLabel} title={refreshLabel} disabled={refreshing || busy !== null} onClick={() => { void controller.refresh(true); }}><Icon name="refresh" /><span className="refresh-label">{refreshLabel}</span></button><button className="button quiet app-settings-button" type="button" aria-label={tr('앱 설정')} title={tr('앱 설정')} aria-haspopup="dialog" disabled={busy !== null || confirmation !== null} onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button></div>;
 
   const settingsDialog = settingsOpen && <LanguageSettings onClose={() => setSettingsOpen(false)} />;
-  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ? tr(error) : ko.loadingBody} /></div>{error && <div className="launch-actions">{refreshButton}</div>}</main>{settingsDialog}</div>;
+  if (!snapshot) return <div className="launch-shell"><main id="main-content" className="launch-content" aria-busy={refreshing}><div className="launch-brand"><img className="app-logo" src="/app-logo.svg" alt="" /><span>{ko.appName}</span></div><div role={error ? 'alert' : 'status'}><EmptyState icon={error ? 'alert' : 'pc'} title={error ? ko.unexpectedTitle : ko.loadingTitle} description={error ? tr(error.message) : ko.loadingBody}>{error?.nextAction && <p className="supporting-text">{tr(error.nextAction)}</p>}</EmptyState></div>{error && <div className="launch-actions">{refreshButton}</div>}</main>{settingsDialog}</div>;
   if (snapshot.platform === 'unsupported') return <div className="launch-shell"><main id="main-content" className="launch-content"><EmptyState icon="pc" title={ko.unsupportedTitle} description={ko.unsupportedBody} />{refreshButton}</main>{settingsDialog}</div>;
 
   const items = navigationFor(snapshot);
@@ -131,7 +131,11 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
     <div className="page-content">
       <header className="page-header"><h1 tabIndex={-1}>{title}</h1>{refreshButton}{description && <p className="page-description">{description}</p>}</header>
       {stale && <p className="stale-label"><Icon name="alert" />{ko.stale}</p>}
-      {error && <section className="notice-box error" role="alert"><Icon name="alert" /><p>{tr(error)}</p></section>}
+      {/* A refusal that repeats the snapshot's own issue is already shown below. */}
+      {error && !(snapshot.issue?.message === error.message && snapshot.issue.nextAction === error.nextAction)
+        && <section className="notice-box error" role="alert"><Icon name="alert" />{error.nextAction
+          ? <div><p>{tr(error.message)}</p><p className="supporting-text">{tr(error.nextAction)}</p></div>
+          : <p>{tr(error.message)}</p>}</section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(snapshot.issue.message)}</p>{snapshot.issue.nextAction && <p className="supporting-text">{tr(snapshot.issue.nextAction)}</p>}</div></section>}
       <div className={`global-feedback ${feedback ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{feedback}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} stale={stale} onAction={serviceAction} onOpenNetwork={() => navigate('network')} />}

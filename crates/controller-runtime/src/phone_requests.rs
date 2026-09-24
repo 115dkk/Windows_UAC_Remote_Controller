@@ -101,8 +101,8 @@ impl std::fmt::Debug for RequestDetailsView {
 pub const fn phone_request_issue() -> AppIssue {
     AppIssue {
         code: "phone_request_unavailable",
-        message: "요청을 확인할 수 없어요.",
-        next_action: Some("컴퓨터에서 요청 상태를 확인하세요."),
+        message: "요청을 확인할 수 없습니다.",
+        next_action: Some("PC 화면에서 요청 창을 확인하십시오."),
     }
 }
 

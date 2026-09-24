@@ -115,8 +115,8 @@ pub(crate) fn open_lock_settings(
 const fn mobile_issue() -> AppIssue {
     AppIssue {
         code: "mobile_state_unavailable",
-        message: "휴대폰 상태를 확인하지 못했어요.",
-        next_action: Some("휴대폰에서 앱을 다시 열어 주세요."),
+        message: "휴대폰 상태를 확인하지 못했습니다.",
+        next_action: Some("앱을 닫았다가 다시 여십시오."),
     }
 }
 
@@ -207,8 +207,8 @@ const fn diagnostics_save_issue() -> AppIssue {
 const fn pairing_scanner_issue() -> AppIssue {
     AppIssue {
         code: "pairing_scanner_unavailable",
-        message: "QR 읽기 화면을 열지 못했어요.",
-        next_action: Some("휴대폰 상태를 다시 확인한 뒤 시도해 주세요."),
+        message: "QR 읽기 화면을 열지 못했습니다.",
+        next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
     }
 }
 
@@ -227,8 +227,8 @@ impl ScannerLaunchReply {
             Self::Opened {} => Ok(()), // Actual native Dialog acknowledgement only.
             Self::Busy {} => Err(AppIssue {
                 code: "pairing_scanner_busy",
-                message: "앞서 요청한 작업이 아직 끝나지 않았어요.",
-                next_action: Some("작업이 끝난 뒤 QR 읽기를 다시 시도해 주세요."),
+                message: "앱이 다른 작업을 처리하는 중입니다.",
+                next_action: Some("잠시 후 [PC의 QR 코드 촬영]을 다시 누르십시오."),
             }),
             Self::Unavailable {} => Err(pairing_scanner_issue()),
         }
@@ -254,8 +254,8 @@ pub(crate) fn open_pairing_scanner(
         let _ = (app, origin);
         Err(AppIssue {
             code: "pairing_scanner_unsupported",
-            message: "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있어요.",
-            next_action: Some("Android 휴대폰에서 앱을 열어 주세요."),
+            message: "QR 읽기는 Android 휴대폰 앱에서 사용할 수 있습니다.",
+            next_action: Some("Android 휴대폰에서 앱을 여십시오."),
         })
     }
 }
@@ -336,7 +336,7 @@ enum PeerRemovalReply {
 fn peer_removal_issue() -> AppIssue {
     AppIssue {
         code: "peer_removal_unconfirmed",
-        message: "PC 등록 삭제 결과를 확인하지 못했습니다. 다시 확인하십시오.",
+        message: "PC 등록 삭제 결과를 확인하지 못했습니다. [다시 확인]을 눌러 [연결된 PC] 목록을 확인하십시오.",
         next_action: None,
     }
 }

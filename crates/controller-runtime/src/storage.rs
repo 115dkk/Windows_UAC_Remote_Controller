@@ -137,7 +137,7 @@ impl From<PreferenceError> for AppIssue {
             PreferenceError::InvalidPolicy => Self {
                 code: "invalid_notification_policy",
                 message: "알림 설정을 저장하지 못했습니다.",
-                next_action: Some("요일과 시작·종료 시간을 확인한 뒤 다시 저장해 주세요."),
+                next_action: Some("요일과 시작·종료 시간을 확인한 뒤 다시 저장하십시오."),
             },
             PreferenceError::ExternalChange => Self {
                 code: "preferences_changed",

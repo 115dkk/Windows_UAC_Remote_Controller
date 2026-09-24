@@ -50,13 +50,13 @@ describe('native snapshot truth in the client', () => {
 
   it('does not equate a running service with remote readiness', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-running').snapshot)} />);
-    expect(await screen.findByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: 'UAC 원격 승인기' })).toBeInTheDocument();
-    expect(screen.queryByText(ko.homePurpose)).not.toBeInTheDocument();
+    expect(screen.queryByText('PC에 표시되는 관리자 권한 요청을 휴대폰에서 승인하거나 거부하기 위한 앱입니다.')).not.toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
     expect(screen.getByText('휴대폰 연결 안 됨')).toBeInTheDocument();
     expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteReady)).not.toBeInTheDocument();
+    expect(screen.queryByText('요청 전송 준비됨')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: serviceActionText.start })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /서비스/u })).not.toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
@@ -68,15 +68,15 @@ describe('native snapshot truth in the client', () => {
     render(<App bridge={bridgeFor(ready)} />);
     expect(await screen.findByText('휴대폰 연결 안 됨')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: serviceStateText.running })).toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteReadyBody)).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.remoteNotReady)).not.toBeInTheDocument();
-    expect(screen.queryByText(ko.serviceRunningBody)).not.toBeInTheDocument();
+    expect(screen.queryByText('관리자 권한 요청이 생기면 연결한 휴대폰에서 확인하십시오.')).not.toBeInTheDocument();
+    expect(screen.queryByText('요청 전송 준비 안 됨')).not.toBeInTheDocument();
+    expect(screen.queryByText('지금은 PC의 관리자 권한 창에서 직접 선택하십시오.')).not.toBeInTheDocument();
   });
 
   it('shows a connected phone even when the legacy readiness flag is false', async () => {
     render(<App bridge={bridgeFor(qaCase('desktop-connected').snapshot)} />);
     expect(await screen.findByText('휴대폰 연결됨')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '승인기 실행 중' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '휴대폰 승인 켜짐' })).toBeInTheDocument();
     expect(screen.queryByText('PC 서비스')).not.toBeInTheDocument();
     expect(screen.queryByText(/별도로 확인/)).not.toBeInTheDocument();
     expect(screen.queryByText(/지금은 PC의 관리자 권한 창에서/)).not.toBeInTheDocument();
@@ -92,12 +92,12 @@ describe('native snapshot truth in the client', () => {
     for (const other of (['install', 'start', 'restart', 'stop', 'uninstall'] as const).filter((item) => item !== action)) {
       expect(screen.queryByRole('button', { name: serviceActionText[other] })).not.toBeInTheDocument();
     }
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeInTheDocument();
     // A stopped PC service is the one cause the screen can name, so it offers
     // the next step instead of only reporting that it cannot tell.
     expect(screen.getByText(snapshot.service!.state === 'running' ? '휴대폰 연결 안 됨'
       : snapshot.service!.state === 'stopped' ? '휴대폰 승인을 켜면 연결 상태를 확인합니다'
-      : '휴대폰 연결 상태를 아직 확인하지 못했습니다')).toBeInTheDocument();
+      : '휴대폰 연결 상태 확인 불가')).toBeInTheDocument();
   });
 
   it('offers lock setup only for an explicitly missing lock with native capability', async () => {
@@ -186,7 +186,7 @@ describe('pairing progress in the device collection', () => {
         const onPair = vi.fn();
         const view = render(<DevicesPanel snapshot={snapshot} disabled={false} onPair={onPair} onRemove={vi.fn()} />);
         expect(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('status')).toHaveTextContent(pairing.message);
-        expect(screen.queryByText(ko.pairingUnavailable)).not.toBeInTheDocument();
+        expect(screen.queryByText('지금은 새 기기를 연결할 수 없습니다.')).not.toBeInTheDocument();
         if (devices === 'unavailable') expect(screen.getByRole('heading', { name: ko.devicesUnavailable })).toBeInTheDocument();
         const button = screen.getByRole('button', { name: ko.pairPhone });
         expect(button).toBeDisabled(); fireEvent.click(button);
@@ -246,7 +246,7 @@ describe('Windows relay address settings', () => {
     const snapshot = qaCase('desktop-running').snapshot;
     const onSetRelay = vi.fn().mockResolvedValue(snapshot);
     render(<RelaySettings snapshot={snapshot} disabled={false} onSetRelay={onSetRelay} />);
-    fireEvent.click(screen.getByRole('button', { name: '이 PC의 내장 중계 사용' }));
+    fireEvent.click(screen.getByRole('button', { name: '이 PC 사용' }));
     await waitFor(() => expect(onSetRelay).toHaveBeenCalledWith('embedded'));
     expect(screen.getByRole('textbox', { name: ko.relayAddress })).toHaveValue('');
   });
@@ -486,7 +486,7 @@ describe('destructive action confirmation', () => {
     const result = deferred<AppSnapshot>();
     const removeDevice = vi.fn<ControllerBridge['removeDevice']>(() => result.promise);
     render(<App bridge={bridgeFor(fixture.snapshot, { removeDevice })} initialPage={fixture.page} />);
-    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 연결 해제' });
+    const trigger = await screen.findByRole('button', { name: '화면 예시 PC 등록 삭제' });
     await user.click(trigger);
     let dialog = screen.getByRole('dialog', { name: '이 PC의 등록을 휴대폰에서 삭제하시겠습니까?' });
     expect(within(dialog).getByRole('button', { name: ko.cancel })).toHaveFocus();
@@ -557,7 +557,7 @@ describe('destructive action confirmation', () => {
     const controlService = vi.fn<ControllerBridge['controlService']>(() => pending.promise);
     render(<App bridge={bridgeFor(snapshot, { controlService })} />);
     await user.click(await screen.findByRole('button', { name: 'PC 연결 기능 제거' }));
-    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능 제거' });
+    const dialog = screen.getByRole('dialog', { name: 'PC 연결 기능을 제거하시겠습니까?' });
     expect(dialog).toHaveTextContent('PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다.');
     expect(dialog).not.toHaveTextContent(/키|데이터|기록/u);
     expect(controlService).not.toHaveBeenCalled();
@@ -570,7 +570,7 @@ describe('destructive action confirmation', () => {
       await pending.promise;
     });
     expect(await screen.findByRole('heading', { name: ko.serviceMissing })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'PC 연결 기능 설치' })).toBeEnabled();
   });
 });

@@ -5,12 +5,12 @@ import { directConnectionState, hasLiveEmbeddedListener, pairedPhonesDisconnecte
 import type { InternetState } from './directConnection';
 
 const stateCopy: Record<InternetState, string> = {
-  discovering: '외부 연결 경로 확인 중',
+  discovering: '외부 주소 확인 중',
   lan_only: '외부에서 접속할 주소가 없음',
   candidate: '외부에서 접속할 주소가 있음',
-  unavailable: '외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.',
-  stopped: '외부 연결 준비 중지됨 · PC 상태에서 휴대폰 승인을 켜십시오.',
-  unknown: '외부 연결 상태 확인 불가 · PC 상태를 다시 확인하십시오.',
+  unavailable: '외부 주소를 확인하지 못했습니다. PC의 인터넷 연결과 공유기 설정을 확인하십시오.',
+  stopped: '외부 연결 꺼짐 · 휴대폰 승인을 켜면 다시 준비합니다.',
+  unknown: '외부 연결 상태 확인 불가 · [다시 확인]을 누르십시오.',
 };
 
 const firewallCopy = '휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.';

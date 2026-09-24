@@ -610,11 +610,11 @@ fn running_management_snapshot_presents_two_valid_devices_and_preserves_revision
     assert!(snapshot.relay_configured);
     assert!(snapshot.can_unpair);
     assert_eq!(snapshot.devices.len(), 2);
-    assert_eq!(snapshot.devices[0].name, "01010101번 휴대폰");
+    assert_eq!(snapshot.devices[0].name, "휴대폰 01010101");
     assert_eq!(snapshot.devices[0].revision, 7);
     assert!(snapshot.devices[0].route_present);
     assert!(snapshot.devices[0].connected);
-    assert_eq!(snapshot.devices[1].name, "abababab번 휴대폰");
+    assert_eq!(snapshot.devices[1].name, "휴대폰 abababab");
     assert_eq!(snapshot.devices[1].revision, 19);
     let wire = serde_json::to_value(&snapshot).expect("management snapshot JSON");
     assert_eq!(wire["devices"][0]["revision"], 7);

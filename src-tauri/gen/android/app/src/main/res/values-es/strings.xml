@@ -6,16 +6,16 @@
     <string name="controller_service_channel_description">Indica si la aprobación por teléfono está activa y la aplicación está lista.</string>
     <string name="controller_service_locked">Desbloquee el teléfono para preparar la aplicación.</string>
     <string name="controller_service_preparing">Preparando la aplicación.</string>
-    <string name="controller_service_ready">Los ajustes de la aplicación están disponibles.</string>
+    <string name="controller_service_ready">Aprobación por teléfono activada</string>
     <string name="controller_service_cleanup">Finalizando la operación anterior.</string>
     <string name="controller_service_unavailable">No se pudo preparar la aplicación. Ábrala para comprobar su estado.</string>
     <string name="controller_service_stopping">Desactivando la aprobación por teléfono.</string>
     <string name="request_channel_sound">Avisos de solicitudes · Sonido</string>
     <string name="request_channel_vibration">Avisos de solicitudes · Vibración</string>
     <string name="request_channel_silent">Avisos de solicitudes · Silencio</string>
-    <string name="request_channel_description">Notifica las solicitudes de su equipo.</string>
-    <string name="request_notification_title">Solicitud de aprobación de UAC</string>
-    <string name="request_computer_context">Equipo vinculado</string>
+    <string name="request_channel_description">Notifica las solicitudes de permisos de administrador de su PC.</string>
+    <string name="request_notification_title">Solicitud de aprobación de permisos de administrador</string>
+    <string name="request_computer_context">PC vinculado</string>
     <string name="request_notification_public_body">Abra la aplicación para ver los detalles.</string>
     <string name="request_action_approve">Aprobar</string>
     <string name="request_action_deny">Rechazar</string>
@@ -25,7 +25,7 @@
     <string name="request_permission_missing">Permita las notificaciones de solicitudes.</string>
     <string name="request_notifications_disabled">Las notificaciones de solicitudes están desactivadas.</string>
     <string name="request_notifications_next">Revise los ajustes de notificaciones del teléfono.</string>
-    <string name="approval_auth_title">Aprobar solicitud del equipo</string>
+    <string name="approval_auth_title">Aprobar solicitud del PC</string>
     <string name="approval_auth_description">Autentíquese en el teléfono para aprobar esta solicitud.</string>
     <string name="lock_settings_pending">Los ajustes de seguridad ya se están abriendo.</string>
     <string name="invalid_device_state_arguments">No se pudo procesar esta solicitud. Vuelva a intentarlo en la aplicación.</string>
@@ -42,7 +42,7 @@
     <string name="pairing_scanner_scanning">Apunte la cámara al QR de la pantalla de vinculación del PC.</string>
     <string name="pairing_scanner_reading">Comprobando el QR.</string>
     <string name="pairing_scanner_read">QR de vinculación del PC escaneado.</string>
-    <string name="pairing_scanner_read_detail">El PC aún no está vinculado.</string>
+    <string name="pairing_scanner_read_detail">Comenzando la vinculación con el PC.</string>
     <string name="pairing_scanner_connecting">Conectando con el PC.</string>
     <string name="pairing_scanner_connecting_detail">Espere un momento.</string>
     <string name="pairing_scanner_compare">Compruebe que estos seis dígitos coincidan con los del PC.</string>
@@ -55,11 +55,11 @@
     <string name="pairing_scanner_failed">No se pudo vincular el PC.</string>
     <string name="pairing_scanner_failed_cancelled">Vinculación cancelada.</string>
     <string name="pairing_scanner_failed_expired">Se agotó el tiempo de confirmación. Vuelva a intentarlo en el PC.</string>
-    <string name="pairing_scanner_failed_network">No se pudo conectar con el PC o el servidor de retransmisión. Revise la red e inténtelo de nuevo.</string>
+    <string name="pairing_scanner_failed_network">No se pudo conectar con el PC. Compruebe que el PC está encendido y que el teléfono está en la misma red Wi-Fi que el PC, e inténtelo de nuevo.</string>
     <string name="pairing_scanner_failed_rejected">El PC rechazó la vinculación. Consulte las instrucciones en su pantalla.</string>
     <string name="pairing_scanner_failed_mismatch">La información del PC y del teléfono no coincidía y se detuvo la vinculación. Inténtelo de nuevo.</string>
-    <string name="pairing_scanner_failed_storage">No se pudo guardar la información de vinculación en el teléfono.</string>
-    <string name="pairing_scanner_failed_unavailable">La vinculación no está disponible ahora.</string>
+    <string name="pairing_scanner_failed_storage">No se pudo guardar la información de vinculación en el teléfono. Cierre y vuelva a abrir la aplicación, e inténtelo de nuevo.</string>
+    <string name="pairing_scanner_failed_unavailable">La vinculación no está disponible ahora. Cierre esta pantalla, compruebe que la aprobación por teléfono está activada e inténtelo de nuevo.</string>
     <string name="pairing_scanner_invalid">No se pudo leer este QR. Compruebe que sea el de la pantalla de vinculación del PC y vuelva a abrir esta pantalla.</string>
     <string name="pairing_scanner_expired">Se agotó el tiempo de escaneo. Cierre y vuelva a abrir esta pantalla.</string>
     <string name="pairing_scanner_closed">Escaneo de QR finalizado.</string>
@@ -73,5 +73,5 @@
     <string name="request_notification_summary">%1$s\n%2$s</string>
     <string name="pairing_usb_title">Conectar PC por USB</string>
     <string name="pairing_usb_waiting">Conecte el cable, elija USB en el PC y permita el acceso en Android. Espera máxima: 30 segundos.</string>
-    <string name="pairing_usb_unavailable">No se pudieron leer los datos USB. Compruebe el cable y el permiso USB, o conecte mediante QR.</string>
+    <string name="pairing_usb_unavailable">No se pudieron recibir los datos de conexión del PC. Compruebe el cable y el permiso USB, o conecte mediante QR.</string>
 </resources>

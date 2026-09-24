@@ -6,16 +6,16 @@
     <string name="controller_service_channel_description">顯示手機核准是否開啟以及應用程式是否就緒。</string>
     <string name="controller_service_locked">解鎖手機後將準備應用程式。</string>
     <string name="controller_service_preparing">正在準備應用程式。</string>
-    <string name="controller_service_ready">可以使用應用程式設定。</string>
+    <string name="controller_service_ready">手機核准已開啟</string>
     <string name="controller_service_cleanup">正在結束上一次操作。</string>
     <string name="controller_service_unavailable">無法準備應用程式。請開啟應用程式查看狀態。</string>
     <string name="controller_service_stopping">正在關閉手機核准。</string>
     <string name="request_channel_sound">要求通知 · 音效</string>
     <string name="request_channel_vibration">要求通知 · 震動</string>
     <string name="request_channel_silent">要求通知 · 靜音</string>
-    <string name="request_channel_description">通知您電腦傳來的要求。</string>
-    <string name="request_notification_title">UAC 核准要求</string>
-    <string name="request_computer_context">已配對的電腦</string>
+    <string name="request_channel_description">通知您 PC 傳來的系統管理員權限要求。</string>
+    <string name="request_notification_title">系統管理員權限核准要求</string>
+    <string name="request_computer_context">已配對的 PC</string>
     <string name="request_notification_public_body">請開啟應用程式查看詳細資料。</string>
     <string name="request_action_approve">核准</string>
     <string name="request_action_deny">拒絕</string>
@@ -25,7 +25,7 @@
     <string name="request_permission_missing">請允許要求通知。</string>
     <string name="request_notifications_disabled">要求通知已關閉。</string>
     <string name="request_notifications_next">請檢查手機的通知設定。</string>
-    <string name="approval_auth_title">核准電腦要求</string>
+    <string name="approval_auth_title">核准 PC 要求</string>
     <string name="approval_auth_description">請在手機上完成身分驗證以核准此要求。</string>
     <string name="lock_settings_pending">正在開啟安全性設定。</string>
     <string name="invalid_device_state_arguments">無法處理此要求。請在應用程式中重試。</string>
@@ -42,7 +42,7 @@
     <string name="pairing_scanner_scanning">請將相機對準電腦配對畫面上的 QR 碼。</string>
     <string name="pairing_scanner_reading">正在檢查 QR 碼。</string>
     <string name="pairing_scanner_read">已掃描電腦配對 QR 碼。</string>
-    <string name="pairing_scanner_read_detail">尚未與電腦配對。</string>
+    <string name="pairing_scanner_read_detail">開始與 PC 配對。</string>
     <string name="pairing_scanner_connecting">正在連線至電腦。</string>
     <string name="pairing_scanner_connecting_detail">請稍候。</string>
     <string name="pairing_scanner_compare">請確認這六位數字與電腦上顯示的一致。</string>
@@ -55,11 +55,11 @@
     <string name="pairing_scanner_failed">無法與電腦配對。</string>
     <string name="pairing_scanner_failed_cancelled">已取消配對。</string>
     <string name="pairing_scanner_failed_expired">確認已逾時。請在電腦上重試。</string>
-    <string name="pairing_scanner_failed_network">無法連線至電腦或轉送伺服器。請檢查網路後重試。</string>
+    <string name="pairing_scanner_failed_network">無法連線至 PC。請確認 PC 已開機，且手機與 PC 連線同一個 Wi-Fi，然後重試。</string>
     <string name="pairing_scanner_failed_rejected">電腦拒絕了配對。請查看電腦螢幕上的指示。</string>
     <string name="pairing_scanner_failed_mismatch">電腦與手機的資訊不一致，已停止配對。請重試。</string>
-    <string name="pairing_scanner_failed_storage">無法在手機上儲存配對資訊。</string>
-    <string name="pairing_scanner_failed_unavailable">目前無法進行配對。</string>
+    <string name="pairing_scanner_failed_storage">無法在手機上儲存配對資訊。請關閉並重新開啟應用程式後重試。</string>
+    <string name="pairing_scanner_failed_unavailable">目前無法進行配對。請關閉此畫面，確認手機核准已開啟後重試。</string>
     <string name="pairing_scanner_invalid">無法讀取此 QR 碼。請確認它來自電腦配對畫面，再重新開啟此畫面。</string>
     <string name="pairing_scanner_expired">掃描已逾時。請關閉並重新開啟此畫面。</string>
     <string name="pairing_scanner_closed">QR 碼掃描已結束。</string>
@@ -73,5 +73,5 @@
     <string name="request_notification_summary">%1$s\n%2$s</string>
     <string name="pairing_usb_title">透過 USB 連線至 PC</string>
     <string name="pairing_usb_waiting">連接傳輸線，在 PC 上選擇 USB，並在 Android 上允許存取。最多等待 30 秒。</string>
-    <string name="pairing_usb_unavailable">無法讀取 USB 連線資訊。請檢查傳輸線和 USB 權限，或透過 QR 碼連線。</string>
+    <string name="pairing_usb_unavailable">無法接收 PC 的連線資訊。請檢查傳輸線和 USB 權限，或透過 QR 碼連線。</string>
 </resources>

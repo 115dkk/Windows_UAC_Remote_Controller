@@ -191,7 +191,7 @@ describe('native request presentation integration', () => {
     return { wake, watchRequests };
   }
   const settled = () => screen.findByRole('button', { name: ko.refresh });
-  const busyOwner = { code: 'app_busy', message: '앞서 요청한 작업이 아직 끝나지 않았어요.', nextAction: '작업이 끝난 뒤 다시 시도해 주세요.' };
+  const busyOwner = { code: 'app_busy', message: '앱이 다른 작업을 처리하는 중입니다.', nextAction: '잠시 후 다시 시도하십시오.' };
 
   it('shows a request the native owner announces without waiting for the periodic read', async () => {
     const empty = { ...pending(), requests: [] };
@@ -239,9 +239,9 @@ describe('native request presentation integration', () => {
     await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
     await settled();
     expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
-    expect(screen.queryByText(/앞서 요청한 작업이 아직 끝나지 않았/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/앱이 다른 작업을 처리하는 중/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: ko.refresh }));
-    expect(await screen.findByText(/앞서 요청한 작업이 아직 끝나지 않았/u)).toBeInTheDocument();
+    expect(await screen.findByText(/앱이 다른 작업을 처리하는 중/u)).toBeInTheDocument();
   });
 
   it('reads details after the snapshot read that holds the native admission instead of failing', async () => {

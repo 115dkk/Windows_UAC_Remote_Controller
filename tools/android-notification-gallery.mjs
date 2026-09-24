@@ -90,7 +90,7 @@ export function checkNotificationUi(xml, selected, expectedStatus) {
   if (!cases.includes(selected) || typeof xml !== 'string' || xml.length > 1024 * 1024 || !xml.includes('<hierarchy')) throw new Error('Missing bounded actual UI dump.');
   const rootNode = xml.match(/<node\b[^>]*>/u)?.[0];
   if (!rootNode?.includes('package="com.android.systemui"')) throw new Error('The notification shade is not the observed UI.');
-  const present = xml.includes('UAC 인증 요청');
+  const present = xml.includes('관리자 권한 승인 요청');
   if (statusCase(selected)) {
     if (!expectedStatus || !hasUiText(xml, expectedStatus.title) || !hasUiText(xml, expectedStatus.body)
         || present || !notificationActionsMatch(xml, selected)) throw new Error('The selected action-free status notification is not visible.');

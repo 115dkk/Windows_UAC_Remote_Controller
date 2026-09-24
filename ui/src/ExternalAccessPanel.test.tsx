@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, ExternalAccessFailure, ExternalAccessInput, ExternalCandidateSource } from './contracts';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
-import { parseFixedAddress, parsePort } from './externalAccess';
+import { checkFixedAddress, parseFixedAddress, parsePort } from './externalAccess';
 import { locales, setPreviewLanguage, tr } from './i18n';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
@@ -15,15 +15,16 @@ import { ServicePanel } from './StatusPanels';
 
 const reasons: Record<ExternalAccessFailure, string> = {
   no_mapping_protocol: '공유기가 자동 포트 열기(UPnP·PCP)를 지원하지 않거나 꺼져 있습니다. 공유기에서 포트를 직접 열고 아래에서 그 방법을 고르십시오.',
-  private_external_address: '공유기가 받은 주소도 사설 주소입니다. 공유기 앞에 다른 공유기나 통신사 장비가 하나 더 있어, 이 공유기에서 포트를 열어도 외부에서 들어올 수 없습니다.',
+  private_external_address: '공유기가 받은 주소도 사설 주소입니다. 공유기 앞에 다른 공유기나 통신사 장비가 하나 더 있어, 이 공유기에서 포트를 열어도 외부에서 들어올 수 없습니다. 그 장비에서도 같은 포트를 열거나 외부 중계 서버를 사용하십시오.',
   public_address_unavailable: '이 집의 공인 IP를 확인하지 못했습니다. 인터넷 연결을 확인하거나 외부 주소를 직접 입력하십시오.',
 };
 const sources: Record<ExternalCandidateSource, string> = {
-  pcp: 'PCP로 공유기에서 받음', upnp: 'UPnP로 공유기에서 받음', stun: 'STUN 서버로 확인',
+  pcp: '공유기 자동 포트 열기(PCP)', upnp: '공유기 자동 포트 열기(UPnP)', stun: '외부 서버에 물어 확인',
   fixed: '직접 입력', public_interface: '이 PC의 공인 주소',
 };
 const portMessage = '포트는 1에서 65535 사이의 숫자로 입력하십시오.';
-const addressMessage = '공인 IP와 포트를 203.0.113.7:7443 형식으로 입력하십시오.';
+const addressMessage = '공인 IP와 포트를 ‘공인 IP:포트’ 형식으로 입력하십시오.';
+const unreachableMessage = '이 주소로는 외부에서 연결할 수 없습니다. 공유기 관리 페이지에 표시된 공인 IP를 입력하십시오.';
 const forwardTitle = '공유기에서 포트를 직접 열었음';
 const fixedTitle = '외부 주소 직접 입력';
 
@@ -78,7 +79,7 @@ describe('external access status', () => {
     const address = fact('외부 주소');
     expect(address).toHaveTextContent('198.51.100.24:17443');
     expect(address.querySelector('bdi')).toHaveAttribute('dir', 'ltr');
-    expect(fact('확인 방법')).toHaveTextContent(sources[source]);
+    expect(fact('주소를 얻은 방법')).toHaveTextContent(sources[source]);
     const lan = fact('이 PC의 내부 주소');
     expect(lan).toHaveTextContent('192.168.0.23:7443');
     expect(lan.querySelector('bdi')).toHaveAttribute('dir', 'ltr');
@@ -89,14 +90,14 @@ describe('external access status', () => {
   it('shows none for a missing source and unknown for a missing LAN address', () => {
     const snapshot = qaCase('desktop-network-auto-no-mapping').snapshot;
     panel({ ...snapshot, externalAccess: { ...snapshot.externalAccess!, lanAddress: null } });
-    expect(fact('확인 방법')).toHaveTextContent('없음');
+    expect(fact('주소를 얻은 방법')).toHaveTextContent('없음');
     expect(fact('이 PC의 내부 주소')).toHaveTextContent('확인 불가');
   });
 
   it.each(['missing', 'stale'] as const)('does not claim an absent address from a %s observation', (condition) => {
     const source = qaCase('desktop-network-auto-no-mapping').snapshot;
     panel(condition === 'missing' ? { ...source, externalAccess: null } : source, undefined, condition === 'stale');
-    for (const label of ['외부 주소', '확인 방법', '이 PC의 내부 주소']) expect(fact(label)).toHaveTextContent('확인 불가');
+    for (const label of ['외부 주소', '주소를 얻은 방법', '이 PC의 내부 주소']) expect(fact(label)).toHaveTextContent('확인 불가');
     expect(screen.queryByText(reasons.no_mapping_protocol)).not.toBeInTheDocument();
     expect(screen.queryByText('없음')).not.toBeInTheDocument();
   });
@@ -104,9 +105,9 @@ describe('external access status', () => {
   it('keeps sections in the pinned order with the relay controls and firewall guidance last', () => {
     panel(qaCase('desktop-network-auto-upnp').snapshot);
     expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent))
-      .toEqual(['현재 상태', '외부에서 연결하는 방법', '중계']);
-    const relay = screen.getByRole('region', { name: '중계' });
-    expect(within(relay).getByRole('button', { name: '내장 중계 선택됨' })).toBeDisabled();
+      .toEqual(['현재 상태', '외부에서 연결하는 방법', '휴대폰이 접속할 곳']);
+    const relay = screen.getByRole('region', { name: '휴대폰이 접속할 곳' });
+    expect(within(relay).getByRole('button', { name: '이 PC 사용 중' })).toBeDisabled();
     expect(within(relay).getByRole('form', { name: ko.relayAddress })).toBeInTheDocument();
     const guidance = screen.getByText('휴대폰이 연결되지 않으면 V3나 방화벽이 UAC 원격 승인기 서비스(uac-service.exe)의 연결 허용을 묻고 있는지 확인하십시오.');
     expect(relay.compareDocumentPosition(guidance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -164,8 +165,8 @@ describe('external access form', () => {
   });
 
   it.each(['', '203.0.113.7', '203.0.113.7:0', '203.0.113.7:70000', '203.0.113.300:7443', 'router.example:7443',
-    '192.168.0.23:7443', '10.0.0.5:7443', '127.0.0.1:7443', '100.64.1.2:7443', '[fe80::1]:7443', '2001:db8::1:7443', '203.0.113.07:7443',
-  ])('rejects the address %j with the pinned message and no bridge call', async (value) => {
+    '2001:db8::1:7443', '203.0.113.07:7443', '[2001:db8::1]', '[2001:4860:4860::8888]:0', '[2001:4860:4860::8888%3]:7443',
+  ])('rejects the address shape %j with the pinned message and no bridge call', async (value) => {
     const user = userEvent.setup();
     const onSave = panel(qaCase('desktop-network-auto-no-mapping').snapshot);
     await user.click(screen.getByRole('radio', { name: fixedTitle }));
@@ -174,15 +175,39 @@ describe('external access form', () => {
     await user.click(methodSave());
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByText(addressMessage)).toBeVisible();
+    expect(screen.queryByText(unreachableMessage)).not.toBeInTheDocument();
     expect(address).toHaveAttribute('aria-invalid', 'true');
     expect(address).toHaveAccessibleDescription(addressMessage);
+  });
+
+  // Every range `direct_network::global` refuses, so the PC never has to refuse
+  // an address the form accepted. The placeholder itself is a documentation address.
+  it.each([
+    '203.0.113.7:7443', '192.0.2.1:7443', '198.51.100.1:7443', '192.0.0.1:7443', '192.0.0.9:7443', '192.0.1.1:7443',
+    '192.88.99.1:7443', '198.18.0.1:7443', '198.19.255.254:7443', '192.168.0.23:7443', '10.0.0.5:7443',
+    '172.16.0.1:7443', '172.31.255.255:7443', '127.0.0.1:7443', '100.64.1.2:7443', '100.127.255.255:7443',
+    '169.254.1.1:7443', '0.1.2.3:7443', '224.0.0.1:7443', '239.1.1.1:7443', '255.255.255.255:7443',
+    '[fe80::1]:7443', '[::1]:7443', '[fc00::1]:7443', '[::ffff:8.8.8.8]:7443', '[2001:db8::1]:7443',
+    '[2001::1]:7443', '[2001:1ff::1]:7443', '[2002::1]:7443', '[3fff::1]:7443', '[3fff:fff::1]:7443', '[ff02::1]:7443',
+  ])('refuses the non-global address %j with the pinned message and no bridge call', async (value) => {
+    const user = userEvent.setup();
+    const onSave = panel(qaCase('desktop-network-auto-no-mapping').snapshot);
+    await user.click(screen.getByRole('radio', { name: fixedTitle }));
+    const address = screen.getByRole('textbox', { name: '외부 주소' });
+    fireEvent.change(address, { target: { value } });
+    await user.click(methodSave());
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByText(unreachableMessage)).toBeVisible();
+    expect(screen.queryByText(addressMessage)).not.toBeInTheDocument();
+    expect(address).toHaveAttribute('aria-invalid', 'true');
+    expect(address).toHaveAccessibleDescription(unreachableMessage);
   });
 
   it.each([
     ['desktop-network-forward-stun', '자동', undefined, { mode: 'automatic' }],
     ['desktop-network-auto-no-mapping', forwardTitle, '17443', { mode: 'router_forward', externalPort: 17443 }],
     ['desktop-network-auto-no-mapping', forwardTitle, undefined, { mode: 'router_forward', externalPort: 7443 }],
-    ['desktop-network-auto-no-mapping', fixedTitle, ' 203.0.113.7:7443 ', { mode: 'fixed', fixedAddress: '203.0.113.7:7443' }],
+    ['desktop-network-auto-no-mapping', fixedTitle, ' 1.2.3.4:7443 ', { mode: 'fixed', fixedAddress: '1.2.3.4:7443' }],
     ['desktop-network-auto-no-mapping', fixedTitle, '[2001:4860:4860::8888]:7443', { mode: 'fixed', fixedAddress: '[2001:4860:4860::8888]:7443' }],
   ] as const)('sends the pinned input shape from %s via %s', async (fixture, option, entry, expected) => {
     const user = userEvent.setup();
@@ -261,8 +286,19 @@ describe('external access form', () => {
   it('parses only numeric ports and address shapes', () => {
     expect(parsePort(' 443 ')).toBe(443);
     expect(parsePort('1e3')).toBeNull();
-    expect(parseFixedAddress('203.0.113.7:7443')).toBe('203.0.113.7:7443');
+    expect(parseFixedAddress('1.2.3.4:7443')).toBe('1.2.3.4:7443');
+    expect(parseFixedAddress('198.17.255.255:7443')).toBe('198.17.255.255:7443');
+    expect(parseFixedAddress('198.20.0.1:7443')).toBe('198.20.0.1:7443');
+    expect(parseFixedAddress('100.63.255.255:7443')).toBe('100.63.255.255:7443');
+    expect(parseFixedAddress('172.32.0.1:7443')).toBe('172.32.0.1:7443');
+    expect(parseFixedAddress('223.255.255.255:7443')).toBe('223.255.255.255:7443');
     expect(parseFixedAddress('[2001:4860:4860::8888]:443')).toBe('[2001:4860:4860::8888]:443');
+    expect(parseFixedAddress('[2001:200::1]:443')).toBe('[2001:200::1]:443');
+    expect(parseFixedAddress('[3fff:1000::1]:443')).toBe('[3fff:1000::1]:443');
+    expect(parseFixedAddress('[2400:cb00::1]:443')).toBe('[2400:cb00::1]:443');
+    expect(checkFixedAddress('203.0.113.7:7443')).toEqual({ error: 'address_unreachable' });
+    expect(checkFixedAddress('[2001:db8::10]:443')).toEqual({ error: 'address_unreachable' });
+    expect(checkFixedAddress('203.0.113.7:7443:1')).toEqual({ error: 'address' });
     expect(parseFixedAddress('203.0.113.7:7443:1')).toBeNull();
   });
 });
@@ -292,7 +328,7 @@ describe('navigation into the external access tab', () => {
     const button = screen.queryByRole('button', { name: '외부 연결 설정' });
     if (!offered) { expect(button).not.toBeInTheDocument(); return; }
     expect(screen.getByText(internetState === 'lan_only' ? '외부에서 접속할 주소가 없음'
-      : '외부 연결 경로를 준비하지 못했습니다. PC와 공유기의 네트워크 설정을 확인하십시오.')).toBeVisible();
+      : '외부 주소를 확인하지 못했습니다. PC의 인터넷 연결과 공유기 설정을 확인하십시오.')).toBeVisible();
     expect(button).toHaveClass('secondary');
     fireEvent.click(button!);
     expect(onOpenNetwork).toHaveBeenCalledOnce();
@@ -308,12 +344,12 @@ describe('navigation into the external access tab', () => {
   it('points the phone page to the tab when pairing waits for the relay', async () => {
     const source = qaCase('desktop-running').snapshot;
     render(<App bridge={createQaBridge({ ...source, canPair: true, relayConfigured: false })} initialPage="devices" />);
-    expect(await screen.findByText('네트워크 연결을 확인하고 외부 연결 화면에서 내장 중계를 사용한 뒤 QR 코드를 표시하십시오.')).toBeVisible();
-    expect(screen.queryByRole('button', { name: '이 PC의 내장 중계 사용' })).not.toBeInTheDocument();
+    expect(await screen.findByText('휴대폰이 접속할 준비가 되지 않아 QR 코드를 표시할 수 없습니다. PC의 네트워크 연결과 [외부 연결] 설정을 확인하십시오.')).toBeVisible();
+    expect(screen.queryByRole('button', { name: '이 PC 사용' })).not.toBeInTheDocument();
     expect(screen.queryByRole('form', { name: ko.relayAddress })).not.toBeInTheDocument();
     fireEvent.click(within(screen.getByRole('region', { name: ko.pairPhone })).getByRole('button', { name: '외부 연결 설정' }));
     expect(screen.getByRole('heading', { level: 1, name: '외부 연결' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '이 PC의 내장 중계 사용' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '이 PC 사용' })).toBeEnabled();
   });
 
   it('does not offer the relay shortcut once the relay is configured', async () => {

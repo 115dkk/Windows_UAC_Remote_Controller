@@ -13,17 +13,17 @@ const decisions: Record<string, { readonly title: string; readonly body: string;
   'phone-decision-sending': { title: '거부를 선택했습니다', body: 'PC로 보내는 중입니다.', listed: true },
   'phone-decision-awaiting-pc': { title: '승인을 보냈습니다', body: 'PC의 처리 결과를 기다리는 중입니다.', listed: true },
   'phone-decision-authentication-cancelled': { title: '본인 확인을 취소했습니다', body: '요청이 남아 있으면 다시 선택할 수 있습니다.', listed: true },
-  'phone-decision-approved': { title: 'PC에서 승인했습니다', body: 'PC가 승인을 적용했습니다.', listed: false },
-  'phone-decision-denied': { title: 'PC에서 거부했습니다', body: 'PC가 요청을 취소했습니다.', listed: false },
+  'phone-decision-approved': { title: '승인 완료', body: 'PC에 승인을 적용했습니다.', listed: false },
+  'phone-decision-denied': { title: '거부 완료', body: 'PC에서 요청을 취소했습니다.', listed: false },
   'phone-decision-failed': { title: 'PC에서 처리하지 못했습니다', body: 'PC 화면에서 요청 창을 확인하십시오.', listed: false },
   'phone-decision-cancelled': { title: 'PC에서 요청이 닫혔습니다', body: 'PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.', listed: false },
   'phone-decision-expired': { title: '요청 시간이 지났습니다', body: '필요하면 PC에서 다시 요청하십시오.', listed: false },
-  'phone-decision-pc-completed': { title: 'PC에서 처리를 마쳤습니다', body: 'PC가 요청을 끝냈지만 승인 여부는 알려 주지 않았습니다.', listed: false },
+  'phone-decision-pc-completed': { title: 'PC에서 요청이 끝났습니다', body: '처리 결과는 PC에서 확인하십시오.', listed: false },
   'phone-decision-local-unconfirmed': { title: 'PC의 결과를 아직 확인하지 못했습니다', body: '선택이 PC에 전달되었는지 확인하지 못했습니다. 요청이 남아 있으면 다시 선택할 수 있습니다.', listed: false },
 };
 const failed = 'PC에 연결하지 못했습니다';
 const guidance: Record<string, readonly string[]> = {
-  'phone-connection-refused': ['PC에 닿았지만 휴대폰 승인이 연결을 받지 않습니다. PC에서 휴대폰 승인이 켜져 있는지 확인하십시오.'],
+  'phone-connection-refused': ['PC는 응답했지만 휴대폰 승인이 연결을 받지 않습니다. PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.'],
   'phone-connection-no-answer': ['PC의 휴대폰 승인이 응답하지 않습니다. PC 앱에서 상태를 확인하거나 PC를 다시 시작하십시오.'],
   'phone-connection-unreachable': ['PC가 켜져 있고 절전 상태가 아닌지 확인하십시오.', '같은 Wi-Fi에 있다면 PC에 V3나 방화벽의 연결 허용 알림이 떠 있는지 확인하십시오.',
     '집 밖에서 쓰려면 PC 앱의 [외부 연결]을 설정한 뒤 이 휴대폰을 집 Wi-Fi에 한 번 연결하십시오.'],

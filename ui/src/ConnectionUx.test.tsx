@@ -32,7 +32,7 @@ describe('pre-approval connection guidance', () => {
     fireEvent.click(entry);
     expect(beginPairing).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: ko.pairingPcOpenStatus }));
-    expect(screen.getByRole('heading', { level: 1, name: ko.homeTitle })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1, name: ko.appName })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: ko.network }));
     expect(within(screen.getByRole('form', { name: ko.relayAddress })).getByText(ko.pairingPcInstallFirst)).toBeVisible();
   });

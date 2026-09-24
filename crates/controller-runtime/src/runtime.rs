@@ -59,22 +59,24 @@ impl From<PlatformError> for AppIssue {
             PlatformError::Unsupported => Self {
                 code: "service_control_unsupported",
                 message: "이 기기에서는 PC의 휴대폰 승인을 켜거나 끌 수 없습니다.",
-                next_action: Some("Windows PC에서 앱을 열어 주세요."),
+                next_action: Some("Windows PC에서 앱을 여십시오."),
             },
             PlatformError::StatusUnavailable => Self {
                 code: "service_status_unavailable",
                 message: "PC에서 휴대폰 승인이 켜져 있는지 확인하지 못했습니다.",
-                next_action: Some("PC의 설치 상태를 확인한 뒤 새로고침해 주세요."),
+                next_action: Some(
+                    "[다시 확인]을 누르십시오. 계속되면 설치 프로그램을 다시 실행해 앱을 복구하십시오.",
+                ),
             },
             PlatformError::HelperUnavailable => Self {
                 code: "service_helper_unavailable",
                 message: "휴대폰 승인을 켜고 끄는 데 필요한 앱 파일을 확인하지 못했습니다.",
-                next_action: Some("설치 프로그램으로 앱의 설치 상태를 확인해 주세요."),
+                next_action: Some("설치 프로그램을 다시 실행해 앱을 복구하십시오."),
             },
             PlatformError::ControlFailed => Self {
                 code: "service_control_failed",
                 message: "요청한 작업이 완료됐는지 확인하지 못했습니다.",
-                next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
+                next_action: Some("[다시 확인]을 눌러 휴대폰 승인이 켜져 있는지 확인하십시오."),
             },
         }
     }
@@ -368,7 +370,7 @@ impl AppRuntime {
                         AppIssue {
                             code: "service_status_stale",
                             message: "휴대폰 승인의 현재 상태를 확인하지 못했습니다. 이전 상태를 표시합니다.",
-                            next_action: Some("새로고침해 현재 상태를 확인해 주세요."),
+                            next_action: Some("[다시 확인]을 누르십시오."),
                         }
                     } else {
                         error.into()
@@ -409,14 +411,14 @@ impl AppRuntime {
             return Err(AppIssue {
                 code: "service_installer_required",
                 message: "휴대폰 승인을 켜고 끄는 데 필요한 파일이 설치되지 않아 작업을 시작하지 않았습니다.",
-                next_action: Some("Windows 설치 프로그램으로 앱을 설치해 주세요."),
+                next_action: Some("Windows 설치 프로그램으로 앱을 설치하십시오."),
             });
         }
         if !service.allowed_actions.contains(&action) {
             return Err(AppIssue {
                 code: "service_action_unavailable",
                 message: "휴대폰 승인의 현재 상태에서는 이 작업을 시작할 수 없습니다.",
-                next_action: Some("새로고침해 현재 상태를 확인해 주세요."),
+                next_action: Some("[다시 확인]을 누르십시오."),
             });
         }
         let outcome = self.adapter.control_service(action).map_err(|error| {
@@ -465,7 +467,7 @@ impl AppRuntime {
             return Err(AppIssue {
                 code: "mobile_readiness_unsupported",
                 message: "이 기기에서는 휴대폰 잠금 상태를 확인할 수 없습니다.",
-                next_action: Some("Android 휴대폰에서 앱을 열어 주세요."),
+                next_action: Some("Android 휴대폰에서 앱을 여십시오."),
             });
         }
         self.mobile = readiness;
@@ -551,7 +553,7 @@ impl AppRuntime {
             return Err(AppIssue {
                 code: "device_removal_unavailable",
                 message: "현재 휴대폰 목록에서는 이 휴대폰을 제거할 수 없습니다.",
-                next_action: Some("목록을 새로 확인한 뒤 다시 시도해 주세요."),
+                next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
             });
         }
         self.adapter
@@ -589,7 +591,7 @@ impl AppRuntime {
             return Err(AppIssue {
                 code: "relay_change_unavailable",
                 message: "휴대폰 승인의 현재 상태에서는 중계 서버 주소를 저장할 수 없습니다.",
-                next_action: Some("상태를 새로 확인한 뒤 다시 시도해 주세요."),
+                next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
             });
         }
         match address {
@@ -646,7 +648,7 @@ impl AppRuntime {
             return Err(AppIssue {
                 code: "external_access_change_unavailable",
                 message: "휴대폰 승인의 현재 상태에서는 외부 연결 설정을 저장할 수 없습니다.",
-                next_action: Some("상태를 새로 확인한 뒤 다시 시도해 주세요."),
+                next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
             });
         }
         self.adapter
@@ -767,13 +769,13 @@ impl AppRuntime {
             ControlProgress::Idle => None,
             ControlProgress::StillRunning => Some(AppIssue {
                 code: "service_control_pending",
-                message: "휴대폰 승인 설정 변경이 아직 진행 중일 수 있습니다. 완료 여부는 확인되지 않았습니다.",
-                next_action: Some("Windows에서 작업이 끝난 것을 확인한 뒤 앱을 다시 열어 주세요."),
+                message: "휴대폰 승인 설정 변경이 끝나지 않았습니다.",
+                next_action: Some("잠시 기다린 뒤 앱을 닫았다가 다시 여십시오."),
             }),
             ControlProgress::CompletionUnknown => Some(AppIssue {
                 code: "service_control_completion_unknown",
                 message: "휴대폰 승인 설정 변경이 끝났는지 확인하지 못했습니다.",
-                next_action: Some("Windows에서 작업 상태를 확인한 뒤 앱을 다시 열어 주세요."),
+                next_action: Some("앱을 닫았다가 다시 열어 현재 상태를 확인하십시오."),
             }),
         }
     }
@@ -839,8 +841,11 @@ impl AppRuntime {
         }
         let pairing = self.pairing_view();
         let progress_issue = self.progress_issue().map(|mut issue| {
-            if self.service_issue.is_some_and(|status| status.code == "service_status_stale") {
-                issue.message = "휴대폰 승인의 현재 상태를 확인하지 못했습니다. 이전 상태를 표시하며 설정 변경이 끝났는지도 확인되지 않았습니다.";
+            if self
+                .service_issue
+                .is_some_and(|status| status.code == "service_status_stale")
+            {
+                issue.message = "휴대폰 승인의 현재 상태와 설정 변경 결과를 확인하지 못했습니다.";
             }
             issue
         });
@@ -850,7 +855,7 @@ impl AppRuntime {
                 .then_some(AppIssue {
                     code: "mobile_readiness_unavailable",
                     message: "휴대폰 잠금 상태를 아직 확인하지 못했습니다.",
-                    next_action: Some("앱을 다시 열어 휴대폰 상태를 확인해 주세요."),
+                    next_action: Some("앱을 닫았다가 다시 여십시오."),
                 })
         });
         let management_running = self.last_service.as_ref().is_some_and(|service| {
@@ -1013,7 +1018,7 @@ fn invalid_ipv6_relay(address: SocketAddrV6) -> bool {
 fn management_device_view(device: &ManagementDevice) -> crate::PairedDeviceView {
     crate::PairedDeviceView {
         id: device.id.clone(),
-        name: format!("{}번 휴대폰", &device.id[..8]),
+        name: format!("휴대폰 {}", &device.id[..8]),
         revision: device.revision,
         route_present: device.route_present,
         connected: device.connected,
@@ -1035,8 +1040,10 @@ fn action_reached(action: ServiceAction, state: ObservedServiceState) -> bool {
 fn service_action_failed() -> AppIssue {
     AppIssue {
         code: "service_helper_failed",
-        message: "휴대폰 승인 설정을 변경하는 작업을 완료하지 못했습니다.",
-        next_action: Some("새로고침한 뒤 휴대폰 승인의 설치 상태를 확인해 주세요."),
+        message: "휴대폰 승인을 켜거나 끄지 못했습니다.",
+        next_action: Some(
+            "[다시 확인]을 누른 뒤 다시 시도하십시오. 계속되면 설치 프로그램을 다시 실행해 앱을 복구하십시오.",
+        ),
     }
 }
 
@@ -1049,14 +1056,14 @@ fn invalid_device_issue() -> AppIssue {
     AppIssue {
         code: "invalid_device_id",
         message: "휴대폰 정보를 읽지 못했습니다.",
-        next_action: Some("목록을 새로 확인한 뒤 다시 시도해 주세요."),
+        next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
     }
 }
 
 fn invalid_relay_issue() -> AppIssue {
     AppIssue {
         code: "invalid_relay_address",
-        message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력해 주세요.",
+        message: "중계 서버 주소를 숫자 IP 주소와 포트로 입력하십시오.",
         next_action: Some("예: 192.0.2.10:443 또는 [2001:db8::10]:443"),
     }
 }
@@ -1065,7 +1072,7 @@ fn management_query_issue() -> AppIssue {
     AppIssue {
         code: "service_management_unavailable",
         message: "연결된 휴대폰 정보를 확인하지 못했습니다.",
-        next_action: Some("휴대폰 승인 상태를 확인한 뒤 새로고침해 주세요."),
+        next_action: Some("[다시 확인]을 누르십시오."),
     }
 }
 
@@ -1073,7 +1080,7 @@ fn management_mutation_issue() -> AppIssue {
     AppIssue {
         code: "service_management_failed",
         message: "요청한 설정을 변경하지 못했습니다.",
-        next_action: Some("현재 상태를 새로 확인한 뒤 다시 시도해 주세요."),
+        next_action: Some("[다시 확인]을 누른 뒤 다시 시도하십시오."),
     }
 }
 
@@ -1093,16 +1100,16 @@ impl Drop for AppRuntime {
 fn pairing_in_progress() -> AppIssue {
     AppIssue {
         code: "pairing_in_progress",
-        message: "휴대폰 연결이 이미 진행 중이에요.",
-        next_action: Some("진행 중인 연결 절차가 끝날 때까지 기다려 주세요."),
+        message: "휴대폰 등록이 이미 진행 중입니다.",
+        next_action: Some("진행 중인 등록이 끝난 뒤 다시 시도하십시오."),
     }
 }
 
 fn service_not_ready() -> AppIssue {
     AppIssue {
         code: "service_not_ready",
-        message: "먼저 PC에서 휴대폰 승인을 켜 주세요.",
-        next_action: Some("휴대폰 승인을 켠 뒤 다시 시도해 주세요."),
+        message: "휴대폰 승인이 켜져 있지 않아 등록을 시작하지 못했습니다.",
+        next_action: Some("[PC 상태]에서 휴대폰 승인을 켜십시오."),
     }
 }
 
@@ -1116,28 +1123,28 @@ fn pairing_issue(failure: PairingFailure) -> AppIssue {
         PairingFailure::ServiceNotReady => service_not_ready(),
         PairingFailure::UserCancelled => AppIssue {
             code: "pairing_user_cancelled",
-            message: "관리자 확인을 취소했어요.",
-            next_action: Some("연결하려면 다시 시도해 주세요."),
+            message: "관리자 확인을 취소했습니다.",
+            next_action: Some("등록하려면 [QR 코드 보기]를 다시 누르십시오."),
         },
         PairingFailure::HelperFailed => AppIssue {
             code: "pairing_helper_failed",
-            message: "연결 절차가 중단됐어요. 다시 시도해 주세요.",
-            next_action: Some("잠시 뒤 다시 시도해 주세요."),
+            message: "휴대폰 등록을 마치지 못했습니다.",
+            next_action: Some("[QR 코드 보기]를 다시 누르십시오."),
         },
         PairingFailure::Timeout => AppIssue {
             code: "pairing_timeout",
-            message: "연결 시간이 지났어요. 다시 시도해 주세요.",
-            next_action: Some("연결을 다시 시작해 주세요."),
+            message: "등록 시간이 지났습니다.",
+            next_action: Some("[QR 코드 보기]를 다시 누르십시오."),
         },
         PairingFailure::RelayUnconfigured => AppIssue {
             code: "pairing_relay_unconfigured",
-            message: "중계 서버 주소를 먼저 설정해 주세요.",
-            next_action: Some("관리자에게 중계 서버 설정을 요청해 주세요."),
+            message: "휴대폰이 접속할 준비가 되지 않았습니다.",
+            next_action: Some("PC의 네트워크 연결과 [외부 연결] 설정을 확인하십시오."),
         },
         PairingFailure::Unavailable => AppIssue {
             code: "pairing_unavailable",
-            message: "지금은 연결을 시작할 수 없어요.",
-            next_action: Some("잠시 뒤 다시 시도해 주세요."),
+            message: "휴대폰 등록을 시작하지 못했습니다.",
+            next_action: Some("잠시 후 [QR 코드 보기]를 다시 누르십시오."),
         },
     }
 }
@@ -1146,23 +1153,23 @@ fn pairing_view(phase: PairingUiPhase, failure: Option<PairingFailure>) -> Pairi
     match phase {
         PairingUiPhase::Connecting => PairingView {
             phase: "connecting",
-            message: "PC의 휴대폰 승인에 연결하고 있어요.".to_owned(),
+            message: "휴대폰 등록을 준비하는 중입니다.".to_owned(),
             failure: None,
         },
         PairingUiPhase::WaitingForAdmin => PairingView {
             phase: "waiting_for_admin",
-            message: "관리자 확인 창에서 [예]를 눌러 주세요.".to_owned(),
+            message: "관리자 확인 창에서 [예]를 누르십시오.".to_owned(),
             failure: None,
         },
         PairingUiPhase::HelperRunning => PairingView {
             phase: "helper_running",
-            message: "PC 화면의 연결 안내를 따라 주세요. 휴대폰 승인 앱에서 QR을 읽고 여섯 자리 숫자를 비교합니다."
+            message: "PC 화면의 안내를 따르십시오. 휴대폰의 UAC 원격 승인기에서 QR 코드를 촬영한 뒤 두 기기의 여섯 자리 숫자를 비교합니다."
                 .to_owned(),
             failure: None,
         },
         PairingUiPhase::Finished => PairingView {
             phase: "finished",
-            message: "연결 절차가 끝났어요. 잠시 뒤 목록에서 휴대폰을 확인해 주세요."
+            message: "연결 절차가 끝났습니다. 잠시 뒤 목록에서 휴대폰을 확인하십시오."
                 .to_owned(),
             failure: None,
         },
@@ -1176,19 +1183,27 @@ fn pairing_failure_view(failure: PairingFailure) -> PairingView {
             "USB 연결을 사용할 수 없습니다. USB 드라이버와 케이블을 확인하거나 QR 코드로 연결하십시오.",
             "usb_unavailable",
         ),
-        PairingFailure::ServiceNotReady => {
-            ("PC의 휴대폰 승인이 준비되지 않았어요.", "service_not_ready")
-        }
-        PairingFailure::UserCancelled => ("관리자 확인을 취소했어요.", "user_cancelled"),
+        PairingFailure::ServiceNotReady => (
+            "휴대폰 승인이 켜져 있지 않아 등록을 시작하지 못했습니다. [PC 상태]에서 휴대폰 승인을 켜십시오.",
+            "service_not_ready",
+        ),
+        PairingFailure::UserCancelled => ("관리자 확인을 취소했습니다.", "user_cancelled"),
         PairingFailure::HelperFailed => (
-            "연결 절차가 중단됐어요. 다시 시도해 주세요.",
+            "휴대폰 등록을 마치지 못했습니다. [QR 코드 보기]를 다시 누르십시오.",
             "helper_failed",
         ),
-        PairingFailure::Timeout => ("연결 시간이 지났어요. 다시 시도해 주세요.", "timeout"),
-        PairingFailure::RelayUnconfigured => {
-            ("중계 서버 주소를 먼저 설정해 주세요.", "relay_unconfigured")
-        }
-        PairingFailure::Unavailable => ("지금은 연결을 시작할 수 없어요.", "unavailable"),
+        PairingFailure::Timeout => (
+            "등록 시간이 지났습니다. [QR 코드 보기]를 다시 누르십시오.",
+            "timeout",
+        ),
+        PairingFailure::RelayUnconfigured => (
+            "휴대폰이 접속할 준비가 되지 않았습니다. PC의 네트워크 연결과 [외부 연결] 설정을 확인하십시오.",
+            "relay_unconfigured",
+        ),
+        PairingFailure::Unavailable => (
+            "휴대폰 등록을 시작하지 못했습니다. 잠시 후 [QR 코드 보기]를 다시 누르십시오.",
+            "unavailable",
+        ),
     };
     PairingView {
         phase: "failed",

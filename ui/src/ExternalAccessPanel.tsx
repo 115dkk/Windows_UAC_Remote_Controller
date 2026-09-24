@@ -11,7 +11,7 @@ import { RelayStatusLine } from './RelayStatusLine';
 import { DirectConnectionStatus, FirewallGuidance } from './DirectConnectionStatus';
 import { RelaySettings } from './RelaySettings';
 import {
-  addressInvalidText, DEFAULT_RELAY_PORT, draftChanged, draftFromView, failureText, FIXED_ADDRESS_EXAMPLE,
+  addressInvalidText, addressUnreachableText, DEFAULT_RELAY_PORT, draftChanged, draftFromView, failureText, FIXED_ADDRESS_EXAMPLE,
   inputFromDraft, lanEndpoint, modeText, parsePort, portInvalidText, sourceText,
 } from './externalAccess';
 import type { ExternalAccessDraft } from './externalAccess';
@@ -41,7 +41,7 @@ function ExternalAccessStatus({ snapshot, stale }: { snapshot: AppSnapshot; stal
       <dl className="status-facts">
         <div><dt>{tr('외부 주소')}</dt><dd>{!view ? unknown : view.externalAddress
           ? <bdi dir="ltr">{displayText(view.externalAddress)}</bdi> : tr('없음')}</dd></div>
-        <div><dt>{tr('확인 방법')}</dt><dd>{!view ? unknown : view.source ? tr(sourceText[view.source]) : tr('없음')}</dd></div>
+        <div><dt>{tr('주소를 얻은 방법')}</dt><dd>{!view ? unknown : view.source ? tr(sourceText[view.source]) : tr('없음')}</dd></div>
         <div><dt>{tr('이 PC의 내부 주소')}</dt><dd>{lan ? <bdi dir="ltr">{displayText(lan)}</bdi> : unknown}</dd></div>
       </dl>
     </div>
@@ -54,7 +54,7 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
 }) {
   // A null draft follows the refreshed native view; a real draft survives refreshes.
   const [draft, setDraft] = useState<ExternalAccessDraft | null>(null);
-  const [fieldError, setFieldError] = useState<'port' | 'address' | null>(null);
+  const [fieldError, setFieldError] = useState<'port' | 'address' | 'address_unreachable' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submitLock = useRef(false);
@@ -105,7 +105,7 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
     void save();
   }
   const portError = fieldError === 'port';
-  const addressError = fieldError === 'address';
+  const addressError = fieldError === 'address' || fieldError === 'address_unreachable';
   const external = parsePort(value.port) ?? relayPort;
   return <section className="network-section" aria-labelledby={`${id}-heading`}>
     <form ref={form} className="network-form" onSubmit={submit} noValidate
@@ -146,7 +146,7 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
                   value={value.address} autoComplete="off" spellCheck={false} aria-invalid={addressError}
                   aria-describedby={addressError ? `${id}-address-error` : undefined}
                   onChange={(event) => edit({ address: event.target.value })} />
-                {addressError && <p id={`${id}-address-error`} className="field-error">{tr(addressInvalidText)}</p>}
+                {addressError && <p id={`${id}-address-error`} className="field-error">{tr(fieldError === 'address_unreachable' ? addressUnreachableText : addressInvalidText)}</p>}
               </div>
             </div>}
           </Fragment>)}</div>
@@ -173,7 +173,7 @@ export function ExternalAccessPanel({ snapshot, disabled, stale = false, onSave,
     <ExternalAccessStatus snapshot={snapshot} stale={stale} />
     <ExternalAccessForm snapshot={snapshot} stale={stale} disabled={disabled} onSave={onSave} />
     <section className="network-section" aria-labelledby={`${id}-relay`}>
-      <h2 id={`${id}-relay`}>{tr('중계')}</h2>
+      <h2 id={`${id}-relay`}>{tr('휴대폰이 접속할 곳')}</h2>
       <RelaySettings snapshot={snapshot} disabled={disabled} onSetRelay={onSetRelay} {...(onOpenStatus ? { onOpenStatus } : {})} />
     </section>
     <FirewallGuidance snapshot={snapshot} stale={stale} className="supporting-text network-guidance" />

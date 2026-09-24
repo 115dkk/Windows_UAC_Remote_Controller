@@ -28,7 +28,7 @@ test('Android notification values are consumer copy; stable resource names and t
   assert.equal(values.get('app_name'), 'UAC 원격 승인기');
   assert.match(read('src-tauri/gen/android/app/src/main/res/values/strings.xml'), /<string name="app_name">UAC Remote Approval<\/string>/u);
   assert.equal(values.get('controller_service_title'), 'UAC 원격 승인기');
-  assert.equal(values.get('controller_service_ready'), '앱 설정을 사용할 수 있습니다.');
+  assert.equal(values.get('controller_service_ready'), '휴대폰 승인 켜짐');
   assert.equal(values.get('controller_service_stopping'), '휴대폰 승인을 끄고 있습니다.');
   assert.equal(values.get('request_notification_summary'), '%1$s\\n%2$s', 'original program/path text is not rewritten');
   assert.deepEqual(['request_action_approve', 'request_action_deny', 'request_action_details'].map((name) => values.get(name)), ['승인', '거부', '자세히 보기']);

@@ -431,8 +431,14 @@ test('source contract defines every custom outcome once in all eleven locales wi
     for (const token of ['기록', '설정', '기기 연결 정보']) assert.ok(korean?.includes(token), `${name} must identify retained ${token}`);
     for (const token of ['history', 'settings', 'device connection information']) assert.ok(english?.includes(token), `${name} must identify retained ${token}`);
   }
-  assert.ok(definitions.get('UacInstallFailed:1042').includes('남아 있을 수'));
-  assert.ok(definitions.get('UacCopyFailed:1042').includes('변경됐거나'));
-  assert.ok(definitions.get('UacStartFailed:1042').includes('실행을 확인하지 못'));
+  // Each failure names what happened and the one step the user can take.
+  assert.ok(definitions.get('UacInstallFailed:1042').includes('설치 프로그램을 다시 실행하십시오.'));
+  assert.ok(definitions.get('UacCopyFailed:1042').includes('앱을 닫은 뒤 설치 프로그램을 다시 실행하십시오.'));
+  assert.ok(definitions.get('UacStartFailed:1042').includes('시작하지 못해 설치를 마치지 못했습니다.'));
   assert.ok(definitions.get('UacDataRetained:1042').includes('다른 파일'));
+  // Formal register only: no conversational endings, and no request to an absent administrator.
+  for (const [key, text] of definitions) {
+    if (!key.endsWith(':1042')) continue;
+    assert.doesNotMatch(text, /(?:주세요|하세요|세요\.|어요|까요\?|관리자에게)/u, `${key} must use the formal register`);
+  }
 });

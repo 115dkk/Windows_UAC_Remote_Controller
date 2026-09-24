@@ -56,12 +56,12 @@ export function RelaySettings({ snapshot, disabled, onSetRelay, onOpenStatus }: 
   }
   if (snapshot.platform !== 'windows') return null;
   return <>
-    <section className="surface pairing-entry auxiliary-card" aria-label={tr('PC 내장 중계')}>
-      <h3>{tr('PC 내장 중계')}</h3>
-      <p className="supporting-text">{tr('중계 기능이 앱에 포함되어 있어요. 기본 설정에서는 PC의 휴대폰 승인을 켜면 함께 실행되며, 앱 창을 닫아도 유지돼요.')}</p>
-      <button type="button" className="button primary" disabled={relayDisabled || submitting || embeddedSelected} onClick={() => { void enableEmbeddedRelay(); }}>{tr(embeddedSelected ? '내장 중계 선택됨' : '이 PC의 내장 중계 사용')}</button>
+    <section className="surface pairing-entry auxiliary-card" aria-label={tr('이 PC (기본)')}>
+      <h3>{tr('이 PC (기본)')}</h3>
+      <p className="supporting-text">{tr('휴대폰 승인이 켜져 있으면 앱 창을 닫아도 휴대폰이 이 PC에 직접 접속합니다.')}</p>
+      <button type="button" className="button primary" disabled={relayDisabled || submitting || embeddedSelected} onClick={() => { void enableEmbeddedRelay(); }}>{tr(embeddedSelected ? '이 PC 사용 중' : '이 PC 사용')}</button>
       {embeddedSelected && snapshot.service?.state === 'stopped' && <>
-        <p className="supporting-text">{tr('내장 중계가 선택되어 있어요. 상태 화면에서 휴대폰 승인을 켜면 중계를 준비해요.')}</p>
+        <p className="supporting-text">{tr('[PC 상태]에서 휴대폰 승인을 켜면 휴대폰이 이 PC에 접속할 수 있습니다.')}</p>
         {onOpenStatus && <button type="button" className="button secondary" disabled={disabled} onClick={onOpenStatus}>{ko.pairingPcOpenStatus}</button>}
       </>}
       {error && <p className="field-error" role="alert">{error}</p>}
@@ -74,7 +74,7 @@ export function RelaySettings({ snapshot, disabled, onSetRelay, onOpenStatus }: 
         aria-describedby={`${id}-relay-hint ${id}-relay-status${relaySaveHint ? ` ${id}-relay-availability` : ''}`} onChange={(event) => { setAddress(event.target.value); setError(null); }} />
       <p id={`${id}-relay-hint`} className="supporting-text">{ko.relayAddressHint}</p>
       <p id={`${id}-relay-status`} className="supporting-text" aria-live="polite">{snapshot.relayStatus
-        ? tr('외부 중계 서버 주소를 저장하면 내장 중계 대신 사용해요.')
+        ? tr('외부 중계 서버 주소를 저장하면 휴대폰이 이 PC 대신 그 서버에 접속합니다.')
         : snapshot.relayConfigured ? ko.relayConfigured : ko.relayUnconfigured}</p>
       <div className="collection-actions"><button type="submit" className="button primary" disabled={relayDisabled || submitting || !address.trim()}>{submitting ? ko.saving : ko.save}</button></div>
       {relaySaveHint && <p id={`${id}-relay-availability`} className="supporting-text">{relaySaveHint}</p>}

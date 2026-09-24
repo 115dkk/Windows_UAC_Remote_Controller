@@ -29,12 +29,12 @@ export function decisionCopy(action: DecisionAction, phase: DecisionPhase): Deci
       body: 'PC로 보내는 중입니다.', icon: 'clock', tone: 'progress' };
     case 'awaiting_pc': return { title: approve ? '승인을 보냈습니다' : '거부를 보냈습니다',
       body: 'PC의 처리 결과를 기다리는 중입니다.', icon: 'clock', tone: 'progress' };
-    case 'approved': return { title: 'PC에서 승인했습니다', body: 'PC가 승인을 적용했습니다.', icon: 'check', tone: 'success' };
-    case 'denied': return { title: 'PC에서 거부했습니다', body: 'PC가 요청을 취소했습니다.', icon: 'close', tone: 'neutral' };
+    case 'approved': return { title: '승인 완료', body: 'PC에 승인을 적용했습니다.', icon: 'check', tone: 'success' };
+    case 'denied': return { title: '거부 완료', body: 'PC에서 요청을 취소했습니다.', icon: 'close', tone: 'neutral' };
     case 'failed': return { title: 'PC에서 처리하지 못했습니다', body: 'PC 화면에서 요청 창을 확인하십시오.', icon: 'alert', tone: 'danger' };
     case 'cancelled': return { title: 'PC에서 요청이 닫혔습니다', body: 'PC에서 직접 처리했거나 요청한 프로그램이 창을 닫았습니다.', icon: 'pc', tone: 'neutral' };
     case 'expired': return { title: '요청 시간이 지났습니다', body: '필요하면 PC에서 다시 요청하십시오.', icon: 'alert', tone: 'warning' };
-    case 'pc_completed': return { title: 'PC에서 처리를 마쳤습니다', body: 'PC가 요청을 끝냈지만 승인 여부는 알려 주지 않았습니다.', icon: 'pc', tone: 'neutral' };
+    case 'pc_completed': return { title: 'PC에서 요청이 끝났습니다', body: '처리 결과는 PC에서 확인하십시오.', icon: 'pc', tone: 'neutral' };
     case 'authentication_cancelled': return { title: '본인 확인을 취소했습니다', body: '요청이 남아 있으면 다시 선택할 수 있습니다.', icon: 'lock', tone: 'neutral' };
     case 'local_unconfirmed': return { title: 'PC의 결과를 아직 확인하지 못했습니다', body: '선택이 PC에 전달되었는지 확인하지 못했습니다. 요청이 남아 있으면 다시 선택할 수 있습니다.', icon: 'alert', tone: 'warning' };
   }

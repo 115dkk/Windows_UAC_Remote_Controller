@@ -39,7 +39,7 @@ function RequestCard({ request, disabled, onDecision, readDetails, initiallyOpen
     <div className="request-context"><Icon name="pc" /><bdi dir="ltr">{displayText(request.computerName)}</bdi></div>
     <p className="eyebrow request-eyebrow">{ko.needsDecision}</p>
     <h2 id={headingId} ref={heading} tabIndex={-1} className="program-name"><bdi dir="ltr">{displayText(request.programName)}</bdi></h2>
-    {[request.programName,request.executablePath,request.computerName].some(hasDirectionControls) && <p className="supporting-text" role="note">{tr('숨은 방향 제어 문자를 눈에 보이게 표시했어요.')}</p>}
+    {[request.programName,request.executablePath,request.computerName].some(hasDirectionControls) && <p className="supporting-text" role="note">{tr('프로그램 이름이나 경로에 글자 순서를 바꾸는 숨은 문자가 있어 [U+…] 형태로 표시했습니다. 요청한 프로그램이 확실하지 않으면 거부하십시오.')}</p>}
     {/* Always mounted, so each change of phase is announced once. The decision
         phase replaces the generic busy text; without one the old text stays. */}
     <div className={phase || !pending ? 'request-result request-status' : 'request-status'} role="status">

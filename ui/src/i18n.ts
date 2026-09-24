@@ -118,6 +118,10 @@ export async function initializeLanguage(): Promise<void> {
   window.addEventListener('languagechange', () => { void refreshLanguage(); });
   window.addEventListener('focus', () => { void refreshLanguage(); });
 }
+/** True only for an exact authored catalogue key, never a prototype property. */
+export function isAuthoredCopy(source: string): boolean {
+  return Object.hasOwn(catalogs.ko, source);
+}
 /** Trusted authored copy only: never pass program/path/request/device data here. */
 export function tr(source: string): string {
   return catalogs[state.locale][source] ?? catalogs.en[source] ?? source;

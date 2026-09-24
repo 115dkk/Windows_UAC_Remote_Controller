@@ -248,14 +248,14 @@ pub(crate) const fn invalid_external_access() -> AppIssue {
     AppIssue {
         code: "invalid_external_access",
         message: "외부 연결 설정을 읽지 못했습니다.",
-        next_action: Some("설정을 다시 고른 뒤 저장해 주세요."),
+        next_action: Some("연결 방법을 다시 선택한 뒤 저장하십시오."),
     }
 }
 
 pub(crate) const fn invalid_external_port() -> AppIssue {
     AppIssue {
         code: "invalid_external_port",
-        message: "포트는 1에서 65535 사이의 숫자로 입력해 주세요.",
+        message: "포트는 1에서 65535 사이의 숫자로 입력하십시오.",
         next_action: None,
     }
 }
@@ -263,8 +263,8 @@ pub(crate) const fn invalid_external_port() -> AppIssue {
 pub(crate) const fn invalid_external_address() -> AppIssue {
     AppIssue {
         code: "invalid_external_address",
-        message: "공인 IP와 포트를 203.0.113.7:7443 형식으로 입력해 주세요.",
-        next_action: Some("사설 주소나 문서용 주소는 외부에서 연결할 수 없습니다."),
+        message: "이 주소로는 외부에서 연결할 수 없습니다.",
+        next_action: Some("공유기 관리 페이지에 표시된 공인 IP와 포트를 입력하십시오."),
     }
 }
 

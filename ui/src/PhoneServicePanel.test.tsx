@@ -108,7 +108,7 @@ describe('Android service controls from actual snapshot capabilities', () => {
   it('labels local activation without claiming that phone requests or a PC connection are ready', async () => {
     render(<App bridge={bridgeFor(qaCase('phone-service-ready').snapshot)} initialPage="schedule" />);
     const panel = await screen.findByRole('region', { name: '휴대폰 승인' });
-    expect(within(panel).getByText('서비스 실행 중')).toBeInTheDocument();
+    expect(within(panel).getByText('휴대폰 승인 켜짐')).toBeInTheDocument();
     expect(within(panel).getByText(ko.phoneServiceReadyBody)).toBeInTheDocument();
     expect(within(panel).getByText('휴대폰을 켤 때 자동 실행')).toBeInTheDocument();
     expect(panel).not.toHaveTextContent(/요청 전송 준비됨/u);
