@@ -8,13 +8,20 @@ use std::{
 };
 
 use android_controller::{MAX_PEER_ASSOCIATIONS, PeerAssociationRef};
-use relay_service::{Registration, RendezvousError, Role, RouteId};
+use relay_service::{Registration, RendezvousCarrier, RendezvousError, Role, RouteId};
 use tokio_util::sync::CancellationToken;
 
 use crate::{BridgeError, MobileController};
 
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// A dial that follows a lost carrier keeps trying this long before it reports
+/// a failure and hands over to the backoff. Nothing wakes maintenance when a
+/// backoff ends, so a PC service restart would otherwise wait for the next
+/// maintenance tick. The presentation waits as long while a dial is in flight.
+const RECOVERY_WINDOW: Duration = Duration::from_secs(120);
+/// Attempts of one recovery dial start at least this far apart.
+const RECOVERY_SPACING: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct NativeConnectivityStatus {
@@ -216,6 +223,18 @@ pub(crate) struct DialRequest {
     pub(crate) route: [u8; 32],
     generation: u64,
     network_stop: CancellationToken,
+    /// Until when this dial retries failed attempts; None for one attempt.
+    recover_until: Option<Instant>,
+}
+
+/// A dial is a recovery dial when nothing failed since this association last
+/// held a carrier, since the network changed or since start.
+fn recovery_deadline(state: &DialState, now: Instant) -> Option<Instant> {
+    if state.failures == 0 {
+        now.checked_add(RECOVERY_WINDOW)
+    } else {
+        None
+    }
 }
 
 pub(crate) struct DialCompletion {
@@ -411,6 +430,7 @@ impl MobileController {
                     route: *route,
                     generation: network.number,
                     network_stop: network.stop.clone(),
+                    recover_until: recovery_deadline(state, now),
                 });
             }
         }
@@ -445,49 +465,88 @@ pub(crate) async fn run_dial(
     intake_stop: CancellationToken,
     request: DialRequest,
 ) -> DialCompletion {
-    // Only the rendezvous wait is asynchronous; stream admission below is a
-    // separate synchronous phase, not a closure inside a select! expansion.
-    // The production JoinSet::spawn call checks the future's Send bound.
-    let attempt = match RouteId::new(request.route) {
-        Ok(route) => {
-            request
-                .network_stop
-                .clone()
-                .run_until_cancelled_owned(connect_candidates(
-                    request.address,
-                    &request.alternatives,
-                    route,
-                    intake_stop,
-                ))
-                .await
-        }
-        Err(_) => None,
-    };
-    // A replaced network or an unusable route says nothing about the PC.
-    let (carrier, failure) = match attempt {
-        Some(Ok(carrier)) => (Some(carrier), None),
-        Some(Err(error)) => (None, NativeDialFailure::classify(error)),
-        None => (None, None),
-    };
-    // The combinator drops the old network's pending socket on cancellation.
-    // Simultaneous completion/cancellation may return a carrier; attachment
-    // still checks this exact token AFTER acquiring owner admission, so it
-    // cannot revive the old transport generation.
-    let attached = carrier
-        .and_then(|carrier| carrier.into_stream().into_std().ok())
-        .and_then(|stream| {
-            stream.set_nonblocking(false).ok()?;
-            Weak::<MobileController>::upgrade(&controller)?
-                .attach_network_stream(request.reference, stream, &request.network_stop)
-                .ok()
-        })
-        .is_some();
+    let outcome = dial(&controller, &intake_stop, &request).await;
     DialCompletion {
         reference: request.reference,
-        outcome: if attached { Ok(()) } else { Err(failure) },
+        outcome,
         generation: request.generation,
         completed_at: Instant::now(),
     }
+}
+
+/// Every attempt of one dial. They keep the candidate order the dial was
+/// created with: the cursor rotated once for the whole dial.
+async fn dial(
+    controller: &Weak<MobileController>,
+    intake_stop: &CancellationToken,
+    request: &DialRequest,
+) -> Result<(), Option<NativeDialFailure>> {
+    // A replaced network, a stopping owner or an unusable route says nothing
+    // about the PC.
+    let Ok(route) = RouteId::new(request.route) else {
+        return Err(None);
+    };
+    let mut failure = None;
+    loop {
+        let began = Instant::now();
+        // Only the rendezvous wait is asynchronous; stream admission below is a
+        // separate synchronous phase, not a closure inside a select! expansion.
+        // The production JoinSet::spawn call checks the future's Send bound.
+        let attempt = request
+            .network_stop
+            .clone()
+            .run_until_cancelled_owned(connect_candidates(
+                request.address,
+                &request.alternatives,
+                route,
+                intake_stop.clone(),
+            ))
+            .await;
+        match attempt {
+            None | Some(Err(RendezvousError::Cancelled)) => return Err(None),
+            Some(Err(error)) => failure = failure.max(NativeDialFailure::classify(error)),
+            Some(Ok(carrier)) => match attach(controller, request, carrier) {
+                Ok(()) => return Ok(()),
+                // Admission held by another native call for a moment: the
+                // PC side re-registers at once, so another attempt can work.
+                Err(BridgeError::Busy) => {}
+                // Any other local refusal shows nothing about the network.
+                Err(_) => return Err(None),
+            },
+        }
+        let next = (began + RECOVERY_SPACING).max(Instant::now());
+        if !request.recover_until.is_some_and(|until| next < until) {
+            return Err(failure);
+        }
+        tokio::select! {
+            biased;
+            () = request.network_stop.cancelled() => return Err(None),
+            () = intake_stop.cancelled() => return Err(None),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(next)) => {}
+        }
+    }
+}
+
+/// The combinator drops the old network's pending socket on cancellation.
+/// Simultaneous completion/cancellation may return a carrier; attachment still
+/// checks this exact token AFTER acquiring owner admission, so it cannot revive
+/// the old transport generation.
+fn attach(
+    controller: &Weak<MobileController>,
+    request: &DialRequest,
+    carrier: RendezvousCarrier,
+) -> Result<(), BridgeError> {
+    let stream = carrier
+        .into_stream()
+        .into_std()
+        .map_err(|_| BridgeError::Closed)?;
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| BridgeError::Closed)?;
+    Weak::<MobileController>::upgrade(controller)
+        .ok_or(BridgeError::Closed)?
+        .attach_network_stream(request.reference, stream, &request.network_stop)
+        .map(|_| ())
 }
 
 /// Only carrier discovery is retried. TLS signing, requests and decisions are
@@ -670,6 +729,7 @@ mod tests {
             route: [9; 32],
             generation: 4,
             network_stop: network_stop.clone(),
+            recover_until: None,
         };
         let job = tokio::spawn(run_dial(Weak::new(), CancellationToken::new(), request));
         // Real rendezvous connection, deliberately no READY. Cancellation is
@@ -703,6 +763,7 @@ mod tests {
                 route: [9; 32],
                 generation: 1,
                 network_stop,
+                recover_until: None,
             },
         )
         .await;
@@ -991,6 +1052,7 @@ mod tests {
                     route: [9; 32],
                     generation: 3,
                     network_stop: CancellationToken::new(),
+                    recover_until: None,
                 },
             ),
         )
@@ -998,5 +1060,217 @@ mod tests {
         .unwrap();
         assert_eq!(completion.outcome, Err(Some(NativeDialFailure::NoAnswer)));
         server.await.unwrap();
+    }
+
+    fn dial_to(
+        address: std::net::SocketAddr,
+        recover_until: Option<Instant>,
+        network_stop: CancellationToken,
+    ) -> DialRequest {
+        DialRequest {
+            reference: reference(),
+            address,
+            alternatives: Vec::new(),
+            route: [9; 32],
+            generation: 5,
+            network_stop,
+            recover_until,
+        }
+    }
+
+    /// One whole phone registration, read the way the relay reads it; None
+    /// when the phone closed first.
+    async fn registration(stream: &tokio::net::TcpStream) -> Option<Vec<u8>> {
+        let expected = Registration::new(Role::Phone, RouteId::new([9; 32]).unwrap()).to_wire();
+        let mut bytes = vec![0; expected.len()];
+        let mut read = 0;
+        while read < bytes.len() {
+            stream.readable().await.ok()?;
+            match stream.try_read(&mut bytes[read..]) {
+                Ok(0) => return None,
+                Ok(count) => read += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(_) => return None,
+            }
+        }
+        Some(bytes)
+    }
+
+    /// A relay that takes each registration and closes without READY. Returns
+    /// how many connections it has accepted.
+    fn relay_without_ready(
+        listener: tokio::net::TcpListener,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = registration(&stream).await;
+            }
+        });
+        accepted
+    }
+
+    #[test]
+    fn a_dial_is_a_recovery_dial_only_before_its_first_failure() {
+        let now = Instant::now();
+        let state = |failures| DialState {
+            generation: 0,
+            in_flight: false,
+            failures,
+            candidate_cursor: 0,
+            retry_at: None,
+            failure: None,
+        };
+        assert_eq!(
+            recovery_deadline(&state(0), now),
+            now.checked_add(RECOVERY_WINDOW)
+        );
+        for failures in [1, 2, u8::MAX] {
+            assert_eq!(recovery_deadline(&state(failures), now), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_dial_makes_one_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = relay_without_ready(listener);
+        let completion = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_dial(
+                Weak::new(),
+                CancellationToken::new(),
+                dial_to(address, None, CancellationToken::new()),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completion.outcome, Err(Some(NativeDialFailure::NoAnswer)));
+        tokio::time::sleep(RECOVERY_SPACING + Duration::from_millis(500)).await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_recovery_dial_retries_until_its_window_ends() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = relay_without_ready(listener);
+        let began = Instant::now();
+        let completion = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_dial(
+                Weak::new(),
+                CancellationToken::new(),
+                dial_to(
+                    address,
+                    Some(began + Duration::from_millis(2_500)),
+                    CancellationToken::new(),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        let elapsed = began.elapsed();
+        assert_eq!(completion.outcome, Err(Some(NativeDialFailure::NoAnswer)));
+        // Attempts start at about 0, 1 and 2 s; a fourth would start after the window.
+        assert!(
+            elapsed >= Duration::from_secs(2) && elapsed < Duration::from_secs(6),
+            "took {elapsed:?}"
+        );
+        let attempts = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(attempts >= 3, "{attempts} attempts");
+    }
+
+    #[tokio::test]
+    async fn a_recovery_dial_reaches_a_relay_that_starts_listening_later() {
+        // Nothing listens here until the relay "restarts" below.
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let began = Instant::now();
+        let dial = tokio::spawn(run_dial(
+            Weak::new(),
+            CancellationToken::new(),
+            dial_to(
+                address,
+                Some(began + Duration::from_secs(20)),
+                CancellationToken::new(),
+            ),
+        ));
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let rebind_limit = Instant::now() + Duration::from_secs(1);
+        let listener = loop {
+            match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => break listener,
+                Err(error) => {
+                    assert!(Instant::now() < rebind_limit, "rebind {address}: {error}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            registration(&stream).await.unwrap(),
+            Registration::new(Role::Phone, RouteId::new([9; 32]).unwrap()).to_wire()
+        );
+        let mut written = 0;
+        while written < relay_service::READY_MARKER.len() {
+            stream.writable().await.unwrap();
+            match stream.try_write(&relay_service::READY_MARKER[written..]) {
+                Ok(0) => panic!("ready marker closed early"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => panic!("ready marker write failed: {error}"),
+            }
+        }
+        let completion = tokio::time::timeout(Duration::from_secs(10), dial)
+            .await
+            .unwrap()
+            .unwrap();
+        // There is no controller to attach to: a local refusal shows nothing.
+        assert_eq!(completion.outcome, Err(None));
+        assert!(
+            began.elapsed() < Duration::from_secs(12),
+            "took {:?}",
+            began.elapsed()
+        );
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn a_network_change_ends_a_recovery_dial_between_attempts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = relay_without_ready(listener);
+        let network_stop = CancellationToken::new();
+        let dial = tokio::spawn(run_dial(
+            Weak::new(),
+            CancellationToken::new(),
+            dial_to(
+                address,
+                Some(Instant::now() + Duration::from_secs(60)),
+                network_stop.clone(),
+            ),
+        ));
+        let limit = Instant::now() + Duration::from_secs(5);
+        while accepted.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < limit, "the first attempt never arrived");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The relay closes at once, so the dial is now waiting for its next attempt.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        network_stop.cancel();
+        let cancelled = Instant::now();
+        let completion = tokio::time::timeout(Duration::from_secs(2), dial)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.outcome, Err(None));
+        assert!(cancelled.elapsed() < Duration::from_secs(2));
     }
 }
