@@ -93,7 +93,8 @@ describe('native request presentation integration', () => {
     const body = (details: string, refreshAfterMillis: number): RequestDetailsView => ({
       version: 1, id: 'synthetic-request-1', programName: '', executablePath: '', details, remainingSeconds: 40, refreshAfterMillis });
     const requestDetails = vi.fn<ControllerBridge['requestDetails']>()
-      .mockResolvedValueOnce(body('FIRST_MINUTE', 60))
+      // Long enough to be observed under a loaded test run, short of findBy's one-second wait.
+      .mockResolvedValueOnce(body('FIRST_MINUTE', 400))
       .mockResolvedValue(body('NEXT_MINUTE', 30000));
     const user = userEvent.setup();
     view(pending(), { requestDetails });
