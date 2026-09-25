@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Public bootstrap bytes only, never a USB authentication/approval protocol.
 #![forbid(unsafe_code)]
-use service_protocol::PairingInvitation;
+use service_protocol::{
+    MAX_PAIRING_INVITATION_BYTES, MIN_PAIRING_INVITATION_BYTES, PairingInvitation,
+};
 
-pub(crate) const MAX_FRAME: usize = 366;
+/// Carries every invitation body the QR carries: v1 (345 or 357 bytes) and v2
+/// with up to three alternative endpoints (up to 415). The invitation parser
+/// decides the exact length; the frame only bounds it.
+const BODY: std::ops::RangeInclusive<usize> =
+    MIN_PAIRING_INVITATION_BYTES..=MAX_PAIRING_INVITATION_BYTES;
+pub(crate) const MAX_FRAME: usize = 9 + MAX_PAIRING_INVITATION_BYTES;
 pub(crate) fn encode(invitation: &PairingInvitation) -> Result<Vec<u8>, ()> {
     let body = invitation.to_wire();
-    if ![345, 357].contains(&body.len()) {
+    if !BODY.contains(&body.len()) {
         return Err(());
     }
     let mut frame = Vec::with_capacity(MAX_FRAME);
@@ -20,7 +27,7 @@ pub(crate) fn decode(frame: &[u8]) -> Result<PairingInvitation, ()> {
         return Err(());
     }
     let length = u16::from_be_bytes([frame[7], frame[8]]) as usize;
-    if ![345, 357].contains(&length) || frame.len() != length + 9 {
+    if !BODY.contains(&length) || frame.len() != length + 9 {
         return Err(());
     }
     PairingInvitation::from_wire(&frame[9..]).map_err(|_| ())

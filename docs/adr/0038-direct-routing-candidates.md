@@ -20,7 +20,7 @@ nonce, bounded discovery/retry/cleanup and exact internal TCP tuple. It retains
 cleanup responsibility for unexpected long grants; a failed cleanup is not
 reported as confirmed router deletion. IPv4/IPv6 public local addresses and
 successful mappings are candidates, not proof of an Internet connection.
-UPnP/NAT-PMP production operations are read-only: their examined mutation
+[Superseded for UPnP by ADR 0039 §3, commit e074b9c.] UPnP/NAT-PMP production operations are read-only: their examined mutation
 interfaces do not provide the required atomic exclusion of unknown same-host
 mappings. No other application's mapping or router-wide policy is changed.
 

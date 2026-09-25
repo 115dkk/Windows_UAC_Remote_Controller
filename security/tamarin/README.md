@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 # Tamarin connection and request-authorization contracts
 
-Status: **verification_in_progress**. ROOT's first supported-tool CI (`187bdc0`) proved the four channel lemmas and exposed both required PC-pin-omission counterexamples. The request model timed out; a later runner shutdown prevented full artifact upload. This is not a passing full protocol gate. Model authors do not run verification; ROOT owns execution, counterexample inspection and final evidence. Expected verdicts below remain acceptance criteria.
+Status: **passing in CI**. The `Protocol security (Tamarin)` job runs the full manifest on every pull request and on main; run 36164383369 (1.6.0, `ee48424`) reported `passed: true` for all 21 rows: the channel and lease lemmas, all nine request obligations with the four helpers, the three honest existentials discharged through checked stronger witnesses, and every broken-model control, including the PC-pin-omission counterexamples. The earlier state (the request model timing out at `187bdc0`) is history. What passes is the symbolic models under their stated assumptions, not implementation refinement: the three honest existentials are covered by conjunction elimination (`originalDirectlyVerified` stays false), and pairing enters the request model as the trusted `TrustedEnrollment` rule rather than as a proved property. Model authors do not run verification; ROOT owns execution, counterexample inspection and final evidence.
 
 Tamarin was selected for this slice's mutable registration and one-shot state. This is not a universal ranking over Verifpal/ProVerif or a claim that a symbolic proof verifies the product. The intended tool version is the official [Tamarin 1.12 release](https://github.com/tamarin-prover/tamarin-prover/releases/tag/1.12.0); binary provenance/checksums are ROOT-owned.
 
@@ -451,3 +451,9 @@ The mutation restores the same global pending RequestSlot, including its consume
 change the original cross-device formula.
 
 The canaries test the model/runner's sensitivity to the specified missing mechanisms. They are not vulnerabilities asserted in the secure product. If ROOT's real prover cannot produce the required positive and negative verdicts, keep this work unverified and inspect the model/trace rather than weakening the lemmas or silently skipping a control.
+
+### Prompt result comment binding review (2026-09-26)
+
+`peer_runtime.rs` gains one comment above the `ApplyOutcome` mapping pointing to
+ADR 0040; no code changes. No theorem, rule, canary, proof budget or expected
+verdict changes; CI must still run the current-source proofs.
