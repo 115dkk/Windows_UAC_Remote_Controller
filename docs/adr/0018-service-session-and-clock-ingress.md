@@ -2,6 +2,10 @@
 
 Status: implementation source; ROOT CI/native evidence is separate.
 
+Superseded in part: the "No SYSTEM Internet listener, dialer" sentence below no
+longer holds. The service dials relays (ADR0027 §3) and hosts the embedded
+listener (ADR0031); see [ADR 0039](0039-service-owned-network-reach.md).
+
 The actual Windows worker owns ServiceSession instead of discarding its registry
 checkpoint. One real ServiceRegistry feeds one exactly restored ApprovalEngine,
 with unchanged epoch-start Instant and a borrowed original thread-affine

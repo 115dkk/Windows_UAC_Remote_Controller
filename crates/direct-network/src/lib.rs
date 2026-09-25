@@ -32,8 +32,8 @@ const CANDIDATE_SECONDS: u32 = 60;
 pub enum ExternalAccess {
     /// PCP, then UPnP IGD, on the default gateway. The default.
     Automatic,
-    /// The user forwarded `external_port` (or set a DMZ) on the router to this
-    /// PC's relay port. The public IPv4 comes from STUN.
+    /// The user forwarded `external_port` on the router to this PC's relay
+    /// port. The public IPv4 comes from STUN.
     RouterForward { external_port: u16 },
     /// A public address the user typed. Published as given.
     Fixed { address: SocketAddr },

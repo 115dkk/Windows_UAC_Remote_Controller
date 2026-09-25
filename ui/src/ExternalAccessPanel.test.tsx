@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, ExternalAccessFailure, ExternalAccessInput, ExternalCandidateSource } from './contracts';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
-import { checkFixedAddress, parseFixedAddress, parsePort } from './externalAccess';
+import { checkFixedAddress, parseFixedAddress, parsePort, suggestExternalPort } from './externalAccess';
 import { locales, setPreviewLanguage, tr } from './i18n';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
@@ -26,6 +26,8 @@ const portMessage = '포트는 1에서 65535 사이의 숫자로 입력하십시
 const addressMessage = '공인 IP와 포트를 ‘공인 IP:포트’ 형식으로 입력하십시오.';
 const unreachableMessage = '이 주소로는 외부에서 연결할 수 없습니다. 공유기 관리 페이지에 표시된 공인 IP를 입력하십시오.';
 const forwardTitle = '공유기에서 포트를 직접 열었음';
+const suggestHint = '공유기에 이미 열어 둔 번호가 있으면 그 번호를 넣으십시오. 원하는 번호를 넣어도 되고, 정한 번호가 없을 때만 무작위로 고르면 됩니다. 외부 포트와 내부 포트를 따로 적을 수 없는 공유기라면 7443을(를) 넣으십시오.';
+const changeHint = '번호를 바꾸면 공유기의 포트포워딩도 새 번호로 고쳐야 합니다.';
 const fixedTitle = '외부 주소 직접 입력';
 
 function deferred<T>() {
@@ -128,9 +130,11 @@ describe('external access form', () => {
 
     await user.click(screen.getByRole('radio', { name: forwardTitle }));
     const port = screen.getByRole('spinbutton', { name: '공유기의 외부 포트' });
-    expect(port).toHaveValue(7443);
-    expect(port).toHaveAccessibleDescription('DMZ를 쓰면 7443입니다.');
-    expect(screen.getByText('공유기 관리 페이지의 포트포워딩에서 외부 포트 7443을(를) 192.168.0.23의 7443 포트(TCP)로 연결하십시오.')).toBeVisible();
+    // No port is recommended: the field starts empty and the router step waits for a number.
+    expect(port).toHaveValue(null);
+    expect(port).toHaveAccessibleDescription(suggestHint);
+    expect(screen.queryByText(/공유기 관리 페이지의 포트포워딩에서/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/DMZ/u)).not.toBeInTheDocument();
     expect(screen.getByText('PC의 내부 주소가 바뀌면 포트포워딩이 끊깁니다. 공유기의 DHCP 고정 할당으로 이 PC의 주소를 고정해 두십시오.')).toBeVisible();
     fireEvent.change(port, { target: { value: '17443' } });
     expect(screen.getByText('공유기 관리 페이지의 포트포워딩에서 외부 포트 17443을(를) 192.168.0.23의 7443 포트(TCP)로 연결하십시오.')).toBeVisible();
@@ -158,7 +162,7 @@ describe('external access form', () => {
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByText(portMessage)).toBeVisible();
     expect(port).toHaveAttribute('aria-invalid', 'true');
-    expect(port).toHaveAccessibleDescription(`DMZ를 쓰면 7443입니다. ${portMessage}`);
+    expect(port).toHaveAccessibleDescription(`${suggestHint} ${portMessage}`);
     expect(port).toHaveFocus();
     fireEvent.change(port, { target: { value: '7443' } });
     expect(screen.queryByText(portMessage)).not.toBeInTheDocument();
@@ -206,7 +210,6 @@ describe('external access form', () => {
   it.each([
     ['desktop-network-forward-stun', '자동', undefined, { mode: 'automatic' }],
     ['desktop-network-auto-no-mapping', forwardTitle, '17443', { mode: 'router_forward', externalPort: 17443 }],
-    ['desktop-network-auto-no-mapping', forwardTitle, undefined, { mode: 'router_forward', externalPort: 7443 }],
     ['desktop-network-auto-no-mapping', fixedTitle, ' 1.2.3.4:7443 ', { mode: 'fixed', fixedAddress: '1.2.3.4:7443' }],
     ['desktop-network-auto-no-mapping', fixedTitle, '[2001:4860:4860::8888]:7443', { mode: 'fixed', fixedAddress: '[2001:4860:4860::8888]:7443' }],
   ] as const)('sends the pinned input shape from %s via %s', async (fixture, option, entry, expected) => {
@@ -356,6 +359,51 @@ describe('navigation into the external access tab', () => {
     render(<App bridge={createQaBridge(qaCase('desktop-pairing-ready').snapshot)} initialPage="devices" />);
     await screen.findByRole('button', { name: ko.pairPhone });
     expect(screen.queryByRole('button', { name: '외부 연결 설정' })).not.toBeInTheDocument();
+  });
+});
+
+describe('external port suggestion', () => {
+  function draws(...values: number[]) {
+    const queue = [...values];
+    return vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+      (array as unknown as Uint32Array)[0] = queue.shift() ?? 0;
+      return array;
+    });
+  }
+
+  it('maps draws onto 20000..=60999, the range the router mapping uses', () => {
+    const spy = draws(0, 40999, 41000);
+    expect(suggestExternalPort(null)).toBe(20000);
+    expect(suggestExternalPort(null)).toBe(60999);
+    expect(suggestExternalPort(null)).toBe(20000);
+    spy.mockRestore();
+  });
+
+  it('draws again rather than bias the low ports or repeat the current one', () => {
+    // 2^32 - 1 lies in the uneven remainder of the 32-bit range and is rejected.
+    const spy = draws(0xffffffff, 0, 1);
+    expect(suggestExternalPort(20000)).toBe(20001);
+    expect(spy).toHaveBeenCalledTimes(3);
+    spy.mockRestore();
+  });
+
+  it('fills the field and the router step only when asked, and saves nothing', async () => {
+    const user = userEvent.setup();
+    const spy = draws(14127);
+    const onSave = panel(qaCase('desktop-network-auto-no-mapping').snapshot);
+    await user.click(screen.getByRole('radio', { name: forwardTitle }));
+    expect(spy).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '무작위로 고르기' }));
+    expect(screen.getByRole('spinbutton', { name: '공유기의 외부 포트' })).toHaveValue(34127);
+    expect(screen.getByText('공유기 관리 페이지의 포트포워딩에서 외부 포트 34127을(를) 192.168.0.23의 7443 포트(TCP)로 연결하십시오.')).toBeVisible();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(methodSave()).toBeEnabled();
+    spy.mockRestore();
+  });
+
+  it('warns that a saved forward has to change on the router too', () => {
+    panel(qaCase('desktop-network-forward-stun').snapshot);
+    expect(screen.getByRole('spinbutton', { name: '공유기의 외부 포트' })).toHaveAccessibleDescription(changeHint);
   });
 });
 

@@ -3,6 +3,10 @@
 
 Status: implementation, 2026-09-12. Native/physical acceptance remains separate.
 
+Superseded in part: the IPv4-only listener, "no UPnP or router edit", "queries no
+public IP service" and "does not claim NAT traversal" were replaced by ADR0038 and
+[ADR 0039](0039-service-owned-network-reach.md).
+
 ## Decision
 
 The Windows product owns its opaque relay inside the already installed service.

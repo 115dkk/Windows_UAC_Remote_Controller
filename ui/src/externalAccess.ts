@@ -28,9 +28,35 @@ export const failureText: Record<ExternalAccessFailure, string> = {
 
 export const modeText: Record<ExternalAccessMode, { readonly title: string; readonly description: string }> = {
   automatic: { title: '자동', description: '공유기가 UPnP나 PCP를 지원하면 이 PC가 포트를 직접 엽니다.' },
-  router_forward: { title: '공유기에서 포트를 직접 열었음', description: '포트포워딩이나 DMZ를 설정한 경우입니다. 공인 IP는 STUN 서버(Google, Cloudflare)에 물어 확인합니다.' },
+  router_forward: { title: '공유기에서 포트를 직접 열었음', description: '공유기의 포트포워딩에서 포트를 연 경우입니다. 공인 IP는 STUN 서버(Google, Cloudflare)에 물어 확인합니다.' },
   fixed: { title: '외부 주소 직접 입력', description: '공인 IP와 포트를 직접 적습니다. 공인 IP가 바뀌면 다시 입력해야 합니다.' },
 };
+
+export const portSuggestText = '무작위로 고르기';
+export const portSuggestHint = '공유기에 이미 열어 둔 번호가 있으면 그 번호를 넣으십시오. 원하는 번호를 넣어도 되고, 정한 번호가 없을 때만 무작위로 고르면 됩니다. 외부 포트와 내부 포트를 따로 적을 수 없는 공유기라면 {port}을(를) 넣으십시오.';
+export const portChangeHint = '번호를 바꾸면 공유기의 포트포워딩도 새 번호로 고쳐야 합니다.';
+
+/** Suggested external ports, the range `igd.rs` draws from. Matched by
+ * convention only: the service never learns that a port was suggested. */
+export const SUGGESTED_PORT_LOW = 20000;
+export const SUGGESTED_PORT_HIGH = 60999;
+
+/** A uniformly drawn port in the suggested range other than `current`. A
+ * suggestion only: the user configures the router and saves, the service
+ * validates. Nothing on this PC can see which router ports are taken. */
+export function suggestExternalPort(current: number | null): number {
+  const span = SUGGESTED_PORT_HIGH - SUGGESTED_PORT_LOW + 1;
+  // Rejecting the top remainder of the 32-bit range keeps every port equally likely.
+  const limit = 2 ** 32 - (2 ** 32 % span);
+  const draw = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(draw);
+    const value = draw[0] ?? limit;
+    if (value >= limit) continue;
+    const port = SUGGESTED_PORT_LOW + (value % span);
+    if (port !== current) return port;
+  }
+}
 
 /** A decimal port 1..65535, or null. */
 export function parsePort(text: string): number | null {
@@ -117,7 +143,8 @@ export interface ExternalAccessDraft {
 export function draftFromView(view: ExternalAccessView | null | undefined): ExternalAccessDraft {
   return {
     mode: view?.mode ?? null,
-    port: String(view?.externalPort ?? view?.relayPort ?? DEFAULT_RELAY_PORT),
+    // No saved forward means no port yet: the field starts empty, not at 7443.
+    port: view?.externalPort == null ? '' : String(view.externalPort),
     address: view?.fixedAddress ?? '',
   };
 }
