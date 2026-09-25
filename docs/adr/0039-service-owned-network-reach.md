@@ -2,9 +2,9 @@
 # ADR 0039: The PC service owns its network reach
 
 Status: implemented, 2026-09-26. Records the 1.5.x network boundary and the port
-choice added with this record. Supersedes
-the network sentences of ADR0018, ADR0027 §3, ADR0031 and ADR0038 named below;
-each of those records now points here and keeps its text as history.
+choice added with this record. Supersedes the network sentences of ADR0018,
+ADR0027 §3, ADR0031 and ADR0038 named below; each of those records now points
+here and keeps its text as history.
 
 ## Why this record exists
 
@@ -59,8 +59,11 @@ use still needs a fresh mutually pinned connection.
 ## External port choice
 
 The app recommends no fixed external port and no DMZ. In RouterForward the port
-field starts empty. A button beside it fills the field with a port drawn
-uniformly from 20000..=60999, and the user then edits the router and saves. The
+field starts empty and accepts any port the user already forwarded or prefers;
+the draw is never required. A router that cannot give the external and internal
+ports separately forwards 7443 to 7443. A button beside the field fills it with
+a port drawn uniformly from 20000..=60999, and the user then edits the router
+and saves. The
 draw is presentation only (`ui/src/externalAccess.ts`): the service validates
 1..65535 as for any typed number and never learns that the number was drawn.
 The range matches the one `igd.rs` draws from by convention; no constant is

@@ -16,7 +16,7 @@
   "공유기의 포트포워딩에서 포트를 연 경우입니다. 공인 IP는 STUN 서버(Google, Cloudflare)에 물어 확인합니다.": "Elige esta opción si has abierto un puerto mediante el reenvío de puertos del router. La IP pública se consulta a servidores STUN (Google, Cloudflare).",
   "공유기의 외부 포트": "Puerto externo del router",
   "무작위로 고르기": "Elegir al azar",
-  "정한 번호가 없으면 무작위로 고르십시오. 이 앱을 쓰는 PC가 집에 여럿이면 PC마다 번호가 달라야 합니다.": "Si no tienes un número en mente, elige uno al azar. Si varios PC de casa usan esta aplicación, cada PC necesita un número distinto.",
+  "공유기에 이미 열어 둔 번호가 있으면 그 번호를 넣으십시오. 원하는 번호를 넣어도 되고, 정한 번호가 없을 때만 무작위로 고르면 됩니다. 외부 포트와 내부 포트를 따로 적을 수 없는 공유기라면 {port}을(를) 넣으십시오.": "Si ya has abierto un puerto en el router, introduce ese número. Puedes introducir el número que quieras; usa «Elegir al azar» solo si no tienes ninguno en mente. Si tu router no permite configurar por separado los puertos externo e interno, introduce {port}.",
   "번호를 바꾸면 공유기의 포트포워딩도 새 번호로 고쳐야 합니다.": "Si cambias el número, actualiza también el reenvío de puertos del router con el nuevo número.",
   "공유기 관리 페이지의 포트포워딩에서 외부 포트 {external}을(를) {lan}의 {port} 포트(TCP)로 연결하십시오.": "En la página de administración del router, en reenvío de puertos, redirige el puerto externo {external} al puerto {port} (TCP) de {lan}.",
   "PC의 내부 주소가 바뀌면 포트포워딩이 끊깁니다. 공유기의 DHCP 고정 할당으로 이 PC의 주소를 고정해 두십시오.": "Si cambia la dirección local del PC, el reenvío de puertos deja de funcionar. Fija la dirección de este PC con la reserva DHCP del router.",

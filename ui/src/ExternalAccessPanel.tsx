@@ -135,7 +135,7 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
                   <button type="button" className="button secondary"
                     onClick={() => edit({ port: String(suggestExternalPort(parsePort(value.port))) })}>{tr(portSuggestText)}</button>
                 </div>
-                <p id={`${id}-port-hint`} className="supporting-text">{tr(savedPort === null ? portSuggestHint : portChangeHint)}</p>
+                <p id={`${id}-port-hint`} className="supporting-text">{savedPort === null ? formatText(portSuggestHint, { port: String(relayPort) }) : tr(portChangeHint)}</p>
                 {portError && <p id={`${id}-port-error`} className="field-error">{tr(portInvalidText)}</p>}
               </div>
               <div className="notice-box network-instructions">

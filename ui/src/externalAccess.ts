@@ -33,7 +33,7 @@ export const modeText: Record<ExternalAccessMode, { readonly title: string; read
 };
 
 export const portSuggestText = '무작위로 고르기';
-export const portSuggestHint = '정한 번호가 없으면 무작위로 고르십시오. 이 앱을 쓰는 PC가 집에 여럿이면 PC마다 번호가 달라야 합니다.';
+export const portSuggestHint = '공유기에 이미 열어 둔 번호가 있으면 그 번호를 넣으십시오. 원하는 번호를 넣어도 되고, 정한 번호가 없을 때만 무작위로 고르면 됩니다. 외부 포트와 내부 포트를 따로 적을 수 없는 공유기라면 {port}을(를) 넣으십시오.';
 export const portChangeHint = '번호를 바꾸면 공유기의 포트포워딩도 새 번호로 고쳐야 합니다.';
 
 /** Suggested external ports, the range `igd.rs` draws from. Matched by

@@ -26,7 +26,7 @@ const portMessage = '포트는 1에서 65535 사이의 숫자로 입력하십시
 const addressMessage = '공인 IP와 포트를 ‘공인 IP:포트’ 형식으로 입력하십시오.';
 const unreachableMessage = '이 주소로는 외부에서 연결할 수 없습니다. 공유기 관리 페이지에 표시된 공인 IP를 입력하십시오.';
 const forwardTitle = '공유기에서 포트를 직접 열었음';
-const suggestHint = '정한 번호가 없으면 무작위로 고르십시오. 이 앱을 쓰는 PC가 집에 여럿이면 PC마다 번호가 달라야 합니다.';
+const suggestHint = '공유기에 이미 열어 둔 번호가 있으면 그 번호를 넣으십시오. 원하는 번호를 넣어도 되고, 정한 번호가 없을 때만 무작위로 고르면 됩니다. 외부 포트와 내부 포트를 따로 적을 수 없는 공유기라면 7443을(를) 넣으십시오.';
 const changeHint = '번호를 바꾸면 공유기의 포트포워딩도 새 번호로 고쳐야 합니다.';
 const fixedTitle = '외부 주소 직접 입력';
 
