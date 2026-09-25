@@ -250,200 +250,226 @@ fn run(
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
     let mut watch = None;
+    // The fixed step a failure after Ready came from, for public diagnostics.
+    let mut step = RuntimeStep::Ready;
     // Keep session OUTSIDE this unwind boundary: every returned error or unwind
     // takes the same staged drain before registry/key release or Finished.
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || -> Result<(), ServiceError> {
-                if cancellation_requested(stop) {
-                    return Ok(());
-                }
-                events
-                    .send(WorkerEvent::Progress)
-                    .map_err(|_| ServiceError::WorkerFailed)?;
-                // Passive fixed-slot inspection only, never a startup probe. Failure/full
-                // storage disables this diagnostic without bypassing identity/registry init.
-                PROBE_REQUESTS.prepare(
-                    crate::native::probe_control_registration_ready(_installation.executable())
-                        .and_then(|()| directory.probe_slot_available()),
-                );
-                let (ready_request, ready_gate) = ready_handshake();
-                events
-                    .send(WorkerEvent::Ready(ready_request))
-                    .map_err(|_| ServiceError::WorkerFailed)?;
-                let ready = ready_gate.wait(startup_began, || cancellation_requested(stop))?;
-                if cancellation_requested(stop) {
-                    return Ok(());
-                }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), ServiceError> {
+            if cancellation_requested(stop) {
+                return Ok(());
+            }
+            events
+                .send(WorkerEvent::Progress)
+                .map_err(|_| ServiceError::WorkerFailed)?;
+            // Passive fixed-slot inspection only, never a startup probe. Failure/full
+            // storage disables this diagnostic without bypassing identity/registry init.
+            PROBE_REQUESTS.prepare(
+                crate::native::probe_control_registration_ready(_installation.executable())
+                    .and_then(|()| directory.probe_slot_available()),
+            );
+            let (ready_request, ready_gate) = ready_handshake();
+            events
+                .send(WorkerEvent::Ready(ready_request))
+                .map_err(|_| ServiceError::WorkerFailed)?;
+            let ready = ready_gate.wait(startup_began, || cancellation_requested(stop))?;
+            if cancellation_requested(stop) {
+                return Ok(());
+            }
+            append(
+                &mut journal,
+                ActivityEvent::Service(ServiceOutcome::Started),
+            )?;
+            step = RuntimeStep::Pairing;
+            if let Some(reason) = session.activate_pairing(ready).map_err(session_error)? {
+                // Fixed kind only; the reason itself stays out of the journal.
                 append(
                     &mut journal,
-                    ActivityEvent::Service(ServiceOutcome::Started),
+                    ActivityEvent::Service(ServiceOutcome::ManagementUnavailable),
                 )?;
-                if let Some(reason) = session.activate_pairing(ready).map_err(session_error)? {
-                    // Fixed kind only; the reason itself stays out of the journal.
+                #[cfg(feature = "lab-software-identity")]
+                crate::lab::record_note(&format!("management listener unavailable: {reason}"));
+                #[cfg(not(feature = "lab-software-identity"))]
+                drop(reason);
+            }
+            step = RuntimeStep::Relay;
+            session
+                .configure_relay_after_ready(relay)
+                .map_err(session_error)?;
+            step = RuntimeStep::Watcher;
+            // A watcher that cannot start yet keeps the service and the
+            // phones' connections up; it is retried, never a reason to exit.
+            // After a power loss every start refused it and the service
+            // restarted every 30 s for hours with only "code 1" to show.
+            let mut watch_retry = WatchRetry::new(Instant::now());
+            watch = start_watch(&mut journal, &mut watch_retry, Instant::now())?;
+            if cancellation_requested(stop) {
+                return Ok(());
+            }
+            step = RuntimeStep::Loop;
+            let mut last_purge = Instant::now();
+            let mut last_activity_read: Option<Instant> = None;
+            let mut watcher_alive_journaled = false;
+            loop {
+                if cancellation_requested(stop) {
+                    break;
+                }
+                let iteration_now = Instant::now();
+                if watch.is_none() && watch_retry.due(iteration_now) {
+                    watch = start_watch(&mut journal, &mut watch_retry, iteration_now)?;
+                }
+                if last_activity_read
+                    .is_none_or(|at| iteration_now.duration_since(at) >= Duration::from_secs(1))
+                {
+                    let records = diagnostic_time()
+                        .and_then(|now| UnixMillis::new(now).ok())
+                        .and_then(|now| {
+                            journal
+                                .recent(now, crate::management_protocol::MAX_ACTIVITY_RECORDS)
+                                .ok()
+                        });
+                    session.observe_activity(records);
+                    last_activity_read = Some(Instant::now());
+                }
+                let events = match watch.as_mut() {
+                    Some(watcher) => watcher
+                        .poll(iteration_now)
+                        .map_err(|_| ServiceError::WorkerFailed)?,
+                    None => Vec::new(),
+                };
+                for event in events {
+                    // Fixed lifecycle kinds only: the events carry no prompt content here.
+                    match &event {
+                        crate::WatchEvent::HelperRestarted { .. } => append(
+                            &mut journal,
+                            ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
+                        )?,
+                        crate::WatchEvent::HelperUnavailable => append(
+                            &mut journal,
+                            ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
+                        )?,
+                        _ => {}
+                    }
+                    let progress = session
+                        .handle_watch_event(event, iteration_now)
+                        .map_err(session_error)?;
+                    journal_prompt_progress(&mut journal, progress)?;
+                }
+                if !watcher_alive_journaled
+                    && watch
+                        .as_ref()
+                        .is_some_and(|watcher| watcher.heartbeats() > 0)
+                {
+                    watcher_alive_journaled = true;
                     append(
                         &mut journal,
-                        ActivityEvent::Service(ServiceOutcome::ManagementUnavailable),
+                        ActivityEvent::Service(ServiceOutcome::WatcherAlive),
                     )?;
-                    #[cfg(feature = "lab-software-identity")]
-                    crate::lab::record_note(&format!("management listener unavailable: {reason}"));
-                    #[cfg(not(feature = "lab-software-identity"))]
-                    drop(reason);
                 }
-                session
-                    .configure_relay_after_ready(relay)
-                    .map_err(session_error)?;
-                watch = Some(
-                    WatchSession::for_running_service().map_err(|_| ServiceError::WorkerFailed)?,
-                );
-                append(
-                    &mut journal,
-                    ActivityEvent::Service(ServiceOutcome::WatcherStarted),
-                )?;
-                if cancellation_requested(stop) {
-                    return Ok(());
+                if let Some(progress) = session
+                    .prompt_deadline_step(iteration_now)
+                    .map_err(session_error)?
+                {
+                    journal_prompt_progress(&mut journal, progress)?;
                 }
-                let mut last_purge = Instant::now();
-                let mut last_activity_read: Option<Instant> = None;
-                let mut watcher_alive_journaled = false;
-                loop {
-                    if cancellation_requested(stop) {
-                        break;
-                    }
-                    let iteration_now = Instant::now();
-                    if last_activity_read
-                        .is_none_or(|at| iteration_now.duration_since(at) >= Duration::from_secs(1))
-                    {
-                        let records = diagnostic_time()
-                            .and_then(|now| UnixMillis::new(now).ok())
-                            .and_then(|now| {
-                                journal
-                                    .recent(now, crate::management_protocol::MAX_ACTIVITY_RECORDS)
-                                    .ok()
-                            });
-                        session.observe_activity(records);
-                        last_activity_read = Some(Instant::now());
-                    }
-                    let watcher = watch.as_mut().ok_or(ServiceError::WorkerFailed)?;
-                    for event in watcher
-                        .poll(iteration_now)
-                        .map_err(|_| ServiceError::WorkerFailed)?
-                    {
-                        // Fixed lifecycle kinds only: the events carry no prompt content here.
-                        match &event {
-                            crate::WatchEvent::HelperRestarted { .. } => append(
-                                &mut journal,
-                                ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
-                            )?,
-                            crate::WatchEvent::HelperUnavailable => append(
-                                &mut journal,
-                                ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
-                            )?,
-                            _ => {}
-                        }
-                        let progress = session
-                            .handle_watch_event(event, iteration_now)
-                            .map_err(session_error)?;
-                        journal_prompt_progress(&mut journal, progress)?;
-                    }
-                    if !watcher_alive_journaled && watcher.heartbeats() > 0 {
-                        watcher_alive_journaled = true;
-                        append(
-                            &mut journal,
-                            ActivityEvent::Service(ServiceOutcome::WatcherAlive),
-                        )?;
-                    }
-                    if let Some(progress) = session
-                        .prompt_deadline_step(iteration_now)
-                        .map_err(session_error)?
-                    {
-                        journal_prompt_progress(&mut journal, progress)?;
-                    }
-                    match session
-                        .process_one_with_watch(watcher)
-                        .map_err(session_error)?
-                    {
-                        SessionProgress::AuthorizedButNotApplied(reason) => {
-                            let failure = match reason {
+                let processed = match watch.as_mut() {
+                    Some(watcher) => session.process_one_with_watch(watcher),
+                    None => session.process_one(),
+                };
+                match processed.map_err(session_error)? {
+                    SessionProgress::AuthorizedButNotApplied(reason) => {
+                        let failure = match reason {
                             crate::peer_runtime::NotAppliedReason::PlatformUnavailable => {
                                 FailureKind::PlatformUnavailable
                             }
                             crate::peer_runtime::NotAppliedReason::NoLiveTarget
                             | crate::peer_runtime::NotAppliedReason::ExpiredAfterVerification
-                            | crate::peer_runtime::NotAppliedReason::PeerChangedAfterVerification =>
-                            {
+                            | crate::peer_runtime::NotAppliedReason::PeerChangedAfterVerification => {
                                 FailureKind::RequestValidationFailed
                             }
                         };
-                            append(&mut journal, ActivityEvent::Failure(failure))?;
-                        }
-                        SessionProgress::ApplyRequested { purpose, .. } => {
-                            let decision = journal_decision(purpose);
-                            append(
-                                &mut journal,
-                                ActivityEvent::Request(RequestOutcome::PhoneDecisionVerified {
-                                    decision,
-                                }),
-                            )?;
-                            append(
-                                &mut journal,
-                                ActivityEvent::Request(RequestOutcome::DecisionSentToWindows {
-                                    decision,
-                                }),
-                            )?;
-                        }
-                        SessionProgress::Prompt(progress) => {
-                            journal_prompt_progress(&mut journal, progress)?;
-                        }
-                        SessionProgress::PairingFailed => append(
+                        append(&mut journal, ActivityEvent::Failure(failure))?;
+                    }
+                    SessionProgress::ApplyRequested { purpose, .. } => {
+                        let decision = journal_decision(purpose);
+                        append(
                             &mut journal,
-                            ActivityEvent::Failure(FailureKind::TransportUnavailable),
-                        )?,
-                        SessionProgress::Enrolled(_device) => {
-                            // The fixed journal schema has no enrollment-device event.
+                            ActivityEvent::Request(RequestOutcome::PhoneDecisionVerified {
+                                decision,
+                            }),
+                        )?;
+                        append(
+                            &mut journal,
+                            ActivityEvent::Request(RequestOutcome::DecisionSentToWindows {
+                                decision,
+                            }),
+                        )?;
+                    }
+                    SessionProgress::Prompt(progress) => {
+                        journal_prompt_progress(&mut journal, progress)?;
+                    }
+                    SessionProgress::PairingFailed => append(
+                        &mut journal,
+                        ActivityEvent::Failure(FailureKind::TransportUnavailable),
+                    )?,
+                    SessionProgress::Enrolled(_device) => {
+                        // The fixed journal schema has no enrollment-device event.
+                    }
+                    _ => {}
+                }
+                match stop.recv_timeout(Duration::from_millis(25)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                }
+                if let Some(request) = PROBE_REQUESTS.take() {
+                    // The watch holds the shared process lease. Preserve the one-shot
+                    // diagnostic path only when no watch exists.
+                    let result = if watch.is_some() {
+                        run_busy_probe(&directory, &request)
+                    } else {
+                        run_requested_probe(
+                            &directory,
+                            &mut supervisor,
+                            &mut supervisor_initialization_failed,
+                            &request,
+                        )
+                    };
+                    // A watcher that has not started yet is retried under the same
+                    // lease: release it unless the probe owner is quarantined (then the
+                    // lease stays held by design).
+                    if matches!(result, Ok(false)) {
+                        supervisor = None;
+                        supervisor_initialization_failed = None;
+                    }
+                    match result {
+                        Ok(quarantined) => {
+                            request.finish(directory.probe_slot_available(), quarantined)
                         }
-                        _ => {}
-                    }
-                    match stop.recv_timeout(Duration::from_millis(25)) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => (),
-                    }
-                    if let Some(request) = PROBE_REQUESTS.take() {
-                        // The watch holds the shared process lease. Preserve the one-shot
-                        // diagnostic path only when no watch exists.
-                        let result = if watch.is_some() {
-                            run_busy_probe(&directory, &request)
-                        } else {
-                            run_requested_probe(
-                                &directory,
-                                &mut supervisor,
-                                &mut supervisor_initialization_failed,
-                                &request,
-                            )
-                        };
-                        match result {
-                            Ok(quarantined) => {
-                                request.finish(directory.probe_slot_available(), quarantined)
-                            }
-                            Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
-                            Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
-                        }
-                    }
-                    if last_purge.elapsed() >= Duration::from_secs(3_600) {
-                        journal
-                            .purge(now()?)
-                            .map_err(|_| ServiceError::JournalUnavailable)?;
-                        last_purge = Instant::now();
+                        Err(ServiceError::ProbeSlotsFull) => request.finish(Ok(false), false),
+                        Err(_) => request.finish(Err(ServiceError::ProbeUnavailable), true),
                     }
                 }
-                append(
-                    &mut journal,
-                    ActivityEvent::Service(ServiceOutcome::Stopping),
-                )?;
-                Ok(())
-            },
-        ))
-        .unwrap_or(Err(ServiceError::WorkerFailed));
+                if last_purge.elapsed() >= Duration::from_secs(3_600) {
+                    journal
+                        .purge(now()?)
+                        .map_err(|_| ServiceError::JournalUnavailable)?;
+                    last_purge = Instant::now();
+                }
+            }
+            append(
+                &mut journal,
+                ActivityEvent::Service(ServiceOutcome::Stopping),
+            )?;
+            Ok(())
+        },
+    ))
+    .inspect(|result| {
+        if let Err(error) = result {
+            record_runtime_failure(step, false, error.service_diagnostic_code());
+        }
+    })
+    .inspect_err(|_| record_runtime_failure(step, true, 0))
+    .unwrap_or(Err(ServiceError::WorkerFailed));
     PROBE_REQUESTS.close();
     if let Some(watch) = watch.as_mut() {
         watch.begin_shutdown();
@@ -656,6 +682,97 @@ fn run_requested_probe(
     Ok(quarantined)
 }
 
+/// Where the worker was when it failed after SCM Ready. Fixed numbers only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeStep {
+    Ready = 1,
+    Pairing = 2,
+    Relay = 3,
+    Watcher = 4,
+    Loop = 5,
+}
+
+fn record_runtime_failure(step: RuntimeStep, panicked: bool, code: u32) {
+    crate::public_diagnostics::record(crate::public_diagnostics::Event::RuntimeFailure {
+        step: step as u8,
+        panicked,
+        code,
+    });
+}
+
+/// Waits between attempts to start a watcher that has not started yet.
+const WATCH_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+];
+
+/// Pacing and reporting of the watcher's start attempts.
+struct WatchRetry {
+    failures: usize,
+    next: Instant,
+    reported: Option<ProbeSupervisorError>,
+}
+
+impl WatchRetry {
+    fn new(now: Instant) -> Self {
+        Self {
+            failures: 0,
+            next: now,
+            reported: None,
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    /// Schedules the next attempt. True when this error is worth a public row:
+    /// the first failure, or one that differs from the last reported.
+    fn failed(&mut self, error: ProbeSupervisorError, now: Instant) -> bool {
+        let delay = WATCH_RETRY_DELAYS[self.failures.min(WATCH_RETRY_DELAYS.len() - 1)];
+        self.failures = self.failures.saturating_add(1);
+        self.next = now + delay;
+        self.reported.replace(error) != Some(error)
+    }
+}
+
+/// Starts the watcher once. A refusal is recorded and retried later; only a
+/// journal failure ends the worker.
+fn start_watch(
+    journal: &mut Journal,
+    retry: &mut WatchRetry,
+    now: Instant,
+) -> Result<Option<WatchSession>, ServiceError> {
+    match WatchSession::for_running_service() {
+        Ok(watch) => {
+            append(
+                journal,
+                ActivityEvent::Service(ServiceOutcome::WatcherStarted),
+            )?;
+            Ok(Some(watch))
+        }
+        Err(error) => {
+            let first = retry.failures == 0;
+            if retry.failed(error, now) {
+                crate::public_diagnostics::record(
+                    crate::public_diagnostics::Event::WatcherStartFailed { error },
+                );
+            }
+            if first {
+                append(
+                    journal,
+                    ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
+                )?;
+            }
+            Ok(None)
+        }
+    }
+}
+
 fn registry_error(error: crate::RegistryError) -> ServiceError {
     if error == crate::RegistryError::MaintenanceRequired {
         ServiceError::RegistryMaintenanceRequired
@@ -676,5 +793,34 @@ mod tests {
         assert!(cancellation_requested(&receiver));
         drop(sender);
         assert!(cancellation_requested(&receiver));
+    }
+
+    #[test]
+    fn a_watcher_that_cannot_start_is_retried_at_a_widening_pace() {
+        let began = Instant::now();
+        let mut retry = WatchRetry::new(began);
+        assert!(retry.due(began));
+        let mut now = began;
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            retry.failed(ProbeSupervisorError::NoInteractiveSession, now);
+            let wait = retry.next - now;
+            assert!(!retry.due(now + wait - Duration::from_millis(1)));
+            assert!(retry.due(now + wait));
+            waits.push(wait.as_secs());
+            now += wait;
+        }
+        assert_eq!(waits, [1, 2, 5, 10, 30, 60, 60, 60]);
+    }
+
+    #[test]
+    fn a_watcher_refusal_is_reported_once_until_it_changes() {
+        let now = Instant::now();
+        let mut retry = WatchRetry::new(now);
+        assert!(retry.failed(ProbeSupervisorError::NoInteractiveSession, now));
+        assert!(!retry.failed(ProbeSupervisorError::NoInteractiveSession, now));
+        assert!(retry.failed(ProbeSupervisorError::SessionChanged, now));
+        assert!(!retry.failed(ProbeSupervisorError::SessionChanged, now));
+        assert!(retry.failed(ProbeSupervisorError::NoInteractiveSession, now));
     }
 }

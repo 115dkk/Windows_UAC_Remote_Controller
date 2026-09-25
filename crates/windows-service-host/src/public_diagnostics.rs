@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Readable diagnostics, never authorization state. Producers supply closed
 //! variants/numbers only. No request text, identities, keys or arbitrary strings.
+use crate::ProbeSupervisorError;
 use activity_journal::ActivityEvent;
 use serde::Serialize;
 use std::{
@@ -24,6 +25,11 @@ pub(crate) enum Event {
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
     HintsRefreshed { reason: HintRefresh },
+    // The UAC watcher could not start; the service keeps running and retries.
+    WatcherStartFailed { error: ProbeSupervisorError },
+    // The worker stopped with an error (or a caught panic) after SCM Ready, at
+    // this fixed step. `code` is the SCM diagnostic code; 0 for a panic.
+    RuntimeFailure { step: u8, panicked: bool, code: u32 },
 }
 
 /// Why a connected phone's routing hints were refreshed. Never an address.
@@ -163,6 +169,17 @@ mod tests {
             Event::HintsRefreshed {
                 reason: HintRefresh::WithoutExternal,
             },
+            Event::WatcherStartFailed {
+                error: ProbeSupervisorError::Native {
+                    stage: crate::SupervisorStage::CreateChild,
+                    hresult: -2147024891,
+                },
+            },
+            Event::RuntimeFailure {
+                step: 4,
+                panicked: false,
+                code: 1,
+            },
         ];
         for event in events {
             let value = serde_json::to_value(row(event)).unwrap();
@@ -180,6 +197,9 @@ mod tests {
                     "phase",
                     "policy",
                     "reason",
+                    "error",
+                    "step",
+                    "panicked",
                 ]
                 .contains(&key.as_str())
             }));
