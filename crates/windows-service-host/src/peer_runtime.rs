@@ -934,6 +934,9 @@ impl<'key> ServiceSession<'key> {
                 let Some(purpose) = live.applying_purpose() else {
                     return Ok(prompt::PromptProgress::default());
                 };
+                // `Gone` means the pressed dialog left the secure desktop within
+                // the helper's two-second window, not that the program started
+                // elevated (ADR 0040).
                 let result = match outcome {
                     crate::ApplyOutcome::Gone => match purpose {
                         DecisionPurpose::Approve => prompt::PromptResult::Approved,

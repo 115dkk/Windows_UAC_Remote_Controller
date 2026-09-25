@@ -15,7 +15,6 @@ import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructPollfd
-import android.util.Base64
 import dev.dkk115.uacremote.MainActivity
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -117,7 +116,7 @@ internal class PairingUsbSession(
                             if (count > length) break
                             if (count == length) {
                                 val body = PairingUsbFrame.body(frame, count) ?: break
-                                invitation = "uac-remote:v1:" + Base64.encodeToString(body, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+                                invitation = PairingUsbFrame.invitationText(body)
                                 body.fill(0)
                                 break
                             }

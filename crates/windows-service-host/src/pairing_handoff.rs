@@ -902,6 +902,9 @@ mod tests {
     use std::net::SocketAddr;
 
     fn invitation_text() -> InvitationText {
+        InvitationText::new(invitation().to_qr_text()).unwrap()
+    }
+    fn invitation() -> PairingInvitation {
         let public = |seed: u8| {
             let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
             let public = p256::PublicKey::from_sec1_bytes(
@@ -913,7 +916,7 @@ mod tests {
             )
             .unwrap()
         };
-        let invitation = PairingInvitation::new(PairingInvitationFields {
+        PairingInvitation::new(PairingInvitationFields {
             ceremony_nonce: PairingNonce::from_bytes([1; 32]).unwrap(),
             attestation_challenge: PairingChallenge::from_bytes([2; 32]).unwrap(),
             pc: PcIdentity::from_bytes([3; 32]).unwrap(),
@@ -923,8 +926,7 @@ mod tests {
             relay_address: SocketAddr::from(([192, 0, 2, 42], 7443)),
             route: [7; 32],
         })
-        .unwrap();
-        InvitationText::new(invitation.to_qr_text()).unwrap()
+        .unwrap()
     }
     fn id(value: u8) -> PendingElevationId {
         PendingElevationId::from_bytes([value; 32]).unwrap()
@@ -973,6 +975,37 @@ mod tests {
         };
         assert!(bound(true).receive(crossed).is_err());
         assert!(bound(true).enable_usb().is_err());
+    }
+
+    #[test]
+    fn usb_bootstrap_frame_carries_invitations_with_alternative_endpoints() {
+        // The service adds the current direct candidates, which makes the
+        // invitation v2 and longer than either v1 size.
+        let one = invitation()
+            .with_alternatives(vec![SocketAddr::from(([203, 0, 113, 7], 41327))])
+            .unwrap();
+        let three = invitation()
+            .with_alternatives(
+                (1..=3)
+                    .map(|n| SocketAddr::from(([0x2001, 0xdb8, 0, 0, 0, 0, 0, n], 7443)))
+                    .collect(),
+            )
+            .unwrap();
+        for (invitation, length) in [(one, 353), (three, 403)] {
+            let frame = crate::usb_bootstrap_frame::encode(&invitation).unwrap();
+            assert_eq!(frame.len(), 9 + length);
+            assert_eq!(u16::from_be_bytes([frame[7], frame[8]]) as usize, length);
+            let decoded = crate::usb_bootstrap_frame::decode(&frame).unwrap();
+            assert_eq!(decoded.to_wire(), invitation.to_wire());
+            assert_eq!(decoded.context_digest(), invitation.context_digest());
+        }
+        assert_eq!(crate::usb_bootstrap_frame::MAX_FRAME, 9 + 415);
+        for length in [344usize, 416] {
+            let mut frame = b"UACUSB".to_vec();
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+            frame.resize(9 + length, 0);
+            assert!(crate::usb_bootstrap_frame::decode(&frame).is_err());
+        }
     }
 
     #[test]

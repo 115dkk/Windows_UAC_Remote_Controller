@@ -3,6 +3,11 @@
 
 Status: ROOT-approved wire/address design; implementation authored; ROOT validation pending.
 
+Superseded in part: v2 invitations (ADR 0038) append up to three alternative
+endpoints, so a body is 345 to 415 bytes and the QR prefix is `uac-remote:v2:`.
+The v1 lengths and text below still hold for v1. The USB bootstrap frame carries
+the same body at any of these lengths.
+
 ## Context
 
 The frozen-candidate statement already binds `InvitationContextDigest`, but that

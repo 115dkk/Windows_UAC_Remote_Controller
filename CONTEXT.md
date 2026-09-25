@@ -39,8 +39,11 @@ not a general remote desktop or arbitrary remote execution tool.
 - **Activity journal**: bounded, expiring operational history with typed events.
   It is not an authorization registry or a tamper-proof audit trail. It must not
   contain passwords, private keys, QR secrets or full command lines.
-- **Mapping obligation**: one owned PCP mapping's exact local/gateway path,
-  server-scoped nonce and actual granted expiry, retained for bounded cleanup.
+- **Mapping obligation**: one mapping the service added on the router, retained
+  for bounded cleanup with its exact local/gateway path and actual expiry. For
+  PCP it also keeps the server-scoped nonce; for UPnP IGD (v1 or v2) it keeps the
+  control URL and external port, and cleanup deletes the entry only while it
+  still names this PC and internal port (ADR 0039).
   Route displacement withdraws its candidate without erasing the obligation;
   only the matching restored path can attempt cleanup, including at shutdown.
   An unanswered cleanup is not evidence that the mapping disappeared. This
