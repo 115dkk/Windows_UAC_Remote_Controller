@@ -251,6 +251,7 @@ export function useController(bridge: ControllerBridge) {
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const pairRead = command.kind === 'pair' && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -332,6 +333,26 @@ export function useController(bridge: ControllerBridge) {
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
         publish({ ...previous, refreshing: false, busy: null, error: null, notice: null });
         return null;
+      }
+      if (pairRead) {
+        // The PC's pair buttons stay enabled while a background read runs. Its
+        // native admission would answer the start with app_busy and the pairing
+        // would never begin, so wait for that exact read and recheck its fresh
+        // capability first, as the phone's scanner intent does.
+        let fresh: AppSnapshot;
+        try { fresh = await pairRead.promise; }
+        catch (failure) {
+          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+          const latest = current.current;
+          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
+            refreshing: false, busy: null, stale: true, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
+          return null;
+        }
+        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        if (!exposedBySnapshot(fresh, command)) {
+          publish({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
+          return null;
+        }
       }
       const started = performance.now();
       const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);

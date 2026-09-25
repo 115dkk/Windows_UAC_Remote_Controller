@@ -136,3 +136,44 @@ describe('scanner intent waits for the actual background read', () => {
     } finally { visibility.mockRestore(); }
   });
 });
+
+describe('PC pairing start waits for the actual background read', () => {
+  function pcSetup() {
+    const snapshot = qaCase('desktop-pairing-ready').snapshot;
+    const pending = deferred<AppSnapshot>();
+    let nativeReadHeld = false;
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(snapshot)
+      .mockImplementationOnce(() => {
+        nativeReadHeld = true;
+        return pending.promise.finally(() => { nativeReadHeld = false; });
+      }).mockResolvedValue(snapshot);
+    // The native single slot refuses rather than queues, as with_runtime does.
+    const beginPairing = vi.fn<ControllerBridge['beginPairing']>(() => nativeReadHeld
+      ? Promise.reject(Object.assign(new Error('synthetic native read busy'), { code: 'app_busy' })) : Promise.resolve(snapshot));
+    const bridge = { ...createQaBridge(snapshot), snapshot: read, beginPairing };
+    return { snapshot, pending, read, beginPairing, bridge };
+  }
+
+  it('starts pairing once after the read instead of colliding with it', async () => {
+    const test = pcSetup();
+    render(<App bridge={test.bridge} initialPage="devices" />);
+    const entry = await screen.findByRole('button', { name: ko.pairPhone });
+    fireEvent(window, new Event('focus'));
+    expect(test.read).toHaveBeenCalledTimes(2);
+    fireEvent.click(entry);
+    expect(test.beginPairing).not.toHaveBeenCalled();
+    await act(async () => { test.pending.resolve(test.snapshot); await test.pending.promise; });
+    await waitFor(() => expect(test.beginPairing).toHaveBeenCalledExactlyOnceWith());
+  });
+
+  it('does not start when the completed read withdrew the capability', async () => {
+    const test = pcSetup();
+    render(<App bridge={test.bridge} initialPage="devices" />);
+    const entry = await screen.findByRole('button', { name: ko.pairPhone });
+    fireEvent(window, new Event('focus'));
+    fireEvent.click(entry);
+    await act(async () => { test.pending.resolve({ ...test.snapshot, canPair: false }); await test.pending.promise; });
+    await waitFor(() => expect(entry).toBeDisabled());
+    expect(test.beginPairing).not.toHaveBeenCalled();
+  });
+});
