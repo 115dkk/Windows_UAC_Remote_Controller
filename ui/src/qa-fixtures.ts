@@ -90,7 +90,7 @@ export function qaCase(name: string): QaCase {
       externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 17443, externalAddress: '198.51.100.24:17443', source: 'stun' } } };
     case 'desktop-network-forward-unavailable': return { page: 'network', snapshot: { ...relayWithPhone,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
-      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 7443, failure: 'public_address_unavailable' } } };
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 41327, failure: 'public_address_unavailable' } } };
     case 'desktop-network-fixed': return { page: 'network', snapshot: { ...relayWithPhone,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
       externalAccess: { ...externalAccess, mode: 'fixed', fixedAddress: '203.0.113.7:7443', externalAddress: '203.0.113.7:7443', source: 'fixed' } } };

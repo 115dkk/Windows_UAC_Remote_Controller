@@ -12,7 +12,8 @@ import { DirectConnectionStatus, FirewallGuidance } from './DirectConnectionStat
 import { RelaySettings } from './RelaySettings';
 import {
   addressInvalidText, addressUnreachableText, DEFAULT_RELAY_PORT, draftChanged, draftFromView, failureText, FIXED_ADDRESS_EXAMPLE,
-  inputFromDraft, lanEndpoint, modeText, parsePort, portInvalidText, sourceText,
+  inputFromDraft, lanEndpoint, modeText, parsePort, portChangeHint, portInvalidText, portSuggestHint, portSuggestText, sourceText,
+  suggestExternalPort,
 } from './externalAccess';
 import type { ExternalAccessDraft } from './externalAccess';
 
@@ -106,7 +107,9 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
   }
   const portError = fieldError === 'port';
   const addressError = fieldError === 'address' || fieldError === 'address_unreachable';
-  const external = parsePort(value.port) ?? relayPort;
+  const external = parsePort(value.port);
+  // Changing a saved forward breaks the router rule and the phone's stored address.
+  const savedPort = view?.mode === 'router_forward' ? view.externalPort : null;
   return <section className="network-section" aria-labelledby={`${id}-heading`}>
     <form ref={form} className="network-form" onSubmit={submit} noValidate
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
@@ -124,17 +127,21 @@ function ExternalAccessForm({ snapshot, stale, disabled, onSave }: {
             {mode === 'router_forward' && value.mode === mode && <div className="network-option-detail">
               <div className="network-field">
                 <label htmlFor={`${id}-port`}>{tr('공유기의 외부 포트')}</label>
-                <input id={`${id}-port`} type="number" inputMode="numeric" min={1} max={65535} step={1} dir="ltr"
-                  value={value.port} autoComplete="off" aria-invalid={portError}
-                  aria-describedby={`${id}-port-hint${portError ? ` ${id}-port-error` : ''}`}
-                  onChange={(event) => edit({ port: event.target.value })} />
-                <p id={`${id}-port-hint`} className="supporting-text">{formatText('DMZ를 쓰면 {port}입니다.', { port: String(relayPort) })}</p>
+                <div className="network-port-row">
+                  <input id={`${id}-port`} type="number" inputMode="numeric" min={1} max={65535} step={1} dir="ltr"
+                    value={value.port} autoComplete="off" aria-invalid={portError}
+                    aria-describedby={`${id}-port-hint${portError ? ` ${id}-port-error` : ''}`}
+                    onChange={(event) => edit({ port: event.target.value })} />
+                  <button type="button" className="button secondary"
+                    onClick={() => edit({ port: String(suggestExternalPort(parsePort(value.port))) })}>{tr(portSuggestText)}</button>
+                </div>
+                <p id={`${id}-port-hint`} className="supporting-text">{tr(savedPort === null ? portSuggestHint : portChangeHint)}</p>
                 {portError && <p id={`${id}-port-error`} className="field-error">{tr(portInvalidText)}</p>}
               </div>
               <div className="notice-box network-instructions">
                 <div>
-                  <p>{formatText('공유기 관리 페이지의 포트포워딩에서 외부 포트 {external}을(를) {lan}의 {port} 포트(TCP)로 연결하십시오.',
-                    { external: String(external), lan: lan ? displayText(lan) : tr('이 PC'), port: String(relayPort) })}</p>
+                  {external !== null && <p>{formatText('공유기 관리 페이지의 포트포워딩에서 외부 포트 {external}을(를) {lan}의 {port} 포트(TCP)로 연결하십시오.',
+                    { external: String(external), lan: lan ? displayText(lan) : tr('이 PC'), port: String(relayPort) })}</p>}
                   <p className="supporting-text">{tr('PC의 내부 주소가 바뀌면 포트포워딩이 끊깁니다. 공유기의 DHCP 고정 할당으로 이 PC의 주소를 고정해 두십시오.')}</p>
                 </div>
               </div>
