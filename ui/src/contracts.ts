@@ -27,7 +27,13 @@ export interface RelayStatus {
   readonly state: 'listening' | 'waiting_network' | 'unavailable' | 'stopped' | 'external_configured' | 'unknown';
   /** Native Windows observation only; a candidate is not a verified WAN connection. */
   readonly internetState?: 'discovering' | 'lan_only' | 'candidate' | 'unavailable' | 'stopped' | 'unknown' | null;
+  /** Why the embedded listener cannot bind, when the service knows. `pid` 0 and a
+   * null `program` mean the holder was not found; the name is untrusted text. */
+  readonly listenerFault?: ListenerFault | null;
 }
+export type ListenerFault =
+  | { readonly kind: 'port_in_use'; readonly port: number; readonly pid: number; readonly program: string | null }
+  | { readonly kind: 'port_reserved'; readonly port: number };
 export type ExternalAccessMode = 'automatic' | 'router_forward' | 'fixed';
 export type ExternalCandidateSource = 'pcp' | 'upnp' | 'stun' | 'fixed' | 'public_interface';
 export type ExternalAccessFailure = 'no_mapping_protocol' | 'private_external_address' | 'public_address_unavailable';

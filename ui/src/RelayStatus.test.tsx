@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
 import { RelaySettings } from './RelaySettings';
-import type { AppSnapshot } from './contracts';
+import type { AppSnapshot, ListenerFault } from './contracts';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { RelayStatusLine } from './RelayStatusLine';
@@ -69,6 +69,46 @@ describe('Windows relay observation and service recovery', () => {
     view.rerender(<RelayStatusLine snapshot={{ ...source, service: null, relayStatus: { mode: 'embedded', state: 'listening' } }} />);
     expect(screen.getByRole('status')).not.toHaveClass('is-success');
     expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
+  });
+
+  it('names the program holding the relay port instead of blaming the network', () => {
+    const source = qaCase('desktop-relay-listening').snapshot;
+    const line = (listenerFault: ListenerFault) =>
+      <RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable', listenerFault } }} />;
+    const view = render(line({ kind: 'port_in_use', port: 7443, pid: 5120, program: 'veraport.exe' }));
+    expect(screen.getByRole('status')).toHaveTextContent('veraport.exe이(가) 7443 포트를 쓰고 있어 휴대폰 연결을 받지 못합니다.');
+    expect(screen.getByRole('status')).not.toHaveTextContent('네트워크 연결을 확인하십시오');
+    view.rerender(line({ kind: 'port_in_use', port: 7443, pid: 5120, program: 'evil\u202eexe.txt' }));
+    expect(screen.getByRole('status')).toHaveTextContent('evil[U+202E]exe.txt이(가)');
+    view.rerender(line({ kind: 'port_in_use', port: 7443, pid: 4, program: null }));
+    expect(screen.getByRole('status')).toHaveTextContent('다른 프로그램(PID 4)이 7443 포트를 쓰고 있어');
+    view.rerender(line({ kind: 'port_in_use', port: 7443, pid: 0, program: null }));
+    expect(screen.getByRole('status')).toHaveTextContent('직전 연결이 아직 정리되지 않았습니다.');
+    view.rerender(line({ kind: 'port_reserved', port: 7443 }));
+    expect(screen.getByRole('status')).toHaveTextContent('Windows가 7443 포트를 쓰지 못하게 막아');
+    // A fault never outlives the unavailable state it explains.
+    view.rerender(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'listening', listenerFault: { kind: 'port_reserved', port: 7443 } } }} />);
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 중');
+    view.rerender(<RelayStatusLine stale snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable', listenerFault: { kind: 'port_reserved', port: 7443 } } }} />);
+    expect(screen.getByRole('status')).toHaveTextContent('휴대폰 연결 대기 상태 확인 불가');
+  });
+
+  it.each(locales)('translates every listener fault in %s', (locale) => {
+    setPreviewLanguage(locale);
+    const source = qaCase('desktop-relay-listening').snapshot;
+    for (const listenerFault of [
+      { kind: 'port_in_use', port: 7443, pid: 5120, program: 'veraport.exe' },
+      { kind: 'port_in_use', port: 7443, pid: 5120, program: null },
+      { kind: 'port_in_use', port: 7443, pid: 0, program: null },
+      { kind: 'port_reserved', port: 7443 },
+    ] as const) {
+      const { container, unmount } = render(<RelayStatusLine snapshot={{ ...source, relayStatus: { mode: 'embedded', state: 'unavailable', listenerFault } }} />);
+      expect(container.textContent).toContain('7443');
+      if (locale !== 'ko') expect(container.textContent?.replace('veraport.exe', '')).not.toMatch(/[가-힣]/u);
+      expect(container.textContent).not.toMatch(/\{[a-z]+\}/u);
+      unmount();
+    }
+    setPreviewLanguage('ko');
   });
 
   it('shows preparation failure and keeps unknown external runtime distinct from reachability', () => {
