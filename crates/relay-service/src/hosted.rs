@@ -34,13 +34,33 @@ impl HostedRelay {
                 Some(socket2::Protocol::TCP),
             )?;
             socket.set_only_v6(false)?;
+            #[cfg(windows)]
+            windows_port_owner::set_exclusive_address_use(&socket)?;
             socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
             socket.listen(128)?;
             Ok::<TcpListener, io::Error>(socket.into())
         })();
         match dual_stack {
             Ok(listener) => Self::from_listener(listener, true),
-            Err(_) => Self::from_listener(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?, false),
+            Err(_) => {
+                #[cfg(windows)]
+                let listener = {
+                    let socket = socket2::Socket::new(
+                        socket2::Domain::IPV4,
+                        socket2::Type::STREAM,
+                        Some(socket2::Protocol::TCP),
+                    )?;
+                    // Windows otherwise allows a wildcard listener beside an
+                    // existing loopback listener (or a later loopback hijack).
+                    windows_port_owner::set_exclusive_address_use(&socket)?;
+                    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+                    socket.listen(128)?;
+                    TcpListener::from(socket)
+                };
+                #[cfg(not(windows))]
+                let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+                Self::from_listener(listener, false)
+            }
         }
     }
 
@@ -157,6 +177,27 @@ mod tests {
         phone.read_exact(&mut payload).unwrap();
         assert_eq!(&payload, b"synthetic");
         drop(host);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn embedded_listener_rejects_an_existing_loopback_listener() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let result = HostedRelay::start_embedded(occupied.local_addr().unwrap().port());
+        assert!(
+            result.is_err(),
+            "wildcard relay must not coexist with a loopback listener"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn embedded_listener_prevents_a_later_loopback_bind() {
+        let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let _host = HostedRelay::start_embedded(port).unwrap();
+        assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err());
     }
 
     #[test]

@@ -816,6 +816,7 @@ impl AppRuntime {
             mode: self.confirmed_relay_mode,
             state: RelayState::Unknown,
             internet_state: None,
+            listener_fault: None,
         };
         if self
             .service_issue
@@ -829,7 +830,7 @@ impl AppRuntime {
             } else if service.state == Some(ServiceState::Running)
                 && let Some(management) = &self.last_management
             {
-                view = management.relay_status;
+                view = management.relay_status.clone();
             }
         }
         Some(view)

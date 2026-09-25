@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Readable diagnostics, never authorization state. Producers supply closed
-//! variants/numbers only. No request text, identities, keys or arbitrary strings.
+//! variants/numbers and sanitized listener image basenames only. No request
+//! text, identities, keys, command lines or directory paths.
 use crate::ProbeSupervisorError;
 use activity_journal::ActivityEvent;
 use serde::Serialize;
@@ -12,24 +13,49 @@ use windows_prompt_probe::supervision::RefusalReason;
 
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Event {
-    Activity { event: ActivityEvent },
-    StartupFailure { stage: u8, code: u32 },
-    StartupGuard { phase: u8, policy: u8, code: u32 },
-    PromptRefused { reason: PromptRefusal },
+    Activity {
+        event: ActivityEvent,
+    },
+    StartupFailure {
+        stage: u8,
+        code: u32,
+    },
+    StartupGuard {
+        phase: u8,
+        policy: u8,
+        code: u32,
+    },
+    PromptRefused {
+        reason: PromptRefusal,
+    },
     // An optional setting read at this fixed startup stage was unusable; the
     // service kept running with that setting's default.
-    ConfigurationIgnored { stage: u8 },
+    ConfigurationIgnored {
+        stage: u8,
+    },
+    // Only changes, including recovery. Names pass the listener codec's validator.
+    RelayListenerChanged {
+        fault: Option<crate::management_protocol::ListenerFault>,
+    },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
-    HintsRefreshed { reason: HintRefresh },
+    HintsRefreshed {
+        reason: HintRefresh,
+    },
     // The UAC watcher could not start; the service keeps running and retries.
-    WatcherStartFailed { error: ProbeSupervisorError },
+    WatcherStartFailed {
+        error: ProbeSupervisorError,
+    },
     // The worker stopped with an error (or a caught panic) after SCM Ready, at
     // this fixed step. `code` is the SCM diagnostic code; 0 for a panic.
-    RuntimeFailure { step: u8, panicked: bool, code: u32 },
+    RuntimeFailure {
+        step: u8,
+        panicked: bool,
+        code: u32,
+    },
 }
 
 /// Why a connected phone's routing hints were refreshed. Never an address.
@@ -163,6 +189,13 @@ mod tests {
                 reason: RefusalReason::ContentChanged.into(),
             },
             Event::ConfigurationIgnored { stage: 8 },
+            Event::RelayListenerChanged {
+                fault: Some(crate::management_protocol::ListenerFault::InUse {
+                    pid: 1234,
+                    program: Some("veraport.exe".into()),
+                }),
+            },
+            Event::RelayListenerChanged { fault: None },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -200,6 +233,7 @@ mod tests {
                     "error",
                     "step",
                     "panicked",
+                    "fault",
                 ]
                 .contains(&key.as_str())
             }));

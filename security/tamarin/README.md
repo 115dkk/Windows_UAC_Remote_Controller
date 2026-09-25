@@ -283,6 +283,19 @@ query, peer and key checks. Peer admission, prompt events, decisions, request
 authorization and lease renewal are unchanged. No theorem, rule, canary, proof
 budget or expected verdict is changed.
 
+### Listener diagnostic source binding review (2026-09-26)
+
+`peer_runtime.rs` retains embedded listener bind failures and caches a read-only
+Windows TCP owner lookup for five seconds. A separate local management query
+returns only the port, PID and sanitized image basename (or a reservation
+classification); fault changes also enter the existing diagnostic log. Recovery,
+external mode and shutdown clear it. The Windows embedded socket now requires
+exclusive address use so a loopback listener cannot coexist with its wildcard
+bind. No peer protocol message, admission, signing, prompt decision or authority
+changes. The local diagnostic is outside the symbolic authorization model. No
+theorem, rule, canary, proof budget or expected verdict changes; CI must still
+run the current-source proofs.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |
