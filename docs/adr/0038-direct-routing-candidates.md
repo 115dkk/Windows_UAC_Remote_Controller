@@ -5,6 +5,10 @@ Status: implementation candidate, 2026-09-22. Executable CI and physical outside
 network acceptance are separate evidence. Supersedes ADR0031's IPv4-only and
 no-router-request restrictions only for the bounded direct-connect work below.
 
+Superseded in part: UPnP IGD now adds and renews the service's own mapping, so
+"UPnP/NAT-PMP production operations are read-only" holds only for NAT-PMP, which
+is not used. See [ADR 0039](0039-service-owned-network-reach.md).
+
 The user's direction excludes account-backed cloud relays and their quota cost.
 The PC retains the embedded opaque relay. A single dual-stack listener shares
 one room owner; its own PC leg uses loopback, not its externally advertised

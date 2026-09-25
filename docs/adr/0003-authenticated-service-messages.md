@@ -3,6 +3,10 @@
 Status: implementing, 2026-09-09; native enrollment/transport owners are not yet
 connected. This decision does not close the outstanding pairing/UAC gates.
 
+Later: the transport owners are connected and released; [ADR
+0039](0039-service-owned-network-reach.md) records where the service's network
+reach now stands.
+
 Use TLS 1.3 with mutually pinned P-256 raw public keys over an untrusted byte
 relay. Disable 0-RTT, session tickets and resumption in the first version. The
 transport key is not an approval key; a successful handshake is not Android

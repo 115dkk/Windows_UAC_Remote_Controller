@@ -4,6 +4,10 @@
 Status: accepted for implementation on 2026-09-11 (Claude root). Native and physical evidence are
 separate and are not asserted by this ADR.
 
+Superseded in part: §3's "no listener, no inbound port" and §4's requirement to
+configure a relay before pairing were replaced by the embedded relay (ADR0031).
+The current boundary is [ADR 0039](0039-service-owned-network-reach.md).
+
 ## Context
 
 The codecs for the pairing invitation (ADR 0020), the frozen candidate and the enrollment acceptance
