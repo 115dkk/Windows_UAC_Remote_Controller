@@ -133,6 +133,7 @@ fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> Managem
         relay_configured,
         relay_status: RelayStatusView {
             internet_state: None,
+            listener_fault: None,
             mode: RelayMode::External,
             state: if relay_configured {
                 RelayState::ExternalConfigured
@@ -493,6 +494,58 @@ fn start_completion_that_already_reverted_to_stopped_is_not_success() {
 }
 
 #[test]
+fn listener_fault_reaches_the_snapshot_without_becoming_readiness() {
+    use controller_runtime::ListenerFaultView;
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut observation = management(Vec::new(), false);
+    observation.relay_status = RelayStatusView {
+        mode: RelayMode::Embedded,
+        state: RelayState::Unavailable,
+        internet_state: None,
+        listener_fault: Some(ListenerFaultView::PortInUse {
+            port: 7443,
+            pid: 1234,
+            program: Some("veraport.exe".into()),
+        }),
+    };
+    *owner.0.management.lock().unwrap() = Ok(observation);
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    let snapshot = runtime.snapshot();
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        json["relayStatus"]["listenerFault"],
+        serde_json::json!({
+            "kind": "port_in_use", "port": 7443, "pid": 1234, "program": "veraport.exe"
+        })
+    );
+    assert!(!snapshot.relay_configured);
+    assert!(!snapshot.service.unwrap().remote_requests_ready);
+    owner.set_observation(Ok(installed(ServiceState::Stopped)));
+    assert!(
+        runtime
+            .snapshot()
+            .relay_status
+            .unwrap()
+            .listener_fault
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::to_value(ListenerFaultView::PortInUse {
+            port: 7443,
+            pid: 0,
+            program: None,
+        })
+        .unwrap(),
+        serde_json::json!({"kind":"port_in_use","port":7443,"pid":0,"program":null})
+    );
+    assert_eq!(
+        serde_json::to_value(ListenerFaultView::PortReserved { port: 7443 }).unwrap(),
+        serde_json::json!({"kind":"port_reserved","port":7443})
+    );
+}
+
+#[test]
 fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
@@ -502,6 +555,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         selected.relay_status.unwrap(),
         RelayStatusView {
             internet_state: None,
+            listener_fault: None,
             mode: RelayMode::Embedded,
             state: RelayState::Stopped,
         }
@@ -521,6 +575,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         relay_configured: false,
         relay_status: RelayStatusView {
             internet_state: None,
+            listener_fault: None,
             mode: RelayMode::Embedded,
             state: RelayState::WaitingNetwork,
         },
@@ -538,6 +593,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         relay_configured: true,
         relay_status: RelayStatusView {
             internet_state: None,
+            listener_fault: None,
             mode: RelayMode::Embedded,
             state: RelayState::Listening,
         },
@@ -1042,7 +1098,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "phoneService": null, "mobile": null,
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
             "relayConfigured": false,
-            "relayStatus": {"mode": "unknown", "state": "unknown", "internetState": null},
+            "relayStatus": {"mode": "unknown", "state": "unknown", "internetState": null, "listenerFault": null},
             "externalAccess": null,
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,

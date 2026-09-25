@@ -28,6 +28,8 @@ pub struct WindowsPlatformAdapter;
 const OPTIONAL_READ_HOLD: Duration = Duration::from_secs(30);
 static LAST_DIRECT: Mutex<Option<(Instant, crate::DirectConnectionState)>> = Mutex::new(None);
 static LAST_EXTERNAL: Mutex<Option<(Instant, crate::ExternalAccessView)>> = Mutex::new(None);
+// The inner None is a successful no-fault read and clears a held fault.
+static LAST_LISTENER: Mutex<Option<(Instant, Option<crate::ListenerFaultView>)>> = Mutex::new(None);
 
 fn held<T: Clone>(slot: &Mutex<Option<(Instant, T)>>, fresh: Option<T>) -> Option<T> {
     match slot.lock() {
@@ -102,12 +104,32 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                 _ => None,
             },
         );
+        let listener_fault = if embedded_relay && !relay_listening {
+            held(
+                &LAST_LISTENER,
+                match windows_service_host::management_listener_query() {
+                    Ok(ManagementResponse::ListenerStatus { port, fault }) => {
+                        Some(fault.map(|fault| listener_fault_view(port, fault)))
+                    }
+                    _ => None,
+                },
+            )
+            .flatten()
+        } else {
+            // A successful ordinary snapshot supersedes an older fault even
+            // if the optional read would miss this time.
+            if let Ok(mut last) = LAST_LISTENER.lock() {
+                *last = None;
+            }
+            None
+        };
         Ok(ManagementObservation {
             external_access,
             activity: activity.map(crate::pc_history::project),
             relay_configured: relay.is_some(),
             relay_status: RelayStatusView {
                 internet_state,
+                listener_fault,
                 mode: if embedded_relay {
                     RelayMode::Embedded
                 } else {
@@ -236,6 +258,19 @@ fn external_access_view(
         }),
     }
     .checked()
+}
+
+fn listener_fault_view(
+    port: u16,
+    fault: windows_service_host::management_protocol::ListenerFault,
+) -> crate::ListenerFaultView {
+    use windows_service_host::management_protocol::ListenerFault;
+    match fault {
+        ListenerFault::InUse { pid, program } => {
+            crate::ListenerFaultView::PortInUse { port, pid, program }
+        }
+        ListenerFault::Reserved => crate::ListenerFaultView::PortReserved { port },
+    }
 }
 
 fn project_direct_state(
@@ -372,6 +407,47 @@ mod tests {
         assert_eq!(hold(&mut slot, None, later), None);
         assert!(slot.is_none());
         assert_eq!(hold(&mut slot, None, later), None);
+    }
+
+    #[test]
+    fn listener_reads_hold_misses_but_clear_on_observed_recovery() {
+        use windows_service_host::management_protocol::ListenerFault;
+        let fault = listener_fault_view(
+            7443,
+            ListenerFault::InUse {
+                pid: 1234,
+                program: Some("veraport.exe".into()),
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&fault).unwrap(),
+            serde_json::json!({
+                "kind": "port_in_use", "port": 7443, "pid": 1234, "program": "veraport.exe"
+            })
+        );
+        let now = Instant::now();
+        let mut slot = None;
+        assert_eq!(
+            hold(&mut slot, Some(Some(fault.clone())), now),
+            Some(Some(fault.clone()))
+        );
+        assert_eq!(
+            hold(&mut slot, None, now + OPTIONAL_READ_HOLD),
+            Some(Some(fault))
+        );
+        assert_eq!(
+            hold(&mut slot, Some(None), now + OPTIONAL_READ_HOLD),
+            Some(None)
+        );
+        assert_eq!(
+            hold(&mut slot, None, now + OPTIONAL_READ_HOLD * 2),
+            Some(None)
+        );
+        assert_eq!(hold(&mut slot, None, now + OPTIONAL_READ_HOLD * 3), None);
+        assert_eq!(
+            serde_json::to_value(listener_fault_view(7443, ListenerFault::Reserved)).unwrap(),
+            serde_json::json!({"kind": "port_reserved", "port": 7443})
+        );
     }
 
     #[test]

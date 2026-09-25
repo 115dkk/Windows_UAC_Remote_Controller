@@ -34,6 +34,7 @@ serde_json.workspace = true
 presentation-i18n = { path = "../presentation-i18n" }
 activity-journal = { path = "../activity-journal" }
 windows-prompt-probe = { path = "../windows-prompt-probe" }
+windows-port-owner = { path = "../windows-port-owner" }
 getrandom.workspace = true
 approval-core = { path = "../approval-core" }
 approval-protocol = { path = "../approval-protocol" }

@@ -75,13 +75,43 @@ pub enum RelayState {
 }
 
 /// Listener observation is distinct from selected configuration/reachability.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayStatusView {
     pub mode: RelayMode,
     pub state: RelayState,
     /// A native route candidate observation, never an authenticated Internet path.
     pub internet_state: Option<DirectConnectionState>,
+    pub listener_fault: Option<ListenerFaultView>,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ListenerFaultView {
+    PortInUse {
+        port: u16,
+        pid: u32,
+        program: Option<String>,
+    },
+    PortReserved {
+        port: u16,
+    },
+}
+
+impl std::fmt::Debug for ListenerFaultView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortInUse { port, pid, .. } => f
+                .debug_struct("ListenerFaultView::PortInUse")
+                .field("port", port)
+                .field("pid", pid)
+                .finish_non_exhaustive(),
+            Self::PortReserved { port } => f
+                .debug_struct("ListenerFaultView::PortReserved")
+                .field("port", port)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

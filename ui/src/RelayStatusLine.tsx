@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { AppSnapshot } from './contracts';
 import { tr } from './i18n';
+import { listenerFaultMessage } from './listenerFault';
 import { hasLiveEmbeddedListener } from './directConnection';
 
 /** Settings and legacy readiness do not establish a live listener. */
@@ -20,7 +21,9 @@ export function RelayStatusLine({ snapshot, stale = false }: { snapshot: AppSnap
     // The service retries the listener on its own every few seconds.
     : relay?.mode === 'embedded' && relay.state === 'unavailable' ? '휴대폰 연결을 받지 못하고 있습니다. PC의 네트워크 연결을 확인하십시오. 연결되면 자동으로 다시 시도합니다.'
     : unknown;
+  // A bind failure names its cause instead of blaming the network.
+  const fault = !stale && !stopped && relay?.mode === 'embedded' && relay.state === 'unavailable' ? relay.listenerFault ?? null : null;
   return <p className={`state-line relay-state ${listening ? 'is-success' : ''}`} role="status">
-    <span className="state-dot" aria-hidden="true" />{tr(message)}
+    <span className="state-dot" aria-hidden="true" />{fault ? listenerFaultMessage(fault) : tr(message)}
   </p>;
 }

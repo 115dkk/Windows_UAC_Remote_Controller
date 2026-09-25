@@ -56,6 +56,8 @@ mod direct;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod enrollment;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod listener;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod management;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod pairing;
@@ -523,6 +525,10 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay_retry_at: Instant,
     #[cfg(all(windows, target_pointer_width = "64"))]
+    relay_listener_fault: Option<crate::management_protocol::ListenerFault>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    relay_owner_lookup: Option<(Instant, Option<windows_port_owner::ListenerOwner>)>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
     relay: Option<std::net::SocketAddr>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     pending_relay: Option<PendingRelayReplacement>,
@@ -637,6 +643,10 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_retry_at: epoch_start,
             #[cfg(all(windows, target_pointer_width = "64"))]
+            relay_listener_fault: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            relay_owner_lookup: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
             relay: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
             pending_relay: None,
@@ -715,6 +725,7 @@ impl<'key> ServiceSession<'key> {
         if self.embedded_mode {
             self.poll_embedded_relay(Instant::now())?;
         } else {
+            self.clear_listener_fault();
             self.dialer = relay.map(dialer::DeviceDialer::new).transpose()?;
         }
         Ok(())
@@ -769,8 +780,13 @@ impl<'key> ServiceSession<'key> {
         if self.embedded_relay.is_none() {
             // A port collision or offline network disables connection readiness,
             // not TPM/service startup. Retry is bounded and never kills an owner.
-            self.embedded_relay =
-                relay_service::HostedRelay::start_embedded(relay_service::EMBEDDED_RELAY_PORT).ok();
+            match relay_service::HostedRelay::start_embedded(relay_service::EMBEDDED_RELAY_PORT) {
+                Ok(host) => {
+                    self.embedded_relay = Some(host);
+                    self.clear_listener_fault();
+                }
+                Err(error) => self.observe_listener_failure(&error, now),
+            }
             if self.embedded_relay.is_none() {
                 // Phones redial within a second of a service restart; a port
                 // the previous process only just released gets the same pace.
@@ -1652,6 +1668,7 @@ impl<'key> ServiceSession<'key> {
             ManagementRequest::Query
                 | ManagementRequest::QueryDirect
                 | ManagementRequest::QueryExternal
+                | ManagementRequest::QueryListener
         ) && class != crate::ffi::ManagementClientClass::CliElevated
         {
             return Ok(Some(ManagementResponse::Refused(
@@ -1661,6 +1678,7 @@ impl<'key> ServiceSession<'key> {
         match request {
             ManagementRequest::QueryDirect => Ok(Some(self.direct_status())),
             ManagementRequest::QueryExternal => Ok(Some(self.external_status())),
+            ManagementRequest::QueryListener => Ok(Some(self.listener_status())),
             ManagementRequest::SetExternalAccess { access } => {
                 // Persist first, on this worker, through the same protected
                 // owner as the relay choice; a failed write changes nothing.
@@ -2179,6 +2197,7 @@ impl<'key> ServiceSession<'key> {
         self.closing = true;
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
+            self.clear_listener_fault();
             self.pairing.shutdown();
             self.management.shutdown();
             self.cancel_direct_gateway();

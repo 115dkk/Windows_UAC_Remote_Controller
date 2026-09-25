@@ -263,6 +263,59 @@ fn routing_mode_withdrawal_retires_output_guards_and_status_contains_no_coordina
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn listener_read_is_medium_client_diagnostic_and_clears_on_mode_change_or_close() {
+    use crate::{
+        ffi::ManagementClientClass,
+        management_protocol::{ListenerFault, ManagementRequest, ManagementResponse},
+    };
+    exercise(|session, _, _, _| {
+        session.embedded_mode = true;
+        // Supply a deterministic cached owner rather than relying on this PC's 7443.
+        let now = Instant::now();
+        session.relay_owner_lookup = Some((
+            now,
+            Some(windows_port_owner::ListenerOwner {
+                pid: 1234,
+                image_name: Some("veraport.exe".into()),
+            }),
+        ));
+        session.observe_listener_failure(&std::io::Error::from_raw_os_error(10048), now);
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryListener
+                )
+                .unwrap(),
+            Some(ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: Some(ListenerFault::InUse {
+                    pid: 1234,
+                    program: Some("veraport.exe".into())
+                }),
+            })
+        );
+        session
+            .configure_relay_after_ready(Some("127.0.0.1:9443".parse().unwrap()))
+            .unwrap();
+        assert!(session.relay_listener_fault.is_none());
+        assert!(session.relay_owner_lookup.is_none());
+        assert_eq!(
+            session.listener_status(),
+            ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: None
+            }
+        );
+        session.relay_listener_fault = Some(ListenerFault::Reserved);
+        session.begin_shutdown();
+        assert!(session.relay_listener_fault.is_none());
+        assert!(session.relay_owner_lookup.is_none());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
 fn external_status(
     session: &mut ServiceSession<'_>,
     class: crate::ffi::ManagementClientClass,

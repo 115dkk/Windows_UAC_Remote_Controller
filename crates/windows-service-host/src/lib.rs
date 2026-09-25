@@ -309,6 +309,23 @@ pub fn management_external_query() -> Result<management_protocol::ManagementResp
     }
 }
 
+/// Optional read-only listener diagnostic, with its own short deadline.
+pub fn management_listener_query() -> Result<management_protocol::ManagementResponse, ServiceError>
+{
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        management_exchange_with_timeout(
+            management_protocol::ManagementRequest::QueryListener,
+            std::time::Duration::from_secs(1),
+        )
+    }
+    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
+
 /// Elevated CLI verbs only (`remove`, `relay`, `external`); the service refuses other clients.
 #[cfg(windows)]
 pub(crate) fn management_mutation(
@@ -319,7 +336,8 @@ pub(crate) fn management_mutation(
         management_protocol::ManagementResponse::Refused(_) => Err(ServiceError::ManagementRefused),
         management_protocol::ManagementResponse::Snapshot { .. }
         | management_protocol::ManagementResponse::DirectStatus { .. }
-        | management_protocol::ManagementResponse::ExternalStatus { .. } => {
+        | management_protocol::ManagementResponse::ExternalStatus { .. }
+        | management_protocol::ManagementResponse::ListenerStatus { .. } => {
             Err(ServiceError::UnexpectedState)
         }
     }

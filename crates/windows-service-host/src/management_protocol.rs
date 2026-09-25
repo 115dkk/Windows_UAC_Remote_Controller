@@ -34,6 +34,8 @@ pub enum ManagementRequest {
     UseEmbeddedRelay,
     /// Separate optional read, like `QueryDirect`; older services refuse it.
     QueryExternal,
+    /// Separate optional read of the embedded listener diagnostic.
+    QueryListener,
     /// Elevated CLI only. The value is validated on both encode and decode.
     SetExternalAccess {
         access: ExternalAccess,
@@ -180,8 +182,40 @@ impl fmt::Debug for DeviceRow {
     }
 }
 
+/// Untrusted diagnostic only; never process identity or an authorization decision.
+#[derive(Clone, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ListenerFault {
+    InUse { pid: u32, program: Option<String> },
+    Reserved,
+}
+
+impl fmt::Debug for ListenerFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InUse { pid, .. } => f
+                .debug_struct("ListenerFault::InUse")
+                .field("pid", pid)
+                .finish_non_exhaustive(),
+            Self::Reserved => f.write_str("ListenerFault::Reserved"),
+        }
+    }
+}
+
+fn validate_program(program: &str) -> Result<(), ManagementCodecError> {
+    if windows_port_owner::valid_image_name(program) {
+        Ok(())
+    } else {
+        Err(ManagementCodecError::Malformed)
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ManagementResponse {
+    ListenerStatus {
+        port: u16,
+        fault: Option<ListenerFault>,
+    },
     DirectStatus {
         embedded_relay: bool,
         relay_listening: bool,
@@ -218,6 +252,11 @@ pub enum ManagementResponse {
 impl fmt::Debug for ManagementResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ListenerStatus { port, fault } => f
+                .debug_struct("ManagementResponse::ListenerStatus")
+                .field("port", port)
+                .field("fault", fault)
+                .finish(),
             Self::DirectStatus { state, .. } => f
                 .debug_tuple("ManagementResponse::DirectStatus")
                 .field(state)
@@ -251,6 +290,7 @@ pub fn encode_request(request: &ManagementRequest) -> Result<Vec<u8>, Management
         ManagementRequest::Query => writer.byte(1),
         ManagementRequest::QueryDirect => writer.byte(5),
         ManagementRequest::QueryExternal => writer.byte(6),
+        ManagementRequest::QueryListener => writer.byte(8),
         ManagementRequest::UseEmbeddedRelay => writer.byte(4),
         ManagementRequest::SetExternalAccess { access } => {
             writer.byte(7);
@@ -276,6 +316,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
         1 => ManagementRequest::Query,
         5 => ManagementRequest::QueryDirect,
         6 => ManagementRequest::QueryExternal,
+        8 => ManagementRequest::QueryListener,
         4 => ManagementRequest::UseEmbeddedRelay,
         7 => ManagementRequest::SetExternalAccess {
             access: reader.external_access()?,
@@ -296,6 +337,23 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
 pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, ManagementCodecError> {
     let mut writer = Writer::new();
     match response {
+        ManagementResponse::ListenerStatus { port, fault } => {
+            writer.byte(0x86);
+            writer.u16(*port);
+            match fault {
+                None => writer.byte(0),
+                Some(ListenerFault::Reserved) => writer.byte(2),
+                Some(ListenerFault::InUse { pid, program }) => {
+                    writer.byte(1);
+                    writer.bytes(&pid.to_be_bytes());
+                    writer.boolean(program.is_some());
+                    if let Some(program) = program {
+                        validate_program(program)?;
+                        writer.text(program)?;
+                    }
+                }
+            }
+        }
         ManagementResponse::DirectStatus {
             embedded_relay,
             relay_listening,
@@ -417,6 +475,26 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
 pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCodecError> {
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
+        0x86 => {
+            let port = reader.u16()?;
+            let fault = match reader.byte()? {
+                0 => None,
+                2 => Some(ListenerFault::Reserved),
+                1 => {
+                    let pid = u32::from_be_bytes(reader.array()?);
+                    let program = if reader.boolean()? {
+                        let text = reader.text(64 * 4)?;
+                        validate_program(&text)?;
+                        Some(text)
+                    } else {
+                        None
+                    };
+                    Some(ListenerFault::InUse { pid, program })
+                }
+                _ => return Err(ManagementCodecError::Malformed),
+            };
+            ManagementResponse::ListenerStatus { port, fault }
+        }
         0x84 => {
             let embedded_relay = reader.boolean()?;
             let relay_listening = reader.boolean()?;
@@ -1099,6 +1177,93 @@ mod tests {
         let mut done = encode_response(&ManagementResponse::Done).unwrap();
         done.push(0);
         assert!(decode_response(&done).is_err());
+    }
+
+    #[test]
+    fn listener_status_round_trips_and_keeps_existing_tags() {
+        assert_eq!(
+            encode_request(&ManagementRequest::QueryListener).unwrap(),
+            b"UCMG\x03\x08"
+        );
+        assert_eq!(
+            decode_request(b"UCMG\x03\x08"),
+            Ok(ManagementRequest::QueryListener)
+        );
+        assert!(decode_request(b"UCMG\x03\x08\x00").is_err());
+        for fault in [
+            None,
+            Some(ListenerFault::Reserved),
+            Some(ListenerFault::InUse {
+                pid: 0,
+                program: None,
+            }),
+            Some(ListenerFault::InUse {
+                pid: 1234,
+                program: Some("veraport.exe".into()),
+            }),
+            Some(ListenerFault::InUse {
+                pid: 4,
+                program: Some("한".repeat(64)),
+            }),
+        ] {
+            let response = ManagementResponse::ListenerStatus { port: 7443, fault };
+            let wire = encode_response(&response).unwrap();
+            assert_eq!(wire[5], 0x86);
+            assert_eq!(decode_response(&wire), Ok(response.clone()));
+            assert!(!format!("{response:?}").contains("veraport"));
+            for end in 0..wire.len() {
+                assert!(decode_response(&wire[..end]).is_err());
+            }
+            let mut trailing = wire;
+            trailing.push(0);
+            assert!(decode_response(&trailing).is_err());
+        }
+        assert_eq!(
+            encode_response(&ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: None
+            })
+            .unwrap(),
+            b"UCMG\x03\x86\x1d\x13\x00"
+        );
+    }
+
+    #[test]
+    fn listener_status_rejects_malformed_names_and_faults_both_ways() {
+        for text in [
+            String::new(),
+            "a".repeat(65),
+            "한".repeat(65),
+            "bad\n.exe".into(),
+            "bad\u{202e}.exe".into(),
+            "C:\\private\\a.exe".into(),
+        ] {
+            assert!(
+                encode_response(&ManagementResponse::ListenerStatus {
+                    port: 7443,
+                    fault: Some(ListenerFault::InUse {
+                        pid: 1,
+                        program: Some(text.clone())
+                    })
+                })
+                .is_err()
+            );
+            let mut writer = Writer::new();
+            writer.byte(0x86);
+            writer.u16(7443);
+            writer.byte(1);
+            writer.bytes(&1_u32.to_be_bytes());
+            writer.byte(1);
+            writer.text(&text).unwrap();
+            assert!(decode_response(&writer.finish().unwrap()).is_err());
+        }
+        for wire in [
+            &b"UCMG\x03\x86\x1d\x13\x03"[..],
+            b"UCMG\x03\x86\x1d\x13\x01\x00\x00\x00\x01\x02",
+            b"UCMG\x03\x86\x1d\x13\x01\x00\x00\x00\x01\x01\x00\x01\xff",
+        ] {
+            assert!(decode_response(wire).is_err());
+        }
     }
 
     fn public() -> SocketAddr {
