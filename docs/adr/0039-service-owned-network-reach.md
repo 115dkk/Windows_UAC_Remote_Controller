@@ -1,10 +1,10 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 # ADR 0039: The PC service owns its network reach
 
-Status: implemented, 2026-09-26. Records the 1.5.x network boundary and the port
-choice added with this record. Supersedes the network sentences of ADR0018,
-ADR0027 §3, ADR0031 and ADR0038 named below; each of those records now points
-here and keeps its text as history.
+Status: implemented, 2026-09-26. Records the 1.5.x network boundary, the port
+choice and the relay port conflict diagnosis added with this record. Supersedes
+the network sentences of ADR0018, ADR0027 §3, ADR0031 and ADR0038 named below;
+each of those records now points here and keeps its text as history.
 
 ## Why this record exists
 
@@ -87,6 +87,27 @@ ports are taken.
 DMZ is not suggested anywhere. A home router's DMZ host receives every
 unsolicited inbound connection, which leaves Windows Firewall as the PC's only
 barrier, usually under the private profile.
+
+## Relay port conflicts
+
+The internal port never moves. The pairing QR, the phone's routing book, the
+PC's own loopback leg (`127.0.0.1:7443`) and every forward a user made on the
+router assume 7443; moving it silently would strand paired phones and break
+the router rule.
+
+The listener sets `SO_EXCLUSIVEADDRUSE` before binding. Without it Windows let
+the wildcard bind succeed beside a program already holding `127.0.0.1:7443`
+(measured on the development PC), and the PC's loopback leg would then reach
+that program. With it the bind fails, as Microsoft documents for dual-stack
+sockets. When a bind fails with WSAEADDRINUSE or WSAEACCES the service looks up
+the listening process in the IPv4 and IPv6 owner-PID TCP tables at most every
+five seconds (`windows-port-owner`, the only new FFI) and keeps the executable's
+file name and PID, never its path. `QueryListener` returns that fault to any
+local client; the app names the program, or the PID, or a Windows port
+reservation (Hyper-V, WSL, Docker), instead of blaming the network. With no
+holder found the fault stays unnamed, because an exclusive listener cannot
+rebind until the previous instance's connections finish. The fault changes
+nothing: the service keeps retrying every second and stops no process.
 
 ## Limits
 
