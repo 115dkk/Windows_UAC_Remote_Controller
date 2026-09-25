@@ -118,6 +118,9 @@ function exposedBySnapshot(snapshot: AppSnapshot, command: ClientCommand): boole
   }
 }
 
+/** Commands that wait for a background read holding the native admission. */
+const QUEUED_OWNER_COMMANDS: ReadonlySet<ClientCommand['kind']> = new Set(['service', 'pair', 'remove', 'relay', 'external-access', 'clear', 'policy']);
+
 function dispatch(bridge: ControllerBridge, command: Exclude<ClientCommand, { kind: 'lock-settings' | 'notification-settings' | 'scan_pairing' | 'diagnostics-folder' | 'diagnostics-export' | 'diagnostics-save' }>): Promise<AppSnapshot> {
   switch (command.kind) {
     case 'service': return bridge.controlService(command.action);
@@ -247,11 +250,13 @@ export function useController(bridge: ControllerBridge) {
     }
     // A renderer revision cannot cancel the native read's admission lease.
     // Serialize this camera-entry intent behind that exact read, then recheck
-    // its fresh capability. Never queue approval/denial or a generic command.
+    // its fresh capability.
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const pairRead = command.kind === 'pair' && activeRead.current?.owner === bridge ? activeRead.current : null;
+    // Owner commands wait for the held read too. Approval and denial never do:
+    // they answer the request exactly as the screen showed it.
+    const ownerRead = QUEUED_OWNER_COMMANDS.has(command.kind) && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -334,13 +339,14 @@ export function useController(bridge: ControllerBridge) {
         publish({ ...previous, refreshing: false, busy: null, error: null, notice: null });
         return null;
       }
-      if (pairRead) {
-        // The PC's pair buttons stay enabled while a background read runs. Its
-        // native admission would answer the start with app_busy and the pairing
-        // would never begin, so wait for that exact read and recheck its fresh
-        // capability first, as the phone's scanner intent does.
+      if (ownerRead) {
+        // Command buttons stay enabled while a background read runs. The native
+        // admission would answer the command with app_busy and nothing would
+        // happen (a pairing that never began, a setting that was never saved),
+        // so wait for that exact read and recheck its fresh capability first,
+        // as the phone's scanner intent does.
         let fresh: AppSnapshot;
-        try { fresh = await pairRead.promise; }
+        try { fresh = await ownerRead.promise; }
         catch (failure) {
           if (liveOwner.current !== bridge || attempt !== revision.current) return null;
           const latest = current.current;

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Synthetic admission ordering; actual minified native startup is a separate CI gate.
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge } from './contracts';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
+import { useController } from './useController';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -175,5 +176,71 @@ describe('PC pairing start waits for the actual background read', () => {
     await act(async () => { test.pending.resolve({ ...test.snapshot, canPair: false }); await test.pending.promise; });
     await waitFor(() => expect(entry).toBeDisabled());
     expect(test.beginPairing).not.toHaveBeenCalled();
+  });
+});
+
+describe('owner commands wait for the actual background read', () => {
+  // The native single slot refuses rather than queues, as with_runtime does.
+  function held(snapshot: AppSnapshot) {
+    const pending = deferred<AppSnapshot>();
+    const state = { held: false };
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(snapshot)
+      .mockImplementationOnce(() => {
+        state.held = true;
+        return pending.promise.finally(() => { state.held = false; });
+      }).mockResolvedValue(snapshot);
+    const admit = <T,>(value: T) => state.held
+      ? Promise.reject(Object.assign(new Error('synthetic native read busy'), { code: 'app_busy' })) : Promise.resolve(value);
+    return { pending, read, admit };
+  }
+
+  it('saves external access once after the read instead of losing the save', async () => {
+    const snapshot = qaCase('desktop-running').snapshot;
+    const test = held(snapshot);
+    const setExternalAccess = vi.fn<ControllerBridge['setExternalAccess']>(() => test.admit(snapshot));
+    const bridge = { ...createQaBridge(snapshot), snapshot: test.read, setExternalAccess };
+    const { result } = renderHook(() => useController(bridge));
+    await waitFor(() => expect(result.current.snapshot).toBe(snapshot));
+    act(() => { void result.current.refresh(); });
+    let saved!: Promise<AppSnapshot | null>;
+    act(() => { saved = result.current.run({ kind: 'external-access', access: { mode: 'router_forward', externalPort: 41327 } }); });
+    expect(setExternalAccess).not.toHaveBeenCalled();
+    await act(async () => { test.pending.resolve(snapshot); await saved; });
+    expect(setExternalAccess).toHaveBeenCalledExactlyOnceWith({ mode: 'router_forward', externalPort: 41327 });
+    expect(result.current.error).toBeNull();
+    expect(result.current.stale).toBe(false);
+  });
+
+  it('does not remove a device the completed read no longer lists', async () => {
+    const snapshot = qaCase('desktop-devices').snapshot;
+    const device = snapshot.devices[0]!;
+    const test = held(snapshot);
+    const removeDevice = vi.fn<ControllerBridge['removeDevice']>(() => test.admit(snapshot));
+    const bridge = { ...createQaBridge(snapshot), snapshot: test.read, removeDevice };
+    const { result } = renderHook(() => useController(bridge));
+    await waitFor(() => expect(result.current.snapshot).toBe(snapshot));
+    act(() => { void result.current.refresh(); });
+    let removed!: Promise<AppSnapshot | null>;
+    act(() => { removed = result.current.run({ kind: 'remove', deviceId: device.id }); });
+    const fresh = { ...snapshot, devices: snapshot.devices.filter((item) => item.id !== device.id) };
+    await act(async () => { test.pending.resolve(fresh); await removed; });
+    expect(removeDevice).not.toHaveBeenCalled();
+    expect(result.current.snapshot).toBe(fresh);
+    expect(result.current.busy).toBeNull();
+  });
+
+  it('never holds an approval back until a later read', async () => {
+    const snapshot = qaCase('phone-pending').snapshot;
+    const request = snapshot.requests.find((item) => item.state === 'pending' && item.canApprove)!;
+    const test = held(snapshot);
+    const decide = vi.fn<ControllerBridge['decide']>(() => test.admit(snapshot));
+    const bridge = { ...createQaBridge(snapshot), snapshot: test.read, decide };
+    const { result } = renderHook(() => useController(bridge));
+    await waitFor(() => expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length));
+    act(() => { void result.current.refresh(); });
+    await act(async () => { await result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    expect(decide).toHaveBeenCalledOnce();
+    await act(async () => { test.pending.resolve(snapshot); await test.pending.promise; });
+    expect(decide).toHaveBeenCalledOnce();
   });
 });
