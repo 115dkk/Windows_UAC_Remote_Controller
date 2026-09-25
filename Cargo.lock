@@ -5341,7 +5341,7 @@ dependencies = [
 
 [[package]]
 name = "windows-port-owner"
-version = "1.5.5"
+version = "1.6.0"
 dependencies = [
  "socket2",
  "thiserror 2.0.20",
