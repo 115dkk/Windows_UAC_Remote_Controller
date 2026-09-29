@@ -244,6 +244,8 @@ class ControllerLifecycleTest {
                 assertEquals(ControllerStatusNotificationRenderer.CHANNEL_ID, found.notification.channelId)
                 assertTrue(found.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0)
                 assertTrue(found.notification.flags and Notification.FLAG_ONGOING_EVENT != 0)
+                // Android 14+ lets a swipe remove it; the service re-posts on this intent.
+                assertNotNull(found.notification.deleteIntent)
             }
             value = Observed(
                 state.state == ControllerServiceState.LOCAL_SETTINGS_READY && state.policyOwnerReady && actor != null && phase == PolicyOwnerPhase.READY,

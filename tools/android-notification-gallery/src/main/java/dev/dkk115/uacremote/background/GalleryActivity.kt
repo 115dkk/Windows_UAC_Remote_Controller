@@ -89,9 +89,12 @@ class GalleryActivity : Activity() {
             Intent(this, GalleryActivity::class.java).setAction("gallery.status")
                 .setData(Uri.parse("gallery://example/status")),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val dismissed = PendingIntent.getBroadcast(this, ControllerStatusNotificationRenderer.NOTIFICATION_ID,
+            Intent("gallery.status.dismissed").setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val renderer = ControllerStatusNotificationRenderer(this)
         renderer.ensureChannel()
-        val notification = renderer.build(state, pending)
+        val notification = renderer.build(state, pending, dismissed)
         val channel = manager.getNotificationChannel(ControllerStatusNotificationRenderer.CHANNEL_ID)
             ?: throw IllegalStateException()
         val ongoing = (notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
@@ -100,7 +103,7 @@ class GalleryActivity : Activity() {
         val showWhen = notification.extras.getBoolean(Notification.EXTRA_SHOW_WHEN, true)
         check(notification.channelId == ControllerStatusNotificationRenderer.CHANNEL_ID)
         check(notification.category == Notification.CATEGORY_SERVICE && notification.actions.isNullOrEmpty())
-        check(notification.contentIntent == pending && notification.fullScreenIntent == null)
+        check(notification.contentIntent == pending && notification.deleteIntent == dismissed && notification.fullScreenIntent == null)
         check(ongoing && onlyAlertOnce && localOnly && !showWhen && notification.timeoutAfter == 0L)
         check((notification.flags and Notification.FLAG_FOREGROUND_SERVICE) == 0)
         check(channel.importance == NotificationManager.IMPORTANCE_LOW && channel.sound == null && !channel.shouldVibrate() && !channel.canShowBadge())

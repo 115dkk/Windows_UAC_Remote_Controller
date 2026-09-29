@@ -10,8 +10,9 @@ import android.os.Build
 import dev.dkk115.uacremote.R
 import dev.dkk115.uacremote.AppLanguage
 
-/** Existing status presentation only. Caller owns the real state, open intent,
- * notification posting and foreground lifetime; this class starts no owner. */
+/** Existing status presentation only. Caller owns the real state, open and
+ * dismissal intents, notification posting and foreground lifetime; this class
+ * starts no owner. */
 internal class ControllerStatusNotificationRenderer(private val source: Context) {
     private val context: Context get() = AppLanguage.context(source)
     fun ensureChannel() {
@@ -24,7 +25,7 @@ internal class ControllerStatusNotificationRenderer(private val source: Context)
         manager.createNotificationChannel(channel)
     }
 
-    fun build(state: ControllerServiceState, open: PendingIntent): Notification {
+    fun build(state: ControllerServiceState, open: PendingIntent, dismissed: PendingIntent): Notification {
         val context = this.context
         val body = when (state) {
             ControllerServiceState.WAITING_FOR_UNLOCK -> R.string.controller_service_locked
@@ -39,6 +40,7 @@ internal class ControllerStatusNotificationRenderer(private val source: Context)
             .setContentTitle(context.getString(R.string.controller_service_title))
             .setContentText(context.getString(body))
             .setContentIntent(open)
+            .setDeleteIntent(dismissed)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
