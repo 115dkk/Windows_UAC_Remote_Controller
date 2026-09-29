@@ -30,6 +30,8 @@ mod build_policy {
 mod contract;
 mod diagnostic;
 mod external_access;
+#[cfg(any(windows, test))]
+mod journal_recovery;
 #[cfg(all(
     windows,
     target_pointer_width = "64",

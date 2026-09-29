@@ -143,10 +143,12 @@ fn run(
         return Ok(());
     }
     let directory = ffi::open_activity_directory().map_err(|error| error.at_startup(2))?;
-    let mut journal = Journal::open(
+    let opened_at = now().map_err(|error| error.at_startup(3))?;
+    let mut journal = crate::journal_recovery::open(
         directory.path(),
         Limits::default(),
-        now().map_err(|error| error.at_startup(3))?,
+        opened_at,
+        crate::public_diagnostics::record,
     )
     .map_err(|_| ServiceError::JournalUnavailable.at_startup(3))?;
     events

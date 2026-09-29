@@ -19,7 +19,11 @@ Explorer or relaunch the app without administrator elevation.
 - Committed activity outcomes, service startup failure codes, process-startup
   guard phases and native prompt refusal reasons. A stored external-access
   setting the service could not parse is recorded as `configuration_ignored`;
-  the service then starts in automatic mode.
+  the service then starts in automatic mode. An activity journal that a power
+  loss left half-written is repaired at startup and recorded as
+  `journal_recovered`; one that cannot be repaired is recorded as
+  `journal_unusable` before the `startup_failure` row
+  ([ADR0041](adr/0041-a-torn-activity-journal-does-not-keep-the-service-down.md)).
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.
