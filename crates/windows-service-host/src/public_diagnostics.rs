@@ -23,6 +23,19 @@ pub(crate) enum Event {
         stage: u8,
         code: u32,
     },
+    // The activity journal could not be opened as stored (a write torn by a
+    // power loss leaves exactly these); the service repaired it and kept starting.
+    JournalRecovered {
+        fault: JournalFault,
+        action: JournalRecovery,
+    },
+    // The activity journal could not be opened and no recovery applies; the
+    // startup_failure row with stage 3 follows.
+    JournalUnusable {
+        fault: JournalFault,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        io_step: Option<JournalIoStep>,
+    },
     StartupGuard {
         phase: u8,
         policy: u8,
@@ -56,6 +69,108 @@ pub(crate) enum Event {
         panicked: bool,
         code: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JournalFault {
+    /// Another process owns the journal's exclusive writer lock.
+    WriterLocked,
+    /// The fixed lock file unexpectedly contained data.
+    UnexpectedLockContent,
+    /// A journal pathname named a link, reparse point or wrong entry type.
+    UnsafeEntry,
+    /// A prior write left the fixed staging file behind.
+    StagingLeft,
+    /// Current storage disappeared after the journal opened.
+    MissingStorage,
+    /// Current storage was malformed or used unsupported metadata.
+    CorruptStorage,
+    /// Current storage exceeded its configured byte limit.
+    StorageTooLarge,
+    /// Current storage exceeded its configured record limit.
+    TooManyRecords,
+    /// A stored JSON line exceeded its configured byte limit.
+    LineTooLarge,
+    /// The fixed journal schema could not be encoded.
+    EncodingFailed,
+    /// An append timestamp preceded the persisted clock observation.
+    ClockRollback,
+    /// A filesystem operation failed.
+    Io,
+}
+
+impl From<&activity_journal::JournalError> for JournalFault {
+    fn from(error: &activity_journal::JournalError) -> Self {
+        match error {
+            activity_journal::JournalError::WriterLocked => Self::WriterLocked,
+            activity_journal::JournalError::UnexpectedLockContent => Self::UnexpectedLockContent,
+            activity_journal::JournalError::UnsafeEntry(_) => Self::UnsafeEntry,
+            activity_journal::JournalError::StagingRecoveryRequired => Self::StagingLeft,
+            activity_journal::JournalError::MissingStorage => Self::MissingStorage,
+            activity_journal::JournalError::CorruptStorage => Self::CorruptStorage,
+            activity_journal::JournalError::StorageTooLarge => Self::StorageTooLarge,
+            activity_journal::JournalError::TooManyRecords => Self::TooManyRecords,
+            activity_journal::JournalError::LineTooLarge => Self::LineTooLarge,
+            activity_journal::JournalError::EncodingFailed => Self::EncodingFailed,
+            activity_journal::JournalError::ClockRollback => Self::ClockRollback,
+            activity_journal::JournalError::Io { .. } => Self::Io,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JournalIoStep {
+    /// Inspect the trusted journal directory.
+    InspectDirectory,
+    /// Resolve the trusted journal directory.
+    ResolveDirectory,
+    /// Inspect a fixed journal entry.
+    InspectEntry,
+    /// Open the fixed lock file.
+    OpenLock,
+    /// Acquire the exclusive writer lock.
+    AcquireLock,
+    /// Read current journal storage.
+    ReadCurrent,
+    /// Create the fixed staging file.
+    CreateStaging,
+    /// Write the fixed staging file.
+    WriteStaging,
+    /// Sync the fixed staging file.
+    SyncStaging,
+    /// Replace current storage with the staged write.
+    ReplaceCurrent,
+    /// Remove the fixed staging file.
+    RemoveStaging,
+}
+
+impl From<activity_journal::IoOperation> for JournalIoStep {
+    fn from(operation: activity_journal::IoOperation) -> Self {
+        match operation {
+            activity_journal::IoOperation::InspectDirectory => Self::InspectDirectory,
+            activity_journal::IoOperation::ResolveDirectory => Self::ResolveDirectory,
+            activity_journal::IoOperation::InspectEntry => Self::InspectEntry,
+            activity_journal::IoOperation::OpenLock => Self::OpenLock,
+            activity_journal::IoOperation::AcquireLock => Self::AcquireLock,
+            activity_journal::IoOperation::ReadCurrent => Self::ReadCurrent,
+            activity_journal::IoOperation::CreateStaging => Self::CreateStaging,
+            activity_journal::IoOperation::WriteStaging => Self::WriteStaging,
+            activity_journal::IoOperation::SyncStaging => Self::SyncStaging,
+            activity_journal::IoOperation::ReplaceCurrent => Self::ReplaceCurrent,
+            activity_journal::IoOperation::RemoveStaging => Self::RemoveStaging,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JournalRecovery {
+    /// Removed a fixed staging file left by an interrupted write.
+    DiscardedStaging,
+    /// Replaced unusable diagnostic history with an empty journal.
+    Cleared,
 }
 
 /// Why a connected phone's routing hints were refreshed. Never an address.
@@ -180,6 +295,14 @@ mod tests {
                 event: ActivityEvent::Service(activity_journal::ServiceOutcome::Started),
             },
             Event::StartupFailure { stage: 7, code: 5 },
+            Event::JournalRecovered {
+                fault: JournalFault::StagingLeft,
+                action: JournalRecovery::DiscardedStaging,
+            },
+            Event::JournalUnusable {
+                fault: JournalFault::Io,
+                io_step: Some(JournalIoStep::AcquireLock),
+            },
             Event::StartupGuard {
                 phase: 2,
                 policy: 1,
@@ -234,10 +357,63 @@ mod tests {
                     "step",
                     "panicked",
                     "fault",
+                    "action",
+                    "io_step",
                 ]
                 .contains(&key.as_str())
             }));
         }
+    }
+
+    #[test]
+    fn journal_recovery_rows_pin_the_public_schema() {
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalRecovered {
+                fault: JournalFault::StagingLeft,
+                action: JournalRecovery::DiscardedStaging,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_recovered",
+                "fault": "staging_left",
+                "action": "discarded_staging"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalUnusable {
+                fault: JournalFault::Io,
+                io_step: Some(JournalIoStep::AcquireLock),
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_unusable",
+                "fault": "io",
+                "io_step": "acquire_lock"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalUnusable {
+                fault: JournalFault::UnexpectedLockContent,
+                io_step: None,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_unusable",
+                "fault": "unexpected_lock_content"
+            })
+        );
     }
 
     #[test]
