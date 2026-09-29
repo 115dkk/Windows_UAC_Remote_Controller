@@ -60,8 +60,8 @@ internal object NativeRequestRules {
         val kind = if (action == "open") NativeRequestAction.DETAILS else NativeRequestRules.action(action) ?: return null
         return NativeNotificationRoute("request:$key", locator, kind)
     }
-    fun mayRouteActivity(restored: Boolean, ownerReady: Boolean, action: NativeRequestAction): Boolean =
-        !restored && ownerReady && action != NativeRequestAction.DENY
+    fun mayRouteActivity(restored: Boolean, fromHistory: Boolean, ownerReady: Boolean, action: NativeRequestAction): Boolean =
+        !restored && !fromHistory && ownerReady && action != NativeRequestAction.DENY
     fun notificationTag(key: String, locator: String): String {
         require(key.startsWith("request:") && fullKey(key.removePrefix("request:")) && NativeRequestRules.locator(locator))
         return "$key:$locator"

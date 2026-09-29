@@ -25,7 +25,7 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "dev.dkk115.uacremote"
-        minSdk = 30
+        minSdk = 31
         targetSdk = 36
         // Both genuine native components use the same single selected ABI.
         ndk { abiFilters += controllerSelectedAbi.abi }

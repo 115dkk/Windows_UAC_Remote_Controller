@@ -69,11 +69,16 @@ class NativeRequestRulesTest {
         assertEquals(2 * 1024 * 1024, NativeRequestRules.MAX_DETAILS_JSON)
     }
     @Test fun RecreationColdOwnerAndDenialCannotLaunchActivityApproval() {
-        assertTrue(NativeRequestRules.mayRouteActivity(false, true, NativeRequestAction.APPROVE))
-        assertTrue(NativeRequestRules.mayRouteActivity(false, true, NativeRequestAction.DETAILS))
-        assertFalse(NativeRequestRules.mayRouteActivity(true, true, NativeRequestAction.APPROVE))
-        assertFalse(NativeRequestRules.mayRouteActivity(false, false, NativeRequestAction.APPROVE))
-        assertFalse(NativeRequestRules.mayRouteActivity(false, true, NativeRequestAction.DENY))
+        assertTrue(NativeRequestRules.mayRouteActivity(false, false, true, NativeRequestAction.APPROVE))
+        assertTrue(NativeRequestRules.mayRouteActivity(false, false, true, NativeRequestAction.DETAILS))
+        assertFalse(NativeRequestRules.mayRouteActivity(true, false, true, NativeRequestAction.APPROVE))
+        assertFalse(NativeRequestRules.mayRouteActivity(false, false, false, NativeRequestAction.APPROVE))
+        assertFalse(NativeRequestRules.mayRouteActivity(false, false, true, NativeRequestAction.DENY))
+    }
+    @Test fun RecentsReplayOfATaskBaseIntentNeverActs() {
+        for (action in NativeRequestAction.values()) {
+            assertFalse(NativeRequestRules.mayRouteActivity(false, true, true, action))
+        }
     }
     @Test fun NotificationDecisionSelectorsAreConsumedOncePerOriginalEntry() {
         val claims = NativeRequestActionClaims()

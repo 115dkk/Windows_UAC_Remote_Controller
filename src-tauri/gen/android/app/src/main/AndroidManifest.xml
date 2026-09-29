@@ -37,9 +37,12 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:theme="@style/Theme.controller_app"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- Not singleTask: One UI 9 relaunches some sideloaded apps from Recents
+             into their existing task, and Android refuses that for singleTask
+             (ADR 0042). singleInstancePerTask keeps the one reused instance. -->
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|layoutDirection|smallestScreenSize|screenLayout|uiMode"
-            android:launchMode="singleTask"
+            android:launchMode="singleInstancePerTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
             android:exported="true">
