@@ -24,6 +24,9 @@ Explorer or relaunch the app without administrator elevation.
   `journal_recovered`; one that cannot be repaired is recorded as
   `journal_unusable` before the `startup_failure` row
   ([ADR0041](adr/0041-a-torn-activity-journal-does-not-keep-the-service-down.md)).
+  A local-network announcement that Windows refused is recorded once per
+  address and error code as `lan_announce_failed` with the Windows error code
+  ([ADR0043](adr/0043-lan-rediscovery-by-dns-sd.md)).
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.

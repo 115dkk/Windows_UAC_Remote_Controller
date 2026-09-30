@@ -11,6 +11,7 @@ mod clock;
 mod clock_request;
 mod codec;
 mod frame;
+mod lan;
 mod message;
 mod pairing;
 
@@ -26,6 +27,10 @@ pub use clock::{
 };
 pub use clock_request::{CLOCK_REQUEST_BYTES, ClockProbeRequest};
 pub use frame::{FrameDecoder, FrameError, FrameFeed, MAX_STREAM_CHUNK_BYTES, encode_frame};
+pub use lan::{
+    LAN_INSTANCE_LABEL_LEN, LAN_INSTANCE_PREFIX, LAN_SERVICE_TYPE, is_lan_instance_label,
+    lan_instance_label,
+};
 pub use message::{
     ClockProbeNonce, MAX_PC_EVENT_BYTES, MAX_REQUEST_LIFETIME_NANOS, PcEvent, PcEventError,
     PcPublicKey, RequestResolution, ServiceTick, SignedPcEvent, UnsignedPcEvent, VerifiedPcEvent,

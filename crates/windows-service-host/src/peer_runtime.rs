@@ -56,6 +56,8 @@ mod direct;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod enrollment;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod lan_announce;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod listener;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod management;
@@ -516,6 +518,8 @@ pub struct ServiceSession<'key> {
     direct_gateway: Option<direct_network::DirectGatewayOwner>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     direct_internal: Option<std::net::SocketAddr>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    lan_announcement: lan_announce::LanAnnouncement,
     /// The configured mode. A gateway owner of another mode is drained and
     /// replaced by `poll_direct_gateway`; an owner never changes mode.
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -637,6 +641,8 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             direct_internal: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
+            lan_announcement: lan_announce::LanAnnouncement::default(),
+            #[cfg(all(windows, target_pointer_width = "64"))]
             external_access: direct_network::ExternalAccess::Automatic,
             #[cfg(all(windows, target_pointer_width = "64"))]
             embedded_mode: false,
@@ -737,6 +743,7 @@ impl<'key> ServiceSession<'key> {
         // Withdraw them together; callers retain every worker until drained.
         self.relay = None;
         self.cancel_direct_gateway();
+        self.drop_lan_announcement();
         // Retire the output guards as part of the same mode/source transition:
         // queued signed routing hints may not cross into the replacement mode.
         for peer in &self.peers {
@@ -831,6 +838,7 @@ impl<'key> ServiceSession<'key> {
             }
         }
         self.poll_direct_gateway(endpoint);
+        self.poll_lan_announcement(now);
         Ok(())
     }
 
@@ -2204,6 +2212,7 @@ impl<'key> ServiceSession<'key> {
             self.pairing.shutdown();
             self.management.shutdown();
             self.cancel_direct_gateway();
+            self.drop_lan_announcement();
             if let Some(host) = self.embedded_relay.as_ref() {
                 host.cancel();
             }
