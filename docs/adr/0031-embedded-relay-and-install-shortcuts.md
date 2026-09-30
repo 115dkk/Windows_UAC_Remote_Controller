@@ -5,7 +5,9 @@ Status: implementation, 2026-09-12. Native/physical acceptance remains separate.
 
 Superseded in part: the IPv4-only listener, "no UPnP or router edit", "queries no
 public IP service" and "does not claim NAT traversal" were replaced by ADR0038 and
-[ADR 0039](0039-service-owned-network-reach.md).
+[ADR 0039](0039-service-owned-network-reach.md). "A changed LAN address can require
+reconnect/re-pairing" no longer holds on a shared network: the phone finds the PC
+again by DNS-SD ([ADR 0043](0043-lan-rediscovery-by-dns-sd.md)).
 
 ## Decision
 

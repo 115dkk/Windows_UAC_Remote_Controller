@@ -62,6 +62,10 @@ pub(crate) enum Event {
     WatcherStartFailed {
         error: ProbeSupervisorError,
     },
+    // Local discovery failed; the service keeps running and retries. No address.
+    LanAnnounceFailed {
+        code: u32,
+    },
     // The worker stopped with an error (or a caught panic) after SCM Ready, at
     // this fixed step. `code` is the SCM diagnostic code; 0 for a panic.
     RuntimeFailure {
@@ -331,6 +335,7 @@ mod tests {
                     hresult: -2147024891,
                 },
             },
+            Event::LanAnnounceFailed { code: 5 },
             Event::RuntimeFailure {
                 step: 4,
                 panicked: false,
@@ -363,6 +368,21 @@ mod tests {
                 .contains(&key.as_str())
             }));
         }
+    }
+
+    #[test]
+    fn lan_announcement_failure_has_only_a_numeric_code() {
+        assert_eq!(
+            serde_json::to_value(row(Event::LanAnnounceFailed { code: 9505 })).unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "lan_announce_failed",
+                "code": 9505
+            })
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ import android.os.UserManager
 import androidx.lifecycle.Lifecycle
 import dev.dkk115.uacremote.ControllerApplication
 import dev.dkk115.uacremote.MainActivity
+import dev.dkk115.uacremote.nativecore.NativeConnectivityStatus
 import java.io.FileDescriptor
 import java.io.PrintWriter
 
@@ -49,16 +50,36 @@ class ControllerForegroundService : Service() {
     private var networkManager: ConnectivityManager? = null
     private var networkPolicy: DefaultNetworkPolicy? = null
     private var networkChanges = 0L
+    private var defaultNetwork: Long? = null
+    private var localNetwork = false
+    private var lanDiscovery: LanServiceDiscovery? = null
+    private var connectivityActor: ApplicationPolicyActor? = null
+    private var connectivityStatus: NativeConnectivityStatus? = null
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            if (!destroyed && networkPolicy?.available(network.networkHandle) == true) scheduleNetworkFlush()
+            if (destroyed) return
+            if (defaultNetwork != network.networkHandle) {
+                defaultNetwork = network.networkHandle
+                localNetwork = false // Wait for this default's capabilities, not those of its predecessor.
+            }
+            if (networkPolicy?.available(network.networkHandle) == true) scheduleNetworkFlush()
+            updateLanDiscovery()
         }
         override fun onLost(network: Network) {
-            if (!destroyed && networkPolicy?.lost(network.networkHandle) == true) scheduleNetworkFlush()
+            if (destroyed) return
+            if (defaultNetwork == network.networkHandle) { defaultNetwork = null; localNetwork = false }
+            if (networkPolicy?.lost(network.networkHandle) == true) scheduleNetworkFlush()
+            updateLanDiscovery()
         }
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-            if (!destroyed && networkPolicy?.capabilities(network.networkHandle, transportTypes(capabilities)) == true) {
+            if (destroyed) return
+            if (networkPolicy?.capabilities(network.networkHandle, transportTypes(capabilities)) == true) {
                 scheduleNetworkFlush()
+            }
+            if (defaultNetwork == network.networkHandle) {
+                localNetwork = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                updateLanDiscovery()
             }
         }
     }
@@ -99,6 +120,11 @@ class ControllerForegroundService : Service() {
             return
         }
         attached = true
+        lanDiscovery = LanServiceDiscovery(this, main,
+            { instance, addresses, port ->
+                if (connectionMaintenanceReady(owner)) owner.policyActor?.lanServiceSeen(instance, addresses, port)
+            },
+            { instance -> if (connectionMaintenanceReady(owner)) owner.policyActor?.lanServiceLost(instance) })
         val unlock = observeUnlock(this)
         val initial = when (unlock) {
             UserUnlockObservation.LOCKED -> ControllerServiceState.WAITING_FOR_UNLOCK
@@ -110,6 +136,7 @@ class ControllerForegroundService : Service() {
             // Promote promptly BEFORE any Rust/CE/key-owner construction.
             startForeground(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             promoted = true
+            updateLanDiscovery()
             shownState = initial
             BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.PROMOTION_SUCCEEDED, unlock = unlock))
         } catch (failure: Exception) {
@@ -242,8 +269,29 @@ class ControllerForegroundService : Service() {
             owner.isCurrentControllerServiceGeneration(ownerToken, activatedGeneration) &&
             owner.policyActor?.lifecyclePhase() == PolicyOwnerPhase.READY
 
+    private fun updateLanDiscovery() {
+        val owner = application as? ControllerApplication
+        val ready = connectionMaintenanceReady(owner)
+        val actor = if (ready) owner?.policyActor else null
+        if (connectivityActor !== actor) {
+            connectivityActor?.observeConnectivity(null)
+            connectivityActor = actor
+            connectivityStatus = null
+            actor?.observeConnectivity { status ->
+                if (!destroyed && connectivityActor === actor) {
+                    connectivityStatus = status
+                    updateLanDiscovery()
+                }
+            }
+        }
+        val status = connectivityStatus
+        lanDiscovery?.setWanted(LanDiscoveryPolicy.wanted(promoted, retiring, destroyed, ready,
+            localNetwork, status?.associations, status?.connected))
+    }
+
     private fun scheduleConnectivityTick() {
         if (!connectionMaintenanceReady(application as? ControllerApplication)) { stopConnectivityTick(); return }
+        updateLanDiscovery()
         scheduleNetworkFlush()
         if (!connectivityTickPosted) {
             connectivityTickPosted = main.postDelayed(connectivityTick, connectivityToken, CONNECTION_TICK_MILLIS)
@@ -253,6 +301,7 @@ class ControllerForegroundService : Service() {
     private fun stopConnectivityTick() {
         main.removeCallbacksAndMessages(connectivityToken)
         connectivityTickPosted = false
+        updateLanDiscovery()
     }
 
     private fun registerDefaultNetwork() {
@@ -260,7 +309,8 @@ class ControllerForegroundService : Service() {
         networkRegistrationAttempted = true
         try {
             val manager = getSystemService(ConnectivityManager::class.java) ?: return
-            networkPolicy = DefaultNetworkPolicy(manager.activeNetwork?.networkHandle)
+            defaultNetwork = manager.activeNetwork?.networkHandle
+            networkPolicy = DefaultNetworkPolicy(defaultNetwork)
             // Observe Android's selected default, including VPN. Never bind to
             // Wi-Fi or request a replacement network to bypass OS routing.
             manager.registerDefaultNetworkCallback(networkCallback, main)
@@ -277,6 +327,7 @@ class ControllerForegroundService : Service() {
     }
 
     private fun flushNetworkChange() {
+        updateLanDiscovery()
         val owner = application as? ControllerApplication
         // A pre-unlock callback only updates memory; no keys/CE/owner are opened.
         if (!connectionMaintenanceReady(owner)) return
@@ -382,6 +433,8 @@ class ControllerForegroundService : Service() {
             generationPresent = activatedGeneration != null, attached = attached, promoted = promoted))
         destroyed = true
         stopConnectivityTick()
+        lanDiscovery?.close()
+        lanDiscovery = null
         activationWaitStartId = null
         unregisterDefaultNetwork()
         unregisterUnlockReceiver()

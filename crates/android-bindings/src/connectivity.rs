@@ -11,7 +11,10 @@ use android_controller::{MAX_PEER_ASSOCIATIONS, PeerAssociationRef};
 use relay_service::{Registration, RendezvousCarrier, RendezvousError, Role, RouteId};
 use tokio_util::sync::CancellationToken;
 
-use crate::{BridgeError, MobileController};
+use crate::{
+    BridgeError, MobileController,
+    lan_hints::{LAN_HINT_OBSERVATION_CAPACITY, LanHints},
+};
 
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -84,6 +87,7 @@ pub(super) struct DialState {
 
 pub(crate) struct ConnectivityOwner {
     pub(super) states: Mutex<BTreeMap<(approval_protocol::PcIdentity, u64), DialState>>,
+    pub(super) lan: Mutex<LanHints>,
     network: Mutex<NetworkGeneration>,
     stop: CancellationToken,
 }
@@ -98,6 +102,7 @@ impl Default for ConnectivityOwner {
     fn default() -> Self {
         Self {
             states: Mutex::new(BTreeMap::new()),
+            lan: Mutex::new(LanHints::default()),
             network: Mutex::new(NetworkGeneration {
                 number: 0,
                 available: true,
@@ -237,6 +242,21 @@ fn recovery_deadline(state: &DialState, now: Instant) -> Option<Instant> {
     }
 }
 
+/// Put current-network observations before stored routes while preserving the
+/// order within both lists and retaining each socket address once.
+fn merge_lan_hints(
+    hints: &[std::net::SocketAddr],
+    candidates: impl IntoIterator<Item = std::net::SocketAddr>,
+) -> Vec<std::net::SocketAddr> {
+    let mut merged = Vec::with_capacity(hints.len() + 1);
+    for address in hints.iter().copied().chain(candidates) {
+        if !merged.contains(&address) {
+            merged.push(address);
+        }
+    }
+    merged
+}
+
 pub(crate) struct DialCompletion {
     pub(crate) reference: PeerAssociationRef,
     /// Ok once a carrier was attached; otherwise what the network showed, if
@@ -342,9 +362,81 @@ impl MobileController {
             .lock()
             .map_err(|_| BridgeError::Closed)?
             .clear();
+        self.connectivity
+            .lan
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .clear();
         for (reference, _, _) in associations {
             self.intake.retire_association(reference);
         }
+        Ok(())
+    }
+
+    /// A DNS-SD instance of the PC service type resolved on the phone's current
+    /// network. Routing hint only: never approval, pairing or reachability.
+    pub fn lan_service_seen(
+        &self,
+        instance: String,
+        addresses: Vec<String>,
+        port: u16,
+    ) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        if !self
+            .approval_alive
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.connectivity.stop.is_cancelled()
+        {
+            return Err(BridgeError::Closed);
+        }
+        if !service_protocol::is_lan_instance_label(&instance) {
+            return Err(BridgeError::InvalidObservation);
+        }
+        let addresses = addresses
+            .into_iter()
+            .take(LAN_HINT_OBSERVATION_CAPACITY)
+            .filter_map(|address| address.parse::<std::net::IpAddr>().ok())
+            .map(|address| std::net::SocketAddr::new(address, port));
+        let changed = self
+            .connectivity
+            .lan
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .record(&instance, addresses, Instant::now());
+        if changed {
+            let mut states = self
+                .connectivity
+                .states
+                .lock()
+                .map_err(|_| BridgeError::Closed)?;
+            for ((pc, _), state) in states.iter_mut() {
+                if service_protocol::lan_instance_label(pc) == instance {
+                    state.retry_at = None;
+                    state.failures = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The instance is gone from the phone's current network.
+    pub fn lan_service_lost(&self, instance: String) -> Result<(), BridgeError> {
+        let _admission = self.enter()?;
+        if !self
+            .approval_alive
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.connectivity.stop.is_cancelled()
+        {
+            return Err(BridgeError::Closed);
+        }
+        if !service_protocol::is_lan_instance_label(&instance) {
+            return Err(BridgeError::InvalidObservation);
+        }
+        self.connectivity
+            .lan
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .forget(&instance);
         Ok(())
     }
 
@@ -366,6 +458,21 @@ impl MobileController {
             .lock()
             .map_err(|_| BridgeError::Closed)?;
         let now = Instant::now();
+        let lan_hints: BTreeMap<_, _> = {
+            let mut lan = self
+                .connectivity
+                .lan
+                .lock()
+                .map_err(|_| BridgeError::Closed)?;
+            let mut current = BTreeMap::new();
+            for (reference, _, _) in &associations {
+                let label = service_protocol::lan_instance_label(&reference.pc());
+                current
+                    .entry(reference.pc())
+                    .or_insert_with(|| lan.addresses_for(&label, now));
+            }
+            current
+        };
         let mut requests = Vec::new();
         let mut connected = 0_u32;
         let mut without_endpoint = 0_u32;
@@ -423,6 +530,13 @@ impl MobileController {
                 let cursor = state.candidate_cursor % candidates.len();
                 candidates.rotate_left(cursor);
                 state.candidate_cursor = (cursor + 1) % candidates.len();
+                let candidates = merge_lan_hints(
+                    lan_hints
+                        .get(&reference.pc())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    candidates,
+                );
                 requests.push(DialRequest {
                     reference: *reference,
                     address: candidates[0],
@@ -474,8 +588,8 @@ pub(crate) async fn run_dial(
     }
 }
 
-/// Every attempt of one dial. They keep the candidate order the dial was
-/// created with: the cursor rotated once for the whole dial.
+/// Every attempt retains the dial's one cursor rotation while allowing a fresh
+/// current-network observation to precede its fixed candidates.
 async fn dial(
     controller: &Weak<MobileController>,
     intake_stop: &CancellationToken,
@@ -489,15 +603,35 @@ async fn dial(
     let mut failure = None;
     loop {
         let began = Instant::now();
-        // Only the rendezvous wait is asynchronous; stream admission below is a
-        // separate synchronous phase, not a closure inside a select! expansion.
-        // The production JoinSet::spawn call checks the future's Send bound.
+        let hints = Weak::<MobileController>::upgrade(controller)
+            .and_then(|controller| {
+                let label = service_protocol::lan_instance_label(&request.reference.pc());
+                controller
+                    .connectivity
+                    .lan
+                    .lock()
+                    .ok()
+                    .map(|mut hints| hints.addresses_for(&label, began))
+            })
+            .unwrap_or_default();
+        let merged = (!hints.is_empty()).then(|| {
+            merge_lan_hints(
+                &hints,
+                std::iter::once(request.address).chain(request.alternatives.iter().copied()),
+            )
+        });
+        let (primary, alternatives) = merged.as_ref().map_or(
+            (request.address, request.alternatives.as_slice()),
+            |candidates| (candidates[0], &candidates[1..]),
+        );
+        // Only the rendezvous wait is asynchronous; no mutex guard survives into
+        // this phase. The production JoinSet::spawn checks the future's Send bound.
         let attempt = request
             .network_stop
             .clone()
             .run_until_cancelled_owned(connect_candidates(
-                request.address,
-                &request.alternatives,
+                primary,
+                alternatives,
                 route,
                 intake_stop.clone(),
             ))
@@ -633,6 +767,19 @@ mod tests {
             PeerAssociationMutation::Recorded(reference) => reference,
             _ => panic!("new synthetic association"),
         }
+    }
+
+    #[test]
+    fn lan_hint_merge_puts_hints_first_and_removes_all_duplicates() {
+        let address = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        let hint_one = address("192.168.1.20:7443");
+        let hint_two = address("10.0.0.20:7443");
+        let stored = address("198.51.100.20:7443");
+        assert_eq!(
+            merge_lan_hints(&[hint_one, hint_two], [stored, hint_one, stored, hint_two],),
+            [hint_one, hint_two, stored]
+        );
+        assert_eq!(merge_lan_hints(&[], [stored, stored]), [stored]);
     }
 
     #[test]

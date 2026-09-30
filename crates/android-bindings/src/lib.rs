@@ -17,6 +17,7 @@ mod intake;
 mod intake_delivery;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 mod intake_tests;
+mod lan_hints;
 mod local_keys;
 mod native_clock;
 mod native_log;

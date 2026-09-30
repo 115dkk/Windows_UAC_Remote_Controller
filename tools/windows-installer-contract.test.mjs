@@ -250,9 +250,16 @@ test('embedded relay firewall changes require protected elevated ownership and a
     'const LOCAL_PORT: &str = "7443";', 'rule.SetApplicationName(&application)?;', 'rule.SetServiceName(&service)?;',
     'rule.SetProtocol(NET_FW_IP_PROTOCOL_TCP.0)?;', 'rule.SetLocalPorts(&port)?;',
     'rule.SetDirection(NET_FW_RULE_DIR_IN)?;', 'rule.SetProfiles(NET_FW_PROFILE2_PRIVATE.0)?;',
-    'rule.SetEdgeTraversal(false.into())?;', 'rules.Add(&rule)', 'rules.Remove(&BSTR::from(RULE_NAME))']) {
+    'rule.SetEdgeTraversal(false.into())?;', 'rules.Add(&rule)', 'unsafe { rules.Remove(name) }',
+    'let name = BSTR::from(RULE_NAME);\n    remove_named_rules(&rules, &name, operation)?;',
+    'remove_named_rules(&rules, &BSTR::from(RULE_NAME), operation)']) {
     assert.ok(firewall.includes(token), `Missing fixed firewall boundary: ${token}`);
   }
+  // Duplicate cleanup removes only the fixed product rule name, and every copy
+  // is gone before the one rule is added.
+  assert.equal(firewall.match(/remove_named_rules\(/gu).length, 3);
+  assert.equal(firewall.match(/rules\.Remove\(/gu).length, 1);
+  assert.ok(firewall.indexOf('remove_named_rules(&rules, &name, operation)?;') < firewall.indexOf('rules.Add(&rule)'));
   assert.ok(firewall.indexOf('rule.SetProtocol(') < firewall.indexOf('rule.SetLocalPorts('));
   assert.ok(firewall.indexOf('rule.SetProfiles(') < firewall.indexOf('rules.Add(&rule)'));
   assert.ok(firewall.indexOf('rules.Add(&rule)') < firewall.indexOf('rules.Item(&name)'));

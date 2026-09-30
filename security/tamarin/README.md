@@ -296,6 +296,21 @@ changes. The local diagnostic is outside the symbolic authorization model. No
 theorem, rule, canary, proof budget or expected verdict changes; CI must still
 run the current-source proofs.
 
+### LAN announcement source binding review (2026-10-01)
+
+`peer_runtime.rs` gains one field holding the DNS-SD announcement owner
+(`peer_runtime/lan_announce.rs`, ADR 0043), one call at the end of
+`poll_embedded_relay`, and a drop of the announcement in `withdraw_relay` and on
+close. The announcement registers an unsigned local-network name for the
+embedded relay's private IPv4 endpoint and records a refusal in the existing
+diagnostic log. It sends nothing to a peer and reads nothing from one. Peer
+admission, signed messages, address advertisements, prompt events, decisions,
+request authorization and lease renewal are unchanged. A phone treats an
+address it discovers this way like any stored candidate: it still needs the
+same rendezvous and pinned TLS before anything else happens, so discovery is
+outside the symbolic authorization model. No theorem, rule, canary, proof
+budget or expected verdict changes; CI must still run the current-source proofs.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |

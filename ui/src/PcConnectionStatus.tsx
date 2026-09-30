@@ -22,7 +22,7 @@ export function PcConnectionStatus({ presentation }: { presentation: PcConnectio
     <Icon name="pc" />
     <div>
       <h2 id={titleId}>{tr('PC에 연결하지 못했습니다')}</h2>
-      {presentation.failure === 'refused' && <p>{tr('PC는 응답했지만 휴대폰 승인이 연결을 받지 않습니다. PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.')}</p>}
+      {presentation.failure === 'refused' && <p>{tr('저장된 PC 주소로 연결했지만 거절됐습니다. PC의 내부 주소가 바뀌었다면 휴대폰을 PC와 같은 Wi-Fi에 연결하십시오. 그래도 안 되면 PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.')}</p>}
       {presentation.failure === 'no_answer' && <p>{tr('PC의 휴대폰 승인이 응답하지 않습니다. PC 앱에서 상태를 확인하거나 PC를 다시 시작하십시오.')}</p>}
       {presentation.failure === 'unreachable' && <ul className="connection-checks">
         {unreachableChecks.map((check) => <li key={check}>{tr(check)}</li>)}

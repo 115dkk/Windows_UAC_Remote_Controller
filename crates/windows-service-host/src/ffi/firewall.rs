@@ -7,8 +7,9 @@
 use std::{marker::PhantomData, rc::Rc};
 use windows::{
     Win32::{
+        Foundation::ERROR_FILE_NOT_FOUND,
         NetworkManagement::WindowsFirewall::{
-            INetFwPolicy2, INetFwRule, NET_FW_ACTION_ALLOW, NET_FW_IP_PROTOCOL_TCP,
+            INetFwPolicy2, INetFwRule, INetFwRules, NET_FW_ACTION_ALLOW, NET_FW_IP_PROTOCOL_TCP,
             NET_FW_PROFILE2_PRIVATE, NET_FW_RULE_DIR_IN, NetFwPolicy2, NetFwRule,
         },
         System::Com::{
@@ -24,6 +25,7 @@ use crate::{SERVICE_NAME, ServiceError, ServiceOperation};
 
 const RULE_NAME: &str = "dev.dkk115.uacremote.embedded-relay.v1";
 const LOCAL_PORT: &str = "7443";
+const MAX_DUPLICATE_RULES: usize = 256;
 
 /// Must be dropped on this thread after every COM interface. A changed apartment
 /// is an error, not permission to uninitialize someone else's apartment.
@@ -48,6 +50,35 @@ impl Drop for ComApartment {
     }
 }
 
+/// Remove all rules bearing this product-owned fixed name. Firewall rule names
+/// need not be unique, so each successful removal is followed by another lookup.
+fn remove_named_rules(
+    rules: &INetFwRules,
+    name: &BSTR,
+    operation: ServiceOperation,
+) -> Result<(), ServiceError> {
+    let absent = windows::core::HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0);
+    for _ in 0..MAX_DUPLICATE_RULES {
+        // SAFETY: same-apartment live collection and fixed owned rule name. Item
+        // distinguishes the documented absent HRESULT from other COM failures.
+        match unsafe { rules.Item(name) } {
+            Ok(rule) => {
+                drop(rule);
+                // SAFETY: same live collection; removal uses only the fixed name.
+                unsafe { rules.Remove(name) }.map_err(|error| win_error(operation, error))?;
+            }
+            Err(error) if error.code() == absent => return Ok(()),
+            Err(error) => return Err(win_error(operation, error)),
+        }
+    }
+    // SAFETY: final same-name lookup proves whether the bounded cleanup completed.
+    match unsafe { rules.Item(name) } {
+        Err(error) if error.code() == absent => Ok(()),
+        Ok(_) => Err(ServiceError::ConfigurationConflict),
+        Err(error) => Err(win_error(operation, error)),
+    }
+}
+
 /// Install/update only this product's private-network TCP relay allowance.
 /// The caller keeps service installation disabled until this succeeds.
 pub(crate) fn provision_embedded_relay_firewall() -> Result<(), ServiceError> {
@@ -68,10 +99,11 @@ pub(crate) fn provision_embedded_relay_firewall() -> Result<(), ServiceError> {
             .map_err(|error| win_error(operation, error))?;
     // SAFETY: policy is live in the initialized apartment; result owns its COM ref.
     let rules = unsafe { policy.Rules() }.map_err(|error| win_error(operation, error))?;
+    let name = BSTR::from(RULE_NAME);
+    remove_named_rules(&rules, &name, operation)?;
     // SAFETY: same fixed-class, same-apartment ownership as above.
     let rule: INetFwRule = unsafe { CoCreateInstance(&NetFwRule, None, CLSCTX_INPROC_SERVER) }
         .map_err(|error| win_error(operation, error))?;
-    let name = BSTR::from(RULE_NAME);
     let service = BSTR::from(SERVICE_NAME);
     let port = BSTR::from(LOCAL_PORT);
     // SAFETY: all setters borrow owned BSTRs or pass fixed scalar constants.
@@ -134,6 +166,5 @@ pub(crate) fn remove_embedded_relay_firewall() -> Result<(), ServiceError> {
             .map_err(|error| win_error(operation, error))?;
     // SAFETY: live apartment-owned interface and fixed owned rule name only.
     let rules = unsafe { policy.Rules() }.map_err(|error| win_error(operation, error))?;
-    // SAFETY: same owned rules reference; the only removal name is a constant.
-    unsafe { rules.Remove(&BSTR::from(RULE_NAME)) }.map_err(|error| win_error(operation, error))
+    remove_named_rules(&rules, &BSTR::from(RULE_NAME), operation)
 }

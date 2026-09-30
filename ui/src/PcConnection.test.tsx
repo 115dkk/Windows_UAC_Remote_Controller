@@ -12,7 +12,7 @@ import { createQaBridge, qaCase } from './qa-fixtures';
 import { RequestPanel } from './RequestPanel';
 
 const failed = 'PC에 연결하지 못했습니다';
-const refused = 'PC는 응답했지만 휴대폰 승인이 연결을 받지 않습니다. PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.';
+const refused = '저장된 PC 주소로 연결했지만 거절됐습니다. PC의 내부 주소가 바뀌었다면 휴대폰을 PC와 같은 Wi-Fi에 연결하십시오. 그래도 안 되면 PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.';
 const noAnswer = 'PC의 휴대폰 승인이 응답하지 않습니다. PC 앱에서 상태를 확인하거나 PC를 다시 시작하십시오.';
 const awake = 'PC가 켜져 있고 절전 상태가 아닌지 확인하십시오.';
 const firewall = '같은 Wi-Fi에 있다면 PC에 V3나 방화벽의 연결 허용 알림이 떠 있는지 확인하십시오.';
