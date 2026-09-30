@@ -8,6 +8,7 @@ import android.os.Looper
 import android.os.SystemClock
 import dev.dkk115.uacremote.nativecore.BridgeException
 import dev.dkk115.uacremote.nativecore.MobileController
+import dev.dkk115.uacremote.nativecore.NativeConnectivityStatus
 import dev.dkk115.uacremote.nativecore.bridgeVersion
 import dev.dkk115.uacremote.nativecore.uniffiEnsureInitialized
 import dev.dkk115.uacremote.nativecore.NativeRequestSelection
@@ -325,6 +326,56 @@ internal class ApplicationPolicyActor(private val application: Application) {
     private val sessionRedialRun = Runnable { sessionRedial.ran(SystemClock.elapsedRealtime()); maintainConnections() }
     @Volatile private var connectivityFailures = 0L
     internal fun connectivityFailureCount(): Long = connectivityFailures
+    @Volatile private var connectivityObserver: ((NativeConnectivityStatus) -> Unit)? = null
+    internal fun observeConnectivity(observer: ((NativeConnectivityStatus) -> Unit)?) {
+        connectivityObserver = observer
+    }
+    private fun publishConnectivity(status: NativeConnectivityStatus) {
+        val observer = connectivityObserver ?: return
+        main.post {
+            if (connectivityObserver === observer && lifecycle.phase() == PolicyOwnerPhase.READY) {
+                try { observer(status) } catch (_: Exception) { }
+            }
+        }
+    }
+
+    /** Untrusted routing hints only; native validates the label, endpoints and paired PC match. */
+    internal fun lanServiceSeen(instance: String, addresses: List<String>, port: Int) {
+        if (port !in 1..65535 || lifecycle.phase() != PolicyOwnerPhase.READY) return
+        try {
+            worker.execute {
+                try {
+                    if (lifecycle.phase() == PolicyOwnerPhase.READY) {
+                        val owner = controller ?: throw BridgeException.Closed()
+                        owner.lanServiceSeen(instance, addresses, port.toUShort())
+                        maintainConnections()
+                    }
+                } catch (_: BridgeException) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } catch (_: Exception) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } finally { resumeQueuedWork(); cleanupIfStopped() }
+            }
+        } catch (_: RejectedExecutionException) { /* The next discovery update or maintenance tick can retry. */ }
+    }
+
+    internal fun lanServiceLost(instance: String) {
+        if (lifecycle.phase() != PolicyOwnerPhase.READY) return
+        try {
+            worker.execute {
+                try {
+                    if (lifecycle.phase() == PolicyOwnerPhase.READY) {
+                        val owner = controller ?: throw BridgeException.Closed()
+                        owner.lanServiceLost(instance)
+                    }
+                } catch (_: BridgeException) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } catch (_: Exception) {
+                    if (connectivityFailures < Long.MAX_VALUE) connectivityFailures += 1
+                } finally { resumeQueuedWork(); cleanupIfStopped() }
+            }
+        } catch (_: RejectedExecutionException) { /* Native routing hints also expire without discovery. */ }
+    }
 
     /** Service/default-network callback only; one latest update on the owner.
      * A change never invokes a request action or repeats biometric approval. */
@@ -349,7 +400,7 @@ internal class ApplicationPolicyActor(private val application: Application) {
                             owner.networkChanged(update.available)
                             networkUpdate.compareAndSet(update, null)
                         }
-                        owner.maintainConnections()
+                        publishConnectivity(owner.maintainConnections())
                         networkRecoveryPending.set(false)
                     }
                 } catch (_: BridgeException) {
