@@ -440,7 +440,7 @@
   "QR 읽기 화면을 열지 못했습니다. [다시 확인]을 누른 뒤 다시 시도하십시오.": "No se pudo abrir el lector de QR. Pulsa [Volver a comprobar] y vuelve a intentarlo.",
   "[다시 확인]을 누른 뒤 다시 시도하십시오.": "Pulsa [Volver a comprobar] y vuelve a intentarlo.",
   "USB 연결 화면을 열지 못했습니다. 케이블을 확인하거나 QR 코드로 연결하십시오.": "No se pudo abrir la pantalla de conexión USB. Comprueba el cable o conéctate con el código QR.",
-  "PC는 응답했지만 휴대폰 승인이 연결을 받지 않습니다. PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.": "El PC respondió, pero la aprobación desde el teléfono no acepta la conexión. En la aplicación del PC, comprueba que la aprobación desde el teléfono está activada.",
+  "저장된 PC 주소로 연결했지만 거절됐습니다. PC의 내부 주소가 바뀌었다면 휴대폰을 PC와 같은 Wi-Fi에 연결하십시오. 그래도 안 되면 PC 앱에서 휴대폰 승인이 켜져 있는지 확인하십시오.": "Se rechazó la conexión a la dirección guardada del PC. Si la dirección del PC en la red local ha cambiado, conecta el teléfono a la misma red Wi-Fi que el PC. Si eso no funciona, comprueba en la aplicación del PC que la aprobación desde el teléfono está activada.",
   "PC에서 요청이 끝났습니다": "La solicitud terminó en el PC",
   "처리 결과는 PC에서 확인하십시오.": "Consulta el resultado en el PC.",
   "승인 완료": "Aprobada",
