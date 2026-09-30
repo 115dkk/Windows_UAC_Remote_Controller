@@ -166,14 +166,17 @@ test('production foreground service delegates only presentation with exact origi
   for (const mapping of ['WAITING_FOR_UNLOCK -> R.string.controller_service_locked', 'PREPARING -> R.string.controller_service_preparing',
     'LOCAL_SETTINGS_READY -> R.string.controller_service_ready', 'CLEANUP_PENDING -> R.string.controller_service_cleanup',
     'UNAVAILABLE -> R.string.controller_service_unavailable', 'STOPPED -> R.string.controller_service_stopping']) assert.ok(renderer.includes(mapping));
-  for (const field of ['.setSmallIcon(R.drawable.ic_controller_service)', '.setContentIntent(open)', '.setCategory(Notification.CATEGORY_SERVICE)',
+  for (const field of ['.setSmallIcon(R.drawable.ic_controller_service)', '.setContentIntent(open)', '.setDeleteIntent(dismissed)', '.setCategory(Notification.CATEGORY_SERVICE)',
     '.setOngoing(true)', '.setOnlyAlertOnce(true)', '.setShowWhen(false)', '.setLocalOnly(true)',
     'Notification.FOREGROUND_SERVICE_IMMEDIATE', 'NotificationManager.IMPORTANCE_LOW', 'channel.setSound(null, null)',
     'channel.enableVibration(false)', 'channel.setShowBadge(false)']) assert.ok(renderer.includes(field));
   assert.doesNotMatch(renderer, /startForeground\(|startService\(|addAction\(|setFullScreenIntent\(|DeviceKeyStore|MainActivity|nativecore/u);
   assert.doesNotMatch(service, /Notification\.Builder\(|NotificationChannel\(/u);
   assert.ok(service.includes('ControllerStatusNotificationRenderer(this).ensureChannel()'));
-  assert.ok(service.includes('return ControllerStatusNotificationRenderer(this).build(state, pending)'));
+  assert.ok(service.includes('return ControllerStatusNotificationRenderer(this).build(state, pending, dismissed)'));
+  // A user dismissal comes back to this service only, which re-posts the state it showed.
+  assert.ok(service.includes('Intent(ACTION_STATUS_DISMISSED).setPackage(packageName)'));
+  assert.ok(service.includes('registerReceiver(dismissReceiver, filter, Context.RECEIVER_NOT_EXPORTED)'));
   assert.ok(service.includes('Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)'));
   assert.ok(service.includes('PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE'));
   assert.ok(service.includes('startForeground(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)'));

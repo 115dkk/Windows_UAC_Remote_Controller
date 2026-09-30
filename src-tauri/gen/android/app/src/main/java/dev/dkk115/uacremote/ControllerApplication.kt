@@ -273,11 +273,13 @@ class ControllerApplication : Application() {
     }
 
     /** Only an existing process-local original handle may consume this selector.
-     * Restored Activity state/cold process/unknown locator never starts auth. */
+     * Restored Activity state/cold process/unknown locator never starts auth,
+     * nor does a task's base intent replayed from Recents. */
     internal fun receiveRequestIntent(activity: MainActivity, intent: Intent, restored: Boolean) {
         check(Looper.myLooper() == Looper.getMainLooper())
         val route = NativeRequestRules.route(intent) ?: return
-        if (!NativeRequestRules.mayRouteActivity(restored, policyActor?.lifecyclePhase() == PolicyOwnerPhase.READY, route.action)) return
+        val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (!NativeRequestRules.mayRouteActivity(restored, fromHistory, policyActor?.lifecyclePhase() == PolicyOwnerPhase.READY, route.action)) return
         routeHost = WeakReference(activity); pendingRoute = route
         if (isCurrentForegroundControllerHost(activity)) dispatchNotificationRoute(activity)
     }

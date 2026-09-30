@@ -37,6 +37,8 @@ class ControllerForegroundService : Service() {
     private var destroyed = false
     private var unlockReceiverRegistered = false
     private var unlockRegistrationAttempted = false
+    private var dismissReceiverRegistered = false
+    private var shownState: ControllerServiceState? = null
     private var activationWaitStartId: Int? = null
     private val main = Handler(Looper.getMainLooper())
     private val connectivityToken = Any()
@@ -78,6 +80,11 @@ class ControllerForegroundService : Service() {
             if (!destroyed && intent.action == Intent.ACTION_USER_UNLOCKED) refreshAfterUnlock()
         }
     }
+    private val dismissReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!destroyed && intent.action == ACTION_STATUS_DISMISSED) restoreStatus()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -103,6 +110,7 @@ class ControllerForegroundService : Service() {
             // Promote promptly BEFORE any Rust/CE/key-owner construction.
             startForeground(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(initial), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             promoted = true
+            shownState = initial
             BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.PROMOTION_SUCCEEDED, unlock = unlock))
         } catch (failure: Exception) {
             BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.PROMOTION_FAILED,
@@ -112,6 +120,7 @@ class ControllerForegroundService : Service() {
             return
         }
         registerForUnlockIfNeeded()
+        registerDismissReceiver()
         registerDefaultNetwork()
     }
 
@@ -296,6 +305,7 @@ class ControllerForegroundService : Service() {
             ControllerStatusNotificationRenderer(this).ensureChannel()
             val manager = getSystemService(NotificationManager::class.java) ?: throw IllegalStateException()
             manager.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(state))
+            shownState = state
         } catch (failure: Exception) {
             BootDiagnostics.record(BootDiagnosticRecord(BootDiagnosticStage.NOTIFICATION_FAILED,
                 failure = BootDiagnostics.failureCategory(failure)))
@@ -310,7 +320,32 @@ class ControllerForegroundService : Service() {
     private fun notification(state: ControllerServiceState): Notification {
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(this, ControllerStatusNotificationRenderer.NOTIFICATION_ID, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        return ControllerStatusNotificationRenderer(this).build(state, pending)
+        val dismissed = PendingIntent.getBroadcast(this, ControllerStatusNotificationRenderer.NOTIFICATION_ID,
+            Intent(ACTION_STATUS_DISMISSED).setPackage(packageName), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return ControllerStatusNotificationRenderer(this).build(state, pending, dismissed)
+    }
+
+    /** Since Android 14 a swipe removes even an ongoing foreground notice while
+     * the service keeps running, so the notice returns with the state it showed.
+     * Only a user dismissal sends this; stopForeground and cancel never do. */
+    private fun restoreStatus() {
+        val state = shownState ?: return
+        if (!promoted || destroyed || retiring) return
+        try {
+            getSystemService(NotificationManager::class.java)?.notify(ControllerStatusNotificationRenderer.NOTIFICATION_ID, notification(state))
+        } catch (_: Exception) { /* The next state change posts it again. */ }
+    }
+
+    private fun registerDismissReceiver() {
+        try {
+            val filter = IntentFilter(ACTION_STATUS_DISMISSED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(dismissReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(dismissReceiver, filter)
+            }
+            dismissReceiverRegistered = true
+        } catch (_: Exception) { /* A dismissed notice then waits for the next state change. */ }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -350,6 +385,10 @@ class ControllerForegroundService : Service() {
         activationWaitStartId = null
         unregisterDefaultNetwork()
         unregisterUnlockReceiver()
+        if (dismissReceiverRegistered) {
+            try { unregisterReceiver(dismissReceiver) } catch (_: Exception) { }
+            dismissReceiverRegistered = false
+        }
         if (attached) (application as? ControllerApplication)?.detachControllerService(ownerToken, activatedGeneration)
         attached = false
         if (promoted) stopForeground(STOP_FOREGROUND_REMOVE)
@@ -385,6 +424,7 @@ class ControllerForegroundService : Service() {
         private const val NETWORK_COALESCE_MILLIS = 250L
         private const val ACTION_START = "dev.dkk115.uacremote.service.START"
         private const val ACTION_EXPLICIT_START = "dev.dkk115.uacremote.service.EXPLICIT_START"
+        private const val ACTION_STATUS_DISMISSED = "dev.dkk115.uacremote.service.STATUS_DISMISSED"
         private const val EXTRA_GENERATION = "dev.dkk115.uacremote.service.NATIVE_GENERATION"
 
         internal fun observeUnlock(context: Context): UserUnlockObservation = try {
