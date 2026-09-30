@@ -13,8 +13,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            DNS_REQUEST_PENDING, ERROR_CALL_NOT_IMPLEMENTED, ERROR_NOT_ENOUGH_MEMORY,
-            ERROR_NOT_SUPPORTED, ERROR_PROC_NOT_FOUND, GetLastError,
+            DNS_REQUEST_PENDING, ERROR_CALL_NOT_IMPLEMENTED, ERROR_INVALID_STATE,
+            ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, ERROR_PROC_NOT_FOUND, GetLastError,
         },
         NetworkManagement::Dns::{
             DNS_QUERY_REQUEST_VERSION1, DNS_SERVICE_INSTANCE, DNS_SERVICE_REGISTER_REQUEST,
@@ -151,19 +151,26 @@ impl Announcement {
                 code
             }));
         }
-        let registration = Arc::new_cyclic(|weak: &std::sync::Weak<Registration>| Registration {
+        let mut registration = Arc::new(Registration {
             request: DNS_SERVICE_REGISTER_REQUEST {
                 Version: DNS_QUERY_REQUEST_VERSION1.0,
                 InterfaceIndex: interface_index,
                 pServiceInstance: instance,
                 pRegisterCompletionCallback: Some(registered),
-                pQueryContext: weak.as_ptr().cast_mut().cast(),
                 ..Default::default()
             },
             instance,
             progress: Mutex::new(Progress::default()),
             changed: Condvar::new(),
         });
+        // The context is this Arc's own data pointer, the one Arc::into_raw
+        // returns below. A fresh Arc has no other reference, so get_mut cannot
+        // fail; if it did, nothing is registered and the instance is freed.
+        let context = Arc::as_ptr(&registration).cast_mut().cast::<c_void>();
+        let Some(unique) = Arc::get_mut(&mut registration) else {
+            return Err(AnnounceError::Failed(ERROR_INVALID_STATE.0));
+        };
+        unique.request.pQueryContext = context;
         let callback = Arc::into_raw(Arc::clone(&registration));
         // SAFETY: registration owns the stable request and constructed instance.
         // callback owns one strong reference until registered consumes it once.
@@ -248,14 +255,21 @@ unsafe extern "system" fn registered(
 }
 
 fn deregister(registration: Arc<Registration>) {
-    let operation = Arc::new_cyclic(|weak: &std::sync::Weak<Deregistration>| Deregistration {
+    let mut operation = Arc::new(Deregistration {
         request: DNS_SERVICE_REGISTER_REQUEST {
             pRegisterCompletionCallback: Some(deregistered),
-            pQueryContext: weak.as_ptr().cast_mut().cast(),
             ..registration.request
         },
         registration,
     });
+    // As in Announcement::start. If get_mut ever failed, withdrawal is not
+    // attempted and the registration is retained rather than freed.
+    let context = Arc::as_ptr(&operation).cast_mut().cast::<c_void>();
+    let Some(unique) = Arc::get_mut(&mut operation) else {
+        std::mem::forget(operation);
+        return;
+    };
+    unique.request.pQueryContext = context;
     let _callback = Arc::into_raw(Arc::clone(&operation));
     // SAFETY: a separate stable request owns its own callback context and keeps
     // the original registration/instance alive. pCancel must be null for this
