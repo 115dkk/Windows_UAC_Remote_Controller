@@ -548,6 +548,11 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
     // Every explicit mutation, including an idempotent no-op, is gated by the
     // OS token. SCM access remains the final independent permission check.
     ffi::require_elevated()?;
+    let _maintenance = if matches!(command, Command::Install | Command::Uninstall) {
+        Some(ffi::acquire_maintenance()?)
+    } else {
+        None
+    };
     if command == Command::Install {
         return install();
     }
@@ -599,6 +604,31 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
         _ => return Err(ServiceError::InvalidArguments),
     }
     Ok(snapshot(status(&service)?))
+}
+
+pub(crate) fn stop_for_repair() -> Result<(), ServiceError> {
+    let manager = manager(false)?;
+    let Some(service) = open(
+        &manager,
+        ServiceAccess::STOP
+            | ServiceAccess::QUERY_STATUS
+            | ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::READ_CONTROL,
+    )?
+    else {
+        return Ok(());
+    };
+    let expected = ffi::expected_executable()?;
+    verify_config(&service, &expected, true)?;
+    ffi::verify_service_security(&service)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
+        != ServiceSidType::Unrestricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    stop(&service, Instant::now())
 }
 
 fn install() -> Result<ServiceSnapshot, ServiceError> {

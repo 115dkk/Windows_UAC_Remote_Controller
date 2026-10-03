@@ -98,6 +98,9 @@ mod pairing_handoff;
 #[cfg(any(windows, test))]
 pub mod peer_runtime;
 mod probe_supervisor;
+#[cfg(windows)]
+mod repair;
+mod repair_manifest;
 #[cfg(any(windows, test))]
 pub mod tls_signer;
 mod trust_registry;
@@ -182,7 +185,39 @@ pub use presentation_i18n::LanguageSettings;
 pub const SERVICE_DISPLAY_NAME: &str = "휴대폰 승인";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
+pub const REPAIR_FOLDER: &str = "repair";
+pub const REPAIR_MANIFEST: &str = "repair-manifest.json";
 pub const ANDROID_SIGNER_SHA256: &[[u8; 32]] = build_policy::ANDROID_SIGNER_SHA256;
+
+/// Successful repair result; names are fixed packaged executable leaves.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RepairOutcome {
+    restored: Vec<&'static str>,
+}
+
+impl RepairOutcome {
+    #[cfg(windows)]
+    fn new(restored: Vec<&'static str>) -> Self {
+        Self { restored }
+    }
+
+    /// Returns repaired fixed leaf names in manifest order.
+    pub fn restored(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.restored.iter().copied()
+    }
+}
+
+/// Repairs the two fixed executables from the version-bound protected copy.
+pub fn repair() -> Result<RepairOutcome, ServiceError> {
+    #[cfg(windows)]
+    {
+        repair::run()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ServiceError::UnsupportedPlatform)
+    }
+}
 
 #[cfg(any(windows, test))]
 pub(crate) fn android_signer_digest_strings() -> Vec<String> {

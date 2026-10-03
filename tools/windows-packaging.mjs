@@ -10,10 +10,14 @@ export const TARGET = 'x86_64-pc-windows-msvc';
 export const OUTPUT = 'target/windows-package';
 export const MAX_BINARY_BYTES = 128 * 1024 * 1024;
 export const MAX_INSTALLER_BYTES = 384 * 1024 * 1024;
+export const MAX_REPAIR_MANIFEST_BYTES = 4096;
 const MARKER = '.uac-windows-package-v1';
 const MARKER_TEXT = 'Generated Windows package inputs v1; not enrollment or signature authority.\n';
+const REPAIR_DIRECTORY = 'repair';
+const REPAIR_MANIFEST = 'repair-manifest.json';
 const LEAVES = ['uac-service.exe', 'uac-prompt-probe.exe'];
 const ALL_LEAVES = ['controller-app.exe', ...LEAVES];
+const REPAIR_ARCHIVE_PATHS = [...LEAVES.map((name) => `${REPAIR_DIRECTORY}/${name}`), `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`];
 const BUNDLE_SOURCE_MARKER = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK', 'ascii');
 const BUNDLE_NSIS_MARKER = Buffer.from('__TAURI_BUNDLE_TYPE_VAR_NSS', 'ascii');
 const BUNDLE_TRANSFORM = 'tauri-bundler-2.9.4-nsis-marker-v1';
@@ -39,6 +43,7 @@ export function buildPlan(repository, env = process.env) {
   return {
     output: join(repository, OUTPUT),
     inputs: join(repository, OUTPUT, 'inputs'),
+    repair: join(repository, OUTPUT, REPAIR_DIRECTORY),
     release: join(targetRoot, TARGET, 'release'),
     cargo: ['build', '--locked', '--release', '--target', TARGET, '-p', 'windows-service-host', '--bin', 'uac-service', '-p', 'windows-prompt-probe', '--bin', 'uac-prompt-probe'],
     tauri: ['node_modules/@tauri-apps/cli/tauri.js', 'build', '--ci', '--bundles', 'nsis', '--target', TARGET, '--config', 'src-tauri/windows/package-config.json', '--', '--locked'],
@@ -56,8 +61,8 @@ function regular(path, limit, cargoSource = false) {
   return readFileSync(path);
 }
 export function validateConfiguration(base, overlay) {
-  if (base.productName !== 'UAC 원격 승인기' || base.identifier !== 'dev.dkk115.uacremote' || base.bundle?.windows?.nsis?.installMode !== 'perMachine' || base.bundle.windows.nsis.template !== 'windows/installer.nsi' || base.bundle.windows.nsis.installerHooks !== 'windows/packaging-hooks.nsh' || base.bundle.windows.allowDowngrades !== false || base.bundle.externalBin?.length || base.bundle.resources && Object.keys(base.bundle.resources).length || base.bundle.fileAssociations?.length || base.plugins?.['deep-link']) fail('Unsupported Windows package configuration.');
-  if (JSON.stringify(overlay) !== JSON.stringify({ bundle: { windows: { webviewInstallMode: { type: 'skip' } }, externalBin: ['../target/windows-package/inputs/uac-service', '../target/windows-package/inputs/uac-prompt-probe'] } })) fail('Use the fixed Windows service package overlay.');
+  if (base.productName !== 'UAC 원격 승인기' || base.identifier !== 'dev.dkk115.uacremote' || base.bundle?.windows?.nsis?.installMode !== 'perMachine' || base.bundle.windows.nsis.template !== 'windows/installer.nsi' || base.bundle.windows.nsis.installerHooks !== 'windows/packaging-hooks.nsh' || base.bundle.windows.allowDowngrades !== false || base.bundle.externalBin?.length || base.bundle.resources !== undefined || base.bundle.fileAssociations?.length || base.plugins?.['deep-link']) fail('Unsupported Windows package configuration.');
+  if (JSON.stringify(overlay) !== JSON.stringify({ bundle: { windows: { webviewInstallMode: { type: 'skip' } }, externalBin: ['../target/windows-package/inputs/uac-service', '../target/windows-package/inputs/uac-prompt-probe'], resources: { '../target/windows-package/repair/uac-service.exe': 'repair/uac-service.exe', '../target/windows-package/repair/uac-prompt-probe.exe': 'repair/uac-prompt-probe.exe', '../target/windows-package/repair/repair-manifest.json': 'repair/repair-manifest.json' } } })) fail('Use the fixed Windows service and repair package overlay.');
   if (base.bundle.windows.signCommand != null || base.bundle.windows.certificateThumbprint != null) fail('Signing requires a separately reviewed post-signing payload capture; this profile predicts only the unsigned NSIS marker change.');
 }
 function noLinks(path) {
@@ -82,7 +87,7 @@ function prepareOutput(plan) {
   if (!existsSync(plan.output)) mkdirSync(plan.output, { recursive: true });
   const entries = readdirSync(plan.output);
   if (entries.length && !entries.includes(MARKER)) fail('Refusing an unowned package output directory.');
-  if (entries.some((name) => ![MARKER, 'inputs', 'manifest.json', 'inspection.json', 'controller-setup.exe'].includes(name))) fail('Unknown package output entries are preserved.');
+  if (entries.some((name) => ![MARKER, 'inputs', REPAIR_DIRECTORY, 'manifest.json', 'inspection.json', 'controller-setup.exe'].includes(name))) fail('Unknown package output entries are preserved.');
   const marker = join(plan.output, MARKER);
   if (existsSync(marker)) {
     if (regular(marker, 1024).toString('utf8') !== MARKER_TEXT) fail('Package ownership marker is invalid.');
@@ -90,6 +95,9 @@ function prepareOutput(plan) {
   noLinks(plan.inputs);
   if (!existsSync(plan.inputs)) mkdirSync(plan.inputs);
   if (readdirSync(plan.inputs).some((name) => !LEAVES.map((leaf) => leaf.replace('.exe', `-${TARGET}.exe`)).includes(name))) fail('Unknown staged inputs are preserved.');
+  noLinks(plan.repair);
+  if (!existsSync(plan.repair)) mkdirSync(plan.repair);
+  if (readdirSync(plan.repair).some((name) => ![...LEAVES, REPAIR_MANIFEST].includes(name))) fail('Unknown staged repair entries are preserved.');
 }
 
 function inspectPeShape(bytes, machines, limit) {
@@ -142,6 +150,23 @@ export function expectedPayload(name, source) {
   const original = unsignedPayload(source);
   return { name, ...original, sourceSha256: original.sha256, transformation: { kind: 'identity' } };
 }
+export function createRepairManifest(version, payload) {
+  if (typeof version !== 'string' || !/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(version) || Buffer.byteLength(version, 'utf8') > 128 || !Array.isArray(payload) || payload.length !== LEAVES.length) fail('Repair manifest inputs are unsupported.');
+  const files = LEAVES.map((name, index) => {
+    const row = payload[index];
+    if (row?.name !== name || !Number.isSafeInteger(row.bytes) || row.bytes < 1 || row.bytes > MAX_BINARY_BYTES || !/^[a-f0-9]{64}$/u.test(row.sha256)) fail('Repair manifest file metadata is invalid.');
+    return { name, bytes: row.bytes, sha256: row.sha256 };
+  });
+  const bytes = Buffer.from(JSON.stringify({ schema: 1, product: 'uac-remote-controller', version, files }), 'utf8');
+  if (bytes.length > MAX_REPAIR_MANIFEST_BYTES) fail('Repair manifest exceeded its bound.');
+  return bytes;
+}
+export function validateRepairManifest(bytes, version, payload) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > MAX_REPAIR_MANIFEST_BYTES || bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) || bytes.toString('utf8').includes('�')) fail('Repair manifest encoding or size is invalid.');
+  const expected = createRepairManifest(version, payload);
+  if (!bytes.equals(expected)) fail('Repair manifest content differs from the staged expectation.');
+  return { name: `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`, bytes: bytes.length, sha256: digest(bytes) };
+}
 export function parseArchiveListing(text) {
   if (Buffer.byteLength(text) > 1024 * 1024) fail('Installer listing exceeded its bound.');
   const records = text.split(/\r?\n\r?\n/u).map((block) => {
@@ -157,27 +182,49 @@ export function parseArchiveListing(text) {
   if (outer.length !== 1 || !['Nsis', 'NSIS'].includes(outer[0].Type) || !outer[0].Path) fail('The outer archive must be exactly one NSIS installer.');
   const rows = records.filter((row) => row.Path && row.Type === undefined);
   if (rows.length > 512) fail('Installer entry count exceeded its bound.');
-  if (new Set(rows.map((row) => row.Path.replaceAll('\\', '/').toLowerCase())).size !== rows.length) fail('Installer listing contains duplicate paths.');
-  return ALL_LEAVES.map((leaf) => {
-    const matches = rows.filter((row) => basename(row.Path.replaceAll('\\', '/')) === leaf);
-    if (matches.length !== 1 || matches[0].Path !== leaf || !/^[0-9]+$/u.test(matches[0].Size ?? '') || Number(matches[0].Size) < 1 || Number(matches[0].Size) > MAX_BINARY_BYTES) fail('Installer must contain each fixed executable exactly once at its root.');
-    return { name: leaf, bytes: Number(matches[0].Size) };
+  const normalized = rows.map((row) => ({ ...row, archivePath: row.Path, path: row.Path.replaceAll('\\', '/') }));
+  if (new Set(normalized.map((row) => row.path.toLowerCase())).size !== rows.length) fail('Installer listing contains duplicate paths.');
+  const required = [...ALL_LEAVES, ...REPAIR_ARCHIVE_PATHS];
+  const resolved = required.map((name) => {
+    const matches = normalized.filter((row) => row.path.toLowerCase() === name.toLowerCase());
+    const limit = name.endsWith(`/${REPAIR_MANIFEST}`) ? MAX_REPAIR_MANIFEST_BYTES : MAX_BINARY_BYTES;
+    if (matches.length !== 1 || matches[0].path !== name || !/^[0-9]+$/u.test(matches[0].Size ?? '') || Number(matches[0].Size) < 1 || Number(matches[0].Size) > limit) fail('Installer must contain each fixed payload at its exact normalized path.');
+    return { name, archivePath: matches[0].archivePath, bytes: Number(matches[0].Size) };
   });
+  const requiredLower = new Set(required.map((path) => path.toLowerCase()));
+  const unexpectedPayload = normalized.some((row) => /^(?:controller-app|uac-service|uac-prompt-probe)\.exe$/iu.test(basename(row.path)) && !requiredLower.has(row.path.toLowerCase()));
+  const expectedRepairManifestPath = `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`.toLowerCase();
+  const unexpectedRepairManifest = normalized.some((row) => basename(row.path).toLowerCase() === REPAIR_MANIFEST.toLowerCase() && row.path.toLowerCase() !== expectedRepairManifestPath);
+  if (unexpectedPayload || unexpectedRepairManifest) fail('Installer contains a fixed payload outside its exact path.');
+  return resolved;
 }
-export function validateManifest(value) {
-  if (!value || value.schemaVersion !== 2 || value.target !== TARGET || value.mode !== 'assembled' || value.signing !== 'not-attested' || !Array.isArray(value.payload) || value.payload.length !== 3) fail('Package manifest is unsupported.');
+export function validateManifest(value, allowedMode = 'assembled') {
+  if (!['staged', 'assembled'].includes(allowedMode) || !value || value.schemaVersion !== 2 || value.target !== TARGET || value.mode !== allowedMode || value.signing !== 'not-attested' || !Array.isArray(value.payload) || value.payload.length !== 6) fail('Package manifest is unsupported.');
   const keys = ['schemaVersion', 'target', 'mode', 'signing', 'payload', 'installer'];
   if (Object.keys(value).some((key) => !keys.includes(key))) fail('Package manifest has unknown fields.');
   for (const [index, row] of value.payload.entries()) {
-    if (!row || Object.keys(row).sort().join() !== 'bytes,name,sha256,sourceSha256,transformation' || row.name !== ALL_LEAVES[index] || !Number.isSafeInteger(row.bytes) || row.bytes < 1 || row.bytes > MAX_BINARY_BYTES || !/^[a-f0-9]{64}$/u.test(row.sha256) || !/^[a-f0-9]{64}$/u.test(row.sourceSha256)) fail('Package payload metadata is invalid.');
+    const expectedName = index < ALL_LEAVES.length ? ALL_LEAVES[index] : REPAIR_ARCHIVE_PATHS[index - ALL_LEAVES.length];
+    if (!expectedName) fail('Package payload metadata is invalid.');
+    const repairManifest = expectedName === `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`;
+    const expectedKeys = repairManifest ? 'bytes,name,sha256' : 'bytes,name,sha256,sourceSha256,transformation';
+    const limit = repairManifest ? MAX_REPAIR_MANIFEST_BYTES : MAX_BINARY_BYTES;
+    if (!row || Object.keys(row).sort().join() !== expectedKeys || row.name !== expectedName || !Number.isSafeInteger(row.bytes) || row.bytes < 1 || row.bytes > limit || !/^[a-f0-9]{64}$/u.test(row.sha256)) fail('Package payload metadata is invalid.');
+    if (repairManifest) continue;
+    if (!/^[a-f0-9]{64}$/u.test(row.sourceSha256)) fail('Package source metadata is invalid.');
     const transform = row.transformation;
     if (!transform || typeof transform !== 'object') fail('Missing bounded payload transformation metadata.');
     if (index === 0) {
       if (Object.keys(transform).sort().join() !== 'from,kind,offset,to' || transform.kind !== BUNDLE_TRANSFORM || transform.from !== BUNDLE_SOURCE_MARKER.toString('ascii') || transform.to !== BUNDLE_NSIS_MARKER.toString('ascii') || !Number.isSafeInteger(transform.offset) || transform.offset < 0 || transform.offset > row.bytes - BUNDLE_SOURCE_MARKER.length) fail('Unexpected main executable transformation.');
     } else if (Object.keys(transform).join() !== 'kind' || transform.kind !== 'identity' || row.sha256 !== row.sourceSha256) fail('Helper payload must be byte-identical to its build input.');
+    if (index >= ALL_LEAVES.length) {
+      const original = value.payload[index - ALL_LEAVES.length + 1];
+      if (row.bytes !== original.bytes || row.sha256 !== original.sha256 || row.sourceSha256 !== original.sourceSha256) fail('Repair executable must be byte-identical to its top-level binary.');
+    }
   }
   const installer = value.installer;
-  if (!installer || Object.keys(installer).sort().join() !== 'bytes,name,sha256' || installer.name !== 'controller-setup.exe' || !Number.isSafeInteger(installer.bytes) || installer.bytes < 1 || installer.bytes > MAX_INSTALLER_BYTES || !/^[a-f0-9]{64}$/u.test(installer.sha256)) fail('Installer metadata is invalid.');
+  if (allowedMode === 'staged') {
+    if (installer !== null) fail('Staged package manifest cannot claim installer metadata.');
+  } else if (!installer || Object.keys(installer).sort().join() !== 'bytes,name,sha256' || installer.name !== 'controller-setup.exe' || !Number.isSafeInteger(installer.bytes) || installer.bytes < 1 || installer.bytes > MAX_INSTALLER_BYTES || !/^[a-f0-9]{64}$/u.test(installer.sha256)) fail('Installer metadata is invalid.');
   return value;
 }
 export function verifyExtractedPayload(entry, data, expected) {
@@ -200,11 +247,15 @@ function run(program, args, options = {}) {
   if (result.error || result.signal || result.status !== 0) fail('A checked packaging child process failed.');
   return result.stdout;
 }
+function rejectImplicitWindowsConfiguration() {
+  if (process.env.TAURI_CONFIG !== undefined || ['tauri.windows.conf.json', 'tauri.windows.conf.json5', 'Tauri.windows.toml'].some((name) => existsSync(join(root, 'src-tauri', name)))) fail('Only the explicit packaging overlay may add generated Windows resources.');
+}
 function stage(plan) {
   prepareOutput(plan);
   invalidateInspection(plan, 'new-stage');
-  if (process.env.TAURI_CONFIG !== undefined || ['tauri.windows.conf.json', 'tauri.windows.conf.json5', 'Tauri.windows.toml'].some((name) => existsSync(join(root, 'src-tauri', name)))) fail('Unreviewed Tauri configuration overrides are unsupported by the unsigned marker profile.');
-  validateConfiguration(JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8')), JSON.parse(readFileSync(join(root, 'src-tauri/windows/package-config.json'), 'utf8')));
+  rejectImplicitWindowsConfiguration();
+  const base = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+  validateConfiguration(base, JSON.parse(readFileSync(join(root, 'src-tauri/windows/package-config.json'), 'utf8')));
   run('cargo', plan.cargo);
   const payload = LEAVES.map((name) => {
     const source = join(plan.release, name);
@@ -212,9 +263,18 @@ function stage(plan) {
     const bytes = regular(source, MAX_BINARY_BYTES, true);
     const row = expectedPayload(name, bytes);
     writeKnown(join(plan.inputs, name.replace('.exe', `-${TARGET}.exe`)), bytes);
+    writeKnown(join(plan.repair, name), bytes);
     return row;
   });
-  writeKnown(join(plan.output, 'manifest.json'), `${JSON.stringify({ schemaVersion: 2, target: TARGET, mode: 'staged', signing: 'not-attested', payload }, null, 2)}\n`);
+  const repairManifest = createRepairManifest(base.version, payload);
+  writeKnown(join(plan.repair, REPAIR_MANIFEST), repairManifest);
+  const repairPayload = [
+    ...payload.map((row) => ({ ...row, name: `${REPAIR_DIRECTORY}/${row.name}` })),
+    validateRepairManifest(repairManifest, base.version, payload),
+  ];
+  const stagedManifest = { schemaVersion: 2, target: TARGET, mode: 'staged', signing: 'not-attested', payload: [...payload, ...repairPayload], installer: null };
+  validateManifest(stagedManifest, 'staged');
+  writeKnown(join(plan.output, 'manifest.json'), `${JSON.stringify(stagedManifest, null, 2)}\n`);
 }
 export function invalidateInspection(plan, reason) {
   if (!['new-stage', 'inspection-started'].includes(reason)) fail('Unknown inspection state.');
@@ -225,20 +285,51 @@ function inspect(plan) {
   if (regular(join(plan.output, MARKER), 1024).toString('utf8') !== MARKER_TEXT) fail('Package ownership marker is invalid.');
   invalidateInspection(plan, 'inspection-started');
   const manifestBytes = regular(join(plan.output, 'manifest.json'), 16 * 1024);
-  const manifest = validateManifest(JSON.parse(manifestBytes));
+  const manifestText = manifestBytes.toString('utf8');
+  if (manifestText.includes('�')) fail('Package manifest is not valid UTF-8.');
+  const manifest = validateManifest(JSON.parse(manifestText));
   const installer = join(plan.output, 'controller-setup.exe');
   const bytes = regular(installer, MAX_INSTALLER_BYTES);
   inspectInstallerPe(bytes);
   if (bytes.length !== manifest.installer.bytes || digest(bytes) !== manifest.installer.sha256) fail('Assembled installer does not match its build manifest.');
   const listing = run('7z', ['l', '-slt', '--', installer], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 60_000 });
   const entries = parseArchiveListing(listing);
+  rejectImplicitWindowsConfiguration();
+  const currentConfig = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+  validateConfiguration(currentConfig, JSON.parse(readFileSync(join(root, 'src-tauri/windows/package-config.json'), 'utf8')));
+  const version = currentConfig.version;
+  const helpers = manifest.payload.slice(1, 3);
+  createRepairManifest(version, helpers);
+  const extracted = new Map();
   for (const entry of entries) {
-    const data = run('7z', ['e', '-so', '-bd', '--', installer, entry.name], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MAX_BINARY_BYTES, timeout: 60_000 });
+    const limit = entry.name === `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}` ? MAX_REPAIR_MANIFEST_BYTES : MAX_BINARY_BYTES;
+    const data = run('7z', ['e', '-so', '-bd', '--', installer, entry.archivePath], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: limit, timeout: 60_000 });
+    extracted.set(entry.name, data);
     const expected = manifest.payload.find((row) => row.name === entry.name);
-    verifyExtractedPayload(entry, data, expected);
+    if (!expected) fail('Installer contains a payload absent from the package manifest.');
+    if (entry.name === `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`) {
+      const actual = validateRepairManifest(data, version, helpers);
+      if (entry.bytes !== actual.bytes || expected.bytes !== actual.bytes || expected.sha256 !== actual.sha256) fail('Repair manifest bytes differ from package metadata.');
+    } else {
+      const extractedName = basename(entry.name);
+      const expectedExecutable = { ...expected, name: basename(expected.name) };
+      if (expectedExecutable.name === 'controller-app.exe') verifyExtractedPayload({ ...entry, name: extractedName }, data, expectedExecutable);
+      else {
+        const actual = unsignedPayload(data);
+        if (extractedName !== expectedExecutable.name || entry.bytes !== actual.bytes || expected.bytes !== actual.bytes || expected.sha256 !== actual.sha256 || expected.sourceSha256 !== actual.sha256 || expected.transformation?.kind !== 'identity') fail('Installer executable bytes differ from package metadata.');
+      }
+    }
   }
+  for (const name of LEAVES) {
+    if (!extracted.get(name)?.equals(extracted.get(`${REPAIR_DIRECTORY}/${name}`))) fail('Repair executable differs from the installed top-level executable.');
+  }
+  const stagedRepairManifest = regular(join(plan.repair, REPAIR_MANIFEST), MAX_REPAIR_MANIFEST_BYTES);
+  const stagedManifestMetadata = validateRepairManifest(stagedRepairManifest, version, helpers);
+  const expectedManifestMetadata = manifest.payload.find((row) => row.name === `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`);
+  if (!expectedManifestMetadata || stagedManifestMetadata.bytes !== expectedManifestMetadata.bytes || stagedManifestMetadata.sha256 !== expectedManifestMetadata.sha256) fail('Staged repair manifest differs from package metadata.');
+  if (!extracted.get(`${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`)?.equals(stagedRepairManifest)) fail('Packaged repair manifest differs from the staged file.');
   writeKnown(join(plan.output, 'inspection.json'), `${JSON.stringify({ schemaVersion: 1, passed: true, scope: 'passive-nsis-payload-only', manifestSha256: digest(manifestBytes), installer: manifest.installer, payload: manifest.payload, signing: 'not-attested', nativeInstallation: 'not-executed' }, null, 2)}\n`);
-  process.stdout.write('Inspected three exact executable payloads without executing the installer. Signing and native installation are not verified.\n');
+  process.stdout.write('Inspected six exact payloads, including the protected repair copies and manifest, without executing the installer. Signing and native installation are not verified.\n');
 }
 export function main(argv = process.argv.slice(2)) {
   const options = parseArguments(argv);
@@ -264,11 +355,22 @@ export function main(argv = process.argv.slice(2)) {
   // Tauri restores its unpatched Cargo main after bundling. Derive expected NSIS
   // bytes only from that build output, NEVER from extracted installer content.
   const payload = ALL_LEAVES.map((name) => expectedPayload(name, regular(name === 'controller-app.exe' ? join(plan.release, name) : join(plan.inputs, name.replace('.exe', `-${TARGET}.exe`)), MAX_BINARY_BYTES, name === 'controller-app.exe')));
+  const helperPayload = payload.slice(1);
+  const repairManifest = regular(join(plan.repair, REPAIR_MANIFEST), MAX_REPAIR_MANIFEST_BYTES);
+  for (const [index, name] of LEAVES.entries()) {
+    const staged = regular(join(plan.repair, name), MAX_BINARY_BYTES);
+    const topLevel = regular(join(plan.inputs, name.replace('.exe', `-${TARGET}.exe`)), MAX_BINARY_BYTES);
+    if (!staged.equals(topLevel) || staged.length !== helperPayload[index].bytes || digest(staged) !== helperPayload[index].sha256) fail('Staged repair executable differs from its top-level package input.');
+  }
+  const repairPayload = [
+    ...helperPayload.map((row) => ({ ...row, name: `${REPAIR_DIRECTORY}/${row.name}` })),
+    validateRepairManifest(repairManifest, config.version, helperPayload),
+  ];
   const destination = join(plan.output, 'controller-setup.exe');
   noLinks(destination);
   if (existsSync(destination)) regular(destination, MAX_INSTALLER_BYTES);
   copyFileSync(source, destination, existsSync(destination) ? 0 : constants.COPYFILE_EXCL);
-  const manifest = { schemaVersion: 2, target: TARGET, mode: 'assembled', signing: 'not-attested', payload, installer: { name: 'controller-setup.exe', bytes: installer.length, sha256: digest(installer) } };
+  const manifest = { schemaVersion: 2, target: TARGET, mode: 'assembled', signing: 'not-attested', payload: [...payload, ...repairPayload], installer: { name: 'controller-setup.exe', bytes: installer.length, sha256: digest(installer) } };
   validateManifest(manifest);
   writeKnown(join(plan.output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   process.stdout.write('Assembled target/windows-package/controller-setup.exe; run inspect separately. No installer or service was executed.\n');

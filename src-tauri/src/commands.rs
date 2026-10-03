@@ -144,6 +144,8 @@ pub(crate) async fn save_notification_policy(
     }
 }
 
+/// Includes the fixed protected-copy repair action. Hashing, Windows elevation
+/// and process waiting stay on with_runtime's serialized blocking worker.
 #[tauri::command]
 pub(crate) async fn control_service(
     app: tauri::AppHandle,

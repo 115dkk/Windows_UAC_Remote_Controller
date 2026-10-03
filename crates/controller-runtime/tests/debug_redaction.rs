@@ -53,6 +53,7 @@ fn presentation_debug_never_emits_identifiers_names_paths_or_commands() {
         relay_configured: false,
         relay_status: None,
         watcher_status: None,
+        installation_integrity: None,
         external_access: None,
         devices: vec![device],
         requests: vec![request],

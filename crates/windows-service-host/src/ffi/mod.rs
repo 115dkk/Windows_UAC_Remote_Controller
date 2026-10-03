@@ -9,6 +9,7 @@ mod elevation;
 mod filesystem;
 mod firewall;
 mod language;
+mod maintenance;
 #[cfg(target_pointer_width = "64")]
 mod overlapped_pipe;
 #[cfg(target_pointer_width = "64")]
@@ -23,6 +24,7 @@ pub(crate) mod probe_supervisor;
 mod process_observer;
 pub(crate) mod prompt_diagnostics;
 pub(crate) mod public_diagnostics;
+mod repair_process;
 mod security;
 mod taskbar;
 mod trust_store;
@@ -90,9 +92,14 @@ pub(crate) use trust_store::{
 };
 
 pub(crate) use filesystem::{
-    ActivityDirectory, expected_executable, open_activity_directory, provision_activity_directory,
-    validate_installation,
+    ActivityDirectory, ValidatedRepairInstallation, create_repair_target, delete_repair_staging,
+    expected_executable, move_repair_staging, open_activity_directory, open_optional_repair_target,
+    open_repair_source, pe_header_is_plausible, provision_activity_directory, read_bounded,
+    recheck_repair_installation, validate_installation, validate_repair_installation,
+    verify_repair_target, write_all_and_flush,
 };
+pub(crate) use maintenance::acquire as acquire_maintenance;
+pub(crate) use repair_process::{RepairChildVerb, run as run_repair_child};
 pub(crate) use security::{harden_service, require_elevated, verify_service_security};
 
 use crate::{ServiceError, ServiceOperation};
@@ -124,7 +131,7 @@ impl Wide {
     }
 }
 
-struct OwnedHandle(HANDLE);
+pub(crate) struct OwnedHandle(HANDLE);
 impl fmt::Debug for OwnedHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("OwnedHandle(redacted)")

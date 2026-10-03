@@ -125,6 +125,7 @@ fn phone_control_never_advertises_installer_or_restart_from_start_stop_hints() {
         ServiceAction::Stop,
         ServiceAction::Restart,
         ServiceAction::Uninstall,
+        ServiceAction::Repair,
     ] {
         assert!(!stopped.allows(action));
     }

@@ -23,6 +23,8 @@ import { useController } from './useController';
 import { tr, useLanguage } from './i18n';
 import { LanguageSettings } from './LanguageSettings';
 import { WatcherNotice } from './WatcherNotice';
+import { RepairNotice } from './RepairNotice';
+import { repairNoticeKind } from './repairNoticeText';
 
 export type ClientPage = 'status' | 'devices' | 'network' | 'activity' | 'requests' | 'schedule';
 interface NavItem { readonly page: ClientPage; readonly label: string; readonly icon: IconName; readonly available: boolean }
@@ -138,7 +140,10 @@ export function App({ bridge, initialPage, taskbarClient }: { bridge: Controller
           ? <div><p>{tr(error.message)}</p><p className="supporting-text">{tr(error.nextAction)}</p></div>
           : <p>{tr(error.message)}</p>}</section>}
       {snapshot.issue && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(snapshot.issue.message)}</p>{snapshot.issue.nextAction && <p className="supporting-text">{tr(snapshot.issue.nextAction)}</p>}</div></section>}
-      {!phone && <WatcherNotice snapshot={snapshot} stale={stale} />}
+      {/* Repair advice names the cause and the remedy; the watcher notice would repeat it. */}
+      {!phone && (repairNoticeKind(snapshot, stale)
+        ? <RepairNotice snapshot={snapshot} stale={stale} disabled={disabled} onRepair={() => serviceAction('repair')} />
+        : <WatcherNotice snapshot={snapshot} stale={stale} />)}
       <div className={`global-feedback ${feedback ? 'has-feedback' : ''}`} role="status" aria-live="polite" aria-atomic="true">{feedback}</div>
       {!phone && page === 'status' && <ServicePanel snapshot={snapshot} disabled={disabled} stale={stale} onAction={serviceAction} onOpenNetwork={() => navigate('network')} />}
       {!phone && page === 'status' && <TaskbarSuggestion client={taskbarClient} />}

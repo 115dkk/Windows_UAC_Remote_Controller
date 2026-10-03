@@ -15,6 +15,7 @@ pub enum Command {
     RelayStatus,
     Service,
     Install,
+    Repair,
     Start,
     Stop,
     Restart,
@@ -202,6 +203,7 @@ impl fmt::Debug for Command {
             Self::RelayStatus => "Command::RelayStatus",
             Self::Service => "Command::Service",
             Self::Install => "Command::Install",
+            Self::Repair => "Command::Repair",
             Self::Start => "Command::Start",
             Self::Stop => "Command::Stop",
             Self::Restart => "Command::Restart",
@@ -407,6 +409,7 @@ impl Command {
             Some("relay-status") => Ok(Self::RelayStatus),
             Some("service") => Ok(Self::Service),
             Some("install") => Ok(Self::Install),
+            Some("repair") => Ok(Self::Repair),
             Some("start") => Ok(Self::Start),
             Some("stop") => Ok(Self::Stop),
             Some("restart") => Ok(Self::Restart),
@@ -528,6 +531,10 @@ pub enum ServiceOperation {
     RequestProbe,
     ConfigureFirewall,
     RemoveFirewall,
+    AcquireMaintenanceLock,
+    WriteRepairFile,
+    LaunchRepairChild,
+    WaitRepairChild,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -564,6 +571,8 @@ pub enum ServiceError {
     UntrustedInstallation,
     #[error("a protected installed executable has an invalid PE header")]
     DamagedInstallation,
+    #[error("the protected repair source is unusable; reinstall this version")]
+    RepairSourceUnusable,
     #[error("protected path validation rejected a reparse point or path alias")]
     UnsafePath,
     #[error("protected object owner or access control is unsupported or unsafe")]
@@ -721,6 +730,7 @@ impl ServiceError {
     /// Stable process exit classes, not raw OS text or truncated Windows codes.
     pub const fn exit_code(self) -> u8 {
         match self {
+            Self::RepairSourceUnusable => 20,
             Self::InvalidArguments => 2,
             Self::ElevationRequired => 3,
             Self::UnsupportedPlatform => 4,
@@ -824,6 +834,27 @@ pub(crate) fn continuing_pending_start(existing: Option<Instant>, now: Instant) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repair_command_has_no_source_target_or_extra_arguments() {
+        assert_eq!(
+            super::Command::parse(["repair"]),
+            Ok(super::Command::Repair)
+        );
+        assert_eq!(
+            super::Command::parse(["repair", "extra"]),
+            Err(super::ServiceError::InvalidArguments)
+        );
+    }
+
+    #[test]
+    fn repair_source_unusable_has_the_dedicated_exit_code() {
+        assert_eq!(super::ServiceError::RepairSourceUnusable.exit_code(), 20);
+        assert_eq!(
+            super::ServiceError::RepairSourceUnusable.service_diagnostic_code(),
+            20
+        );
+    }
+
     #[test]
     fn inspector_command_has_no_target_or_operation_arguments() {
         assert_eq!(
@@ -1264,6 +1295,7 @@ mod tests {
             ("status", Command::Status),
             ("service", Command::Service),
             ("install", Command::Install),
+            ("repair", Command::Repair),
             ("start", Command::Start),
             ("stop", Command::Stop),
             ("restart", Command::Restart),
@@ -1323,6 +1355,7 @@ mod tests {
             "status",
             "service",
             "install",
+            "repair",
             "start",
             "stop",
             "restart",
@@ -1507,6 +1540,7 @@ mod tests {
             crate::query_status(),
             Err(ServiceError::UnsupportedPlatform)
         );
+        assert_eq!(crate::repair(), Err(ServiceError::UnsupportedPlatform));
         for operation in [
             crate::install,
             crate::start,

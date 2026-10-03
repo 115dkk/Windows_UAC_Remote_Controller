@@ -1,4 +1,12 @@
 {
+  "휴대폰 승인 프로그램 파일 일부가 손상되었습니다. [수리하기]를 누르면 이 PC에 보관된 원본으로 되돌립니다. Windows 관리자 승인이 필요합니다.": "Alguns ficheiros do programa de aprovação pelo telemóvel estão danificados. Selecione [Reparar] para os restaurar a partir das cópias guardadas neste PC. É necessária a aprovação do administrador do Windows.",
+  "프로그램 파일과 이 PC에 보관된 원본이 모두 손상되어 여기서는 수리할 수 없습니다. 같은 버전을 다시 설치하십시오.": "Os ficheiros do programa e as cópias guardadas neste PC estão danificados, pelo que não é possível repará-los aqui. Reinstale a mesma versão.",
+  "수리하기": "Reparar",
+  "손상된 프로그램 파일을 이 PC에 보관된 원본으로 되돌리고 서비스를 다시 시작합니다. 지금 처리 중인 승인 요청은 취소됩니다.": "Restaura os ficheiros danificados do programa a partir das cópias guardadas neste PC e reinicia o serviço. Os pedidos de aprovação em curso serão cancelados.",
+  "수리를 마쳤습니다.": "Reparação concluída.",
+  "수리하지 못했습니다. 같은 버전을 다시 설치하십시오.": "Não foi possível reparar. Reinstale a mesma versão.",
+  "수리하는 중": "A reparar",
+  "손상된 프로그램 파일을 수리하시겠습니까?": "Reparar os ficheiros danificados do programa?",
   "외부 연결": "Acesso externo",
   "휴대폰이 집 밖에서도 이 PC에 연결할 수 있게 설정합니다.": "Configure a forma como o telemóvel se liga a este PC quando está fora de casa.",
   "외부 연결 설정": "Configurar acesso externo",

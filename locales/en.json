@@ -1,4 +1,12 @@
 {
+  "휴대폰 승인 프로그램 파일 일부가 손상되었습니다. [수리하기]를 누르면 이 PC에 보관된 원본으로 되돌립니다. Windows 관리자 승인이 필요합니다.": "Some program files for phone approval are damaged. Select [Repair] to restore them from the copies stored on this PC. Windows administrator approval is required.",
+  "프로그램 파일과 이 PC에 보관된 원본이 모두 손상되어 여기서는 수리할 수 없습니다. 같은 버전을 다시 설치하십시오.": "The program files and the copies stored on this PC are both damaged, so they cannot be repaired here. Reinstall the same version.",
+  "수리하기": "Repair",
+  "손상된 프로그램 파일을 이 PC에 보관된 원본으로 되돌리고 서비스를 다시 시작합니다. 지금 처리 중인 승인 요청은 취소됩니다.": "Restores damaged program files from the copies stored on this PC and restarts the service. Approval requests being processed will be cancelled.",
+  "수리를 마쳤습니다.": "Repair completed.",
+  "수리하지 못했습니다. 같은 버전을 다시 설치하십시오.": "Repair failed. Reinstall the same version.",
+  "수리하는 중": "Repairing",
+  "손상된 프로그램 파일을 수리하시겠습니까?": "Repair damaged program files?",
   "외부 연결": "External access",
   "휴대폰이 집 밖에서도 이 PC에 연결할 수 있게 설정합니다.": "Set up how your phone reaches this PC when you are away from home.",
   "외부 연결 설정": "Set up external access",

@@ -16,10 +16,16 @@ direct-network = { path = "../direct-network" }
 notification-policy = { path = "../notification-policy" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service-host = { path = "../windows-service-host" }
+windows = { version = "0.62.2", default-features = false, features = [
+    "std", "Win32_Foundation", "Win32_System_Com", "Win32_System_Threading",
+    "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Security",
+    "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Registry",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # Constants for safe std no-follow/nonblocking opens only; no libc FFI calls.
@@ -31,5 +37,15 @@ rustix.workspace = true
 [dev-dependencies]
 tempfile = "3.23.0"
 
-[lints]
-workspace = true
+# Only the Windows-only installation_ffi module may override this deny lint.
+# Portable presentation and integrity classification remain safe Rust.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

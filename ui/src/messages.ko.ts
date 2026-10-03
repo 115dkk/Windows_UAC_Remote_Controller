@@ -26,6 +26,7 @@ export const ko = {
   unexpectedTitle: '앱 상태 확인 불가',
   stale: '마지막으로 확인한 상태예요. 다시 확인하기 전에는 상태를 변경할 수 없어요.',
   updated: '현재 상태를 확인했어요.',
+  repairDone: '수리를 마쳤습니다.',
   pending: '응답을 기다리고 있어요.',
   cancel: '취소',
   save: '저장',
@@ -225,9 +226,10 @@ export function policyUnavailableTitleText(service: PhoneServiceView | null): st
   }
 }
 export const serviceActionText: Record<ServiceAction, string> = {
-  install: 'PC 연결 기능 설치', start: '휴대폰 승인 켜기', stop: '휴대폰 승인 끄기', restart: '휴대폰 승인 다시 켜기', uninstall: 'PC 연결 기능 제거',
+  install: 'PC 연결 기능 설치', start: '휴대폰 승인 켜기', stop: '휴대폰 승인 끄기', restart: '휴대폰 승인 다시 켜기', uninstall: 'PC 연결 기능 제거', repair: '수리하기',
 };
 export const serviceConfirmText: Partial<Record<ServiceAction, { title: string; body: string }>> = {
+  repair: { title: '손상된 프로그램 파일을 수리하시겠습니까?', body: '손상된 프로그램 파일을 이 PC에 보관된 원본으로 되돌리고 서비스를 다시 시작합니다. 지금 처리 중인 승인 요청은 취소됩니다.' },
   stop: { title: '휴대폰 승인을 끄시겠습니까?', body: '다시 켜기 전까지 이 PC의 요청을 휴대폰에서 처리할 수 없어요. 자동 실행 설정은 바뀌지 않아요. PC의 관리자 권한 창에서는 직접 선택할 수 있어요.' },
   restart: { title: '휴대폰 승인을 다시 켜시겠습니까?', body: '다시 켜는 동안 이 PC의 휴대폰 승인 기능이 잠시 꺼져요. PC의 관리자 권한 창에서는 직접 선택할 수 있어요.' },
   uninstall: { title: 'PC 연결 기능을 제거하시겠습니까?', body: 'PC에서 실행되는 휴대폰 승인 기능만 제거하고, 이 설정 앱은 남겨 둡니다. 다시 사용하려면 PC 연결 기능을 설치해야 합니다. 제거하려면 Windows 관리자 확인이 필요합니다.' },

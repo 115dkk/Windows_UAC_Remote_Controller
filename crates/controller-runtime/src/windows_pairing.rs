@@ -299,6 +299,7 @@ fn map_service_error(error: ServiceError) -> PairingFailure {
         | ServiceError::ConfigurationConflict
         | ServiceError::UntrustedInstallation
         | ServiceError::DamagedInstallation
+        | ServiceError::RepairSourceUnusable
         | ServiceError::UnsafePath
         | ServiceError::UnsafePermissions
         | ServiceError::InstallationIncomplete { .. }

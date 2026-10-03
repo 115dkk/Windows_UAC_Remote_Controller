@@ -17,7 +17,7 @@ for (const name of readdirSync('ui/src')) {
 }
 for (const path of [
   'crates/controller-runtime/src/runtime.rs', 'crates/controller-runtime/src/unwired.rs',
-  'crates/controller-runtime/src/contract.rs',
+  'crates/controller-runtime/src/contract.rs', 'crates/controller-runtime/src/integrity.rs',
   'crates/controller-runtime/src/phone_requests.rs', 'crates/controller-runtime/src/phone_history.rs',
   'crates/controller-runtime/src/storage.rs', 'src-tauri/src/commands.rs', 'src-tauri/src/mobile.rs',
   'src-tauri/src/mobile/snapshot.rs', 'src-tauri/src/language.rs',

@@ -180,6 +180,10 @@ Var UacServicePin
 Var UacProbePin
 Var UacAppPin
 Var UacUninstallerPin
+Var UacRepairDirectoryPin
+Var UacRepairServicePin
+Var UacRepairProbePin
+Var UacRepairManifestPin
 Var UacAppList
 Var UacAppCount
 Var UacAppIndex
@@ -228,6 +232,18 @@ Function ${PREFIX}UacReleaseFiles
     System::Call 'kernel32::CloseHandle(p $UacUninstallerPin)'
     StrCpy $UacUninstallerPin 0
   ${EndIf}
+  ${If} $UacRepairServicePin <> 0
+    System::Call 'kernel32::CloseHandle(p $UacRepairServicePin)'
+    StrCpy $UacRepairServicePin 0
+  ${EndIf}
+  ${If} $UacRepairProbePin <> 0
+    System::Call 'kernel32::CloseHandle(p $UacRepairProbePin)'
+    StrCpy $UacRepairProbePin 0
+  ${EndIf}
+  ${If} $UacRepairManifestPin <> 0
+    System::Call 'kernel32::CloseHandle(p $UacRepairManifestPin)'
+    StrCpy $UacRepairManifestPin 0
+  ${EndIf}
 FunctionEnd
 
 Function ${PREFIX}UacRelease
@@ -239,6 +255,10 @@ Function ${PREFIX}UacRelease
   ${If} $UacHandle <> 0
     System::Call 'kernel32::CloseHandle(p $UacHandle)'
     StrCpy $UacHandle 0
+  ${EndIf}
+  ${If} $UacRepairDirectoryPin <> 0
+    System::Call 'kernel32::CloseHandle(p $UacRepairDirectoryPin)'
+    StrCpy $UacRepairDirectoryPin 0
   ${EndIf}
   ${If} $UacDirectoryPin <> 0
     System::Call 'kernel32::CloseHandle(p $UacDirectoryPin)'
@@ -629,6 +649,8 @@ FunctionEnd
 
 Function ${PREFIX}UacInspectFiles
   StrCpy $UacFailure "$(UacUnsafe)"
+  ; Every caller closes file pins before calling again. The repair-directory pin
+  ; alone survives PREINSTALL so POSTINSTALL can keep its parent fixed by identity.
   StrCpy $UacDirectoryMode 0
   StrCpy $UacPolicy 1
   StrCpy $UacAllowMissing 1
@@ -648,6 +670,36 @@ Function ${PREFIX}UacInspectFiles
   Call ${PREFIX}UacOpenChecked
   StrCpy $UacUninstallerPin $UacHandle
   StrCpy $UacHandle 0
+  ; POSTINSTALL reuses PREINSTALL's directory pin instead of opening the same
+  ; path twice; a fresh call (including uninstall) opens and validates it here.
+  ; UacOpenChecked normalized that pinned path, rejected reparse metadata and
+  ; checked the protected DACL before any child path is opened or written.
+  ${If} $UacRepairDirectoryPin = 0
+    StrCpy $UacDirectoryMode 1
+    StrCpy $UacPolicy 1
+    StrCpy $UacAllowMissing 1
+    StrCpy $UacPath "$INSTDIR\repair"
+    Call ${PREFIX}UacOpenChecked
+    StrCpy $UacRepairDirectoryPin $UacHandle
+    StrCpy $UacHandle 0
+  ${EndIf}
+  ${If} $UacRepairDirectoryPin <> 0
+    StrCpy $UacDirectoryMode 0
+    StrCpy $UacPolicy 1
+    StrCpy $UacAllowMissing 1
+    StrCpy $UacPath "$INSTDIR\repair\uac-service.exe"
+    Call ${PREFIX}UacOpenChecked
+    StrCpy $UacRepairServicePin $UacHandle
+    StrCpy $UacHandle 0
+    StrCpy $UacPath "$INSTDIR\repair\uac-prompt-probe.exe"
+    Call ${PREFIX}UacOpenChecked
+    StrCpy $UacRepairProbePin $UacHandle
+    StrCpy $UacHandle 0
+    StrCpy $UacPath "$INSTDIR\repair\repair-manifest.json"
+    Call ${PREFIX}UacOpenChecked
+    StrCpy $UacRepairManifestPin $UacHandle
+    StrCpy $UacHandle 0
+  ${EndIf}
 FunctionEnd
 
 Function ${PREFIX}UacStopService
@@ -774,6 +826,31 @@ FunctionEnd
     StrCpy $UacHandle 0
   ${EndIf}
   Call UacInspectFiles
+  ${If} $UacDirectoryPin = 0
+    Call UacFail
+  ${EndIf}
+  ${If} $UacRepairDirectoryPin = 0
+    ; An absent directory cannot already contain repair child pins.
+    ${If} $UacRepairServicePin <> 0
+    ${OrIf} $UacRepairProbePin <> 0
+    ${OrIf} $UacRepairManifestPin <> 0
+      Call UacFail
+    ${EndIf}
+    ; The fixed repair directory is the only descendant created here. It inherits
+    ; the already-checked protected installation DACL; no ACL is broadened.
+    ClearErrors
+    CreateDirectory "$INSTDIR\repair"
+    ${If} ${Errors}
+      Call UacFail
+    ${EndIf}
+    StrCpy $UacDirectoryMode 1
+    StrCpy $UacPolicy 1
+    StrCpy $UacAllowMissing 0
+    StrCpy $UacPath "$INSTDIR\repair"
+    Call UacOpenChecked
+    StrCpy $UacRepairDirectoryPin $UacHandle
+    StrCpy $UacHandle 0
+  ${EndIf}
   StrCpy $UacFailure "$(UacStopFailed)"
   ${If} $UacServicePin <> 0
     Call UacStopService
@@ -791,6 +868,10 @@ FunctionEnd
   ${OrIf} $UacProbePin = 0
   ${OrIf} $UacAppPin = 0
   ${OrIf} $UacUninstallerPin = 0
+  ${OrIf} $UacRepairDirectoryPin = 0
+  ${OrIf} $UacRepairServicePin = 0
+  ${OrIf} $UacRepairProbePin = 0
+  ${OrIf} $UacRepairManifestPin = 0
     Call UacFail
   ${EndIf}
   StrCpy $UacFailure "$(UacInstallFailed)"
@@ -827,6 +908,9 @@ FunctionEnd
   ${Else}
     Call un.UacRequireServiceAbsent
   ${EndIf}
+  ; All checked file handles stay pinned through the uninstall command, then close
+  ; before the template deletes fixed top-level and repair children. Directories
+  ; remain pinned until their own fixed-name removal.
   Call un.UacReleaseFiles
 !macroend
 

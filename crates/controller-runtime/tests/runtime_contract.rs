@@ -18,6 +18,8 @@ struct SyntheticOwnerState {
     observation: Mutex<Result<ServiceObservation, PlatformError>>,
     outcome: Mutex<Result<ServiceCommandOutcome, PlatformError>>,
     management: Mutex<Result<ManagementObservation, PlatformError>>,
+    integrity: Mutex<Option<controller_runtime::InstallationIntegrityView>>,
+    integrity_reads: AtomicUsize,
     reads: AtomicUsize,
     management_reads: AtomicUsize,
     controls: AtomicUsize,
@@ -37,6 +39,8 @@ impl SyntheticOwner {
             // mutation. Even the synthetic default is not fabricated success.
             outcome: Mutex::new(Err(PlatformError::ControlFailed)),
             management: Mutex::new(Err(PlatformError::StatusUnavailable)),
+            integrity: Mutex::new(None),
+            integrity_reads: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
             management_reads: AtomicUsize::new(0),
             controls: AtomicUsize::new(0),
@@ -64,6 +68,13 @@ impl SyntheticOwner {
 }
 
 impl PlatformAdapter for SyntheticOwner {
+    fn observe_installation_integrity(
+        &self,
+    ) -> Option<controller_runtime::InstallationIntegrityView> {
+        self.0.integrity_reads.fetch_add(1, Ordering::SeqCst);
+        self.0.integrity.lock().unwrap().clone()
+    }
+
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
         *self
@@ -87,7 +98,20 @@ impl PlatformAdapter for SyntheticOwner {
         _action: ServiceAction,
     ) -> Result<ServiceCommandOutcome, PlatformError> {
         self.0.controls.fetch_add(1, Ordering::SeqCst);
-        *self.0.outcome.lock().expect("synthetic outcome lock")
+        let outcome = *self.0.outcome.lock().expect("synthetic outcome lock");
+        if outcome
+            == Ok(ServiceCommandOutcome::Repair(
+                controller_runtime::RepairOutcome::Repaired,
+            ))
+        {
+            self.set_observation(Ok(installed(ServiceState::Running)));
+            *self.0.integrity.lock().unwrap() =
+                Some(controller_runtime::InstallationIntegrityView {
+                    state: controller_runtime::IntegrityStateView::Intact,
+                    damaged: Vec::new(),
+                });
+        }
+        outcome
     }
 
     fn remove_device(&self, _device_id: &str) -> Result<(), PlatformError> {
@@ -207,6 +231,177 @@ fn windows_runtime(directory: &tempfile::TempDir, owner: SyntheticOwner) -> AppR
         Box::new(UnavailablePairingStarter),
     )
     .expect("synthetic runtime")
+}
+
+#[test]
+fn integrity_json_and_repair_hint_are_independent_of_the_main_helper() {
+    use controller_runtime::{InstallationIntegrityView, IntegrityStateView};
+    for (state, text) in [
+        (IntegrityStateView::Intact, "intact"),
+        (IntegrityStateView::Damaged, "damaged"),
+        (IntegrityStateView::SourceDamaged, "source_damaged"),
+        (IntegrityStateView::Unknown, "unknown"),
+    ] {
+        for control in [
+            Ok(ControlHint::Available),
+            Ok(ControlHint::NeedsInstaller),
+            Err(PlatformError::HelperUnavailable),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let owner = SyntheticOwner::new(Ok(ServiceObservation {
+                state: ObservedServiceState::Installed(ServiceState::Stopped),
+                control,
+            }));
+            *owner.0.integrity.lock().unwrap() = Some(InstallationIntegrityView {
+                state,
+                damaged: vec!["uac-service.exe".into()],
+            });
+            let mut runtime = windows_runtime(&directory, owner.clone());
+            let view = runtime.snapshot();
+            assert_eq!(
+                serde_json::to_value(&view).unwrap()["installationIntegrity"],
+                json!({
+                    "state": text, "damaged": ["uac-service.exe"]
+                })
+            );
+            assert_eq!(
+                view.service
+                    .unwrap()
+                    .allowed_actions
+                    .contains(&ServiceAction::Repair),
+                state == IntegrityStateView::Damaged
+            );
+            runtime.snapshot();
+            assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 1);
+        }
+    }
+    assert_eq!(
+        serde_json::from_value::<ServiceAction>(json!("repair")).unwrap(),
+        ServiceAction::Repair
+    );
+    let android = controller_runtime::AppSnapshot::from_android_service(
+        controller_runtime::PhoneServiceView::UNAVAILABLE,
+        MobileReadiness::UNAVAILABLE,
+    );
+    assert!(serde_json::to_value(android).unwrap()["installationIntegrity"].is_null());
+}
+
+#[test]
+fn repair_is_not_launched_without_a_verified_source_and_damage() {
+    use controller_runtime::{InstallationIntegrityView, IntegrityStateView};
+    for state in [
+        None,
+        Some(IntegrityStateView::Intact),
+        Some(IntegrityStateView::Unknown),
+        Some(IntegrityStateView::SourceDamaged),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+        *owner.0.integrity.lock().unwrap() = state.map(|state| InstallationIntegrityView {
+            state,
+            damaged: Vec::new(),
+        });
+        let mut runtime = windows_runtime(&directory, owner.clone());
+        assert!(
+            !runtime
+                .snapshot()
+                .service
+                .unwrap()
+                .allowed_actions
+                .contains(&ServiceAction::Repair)
+        );
+        let view = runtime.control_service(ServiceAction::Repair).unwrap();
+        assert_eq!(owner.0.controls.load(Ordering::SeqCst), 0);
+        assert_eq!(view.issue.unwrap().code, "repair_source_unusable");
+        assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+fn watcher_failure_transitions_force_checks_but_repeated_failures_do_not() {
+    use controller_runtime::{WatcherRefusalView, WatcherStateView, WatcherStatusView};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    runtime.snapshot();
+    let mut observation = management(Vec::new(), false);
+    observation.watcher = Some(WatcherStatusView {
+        state: WatcherStateView::Unavailable,
+        refusal: Some(WatcherRefusalView::HelperDamaged),
+    });
+    owner.set_management(Ok(observation.clone()));
+    runtime.snapshot();
+    runtime.snapshot();
+    assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 2);
+    observation.watcher.as_mut().unwrap().refusal = Some(WatcherRefusalView::HelperFailed);
+    owner.set_management(Ok(observation.clone()));
+    runtime.snapshot();
+    assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 3);
+    owner.set_management(Err(PlatformError::StatusUnavailable));
+    runtime.snapshot();
+    owner.set_management(Ok(observation));
+    runtime.snapshot();
+    assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn repair_exit_codes_and_every_outcome_refresh_integrity() {
+    use controller_runtime::{
+        InstallationIntegrityView, IntegrityStateView, RepairOutcome, repair_exit_outcome,
+    };
+    assert_eq!(repair_exit_outcome(0), RepairOutcome::Repaired);
+    assert_eq!(repair_exit_outcome(20), RepairOutcome::SourceUnusable);
+    for code in [1, 19, 21, u32::MAX] {
+        assert_eq!(repair_exit_outcome(code), RepairOutcome::Failed);
+    }
+    for (outcome, issue) in [
+        (
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::Repaired)),
+            None,
+        ),
+        (
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::UserCancelled)),
+            Some("service_user_cancelled"),
+        ),
+        (
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::SourceUnusable)),
+            Some("repair_source_unusable"),
+        ),
+        (
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::Failed)),
+            Some("repair_failed"),
+        ),
+        (Err(PlatformError::ControlFailed), Some("repair_failed")),
+        (
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::StillRunning)),
+            None,
+        ),
+        (
+            Ok(ServiceCommandOutcome::Repair(
+                RepairOutcome::CompletionStatusUnknown,
+            )),
+            None,
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = SyntheticOwner::new(Ok(ServiceObservation {
+            state: ObservedServiceState::Installed(ServiceState::Stopped),
+            control: Err(PlatformError::HelperUnavailable),
+        }));
+        *owner.0.integrity.lock().unwrap() = Some(InstallationIntegrityView {
+            state: IntegrityStateView::Damaged,
+            damaged: vec!["uac-service.exe".into()],
+        });
+        owner.set_outcome(outcome);
+        let mut runtime = windows_runtime(&directory, owner.clone());
+        let view = runtime.control_service(ServiceAction::Repair).unwrap();
+        assert_eq!(owner.0.controls.load(Ordering::SeqCst), 1);
+        assert_eq!(owner.0.integrity_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            view.service.unwrap().action_issue.map(|value| value.code),
+            issue
+        );
+    }
 }
 
 #[test]
@@ -1193,6 +1388,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "relayConfigured": false,
             "relayStatus": {"mode": "unknown", "state": "unknown", "internetState": null, "listenerFault": null},
             "watcherStatus": null,
+            "installationIntegrity": null,
             "externalAccess": null,
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,

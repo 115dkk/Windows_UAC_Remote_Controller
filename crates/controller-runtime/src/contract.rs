@@ -20,6 +20,7 @@ pub enum ServiceAction {
     Stop,
     Restart,
     Uninstall,
+    Repair,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -112,6 +113,22 @@ impl std::fmt::Debug for ListenerFaultView {
                 .finish(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityStateView {
+    Intact,
+    Damaged,
+    SourceDamaged,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallationIntegrityView {
+    pub state: IntegrityStateView,
+    pub damaged: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -383,7 +400,10 @@ impl PhoneServiceView {
         match action {
             ServiceAction::Start => self.can_start,
             ServiceAction::Stop => self.can_stop,
-            ServiceAction::Install | ServiceAction::Restart | ServiceAction::Uninstall => false,
+            ServiceAction::Install
+            | ServiceAction::Restart
+            | ServiceAction::Uninstall
+            | ServiceAction::Repair => false,
         }
     }
 }
@@ -647,6 +667,8 @@ pub struct AppSnapshot {
     pub relay_status: Option<RelayStatusView>,
     /// None: not Windows, service not running, or not observed.
     pub watcher_status: Option<WatcherStatusView>,
+    /// None before the first check and on non-Windows platforms.
+    pub installation_integrity: Option<InstallationIntegrityView>,
     /// None: not Windows, service not running, or not observed.
     pub external_access: Option<ExternalAccessView>,
     pub devices: Vec<PairedDeviceView>,
@@ -678,6 +700,7 @@ impl AppSnapshot {
             relay_configured: false,
             relay_status: None,
             watcher_status: None,
+            installation_integrity: None,
             external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),
@@ -722,6 +745,7 @@ impl AppSnapshot {
             relay_configured: false,
             relay_status: None,
             watcher_status: None,
+            installation_integrity: None,
             external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),
