@@ -25,7 +25,10 @@ intact (`MZ` header present).
 Measured around it, without an established mechanism:
 
 - Kernel-Power 41 and EventLog 6008: an unexpected shutdown at 13:57:51 on
-  2026-10-02.
+  2026-10-02. It was a bug check, not a power loss: Kernel-Power 41 records
+  BugcheckCode 209 (0xD1, DRIVER_IRQL_NOT_LESS_OR_EQUAL) and volmgr 162 a
+  written dump. The same PC logged ten 0xD1 bug checks since 2026-09-03, all
+  with one of two faulting-address suffixes; the driver is not identified here.
 - The helper had been written by the 1.8.0 install at 20:03 on 2026-10-01; the
   service started the watcher from it then without error.
 - On the same PC the repository's `.git/index`, last written at 02:40 on
