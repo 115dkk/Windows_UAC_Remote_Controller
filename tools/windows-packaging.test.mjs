@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { buildPlan, createRepairManifest, expectedPayload, inspectPe, inspectInstallerPe, invalidateInspection, MAX_BINARY_BYTES, MAX_REPAIR_MANIFEST_BYTES, parseArchiveListing, parseArguments, TARGET, transformNsisMain, validateConfiguration, validateFileMetadata, validateManifest, validateRepairManifest, verifyExtractedPayload } from './windows-packaging.mjs';
+import { buildPlan, createRepairManifest, createStagedManifest, expectedPayload, inspectPe, inspectInstallerPe, invalidateInspection, MAX_BINARY_BYTES, MAX_REPAIR_MANIFEST_BYTES, parseArchiveListing, parseArguments, TARGET, transformNsisMain, validateConfiguration, validateFileMetadata, validateManifest, validateRepairManifest, validateStagedManifest, verifyExtractedPayload } from './windows-packaging.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const base = JSON.parse(readFileSync(join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
@@ -33,9 +33,12 @@ function mainPe() {
 function listing(type = 'Nsis', members = [...leaves, ...repairLeaves]) {
   return `7-Zip synthetic listing\n\nPath = controller-setup.exe\nType = ${type}\nPhysical Size = 10000\n\n${members.map((name) => `Path = ${name}\nSize = ${name.endsWith('.json') ? 256 : 1024}\nPacked Size = 400`).join('\n\n')}\n`;
 }
+function helperPayload() {
+  return leaves.slice(1).map((name) => expectedPayload(name, pe()));
+}
 function manifest() {
-  const payload = leaves.map((name) => expectedPayload(name, name === 'controller-app.exe' ? mainPe() : pe()));
-  const helpers = payload.slice(1);
+  const helpers = helperPayload();
+  const payload = [expectedPayload('controller-app.exe', mainPe()), ...helpers];
   const repairManifest = createRepairManifest(base.version, helpers);
   return { schemaVersion: 2, target: TARGET, mode: 'assembled', signing: 'not-attested', payload: [...payload, ...helpers.map((row) => ({ ...row, name: `repair/${row.name}` })), validateRepairManifest(repairManifest, base.version, helpers)], installer: { name: 'controller-setup.exe', bytes: 2048, sha256: 'b'.repeat(64) } };
 }
@@ -112,21 +115,54 @@ test('archive requires one NSIS descriptor, three root payloads and three exact 
   assert.throws(() => parseArchiveListing(listing().replace('Size = 256', `Size = ${MAX_REPAIR_MANIFEST_BYTES + 1}`)));
 });
 
-test('manifest is exact bounded artifact metadata, not signing/native success', () => {
-  assert.equal(validateManifest(manifest()).signing, 'not-attested');
-  const staged = manifest(); staged.mode = 'staged'; staged.installer = null;
-  assert.equal(validateManifest(staged, 'staged').payload.length, 6);
+test('staged and assembled package manifests have distinct exact schemas', () => {
+  const helpers = helperPayload();
+  // Use the same exported constructor stage() calls, with the same two-helper input.
+  const staged = createStagedManifest(base.version, helpers, createRepairManifest(base.version, helpers));
+  assert.deepEqual(staged.payload.map((row) => row.name), [
+    'uac-service.exe', 'uac-prompt-probe.exe',
+    'repair/uac-service.exe', 'repair/uac-prompt-probe.exe', 'repair/repair-manifest.json',
+  ]);
+  assert.equal(staged.installer, null);
+  assert.equal(staged.payload[0].transformation.kind, 'identity');
+  assert.equal(validateStagedManifest(staged).payload.length, 5);
+  assert.doesNotMatch(JSON.stringify(staged), /controller-app\.exe|tauri-bundler/u);
+  assert.equal(validateStagedManifest(structuredClone(staged)).payload[4].name, 'repair/repair-manifest.json');
+  assert.deepEqual(staged.payload[2].sha256, staged.payload[0].sha256);
+  assert.deepEqual(staged.payload[3].sha256, staged.payload[1].sha256);
+  assert.deepEqual(staged.payload[2].bytes, staged.payload[0].bytes);
+  assert.deepEqual(staged.payload[3].bytes, staged.payload[1].bytes);
+  assert.equal(staged.payload[4].bytes, createRepairManifest(base.version, helpers).length);
+  const reversedHelpers = helperPayload().reverse();
+  const canonicalRepairManifest = createRepairManifest(base.version, helperPayload());
+  assert.throws(() => createStagedManifest(base.version, reversedHelpers, canonicalRepairManifest));
+  assert.throws(() => createStagedManifest(base.version, helpers.slice(0, 1), canonicalRepairManifest));
   assert.throws(() => validateManifest(staged));
-  staged.installer = { name: 'controller-setup.exe', bytes: 1, sha256: 'b'.repeat(64) };
-  assert.throws(() => validateManifest(staged, 'staged'));
-  assert.throws(() => validateManifest(manifest(), 'invalid'));
+  for (const change of [
+    (m) => { m.mode = 'assembled'; },
+    (m) => { m.payload.unshift(expectedPayload('controller-app.exe', mainPe())); },
+    (m) => { m.payload.pop(); },
+    (m) => { m.payload[0].transformation.kind = 'tauri-bundler-2.9.4-nsis-marker-v1'; },
+    (m) => { m.payload[2].sha256 = '0'.repeat(64); },
+    (m) => { m.payload[2].name = 'repair/uac-prompt-probe.exe'; },
+    (m) => { m.payload[4].bytes = MAX_REPAIR_MANIFEST_BYTES + 1; },
+    (m) => { m.installer = { name: 'controller-setup.exe', bytes: 1, sha256: 'b'.repeat(64) }; },
+  ]) {
+    const value = structuredClone(staged); change(value); assert.throws(() => validateStagedManifest(value));
+  }
+
+  assert.deepEqual(manifest().payload.map((row) => row.name), [
+    'controller-app.exe', 'uac-service.exe', 'uac-prompt-probe.exe',
+    'repair/uac-service.exe', 'repair/uac-prompt-probe.exe', 'repair/repair-manifest.json',
+  ]);
+  assert.equal(validateManifest(manifest()).signing, 'not-attested');
   for (const change of [(m) => { m.mode = 'staged'; }, (m) => { m.authenticated = true; }, (m) => { m.payload.pop(); }, (m) => { m.payload[0].sha256 = 'invalid'; }, (m) => { m.payload[1].name = 'other.exe'; }, (m) => { m.payload[3].sha256 = '0'.repeat(64); }, (m) => { m.payload[5].bytes = MAX_REPAIR_MANIFEST_BYTES + 1; }, (m) => { m.installer.bytes = Number.MAX_SAFE_INTEGER; }]) {
     const value = manifest(); change(value); assert.throws(() => validateManifest(value));
   }
 });
 
 test('repair manifest is exact compact UTF-8 from the staged helper metadata', () => {
-  const helpers = leaves.slice(1).map((name) => expectedPayload(name, pe()));
+  const helpers = helperPayload();
   const bytes = createRepairManifest('1.8.0', helpers);
   const exact = `{"schema":1,"product":"uac-remote-controller","version":"1.8.0","files":[{"name":"uac-service.exe","bytes":1024,"sha256":"${helpers[0].sha256}"},{"name":"uac-prompt-probe.exe","bytes":1024,"sha256":"${helpers[1].sha256}"}]}`;
   assert.deepEqual(bytes, Buffer.from(exact, 'utf8'));
@@ -257,8 +293,8 @@ test('stage writes repair copies and inspect checks exact staged and packaged by
   assert.match(source, /repair: join\(repository, OUTPUT, REPAIR_DIRECTORY\)/u);
   assert.match(source, /writeKnown\(join\(plan\.repair, name\), bytes\)/u);
   assert.match(source, /writeKnown\(join\(plan\.repair, REPAIR_MANIFEST\), repairManifest\)/u);
-  assert.match(source, /mode: 'staged',[\s\S]*payload: \[\.\.\.payload, \.\.\.repairPayload\]/u);
-  assert.match(source, /validateManifest\(stagedManifest, 'staged'\)/u);
+  assert.match(source, /createStagedManifest\(base\.version, payload, repairManifest\)/u);
+  assert.match(source, /return validateStagedManifest\(\{ schemaVersion: 2,[\s\S]*payload: \[\.\.\.payload, \.\.\.repairPayload\]/u);
   assert.match(source, /createRepairManifest\(base\.version, payload\)/u);
   assert.match(source, /createRepairManifest\(version, helpers\)/u);
   assert.match(source, /validateConfiguration\(currentConfig/u);

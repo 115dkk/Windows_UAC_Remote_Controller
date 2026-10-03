@@ -198,13 +198,13 @@ export function parseArchiveListing(text) {
   if (unexpectedPayload || unexpectedRepairManifest) fail('Installer contains a fixed payload outside its exact path.');
   return resolved;
 }
-export function validateManifest(value, allowedMode = 'assembled') {
-  if (!['staged', 'assembled'].includes(allowedMode) || !value || value.schemaVersion !== 2 || value.target !== TARGET || value.mode !== allowedMode || value.signing !== 'not-attested' || !Array.isArray(value.payload) || value.payload.length !== 6) fail('Package manifest is unsupported.');
+function validateManifestEnvelope(value, mode, expectedNames) {
+  if (!Array.isArray(expectedNames) || expectedNames.some((name, index) => !name || expectedNames.indexOf(name) !== index)) fail('Package manifest schema is invalid.');
+  if (!value || value.schemaVersion !== 2 || value.target !== TARGET || value.mode !== mode || value.signing !== 'not-attested' || !Array.isArray(value.payload) || value.payload.length !== expectedNames.length) fail('Package manifest is unsupported.');
   const keys = ['schemaVersion', 'target', 'mode', 'signing', 'payload', 'installer'];
   if (Object.keys(value).some((key) => !keys.includes(key))) fail('Package manifest has unknown fields.');
   for (const [index, row] of value.payload.entries()) {
-    const expectedName = index < ALL_LEAVES.length ? ALL_LEAVES[index] : REPAIR_ARCHIVE_PATHS[index - ALL_LEAVES.length];
-    if (!expectedName) fail('Package payload metadata is invalid.');
+    const expectedName = expectedNames[index];
     const repairManifest = expectedName === `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`;
     const expectedKeys = repairManifest ? 'bytes,name,sha256' : 'bytes,name,sha256,sourceSha256,transformation';
     const limit = repairManifest ? MAX_REPAIR_MANIFEST_BYTES : MAX_BINARY_BYTES;
@@ -213,19 +213,37 @@ export function validateManifest(value, allowedMode = 'assembled') {
     if (!/^[a-f0-9]{64}$/u.test(row.sourceSha256)) fail('Package source metadata is invalid.');
     const transform = row.transformation;
     if (!transform || typeof transform !== 'object') fail('Missing bounded payload transformation metadata.');
-    if (index === 0) {
+    if (expectedName === 'controller-app.exe') {
       if (Object.keys(transform).sort().join() !== 'from,kind,offset,to' || transform.kind !== BUNDLE_TRANSFORM || transform.from !== BUNDLE_SOURCE_MARKER.toString('ascii') || transform.to !== BUNDLE_NSIS_MARKER.toString('ascii') || !Number.isSafeInteger(transform.offset) || transform.offset < 0 || transform.offset > row.bytes - BUNDLE_SOURCE_MARKER.length) fail('Unexpected main executable transformation.');
     } else if (Object.keys(transform).join() !== 'kind' || transform.kind !== 'identity' || row.sha256 !== row.sourceSha256) fail('Helper payload must be byte-identical to its build input.');
-    if (index >= ALL_LEAVES.length) {
-      const original = value.payload[index - ALL_LEAVES.length + 1];
-      if (row.bytes !== original.bytes || row.sha256 !== original.sha256 || row.sourceSha256 !== original.sourceSha256) fail('Repair executable must be byte-identical to its top-level binary.');
+    if (expectedName.startsWith(`${REPAIR_DIRECTORY}/`) && expectedName !== `${REPAIR_DIRECTORY}/${REPAIR_MANIFEST}`) {
+      const original = value.payload.find((candidate) => candidate.name === basename(expectedName));
+      if (!original || row.bytes !== original.bytes || row.sha256 !== original.sha256 || row.sourceSha256 !== original.sourceSha256) fail('Repair executable must be byte-identical to its top-level binary.');
     }
   }
-  const installer = value.installer;
-  if (allowedMode === 'staged') {
-    if (installer !== null) fail('Staged package manifest cannot claim installer metadata.');
-  } else if (!installer || Object.keys(installer).sort().join() !== 'bytes,name,sha256' || installer.name !== 'controller-setup.exe' || !Number.isSafeInteger(installer.bytes) || installer.bytes < 1 || installer.bytes > MAX_INSTALLER_BYTES || !/^[a-f0-9]{64}$/u.test(installer.sha256)) fail('Installer metadata is invalid.');
   return value;
+}
+export function validateStagedManifest(value) {
+  // Before Tauri builds controller-app.exe, provenance covers two top-level
+  // helpers, their two repair copies and the repair manifest: exactly five rows.
+  validateManifestEnvelope(value, 'staged', [...LEAVES, ...REPAIR_ARCHIVE_PATHS]);
+  if (value.installer !== null) fail('Staged package manifest cannot claim installer metadata.');
+  return value;
+}
+export function validateManifest(value) {
+  // Assembly prepends controller-app.exe and binds installer metadata: six rows.
+  validateManifestEnvelope(value, 'assembled', [...ALL_LEAVES, ...REPAIR_ARCHIVE_PATHS]);
+  const installer = value.installer;
+  if (!installer || Object.keys(installer).sort().join() !== 'bytes,name,sha256' || installer.name !== 'controller-setup.exe' || !Number.isSafeInteger(installer.bytes) || installer.bytes < 1 || installer.bytes > MAX_INSTALLER_BYTES || !/^[a-f0-9]{64}$/u.test(installer.sha256)) fail('Installer metadata is invalid.');
+  return value;
+}
+export function createStagedManifest(version, payload, repairManifest) {
+  if (!Array.isArray(payload) || payload.length !== LEAVES.length || payload.some((row, index) => row?.name !== LEAVES[index])) fail('Staged helper payload is unsupported.');
+  const repairPayload = [
+    ...payload.map((row) => ({ ...row, name: `${REPAIR_DIRECTORY}/${row.name}` })),
+    validateRepairManifest(repairManifest, version, payload),
+  ];
+  return validateStagedManifest({ schemaVersion: 2, target: TARGET, mode: 'staged', signing: 'not-attested', payload: [...payload, ...repairPayload], installer: null });
 }
 export function verifyExtractedPayload(entry, data, expected) {
   const actual = unsignedPayload(data);
@@ -268,12 +286,7 @@ function stage(plan) {
   });
   const repairManifest = createRepairManifest(base.version, payload);
   writeKnown(join(plan.repair, REPAIR_MANIFEST), repairManifest);
-  const repairPayload = [
-    ...payload.map((row) => ({ ...row, name: `${REPAIR_DIRECTORY}/${row.name}` })),
-    validateRepairManifest(repairManifest, base.version, payload),
-  ];
-  const stagedManifest = { schemaVersion: 2, target: TARGET, mode: 'staged', signing: 'not-attested', payload: [...payload, ...repairPayload], installer: null };
-  validateManifest(stagedManifest, 'staged');
+  const stagedManifest = createStagedManifest(base.version, payload, repairManifest);
   writeKnown(join(plan.output, 'manifest.json'), `${JSON.stringify(stagedManifest, null, 2)}\n`);
 }
 export function invalidateInspection(plan, reason) {

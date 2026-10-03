@@ -215,13 +215,19 @@ already protected installation folder and gives it no separate ACL, so it
 inherits the protected DACL. POSTINSTALL requires checked pins for the directory
 and all three files.
 
-The Windows package manifest lists the two repair executables and repair manifest
-in addition to the three top-level executables. Passive inspection extracts all six
-fixed paths, checks their recorded sizes and hashes, requires each repair
-executable to equal its top-level counterpart byte for byte, and requires the
+The staged package manifest lists five entries in order:
+`uac-service.exe`, `uac-prompt-probe.exe`, `repair/uac-service.exe`,
+`repair/uac-prompt-probe.exe` and `repair/repair-manifest.json`. After Tauri
+builds the controller, the assembled package manifest lists six entries by adding
+`controller-app.exe` first and keeping those five entries in the same order.
+Passive inspection extracts all six fixed paths, checks their recorded sizes and
+hashes, requires each repair executable to equal its top-level counterpart byte
+for byte, and requires the
 packaged repair manifest to equal the staged file and the canonical content.
-Uninstall removes the three fixed files and then the fixed, empty `repair`
-directory after service removal. It never recursively removes that directory.
+Uninstall removes the three fixed files and then attempts to remove the fixed,
+empty `repair` directory after service removal. It never recursively removes
+that directory. Unknown contents keep the directory in place without preventing
+registry and shortcut cleanup.
 
 Failure does not imply rollback. Program files may have been partially changed;
 service registration or AutoStart settings may remain. The installer aborts with

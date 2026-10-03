@@ -11,6 +11,34 @@ pub(crate) const FILE_NAMES: [&str; 2] = ["uac-service.exe", "uac-prompt-probe.e
 pub(crate) const MAX_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4096;
 
+/// A timed-out worker may still own native I/O. Its slot is not reusable until
+/// the thread has actually exited, even if cancellation was requested.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerAdmission {
+    Start,
+    Reap,
+    Busy,
+}
+
+pub(crate) fn worker_admission(outstanding: bool, exited: bool) -> WorkerAdmission {
+    match (outstanding, exited) {
+        (false, _) => WorkerAdmission::Start,
+        (true, true) => WorkerAdmission::Reap,
+        (true, false) => WorkerAdmission::Busy,
+    }
+}
+
+/// No partial or late result can preserve an Intact/Damaged claim after a
+/// deadline, failed worker, or outstanding native operation.
+pub(crate) fn completed_check(
+    result: Option<InstallationIntegrityView>,
+) -> InstallationIntegrityView {
+    result.unwrap_or_else(|| InstallationIntegrityView {
+        state: IntegrityStateView::Unknown,
+        damaged: Vec::new(),
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManifestState {
     Valid,
@@ -219,6 +247,42 @@ pub(crate) const fn repair_issue(source_unusable: bool) -> crate::AppIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timeout_or_missing_completion_is_unknown_not_a_partial_integrity_claim() {
+        for state in [
+            IntegrityStateView::Intact,
+            IntegrityStateView::Damaged,
+            IntegrityStateView::SourceDamaged,
+            IntegrityStateView::Unknown,
+        ] {
+            let late = InstallationIntegrityView {
+                state,
+                damaged: vec![FILE_NAMES[0].to_owned()],
+            };
+            assert_eq!(completed_check(Some(late.clone())), late);
+            // The deadline owner discards a late result before this projection.
+            // No previous/partial result survives the timeout.
+            let timed_out = completed_check(None);
+            assert_eq!(timed_out.state, IntegrityStateView::Unknown);
+            assert!(timed_out.damaged.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_cancelled_but_outstanding_thread_never_admits_a_second_check() {
+        assert_eq!(worker_admission(false, false), WorkerAdmission::Start);
+        assert_eq!(worker_admission(false, true), WorkerAdmission::Start);
+        // Cancellation does not mean exit. Repeated polls keep the same slot
+        // busy, regardless of how many deadline/cancel requests have occurred.
+        for _ in 0..10 {
+            assert_eq!(worker_admission(true, false), WorkerAdmission::Busy);
+        }
+        // Only a signaled native thread allows reaping; it must be joined and
+        // removed before a fresh operation can replace the slot.
+        assert_eq!(worker_admission(true, true), WorkerAdmission::Reap);
+        assert_eq!(worker_admission(false, false), WorkerAdmission::Start);
+    }
 
     #[test]
     fn repair_target_acl_requires_a_trusted_owner_and_no_untrusted_writer() {

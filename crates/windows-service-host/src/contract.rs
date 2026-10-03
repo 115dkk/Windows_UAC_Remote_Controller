@@ -532,9 +532,8 @@ pub enum ServiceOperation {
     ConfigureFirewall,
     RemoveFirewall,
     AcquireMaintenanceLock,
+    HardenRepairProcess,
     WriteRepairFile,
-    LaunchRepairChild,
-    WaitRepairChild,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

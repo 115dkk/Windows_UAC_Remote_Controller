@@ -1,75 +1,143 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! One protected, machine-wide lock serializes installation, removal and repair.
+//! One protected installation-local file serializes install, removal and repair.
 
-use std::{mem::size_of, ptr};
+use std::{mem::size_of, path::Path, ptr, thread, time::Duration};
 
 use windows::{
     Win32::{
-        Foundation::{ERROR_ACCESS_DENIED, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{ERROR_DELETE_PENDING, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE},
         Security::SECURITY_ATTRIBUTES,
-        System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        Storage::FileSystem::{
+            CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_MODE, OPEN_ALWAYS,
+        },
     },
-    core::w,
+    core::HRESULT,
 };
 
-use super::{OwnedHandle, security::SecurityDescriptor, win_error};
-use crate::{ServiceError, ServiceOperation};
+use super::{
+    OwnedHandle, Wide,
+    filesystem::{inspect_open_handle, known_folder, pin_ancestors},
+    security::SecurityDescriptor,
+    win_error,
+};
+use crate::{
+    INSTALLATION_FOLDER, ServiceError, ServiceOperation,
+    policy::{self, ObjectPolicy},
+};
 
-const WAIT_MILLIS: u32 = 60_000;
+const LOCK_FILE: &str = "maintenance.lock";
+const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const RETRY_LIMIT: u16 = 240;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryDecision {
+    Retry,
+    Timeout,
+}
+
+const fn retry_decision(elapsed_intervals: u16) -> RetryDecision {
+    if elapsed_intervals < RETRY_LIMIT {
+        RetryDecision::Retry
+    } else {
+        RetryDecision::Timeout
+    }
+}
+
+fn is_lock_contention(error: &windows::core::Error) -> bool {
+    [ERROR_SHARING_VIOLATION, ERROR_DELETE_PENDING]
+        .into_iter()
+        .any(|code| error.code() == HRESULT::from_win32(code.0) || error.code().0 as u32 == code.0)
+}
 
 #[derive(Debug)]
 pub(crate) struct MaintenanceGuard {
-    handle: OwnedHandle,
+    _lock: OwnedHandle,
+    _pins: Vec<OwnedHandle>,
 }
 
 pub(crate) fn acquire() -> Result<MaintenanceGuard, ServiceError> {
-    // SYNCHRONIZE | MUTEX_MODIFY_STATE only: administrators and SYSTEM can wait
-    // and release after acquisition, but cannot change the mutex object's DACL.
-    let descriptor =
-        SecurityDescriptor::from_sddl("O:SYG:SYD:P(A;;0x00100001;;;SY)(A;;0x00100001;;;BA)")?;
+    let program_files = known_folder(&windows::Win32::UI::Shell::FOLDERID_ProgramFiles)?;
+    let installation = program_files.join(INSTALLATION_FOLDER);
+    let path = installation.join(LOCK_FILE);
+    let trusted = policy::trusted_system_sids();
+    let mut pins = pin_ancestors(&program_files, &trusted)?;
+    pins.push(super::filesystem::open_checked(
+        &installation,
+        true,
+        ObjectPolicy::Installation,
+        &trusted,
+    )?);
+    let lock = open_with_retry(&path, &trusted)?;
+    // Recheck the retained parent after opening/possibly creating the lock leaf.
+    inspect_open_handle(
+        pins.last().ok_or(ServiceError::UntrustedInstallation)?,
+        &installation,
+        true,
+        ObjectPolicy::Installation,
+        &trusted,
+    )?;
+    Ok(MaintenanceGuard {
+        _lock: lock,
+        _pins: pins,
+    })
+}
+
+fn open_with_retry(path: &Path, trusted: &[Vec<u8>]) -> Result<OwnedHandle, ServiceError> {
+    let descriptor = SecurityDescriptor::from_sddl("D:P(A;;FA;;;SY)(A;;FA;;;BA)")?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.ptr().0,
         bInheritHandle: false.into(),
     };
-    // SAFETY: fixed Global name and live fixed SYSTEM/Administrators descriptor.
-    // Creation does not take ownership; the returned owning handle is adopted once.
-    // If an existing same-name object has a hostile type or DACL, CreateMutexW
-    // refuses it; this code never opens a fallback name or broadens access.
-    let handle = match unsafe {
-        CreateMutexW(
-            Some(ptr::from_ref(&attributes)),
-            false,
-            w!("Global\\UacRemoteController.Maintenance.v1"),
-        )
-    } {
-        Ok(handle) => handle,
-        Err(error) if error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0) => {
-            return Err(ServiceError::UnsafePermissions);
+    let wide = Wide::new(path)?;
+    let mut elapsed_intervals: u16 = 0;
+    loop {
+        // SAFETY: fixed leaf below retained protected installation pins; OPEN_ALWAYS
+        // cannot escape that parent, share0 is the lock, DELETE_ON_CLOSE removes only
+        // this exact file, and the protected descriptor is applied atomically if new.
+        let opened = unsafe {
+            CreateFileW(
+                wide.ptr(),
+                (GENERIC_READ | GENERIC_WRITE).0 | DELETE.0,
+                FILE_SHARE_MODE(0),
+                Some(ptr::from_ref(&attributes)),
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        };
+        match opened {
+            Ok(raw) => {
+                let handle = OwnedHandle(raw);
+                inspect_open_handle(&handle, path, false, ObjectPolicy::Installation, trusted)?;
+                return Ok(handle);
+            }
+            Err(error) if is_lock_contention(&error) => match retry_decision(elapsed_intervals) {
+                RetryDecision::Retry => {
+                    thread::sleep(RETRY_INTERVAL);
+                    elapsed_intervals += 1;
+                }
+                RetryDecision::Timeout => return Err(ServiceError::Timeout),
+            },
+            Err(error) => {
+                return Err(win_error(ServiceOperation::AcquireMaintenanceLock, error));
+            }
         }
-        Err(error) => {
-            return Err(win_error(ServiceOperation::AcquireMaintenanceLock, error));
-        }
-    };
-    let handle = OwnedHandle(handle);
-    // SAFETY: live waitable mutex handle, bounded 60-second wait, no alertable wait.
-    let wait = unsafe { WaitForSingleObject(handle.0, WAIT_MILLIS) };
-    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-        return Ok(MaintenanceGuard { handle });
     }
-    if wait == WAIT_TIMEOUT {
-        return Err(ServiceError::Timeout);
-    }
-    Err(win_error(
-        ServiceOperation::AcquireMaintenanceLock,
-        windows::core::Error::from_thread(),
-    ))
 }
 
-impl Drop for MaintenanceGuard {
-    fn drop(&mut self) {
-        // SAFETY: this guard exists only after this thread acquired the mutex.
-        // Release occurs once before the owning handle's destructor closes it.
-        let _ = unsafe { ReleaseMutex(self.handle.0) };
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sharing_violations_retry_then_timeout_at_sixty_seconds() {
+        assert_eq!(RETRY_INTERVAL, Duration::from_millis(250));
+        assert_eq!(RETRY_LIMIT, 240);
+        assert_eq!(retry_decision(0), RetryDecision::Retry);
+        assert_eq!(retry_decision(239), RetryDecision::Retry);
+        assert_eq!(retry_decision(240), RetryDecision::Timeout);
+        assert_eq!(retry_decision(u16::MAX), RetryDecision::Timeout);
     }
 }

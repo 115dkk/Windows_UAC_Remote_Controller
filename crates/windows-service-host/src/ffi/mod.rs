@@ -24,7 +24,6 @@ pub(crate) mod probe_supervisor;
 mod process_observer;
 pub(crate) mod prompt_diagnostics;
 pub(crate) mod public_diagnostics;
-mod repair_process;
 mod security;
 mod taskbar;
 mod trust_store;
@@ -38,7 +37,7 @@ pub use taskbar::{
 };
 
 pub(crate) use elevation::request_elevated_control;
-pub(crate) use firewall::{provision_embedded_relay_firewall, remove_embedded_relay_firewall};
+pub(crate) use firewall::{provision_embedded_relay_firewall_for, remove_embedded_relay_firewall};
 #[cfg(target_pointer_width = "64")]
 pub(crate) use process_observer::provision_current_process_observer;
 #[cfg(not(target_pointer_width = "64"))]
@@ -92,15 +91,17 @@ pub(crate) use trust_store::{
 };
 
 pub(crate) use filesystem::{
-    ActivityDirectory, ValidatedRepairInstallation, create_repair_target, delete_repair_staging,
-    expected_executable, move_repair_staging, open_activity_directory, open_optional_repair_target,
-    open_repair_source, pe_header_is_plausible, provision_activity_directory, read_bounded,
+    ActivityDirectory, ValidatedRepairInstallation, ValidatedServiceInstallation,
+    create_repair_target, delete_repair_staging, expected_executable, move_repair_staging,
+    open_activity_directory, open_optional_repair_target, open_repair_source,
+    pe_header_is_plausible, provision_activity_directory, read_bounded,
     recheck_repair_installation, validate_installation, validate_repair_installation,
     verify_repair_target, write_all_and_flush,
 };
-pub(crate) use maintenance::acquire as acquire_maintenance;
-pub(crate) use repair_process::{RepairChildVerb, run as run_repair_child};
-pub(crate) use security::{harden_service, require_elevated, verify_service_security};
+pub(crate) use maintenance::{MaintenanceGuard, acquire as acquire_maintenance};
+pub(crate) use security::{
+    harden_repair_dll_search, harden_service, require_elevated, verify_service_security,
+};
 
 use crate::{ServiceError, ServiceOperation};
 use std::{ffi::OsStr, fmt, os::windows::ffi::OsStrExt};

@@ -59,6 +59,18 @@ impl ValidatedInstallation {
     }
 }
 
+/// Closed crate-internal proof accepted by SCM configuration. Implementations
+/// retain protected ancestry and derive the same fixed main executable path.
+pub(crate) trait ValidatedServiceInstallation {
+    fn service_executable(&self) -> &Path;
+}
+
+impl ValidatedServiceInstallation for ValidatedInstallation {
+    fn service_executable(&self) -> &Path {
+        self.executable()
+    }
+}
+
 /// The Journal's path-based I/O is safe only while these validated parent pins
 /// and private ACLs remain in force. Not an authority/key storage abstraction.
 pub(crate) struct ActivityDirectory {
@@ -144,6 +156,7 @@ pub(crate) fn validate_installation(
 pub(crate) struct ValidatedRepairInstallation {
     installation: PathBuf,
     repair: PathBuf,
+    _service_path: PathBuf,
     trusted: Vec<Vec<u8>>,
     installation_pin_index: usize,
     repair_pin_index: usize,
@@ -153,6 +166,14 @@ pub(crate) struct ValidatedRepairInstallation {
 impl fmt::Debug for ValidatedRepairInstallation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ValidatedRepairInstallation(protected)")
+    }
+}
+
+impl ValidatedServiceInstallation for ValidatedRepairInstallation {
+    fn service_executable(&self) -> &Path {
+        // Stored once from the fixed Program Files installation root.
+        // The leaf is checked separately before service configuration.
+        self._service_path.as_path()
     }
 }
 
@@ -207,6 +228,7 @@ pub(crate) fn validate_repair_installation() -> Result<ValidatedRepairInstallati
     pins.push(current_pin);
     pins.push(self_pin);
     Ok(ValidatedRepairInstallation {
+        _service_path: installation.join(SERVICE_EXECUTABLE),
         installation,
         repair,
         trusted,

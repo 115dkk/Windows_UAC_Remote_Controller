@@ -897,23 +897,24 @@ Section Uninstall
     Call un.UacFail
   ${EndIf}
 
-  ; Repair files are fixed above. Close the checked directory pin, then remove
-  ; only the now-empty fixed directory; unknown contents keep it in place.
+  ; Repair files are fixed above. Close the checked directory pin, then attempt
+  ; to remove only the now-empty fixed directory.
   ${If} $UacRepairDirectoryPin <> 0
     System::Call 'kernel32::CloseHandle(p $UacRepairDirectoryPin)'
     StrCpy $UacRepairDirectoryPin 0
   ${EndIf}
+  ; Unknown contents are not ours to remove. A nonempty repair directory is
+  ; retained just like a nonempty $INSTDIR, and uninstall continues.
   ClearErrors
   RMDir "$INSTDIR\repair"
-  ${If} ${Errors}
-    Call un.UacFail
-  ${EndIf}
+  ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.
   ; Keep parent pins, release only the directory being removed.
   ${If} $UacDirectoryPin <> 0
     System::Call 'kernel32::CloseHandle(p $UacDirectoryPin)'
     StrCpy $UacDirectoryPin 0
   ${EndIf}
-  RMDir "$INSTDIR" ; Nonempty (unowned) contents are deliberately retained.
+  ; Nonempty (unowned) contents are deliberately retained.
+  RMDir "$INSTDIR"
 
   ; Remove shortcuts if not updating
   ${If} $UpdateMode <> 1

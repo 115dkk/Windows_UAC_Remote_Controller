@@ -265,13 +265,20 @@ test('taskbar preference is bounded machine state after successful service insta
 });
 
 test('embedded relay firewall changes require protected elevated ownership and a fixed narrow rule', () => {
-  for (const name of ['provision_embedded_relay_firewall', 'remove_embedded_relay_firewall']) {
-    const start = firewall.indexOf(`pub(crate) fn ${name}() -> Result<(), ServiceError> {`);
-    assert.ok(start >= 0, 'firewall API accepts no caller-selected paths or rule parameters');
-    const body = firewall.slice(start, firewall.indexOf('\n}', start));
-    assert.ok(body.indexOf('require_elevated()?') < body.indexOf('validate_installation(true)?'));
-    assert.ok(body.indexOf('validate_installation(true)?') < body.indexOf('ComApartment::enter(operation)?'));
-  }
+  // Provisioning takes the caller's already validated installation image, but
+  // only the fixed Program Files service path is accepted; removal takes nothing.
+  const provisionStart = firewall.indexOf('pub(crate) fn provision_embedded_relay_firewall_for(\n    executable: &std::path::Path,\n) -> Result<(), ServiceError> {');
+  assert.ok(provisionStart >= 0, 'firewall provisioning accepts only the installation image path');
+  const provision = firewall.slice(provisionStart, firewall.indexOf('\n}', provisionStart));
+  assert.ok(provision.indexOf('require_elevated()?') < provision.indexOf('super::expected_executable()?'));
+  assert.ok(provision.indexOf('super::expected_executable()?') < provision.indexOf('return Err(ServiceError::UntrustedInstallation);'));
+  assert.ok(provision.indexOf('return Err(ServiceError::UntrustedInstallation);') < provision.indexOf('ComApartment::enter(operation)?'));
+  const removeStart = firewall.indexOf('pub(crate) fn remove_embedded_relay_firewall() -> Result<(), ServiceError> {');
+  assert.ok(removeStart >= 0, 'firewall removal accepts no caller-selected paths or rule parameters');
+  const remove = firewall.slice(removeStart, firewall.indexOf('\n}', removeStart));
+  assert.ok(remove.indexOf('require_elevated()?') >= 0);
+  assert.ok(remove.indexOf('require_elevated()?') < remove.indexOf('validate_installation(true)?'));
+  assert.ok(remove.indexOf('validate_installation(true)?') < remove.indexOf('ComApartment::enter(operation)?'));
   for (const token of ['const RULE_NAME: &str = "dev.dkk115.uacremote.embedded-relay.v1";',
     'const LOCAL_PORT: &str = "7443";', 'rule.SetApplicationName(&application)?;', 'rule.SetServiceName(&service)?;',
     'rule.SetProtocol(NET_FW_IP_PROTOCOL_TCP.0)?;', 'rule.SetLocalPorts(&port)?;',
@@ -412,7 +419,21 @@ test('source contract removes the service before fixed file deletion and retains
   }
   ordered(uninstall, ['Delete "$INSTDIR\\repair\\uac-service.exe"',
     'Delete "$INSTDIR\\repair\\uac-prompt-probe.exe"', 'Delete "$INSTDIR\\repair\\repair-manifest.json"',
-    'System::Call \'kernel32::CloseHandle(p $UacRepairDirectoryPin)\'', 'RMDir "$INSTDIR\\repair"']);
+    'System::Call \'kernel32::CloseHandle(p $UacRepairDirectoryPin)\'', 'ClearErrors',
+    'RMDir "$INSTDIR\\repair"', 'ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.',
+    'RMDir "$INSTDIR"',
+    'DeleteRegKey HKLM "${UNINSTKEY}"']);
+  const repairRm = position(uninstall, 'RMDir "$INSTDIR\\repair"');
+  assert.equal(uninstall[repairRm - 1], 'ClearErrors');
+  assert.equal(uninstall[repairRm + 1], 'ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.');
+  assert.doesNotMatch(uninstall.slice(repairRm - 2, repairRm + 3).join('\n'), /RMDir\s+\/r|Call un\.UacFail/u);
+  const mainRm = position(uninstall, 'RMDir "$INSTDIR"', repairRm);
+  assert.ok(!uninstall.slice(repairRm + 1, mainRm).some((line) => line === 'Call un.UacFail'));
+  const registryCleanup = position(uninstall, 'DeleteRegKey HKLM "${UNINSTKEY}"');
+  assert.ok(registryCleanup > mainRm);
+  assert.ok(position(uninstall, '${If} $UpdateMode <> 1', registryCleanup) > registryCleanup);
+  assert.ok(position(uninstall, '!insertmacro NSIS_HOOK_POSTUNINSTALL', registryCleanup) > registryCleanup);
+  assert.ok(!uninstall.slice(repairRm + 1, registryCleanup).some((line) => line === 'Abort'));
   assert.ok(!uninstall.includes('RMDir /REBOOTOK "$INSTDIR\\{{this}}"'));
   assert.equal(uninstall.filter((line) => line === 'RMDir "$INSTDIR\\repair"').length, 1);
   for (const leaf of ['uac-service.exe', 'uac-prompt-probe.exe', 'repair-manifest.json']) {
@@ -445,8 +466,8 @@ test('source contract checks each concrete copy delete and shortcut error before
     line.startsWith('CreateShortcut ') || line === 'Delete "$INSTDIR\\${MAINBINARYNAME}.exe"' ||
     line === 'Delete "$INSTDIR\\repair\\uac-service.exe"' || line === 'Delete "$INSTDIR\\repair\\uac-prompt-probe.exe"' ||
     line === 'Delete "$INSTDIR\\repair\\repair-manifest.json"' || line === 'Delete "$INSTDIR\\\\{{this}}"' ||
-    line === 'Delete "$INSTDIR\\uninstall.exe"' || line === 'RMDir "$INSTDIR\\repair"') ? [index] : []);
-  assert.ok(tested.length >= 11, 'Expected concrete copy/delete/uninstaller/shortcut/repair operations');
+    line === 'Delete "$INSTDIR\\uninstall.exe"') ? [index] : []);
+  assert.ok(tested.length >= 10, 'Expected concrete copy/delete/uninstaller/shortcut/repair operations');
   for (const index of tested) {
     assert.equal(template[index - 1], 'ClearErrors', template[index]);
     assert.equal(template[index + 1], '${If} ${Errors}', template[index]);

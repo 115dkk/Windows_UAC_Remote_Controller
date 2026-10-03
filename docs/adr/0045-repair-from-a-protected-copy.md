@@ -55,13 +55,23 @@ itself against the manifest first.
 
 **Bytes are checked once and written from memory.** Each source file is read
 into memory, hashed, and those same bytes are written to a new sibling file,
-flushed, renamed over the target with write-through, reopened and hashed again.
-Nothing is copied by path after it was checked.
+flushed, reopened and hashed again. Nothing is copied by path after it was
+checked. Every staging file is complete and verified before the service is
+stopped; only then is each one renamed over its target with write-through and
+hashed once more.
 
-**Repair is serialized with installation.** It holds the machine-wide
-maintenance mutex that `install` holds, stops the service through the SCM before
-replacing a file, and afterwards runs the restored, re-hashed
-`uac-service.exe install` and `start`.
+**Repair is serialized with installation.** `install`, `uninstall` and repair
+hold one lock: `maintenance.lock`, opened without sharing inside the protected
+installation folder with a DACL for SYSTEM and Administrators only. A user
+cannot create or open it, so unlike a named mutex it cannot be taken first to
+block maintenance; a second administrator caller waits up to 60 seconds. Repair
+keeps the lock while it restores the files, reapplies the service configuration
+(the same in-process code `install` runs) and starts the service. If a step
+after the stop fails and both targets are either verified or untouched, a
+service that was running before is started again before the error is returned.
+
+**The repair process limits its own DLL search** to System32 before doing
+anything else.
 
 **The management pipe gains no repair command.** The service never repairs on a
 client's request.
@@ -76,6 +86,11 @@ manifest. The process cannot choose a source, a target, an argument or a
 version. It cannot modify the protected copy, its manifest or the installation
 folder, because they are writable only by SYSTEM and Administrators; an
 attacker who already has those rights is outside the threat model (AGENTS.md).
+
+**The app's check cannot hang it.** The integrity check reads files that users
+may also open, so it runs on its own COM-initialized thread under a 20-second
+deadline. On expiry its blocked I/O is cancelled and the result is "unknown";
+no second check or repair starts until that thread has exited.
 
 ## Consequences
 
