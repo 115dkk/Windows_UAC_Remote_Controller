@@ -163,6 +163,32 @@ test('source contract rejects missing duplicate or extra helper payloads at NSIS
   rejectingGuard(template, '!ifndef UAC_PROBE_INCLUDED');
 });
 
+test('packaging-only resources map exactly three staged repair files under repair', () => {
+  assert.equal(base.bundle.resources, undefined, 'ordinary controller builds do not depend on generated repair files');
+  assert.deepEqual(overlay.bundle.resources, {
+    '../target/windows-package/repair/uac-service.exe': 'repair/uac-service.exe',
+    '../target/windows-package/repair/uac-prompt-probe.exe': 'repair/uac-prompt-probe.exe',
+    '../target/windows-package/repair/repair-manifest.json': 'repair/repair-manifest.json',
+  });
+  const install = section('Install');
+  ordered(install, ['!if "{{this}}" != "repair"', '!error "Unexpected resource directory in the fixed service package."',
+    '!ifdef UAC_REPAIR_DIRECTORY_INCLUDED', '!error "Duplicate repair resource directory."',
+    '!define UAC_REPAIR_DIRECTORY_INCLUDED', '!ifndef UAC_REPAIR_DIRECTORY_INCLUDED',
+    '!error "Missing repair resource directory."']);
+  for (const [path, define] of [
+    ['repair\\uac-service.exe', 'UAC_REPAIR_SERVICE_INCLUDED'],
+    ['repair\\uac-prompt-probe.exe', 'UAC_REPAIR_PROBE_INCLUDED'],
+    ['repair\\repair-manifest.json', 'UAC_REPAIR_MANIFEST_INCLUDED'],
+  ]) {
+    assert.ok(install.some((line) => line.includes(`"{{this.[1]}}" == "${path}"`)));
+    rejectingGuard(install, `!ifndef ${define}`);
+  }
+  assert.ok(install.includes('!error "Unexpected resource in the fixed service package."'));
+  ordered(install, ['StrCpy $UacFailure "$(UacCopyFailed)"',
+    'ClearErrors', 'File /a "/oname={{this.[1]}}" "{{no-escape @key}}"', '${If} ${Errors}', 'Call UacFail',
+    'File /a "/oname={{this}}" "{{no-escape @key}}"']);
+});
+
 test('branding migration preserves installation identity and only renames owned legacy shortcuts', () => {
   const migration = block(template, '!macro UacMigrateShortcut OLD NEW', '!macroend');
   ordered(migration, ['!insertmacro IsShortcutTarget "${OLD}" "$INSTDIR\\${MAINBINARYNAME}.exe"',
@@ -239,13 +265,20 @@ test('taskbar preference is bounded machine state after successful service insta
 });
 
 test('embedded relay firewall changes require protected elevated ownership and a fixed narrow rule', () => {
-  for (const name of ['provision_embedded_relay_firewall', 'remove_embedded_relay_firewall']) {
-    const start = firewall.indexOf(`pub(crate) fn ${name}() -> Result<(), ServiceError> {`);
-    assert.ok(start >= 0, 'firewall API accepts no caller-selected paths or rule parameters');
-    const body = firewall.slice(start, firewall.indexOf('\n}', start));
-    assert.ok(body.indexOf('require_elevated()?') < body.indexOf('validate_installation(true)?'));
-    assert.ok(body.indexOf('validate_installation(true)?') < body.indexOf('ComApartment::enter(operation)?'));
-  }
+  // Provisioning takes the caller's already validated installation image, but
+  // only the fixed Program Files service path is accepted; removal takes nothing.
+  const provisionStart = firewall.indexOf('pub(crate) fn provision_embedded_relay_firewall_for(\n    executable: &std::path::Path,\n) -> Result<(), ServiceError> {');
+  assert.ok(provisionStart >= 0, 'firewall provisioning accepts only the installation image path');
+  const provision = firewall.slice(provisionStart, firewall.indexOf('\n}', provisionStart));
+  assert.ok(provision.indexOf('require_elevated()?') < provision.indexOf('super::expected_executable()?'));
+  assert.ok(provision.indexOf('super::expected_executable()?') < provision.indexOf('return Err(ServiceError::UntrustedInstallation);'));
+  assert.ok(provision.indexOf('return Err(ServiceError::UntrustedInstallation);') < provision.indexOf('ComApartment::enter(operation)?'));
+  const removeStart = firewall.indexOf('pub(crate) fn remove_embedded_relay_firewall() -> Result<(), ServiceError> {');
+  assert.ok(removeStart >= 0, 'firewall removal accepts no caller-selected paths or rule parameters');
+  const remove = firewall.slice(removeStart, firewall.indexOf('\n}', removeStart));
+  assert.ok(remove.indexOf('require_elevated()?') >= 0);
+  assert.ok(remove.indexOf('require_elevated()?') < remove.indexOf('validate_installation(true)?'));
+  assert.ok(remove.indexOf('validate_installation(true)?') < remove.indexOf('ComApartment::enter(operation)?'));
   for (const token of ['const RULE_NAME: &str = "dev.dkk115.uacremote.embedded-relay.v1";',
     'const LOCAL_PORT: &str = "7443";', 'rule.SetApplicationName(&application)?;', 'rule.SetServiceName(&service)?;',
     'rule.SetProtocol(NET_FW_IP_PROTOCOL_TCP.0)?;', 'rule.SetLocalPorts(&port)?;',
@@ -273,7 +306,7 @@ test('source contract runs PREINSTALL before destination writes and POSTINSTALL 
   const before = position(install, '!insertmacro NSIS_HOOK_PREINSTALL');
   const after = position(install, '!insertmacro NSIS_HOOK_POSTINSTALL');
   const writes = install.flatMap((line, index) => /^(?:SetOutPath|File|CreateDirectory|WriteUninstaller)\b/u.test(line) ? [index] : []);
-  assert.ok(writes.length >= 4, 'Expected actual destination/payload/uninstaller instructions');
+  assert.ok(writes.length >= 4, 'Expected actual destination/payload/uninstaller/repair instructions');
   for (const index of writes) assert.ok(before < index && index < after, `Destination write outside pre/post hooks: ${install[index]}`);
   ordered(install, ['StrCpy $UacFailure "$(UacCopyFailed)"', 'ClearErrors', 'SetOutPath $INSTDIR', '${If} ${Errors}', 'Call UacFail']);
   const pre = hook('PREINSTALL');
@@ -281,6 +314,55 @@ test('source contract runs PREINSTALL before destination writes and POSTINSTALL 
   ordered(pre, ['Call UacPrepare', '${If} $UacDirectoryPin = 0', 'Call UacInspectFiles',
     'Call UacStopService', 'Call UacRequireServiceAbsent', 'Call UacReleaseFiles']);
   assert.ok(!pre.includes('Call UacRelease'), 'Parent/directory pins must survive binary replacement');
+  const releaseFiles = native('UacReleaseFiles');
+  for (const pin of ['$UacRepairServicePin', '$UacRepairProbePin', '$UacRepairManifestPin']) {
+    position(releaseFiles, `System::Call 'kernel32::CloseHandle(p ${pin})'`);
+  }
+});
+
+test('repair directory is checked or created by fixed name and inherits the protected installation DACL', () => {
+  const inspect = native('UacInspectFiles');
+  ordered(inspect, ['${If} $UacRepairDirectoryPin = 0', 'StrCpy $UacDirectoryMode 1', 'StrCpy $UacPolicy 1',
+    'StrCpy $UacAllowMissing 1', 'StrCpy $UacPath "$INSTDIR\\repair"',
+    'Call ${PREFIX}UacOpenChecked', 'StrCpy $UacRepairDirectoryPin $UacHandle',
+    '${If} $UacRepairDirectoryPin <> 0', 'StrCpy $UacDirectoryMode 0',
+    'StrCpy $UacPolicy 1', 'StrCpy $UacAllowMissing 1',
+    'StrCpy $UacPath "$INSTDIR\\repair\\uac-service.exe"', 'Call ${PREFIX}UacOpenChecked',
+    'StrCpy $UacPath "$INSTDIR\\repair\\uac-prompt-probe.exe"', 'Call ${PREFIX}UacOpenChecked',
+    'StrCpy $UacPath "$INSTDIR\\repair\\repair-manifest.json"', 'Call ${PREFIX}UacOpenChecked']);
+  const pre = hook('PREINSTALL');
+  ordered(pre, ['Call UacInspectFiles', '${If} $UacDirectoryPin = 0', 'Call UacFail',
+    '${If} $UacRepairDirectoryPin = 0', 'ClearErrors',
+    'CreateDirectory "$INSTDIR\\repair"', '${If} ${Errors}', 'Call UacFail',
+    'StrCpy $UacDirectoryMode 1', 'StrCpy $UacPolicy 1', 'StrCpy $UacAllowMissing 0',
+    'StrCpy $UacPath "$INSTDIR\\repair"', 'Call UacOpenChecked',
+    'StrCpy $UacRepairDirectoryPin $UacHandle']);
+  const afterInspect = pre.slice(position(pre, 'Call UacInspectFiles'));
+  assert.ok(!afterInspect.some((line) => /ConvertStringSecurityDescriptor|SetNamedSecurityInfo|SetFileSecurity/u.test(line)));
+  assert.equal(pre.filter((line) => line === 'CreateDirectory "$INSTDIR\\repair"').length, 1);
+});
+
+test('repair pins are optional before install, required after install and released', () => {
+  const inspect = native('UacInspectFiles');
+  position(inspect, 'StrCpy $UacAllowMissing 1');
+  const releaseFiles = native('UacReleaseFiles');
+  const release = native('UacRelease');
+  for (const pin of ['$UacRepairServicePin', '$UacRepairProbePin', '$UacRepairManifestPin']) {
+    position(inspect, `StrCpy ${pin} $UacHandle`);
+    position(releaseFiles, `System::Call 'kernel32::CloseHandle(p ${pin})'`);
+    position(releaseFiles, `StrCpy ${pin} 0`);
+  }
+  position(inspect, 'StrCpy $UacRepairDirectoryPin $UacHandle');
+  assert.equal(inspect.filter((line) => line === 'StrCpy $UacRepairDirectoryPin $UacHandle').length, 1);
+  ordered(inspect, ['${If} $UacRepairDirectoryPin = 0', 'Call ${PREFIX}UacOpenChecked',
+    'StrCpy $UacRepairDirectoryPin $UacHandle', '${EndIf}', '${If} $UacRepairDirectoryPin <> 0']);
+  position(release, "System::Call 'kernel32::CloseHandle(p $UacRepairDirectoryPin)'");
+  position(release, 'StrCpy $UacRepairDirectoryPin 0');
+  const post = hook('POSTINSTALL');
+  assert.ok(position(post, 'Call UacInspectFiles') < position(post, '${If} $UacServicePin = 0'));
+  ordered(post, ['${If} $UacServicePin = 0', '${OrIf} $UacRepairDirectoryPin = 0',
+    '${OrIf} $UacRepairServicePin = 0', '${OrIf} $UacRepairProbePin = 0',
+    '${OrIf} $UacRepairManifestPin = 0', 'Call UacFail']);
 });
 
 test('source contract restricts elevated child execution to three checked fixed service verbs', () => {
@@ -288,7 +370,9 @@ test('source contract restricts elevated child execution to three checked fixed 
     .map((verb) => 'ExecWait \'"$INSTDIR\\uac-service.exe" ' + verb + '\' $0'));
   const post = hook('POSTINSTALL');
   ordered(post, ['Call UacInspectFiles', '${If} $UacServicePin = 0', '${OrIf} $UacProbePin = 0',
-    '${OrIf} $UacAppPin = 0', '${OrIf} $UacUninstallerPin = 0', 'Call UacFail']);
+    '${OrIf} $UacAppPin = 0', '${OrIf} $UacUninstallerPin = 0',
+    '${OrIf} $UacRepairDirectoryPin = 0', '${OrIf} $UacRepairServicePin = 0',
+    '${OrIf} $UacRepairProbePin = 0', '${OrIf} $UacRepairManifestPin = 0', 'Call UacFail']);
   const install = checkedExec(post, 'install', 'UacFail');
   const start = checkedExec(post, 'start', 'UacFail');
   assert.ok(install < start && start < position(post, 'Call UacRelease'));
@@ -328,6 +412,33 @@ test('source contract removes the service before fixed file deletion and retains
   for (const index of deletes) assert.ok(pre < index, 'File removal must follow PREUNINSTALL');
   ordered(hook('PREUNINSTALL'), ['Call un.UacPrepare', 'Call un.UacInspectFiles',
     'StrCpy $UacFailure "$(UacRemoveFailed)"', 'Call un.UacRequireServiceAbsent', 'Call un.UacReleaseFiles']);
+  const releaseFiles = native('UacReleaseFiles');
+  for (const pin of ['$UacServicePin', '$UacProbePin', '$UacAppPin', '$UacUninstallerPin',
+    '$UacRepairServicePin', '$UacRepairProbePin', '$UacRepairManifestPin']) {
+    position(releaseFiles, `System::Call 'kernel32::CloseHandle(p ${pin})'`);
+  }
+  ordered(uninstall, ['Delete "$INSTDIR\\repair\\uac-service.exe"',
+    'Delete "$INSTDIR\\repair\\uac-prompt-probe.exe"', 'Delete "$INSTDIR\\repair\\repair-manifest.json"',
+    'System::Call \'kernel32::CloseHandle(p $UacRepairDirectoryPin)\'', 'ClearErrors',
+    'RMDir "$INSTDIR\\repair"', 'ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.',
+    'RMDir "$INSTDIR"',
+    'DeleteRegKey HKLM "${UNINSTKEY}"']);
+  const repairRm = position(uninstall, 'RMDir "$INSTDIR\\repair"');
+  assert.equal(uninstall[repairRm - 1], 'ClearErrors');
+  assert.equal(uninstall[repairRm + 1], 'ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.');
+  assert.doesNotMatch(uninstall.slice(repairRm - 2, repairRm + 3).join('\n'), /RMDir\s+\/r|Call un\.UacFail/u);
+  const mainRm = position(uninstall, 'RMDir "$INSTDIR"', repairRm);
+  assert.ok(!uninstall.slice(repairRm + 1, mainRm).some((line) => line === 'Call un.UacFail'));
+  const registryCleanup = position(uninstall, 'DeleteRegKey HKLM "${UNINSTKEY}"');
+  assert.ok(registryCleanup > mainRm);
+  assert.ok(position(uninstall, '${If} $UpdateMode <> 1', registryCleanup) > registryCleanup);
+  assert.ok(position(uninstall, '!insertmacro NSIS_HOOK_POSTUNINSTALL', registryCleanup) > registryCleanup);
+  assert.ok(!uninstall.slice(repairRm + 1, registryCleanup).some((line) => line === 'Abort'));
+  assert.ok(!uninstall.includes('RMDir /REBOOTOK "$INSTDIR\\{{this}}"'));
+  assert.equal(uninstall.filter((line) => line === 'RMDir "$INSTDIR\\repair"').length, 1);
+  for (const leaf of ['uac-service.exe', 'uac-prompt-probe.exe', 'repair-manifest.json']) {
+    assert.equal(uninstall.filter((line) => line === `Delete "$INSTDIR\\repair\\${leaf}"`).length, 1);
+  }
   ordered(hook('POSTUNINSTALL'), ['Call un.UacRelease', 'DetailPrint "$(UacDataRetained)"']);
   const text = [...template, ...hooks].join('\n');
   assert.doesNotMatch(text, /\bRMDir\s+\/r\b/iu);
@@ -350,10 +461,13 @@ test('source contract never reads a registry-selected old executable or uninstal
 
 test('source contract checks each concrete copy delete and shortcut error before continuing', () => {
   const tested = template.flatMap((line, index) => (line === 'File "${MAINBINARYSRCPATH}"' ||
+    line === 'File /a "/oname={{this.[1]}}" "{{no-escape @key}}"' ||
     line === 'File /a "/oname={{this}}" "{{no-escape @key}}"' || line.startsWith('WriteUninstaller ') ||
     line.startsWith('CreateShortcut ') || line === 'Delete "$INSTDIR\\${MAINBINARYNAME}.exe"' ||
-    line === 'Delete "$INSTDIR\\\\{{this}}"' || line === 'Delete "$INSTDIR\\uninstall.exe"') ? [index] : []);
-  assert.ok(tested.length >= 8, 'Expected concrete copy/delete/uninstaller/shortcut operations');
+    line === 'Delete "$INSTDIR\\repair\\uac-service.exe"' || line === 'Delete "$INSTDIR\\repair\\uac-prompt-probe.exe"' ||
+    line === 'Delete "$INSTDIR\\repair\\repair-manifest.json"' || line === 'Delete "$INSTDIR\\\\{{this}}"' ||
+    line === 'Delete "$INSTDIR\\uninstall.exe"') ? [index] : []);
+  assert.ok(tested.length >= 10, 'Expected concrete copy/delete/uninstaller/shortcut/repair operations');
   for (const index of tested) {
     assert.equal(template[index - 1], 'ClearErrors', template[index]);
     assert.equal(template[index + 1], '${If} ${Errors}', template[index]);

@@ -11,13 +11,15 @@ use windows::{
         Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF},
         Security::SECURITY_ATTRIBUTES,
         Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
             FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-            FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-            GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
-            GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING, READ_CONTROL,
-            VOLUME_NAME_DOS,
+            FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FILE_WRITE_DATA,
+            FlushFileBuffers, GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW,
+            GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+            GetVolumeInformationByHandleW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MoveFileExW, OPEN_EXISTING, READ_CONTROL, VOLUME_NAME_DOS, WriteFile,
         },
         System::Com::CoTaskMemFree,
         UI::Shell::{
@@ -33,7 +35,8 @@ use super::{
     win_error,
 };
 use crate::{
-    INSTALLATION_FOLDER, SERVICE_EXECUTABLE, ServiceError, ServiceOperation,
+    INSTALLATION_FOLDER, REPAIR_FOLDER, REPAIR_MANIFEST, SERVICE_EXECUTABLE, ServiceError,
+    ServiceOperation,
     policy::{self, ObjectPolicy},
 };
 
@@ -53,6 +56,18 @@ impl fmt::Debug for ValidatedInstallation {
 impl ValidatedInstallation {
     pub(crate) fn executable(&self) -> &Path {
         &self.executable
+    }
+}
+
+/// Closed crate-internal proof accepted by SCM configuration. Implementations
+/// retain protected ancestry and derive the same fixed main executable path.
+pub(crate) trait ValidatedServiceInstallation {
+    fn service_executable(&self) -> &Path;
+}
+
+impl ValidatedServiceInstallation for ValidatedInstallation {
+    fn service_executable(&self) -> &Path {
+        self.executable()
     }
 }
 
@@ -136,6 +151,113 @@ pub(crate) fn validate_installation(
     })
 }
 
+/// Retains the protected installation and repair directories while repair reads
+/// fixed sources and replaces only the two fixed installation leaves.
+pub(crate) struct ValidatedRepairInstallation {
+    installation: PathBuf,
+    repair: PathBuf,
+    _service_path: PathBuf,
+    trusted: Vec<Vec<u8>>,
+    installation_pin_index: usize,
+    repair_pin_index: usize,
+    _pins: Vec<OwnedHandle>,
+}
+
+impl fmt::Debug for ValidatedRepairInstallation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ValidatedRepairInstallation(protected)")
+    }
+}
+
+impl ValidatedServiceInstallation for ValidatedRepairInstallation {
+    fn service_executable(&self) -> &Path {
+        // Stored once from the fixed Program Files installation root.
+        // The leaf is checked separately before service configuration.
+        self._service_path.as_path()
+    }
+}
+
+impl ValidatedRepairInstallation {
+    pub(crate) fn target(&self, name: &str) -> PathBuf {
+        self.installation.join(name)
+    }
+
+    pub(crate) fn source(&self, name: &str) -> PathBuf {
+        self.repair.join(name)
+    }
+
+    pub(crate) fn manifest(&self) -> PathBuf {
+        self.repair.join(REPAIR_MANIFEST)
+    }
+
+    pub(crate) fn trusted(&self) -> &[Vec<u8>] {
+        &self.trusted
+    }
+}
+
+pub(crate) fn validate_repair_installation() -> Result<ValidatedRepairInstallation, ServiceError> {
+    let program_files = known_folder(&FOLDERID_ProgramFiles)?;
+    let installation = program_files.join(INSTALLATION_FOLDER);
+    let repair = installation.join(REPAIR_FOLDER);
+    let self_path = repair.join(SERVICE_EXECUTABLE);
+    let trusted = policy::trusted_system_sids();
+    let mut pins = pin_ancestors(&program_files, &trusted)?;
+    let installation_pin_index = pins.len();
+    pins.push(open_checked(
+        &installation,
+        true,
+        ObjectPolicy::Installation,
+        &trusted,
+    )?);
+    let repair_pin_index = pins.len();
+    pins.push(open_checked(
+        &repair,
+        true,
+        ObjectPolicy::Installation,
+        &trusted,
+    )?);
+    let self_pin = open_checked(&self_path, false, ObjectPolicy::Installation, &trusted)?;
+    let current = std::env::current_exe().map_err(|_| ServiceError::UntrustedInstallation)?;
+    if !same_path(&current, &self_path)? {
+        return Err(ServiceError::UntrustedInstallation);
+    }
+    let current_pin = open_checked(&current, false, ObjectPolicy::Installation, &trusted)?;
+    if file_identity(&current_pin)? != file_identity(&self_pin)? {
+        return Err(ServiceError::UntrustedInstallation);
+    }
+    pins.push(current_pin);
+    pins.push(self_pin);
+    Ok(ValidatedRepairInstallation {
+        _service_path: installation.join(SERVICE_EXECUTABLE),
+        installation,
+        repair,
+        trusted,
+        installation_pin_index,
+        repair_pin_index,
+        _pins: pins,
+    })
+}
+
+pub(crate) fn recheck_repair_installation(
+    installation: &ValidatedRepairInstallation,
+) -> Result<(), ServiceError> {
+    inspect_open_handle(
+        &installation._pins[installation.installation_pin_index],
+        &installation.installation,
+        true,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    )?;
+    inspect_open_handle(
+        &installation._pins[installation.repair_pin_index],
+        &installation.repair,
+        true,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    )?;
+    Ok(())
+}
+
 /// Fixed probe leaf plus the already checked running-service installation.
 /// No caller path/name and no copying/provisioning occurs in this read-only proof.
 #[cfg(target_pointer_width = "64")]
@@ -200,8 +322,26 @@ fn read_probe_header(pin: &OwnedHandle) -> Result<Vec<u8>, ServiceError> {
     Ok(bytes)
 }
 
+pub(crate) fn read_bounded(pin: &OwnedHandle, maximum: u64) -> Result<Vec<u8>, ServiceError> {
+    let info = file_info(pin)?;
+    let file_bytes = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+    if file_bytes > maximum {
+        return Err(ServiceError::RepairSourceUnusable);
+    }
+    let length = usize::try_from(file_bytes).map_err(|_| ServiceError::RepairSourceUnusable)?;
+    let mut bytes = vec![0u8; length];
+    if !bytes.is_empty() {
+        read_at_zero(pin, &mut bytes)?;
+    }
+    let after = file_info(pin)?;
+    let after_bytes = (u64::from(after.nFileSizeHigh) << 32) | u64::from(after.nFileSizeLow);
+    if after_bytes != file_bytes {
+        return Err(ServiceError::RepairSourceUnusable);
+    }
+    Ok(bytes)
+}
+
 /// Reads an exact prefix at explicit file offset0 through the retained pin.
-#[cfg(target_pointer_width = "64")]
 fn read_at_zero(pin: &OwnedHandle, bytes: &mut [u8]) -> Result<(), ServiceError> {
     use windows::Win32::{Storage::FileSystem::ReadFile, System::IO::OVERLAPPED};
 
@@ -229,7 +369,7 @@ fn read_at_zero(pin: &OwnedHandle, bytes: &mut [u8]) -> Result<(), ServiceError>
 }
 
 /// Minimal architecture/header screen for a bounded PE prefix; not signature trust.
-fn pe_header_is_plausible(bytes: &[u8]) -> bool {
+pub(crate) fn pe_header_is_plausible(bytes: &[u8]) -> bool {
     if bytes.len() < 0x40 || bytes.get(..2) != Some(b"MZ") {
         return false;
     }
@@ -391,6 +531,10 @@ fn pinned_pairing_installation(
     })
 }
 
+fn is_windows_code(code: u32, error: windows::Win32::Foundation::WIN32_ERROR) -> bool {
+    code == error.0 || code == windows::core::HRESULT::from_win32(error.0).0 as u32
+}
+
 fn same_path(a: &Path, b: &Path) -> Result<bool, ServiceError> {
     let a = a.to_str().ok_or(ServiceError::UnsafePath)?;
     let b = b.to_str().ok_or(ServiceError::UnsafePath)?;
@@ -542,10 +686,11 @@ pub(super) fn open_checked(
     }
     let wide = Wide::new(path)?;
     let (access, sharing) = pin_open_options(directory);
-    // SAFETY: all buffers live through call; OPEN_EXISTING never creates or
-    // follows the final reparse point; share-delete is deliberately omitted.
-    // Actual data-read/list access makes sharing restrictions effective; metadata
-    // rights alone are insufficient. No backup privilege is enabled here.
+    // SAFETY: all buffers live through call; OPEN_EXISTING never creates and
+    // FILE_FLAG_OPEN_REPARSE_POINT opens the final reparse point itself rather
+    // than following it; inspection below rejects that attribute. Share-delete is
+    // deliberately omitted. Actual data-read/list access makes sharing restrictions
+    // effective; metadata rights alone are insufficient. No backup privilege is enabled.
     let raw = unsafe {
         CreateFileW(
             wide.ptr(),
@@ -630,6 +775,192 @@ fn file_identity(handle: &OwnedHandle) -> Result<(u32, u32, u32), ServiceError> 
         info.nFileIndexHigh,
         info.nFileIndexLow,
     ))
+}
+
+pub(crate) fn open_repair_source(
+    installation: &ValidatedRepairInstallation,
+    path: &Path,
+) -> Result<OwnedHandle, ServiceError> {
+    open_checked(
+        path,
+        false,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    )
+}
+
+pub(crate) fn open_optional_repair_target(
+    installation: &ValidatedRepairInstallation,
+    path: &Path,
+) -> Result<Option<OwnedHandle>, ServiceError> {
+    match open_checked(
+        path,
+        false,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    ) {
+        Ok(handle) => Ok(Some(handle)),
+        Err(ServiceError::WindowsCall {
+            operation: ServiceOperation::OpenProtectedPath,
+            code,
+        }) if is_windows_code(code, ERROR_FILE_NOT_FOUND) => Ok(None),
+        Err(_) => Err(ServiceError::UntrustedInstallation),
+    }
+}
+
+fn open_repair_staging(
+    installation: &ValidatedRepairInstallation,
+    path: &Path,
+) -> Result<Option<OwnedHandle>, ServiceError> {
+    match open_checked(
+        path,
+        false,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    ) {
+        Ok(handle) => Ok(Some(handle)),
+        Err(ServiceError::WindowsCall {
+            operation: ServiceOperation::OpenProtectedPath,
+            code,
+        }) if is_windows_code(code, ERROR_FILE_NOT_FOUND) => Ok(None),
+        Err(_) => Err(ServiceError::UntrustedInstallation),
+    }
+}
+
+pub(crate) fn verify_repair_target(
+    installation: &ValidatedRepairInstallation,
+    path: &Path,
+    original: &OwnedHandle,
+) -> Result<(), ServiceError> {
+    inspect_open_handle(
+        original,
+        path,
+        false,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    )?;
+    let current = open_checked(
+        path,
+        false,
+        ObjectPolicy::Installation,
+        installation.trusted(),
+    )?;
+    if file_identity(original)? != file_identity(&current)? {
+        return Err(ServiceError::UntrustedInstallation);
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_repair_staging(
+    installation: &ValidatedRepairInstallation,
+    path: &Path,
+) -> Result<(), ServiceError> {
+    let Some(pin) = open_repair_staging(installation, path)? else {
+        return Ok(());
+    };
+    drop(pin);
+    let wide = Wide::new(path)?;
+    // SAFETY: the exact fixed staging leaf passed protected-path checks under the
+    // retained parent pins. Its checked handle is closed before deletion by name.
+    unsafe { DeleteFileW(wide.ptr()) }
+        .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
+}
+
+pub(crate) fn create_repair_target(
+    // Proof that the protected parent pins are held for this whole call.
+    _installation: &ValidatedRepairInstallation,
+    path: &Path,
+) -> Result<OwnedHandle, ServiceError> {
+    let wide = Wide::new(path)?;
+    // SAFETY: fixed staging leaf below the retained checked installation parent;
+    // CREATE_NEW never opens an existing alias, sharing is denied, and default
+    // security inherits the protected installation DACL.
+    let raw = unsafe {
+        CreateFileW(
+            wide.ptr(),
+            (FILE_WRITE_DATA | FILE_READ_ATTRIBUTES).0,
+            FILE_SHARE_MODE(0),
+            None,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            None,
+        )
+    }
+    .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))?;
+    let handle = OwnedHandle(raw);
+    let info = file_info(&handle)?;
+    // The protected parent was checked and retained before this CREATE_NEW.
+    // Inspecting its final path, type and empty size now catches aliases or an
+    // unexpected object without requiring READ_CONTROL on this write-only handle.
+    // The caller closes and reopens this leaf through open_checked before rename,
+    // which verifies the inherited owner and DACL on a READ_CONTROL handle.
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0) != 0
+        || info.nNumberOfLinks != 1
+        || info.nFileSizeHigh != 0
+        || info.nFileSizeLow != 0
+    {
+        return Err(ServiceError::UnsafePath);
+    }
+    let mut normalized = [0u16; 32_768];
+    // SAFETY: initialized bounded output and live CREATE_NEW file handle; only its
+    // normalized DOS name is read and compared with the fixed expected staging path.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            handle.0,
+            &mut normalized,
+            GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+        )
+    } as usize;
+    if length == 0 || length >= normalized.len() {
+        return Err(ServiceError::UnsafePath);
+    }
+    let normalized =
+        String::from_utf16(&normalized[..length]).map_err(|_| ServiceError::UnsafePath)?;
+    let normalized = normalized
+        .strip_prefix(r"\\?\")
+        .ok_or(ServiceError::UnsafePath)?;
+    if !same_path(Path::new(normalized), path)? {
+        return Err(ServiceError::UnsafePath);
+    }
+    Ok(handle)
+}
+
+pub(crate) fn write_all_and_flush(handle: &OwnedHandle, bytes: &[u8]) -> Result<(), ServiceError> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let mut written = 0;
+        // SAFETY: live exclusive synchronous file, bounded initialized input and
+        // scalar output. The call retains no pointer and partial writes advance.
+        unsafe { WriteFile(handle.0, Some(&bytes[offset..]), Some(&mut written), None) }
+            .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))?;
+        if written == 0 || written as usize > bytes.len() - offset {
+            return Err(ServiceError::UnexpectedState);
+        }
+        offset += written as usize;
+    }
+    // SAFETY: the same live exclusive file remains owned through the flush.
+    unsafe { FlushFileBuffers(handle.0) }
+        .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
+}
+
+pub(crate) fn move_repair_staging(
+    installation: &ValidatedRepairInstallation,
+    staging: &Path,
+    target: &Path,
+) -> Result<(), ServiceError> {
+    recheck_repair_installation(installation)?;
+    let staging = Wide::new(staging)?;
+    let target = Wide::new(target)?;
+    // SAFETY: both fixed leaves share the retained checked installation parent.
+    // Caller has closed and verified the CREATE_NEW source before replacement.
+    unsafe {
+        MoveFileExW(
+            staging.ptr(),
+            target.ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
 }
 
 /// Elevated install-only provisioning. Existing directories are checked rather

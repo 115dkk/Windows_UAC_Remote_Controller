@@ -19,8 +19,9 @@ node tools/windows-packaging.mjs build
 node tools/windows-packaging.mjs inspect
 ```
 
-`stage` builds just the two native payloads with `cargo build --locked --release`
-and stages them; `build` additionally invokes the existing Tauri CLI/frontend
+`stage` builds just the two native payloads with `cargo build --locked --release`,
+stages their top-level and repair copies, and writes both the package and repair
+manifests; `build` additionally invokes the existing Tauri CLI/frontend
 build with `windows/package-config.json`. The supported target is explicitly
 `x86_64-pc-windows-msvc`; other targets fail. `CARGO_TARGET_DIR` may select the
 Cargo build directory, but generated package outputs stay at:
@@ -29,6 +30,8 @@ Cargo build directory, but generated package outputs stay at:
 - `target/windows-package/manifest.json`
 - `target/windows-package/inspection.json`
 - `target/windows-package/inputs/` with the two target-suffixed sidecars.
+- `target/windows-package/repair/` with the two protected-copy inputs and
+  `repair-manifest.json`.
 
 The generated namespace has a strict marker and entry allowlist. Unknown files,
 links or unsupported staged shapes are not cleaned up or adopted. Cargo's normal
@@ -37,8 +40,9 @@ and published files must be regular single-link copies. Each new stage first
 invalidates any previous successful inspection record.
 
 `inspect` reads the assembled file as data: bounded PE executable/stub checks,
-exactly one outer NSIS archive descriptor, unique root names and exact hashes of
-all three executable payloads extracted by `7z` **to stdout**, never executed.
+exactly one outer NSIS archive descriptor, unique fixed paths and exact hashes of
+all six payloads (three top-level executables, two repair copies and the repair
+manifest) extracted by `7z` **to stdout**, never executed.
 The inspector also reverses only the already-validated marker in a memory copy
 and compares its full hash with the pre-recorded build-source hash. It never
 changes an expected hash to match archive content. Its receipt binds the actual
@@ -75,7 +79,10 @@ assembly, not prediction from the extracted output or a disabled hash check.
 
 Ordinary `tauri build` without the Windows overlay must fail NSIS compilation:
 the template requires both exact service sidecars and prerequisite-only WebView2.
-Linux/Android builds do not acquire these Windows sidecar requirements.
+The `--config src-tauri/windows/package-config.json` packaging overlay maps
+exactly three staged resources to `repair/`; the base `tauri.conf.json` contains
+no generated resource path, so ordinary Cargo, Linux and Android builds do not
+acquire these resource or sidecar requirements.
 Tauri renders the JSON `webviewInstallMode: { type: "skip" }` choice as an empty
 NSIS mode string. The build script enforces the exact JSON overlay; the template
 rejects nonempty bootstrapper modes. The JSON and rendered representations must
@@ -188,6 +195,39 @@ hardens the service DACL, configures the Unrestricted service SID (ADR 0028), pr
 activity/trust directories, and **only then** configures AutoStart. `start` must
 return success before NSIS finishes successfully. The service's runtime can
 still fail TPM/key/registry initialization; those gates are not bypassed.
+
+### Protected repair copy
+
+Windows staging writes byte-for-byte copies of `uac-service.exe` and
+`uac-prompt-probe.exe` under `target/windows-package/repair/`. From the same
+staged bytes it writes a compact UTF-8, no-BOM `repair-manifest.json` no larger
+than 4096 bytes. The manifest fixes schema `1`, product
+`uac-remote-controller`, the application version from `tauri.conf.json`, and the
+name, byte length and lowercase SHA-256 of both files in that order.
+
+The packaging-only `src-tauri/windows/package-config.json` resource map feeds the custom
+NSIS resource loop, which installs the three files as
+`$INSTDIR\repair\uac-service.exe`, `$INSTDIR\repair\uac-prompt-probe.exe` and
+`$INSTDIR\repair\repair-manifest.json`. PREINSTALL accepts an existing `repair`
+only after the same checked, no-reparse directory open used for the installation
+folder. If absent, the installer creates that one fixed directory inside the
+already protected installation folder and gives it no separate ACL, so it
+inherits the protected DACL. POSTINSTALL requires checked pins for the directory
+and all three files.
+
+The staged package manifest lists five entries in order:
+`uac-service.exe`, `uac-prompt-probe.exe`, `repair/uac-service.exe`,
+`repair/uac-prompt-probe.exe` and `repair/repair-manifest.json`. After Tauri
+builds the controller, the assembled package manifest lists six entries by adding
+`controller-app.exe` first and keeping those five entries in the same order.
+Passive inspection extracts all six fixed paths, checks their recorded sizes and
+hashes, requires each repair executable to equal its top-level counterpart byte
+for byte, and requires the
+packaged repair manifest to equal the staged file and the canonical content.
+Uninstall removes the three fixed files and then attempts to remove the fixed,
+empty `repair` directory after service removal. It never recursively removes
+that directory. Unknown contents keep the directory in place without preventing
+registry and shortcut cleanup.
 
 Failure does not imply rollback. Program files may have been partially changed;
 service registration or AutoStart settings may remain. The installer aborts with

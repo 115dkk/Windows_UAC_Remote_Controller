@@ -54,7 +54,10 @@ pub(super) fn snapshot(
     if matches!(
         operation,
         OwnerOperation::ControlService(
-            ServiceAction::Install | ServiceAction::Restart | ServiceAction::Uninstall
+            ServiceAction::Install
+                | ServiceAction::Restart
+                | ServiceAction::Uninstall
+                | ServiceAction::Repair
         )
     ) {
         return Err(controller_runtime::PlatformError::Unsupported.into());

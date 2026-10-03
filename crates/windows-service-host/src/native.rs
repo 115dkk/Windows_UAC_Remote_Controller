@@ -551,6 +551,11 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
     if command == Command::Install {
         return install();
     }
+    let _maintenance = if command == Command::Uninstall {
+        Some(ffi::acquire_maintenance()?)
+    } else {
+        None
+    };
     let access = match command {
         Command::Start => ServiceAccess::START,
         Command::Stop => ServiceAccess::STOP,
@@ -601,13 +606,92 @@ pub(crate) fn mutate(command: Command) -> Result<ServiceSnapshot, ServiceError> 
     Ok(snapshot(status(&service)?))
 }
 
+pub(crate) fn service_running_for_repair(executable: &Path) -> Result<bool, ServiceError> {
+    let manager = manager(false)?;
+    let Some(service) = open(
+        &manager,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG | ServiceAccess::READ_CONTROL,
+    )?
+    else {
+        return Ok(false);
+    };
+    verify_repair_service(&service, executable)?;
+    Ok(matches!(
+        status(&service)?.current_state,
+        NativeState::Running | NativeState::StartPending
+    ))
+}
+
+pub(crate) fn stop_for_repair(executable: &Path) -> Result<(), ServiceError> {
+    let manager = manager(false)?;
+    let Some(service) = open(
+        &manager,
+        ServiceAccess::STOP
+            | ServiceAccess::QUERY_STATUS
+            | ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::READ_CONTROL,
+    )?
+    else {
+        return Ok(());
+    };
+    verify_repair_service(&service, executable)?;
+    stop(&service, Instant::now())
+}
+
+pub(crate) fn start_for_repair(executable: &Path) -> Result<ServiceSnapshot, ServiceError> {
+    let manager = manager(false)?;
+    let service = open(
+        &manager,
+        ServiceAccess::START
+            | ServiceAccess::QUERY_STATUS
+            | ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::READ_CONTROL,
+    )?
+    .ok_or(ServiceError::NotInstalled)?;
+    verify_repair_service(&service, executable)?;
+    start(&service, Instant::now())?;
+    Ok(snapshot(status(&service)?))
+}
+
+fn verify_repair_service(service: &Service, executable: &Path) -> Result<(), ServiceError> {
+    verify_config(service, executable, true)?;
+    ffi::verify_service_security(service)?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| scm_error(ServiceOperation::QueryConfiguration, error))?
+        != ServiceSidType::Unrestricted
+    {
+        return Err(ServiceError::ConfigurationConflict);
+    }
+    Ok(())
+}
+
 fn install() -> Result<ServiceSnapshot, ServiceError> {
     let installation = ffi::validate_installation(true)?;
+    let maintenance = ffi::acquire_maintenance()?;
+    configure_installed_service(&maintenance, &installation)
+}
+
+/// Applies the fixed service registration while the caller retains the one
+/// installation-local maintenance lock and a validated installation proof.
+pub(crate) fn configure_installed_service(
+    _maintenance: &ffi::MaintenanceGuard,
+    installation: &impl ffi::ValidatedServiceInstallation,
+) -> Result<ServiceSnapshot, ServiceError> {
+    let executable = installation.service_executable();
+    let expected = ffi::expected_executable()?;
+    if !executable
+        .to_str()
+        .zip(expected.to_str())
+        .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    {
+        return Err(ServiceError::UntrustedInstallation);
+    }
     let manager = manager(true)?;
     let access = INSTALL_ACCESS;
     let service = match open(&manager, access)? {
         Some(service) => {
-            let config = verify_config(&service, installation.executable(), true)?;
+            let config = verify_config(&service, executable, true)?;
             // Existing own configurations may be repaired only after proving
             // that no unprivileged principal can mutate this service object.
             ffi::verify_service_security(&service)?;
@@ -630,16 +714,13 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
             // Disable a verified stopped registration before provisioning repair;
             // failure must never leave an incompletely prepared auto-start host.
             service
-                .change_config(&service_info(
-                    installation.executable(),
-                    ServiceStartType::Disabled,
-                ))
+                .change_config(&service_info(executable, ServiceStartType::Disabled))
                 .map_err(|e| scm_error(ServiceOperation::HardenService, e))?;
             service
         }
         None => manager
             .create_service(
-                &service_info(installation.executable(), ServiceStartType::Disabled),
+                &service_info(executable, ServiceStartType::Disabled),
                 access,
             )
             .map_err(|e| scm_error(ServiceOperation::CreateService, e))?,
@@ -652,17 +733,14 @@ fn install() -> Result<ServiceSnapshot, ServiceError> {
         configure_recovery(&service)?;
         ffi::provision_activity_directory()?;
         ffi::provision_trust_directory()?;
-        ffi::provision_embedded_relay_firewall()?;
+        ffi::provision_embedded_relay_firewall_for(executable)?;
         ffi::TrustDirectory::open_for_elevated_configuration()?
             .authorize_missing_registry_bootstrap()?;
         Ok(())
     };
     prepare().map_err(incomplete)?;
     service
-        .change_config(&service_info(
-            installation.executable(),
-            ServiceStartType::AutoStart,
-        ))
+        .change_config(&service_info(executable, ServiceStartType::AutoStart))
         .map_err(|e| incomplete(scm_error(ServiceOperation::HardenService, e)))?;
     Ok(snapshot(status(&service)?))
 }

@@ -62,6 +62,17 @@ impl SecurityDescriptor {
     }
 }
 
+pub(crate) fn harden_repair_dll_search() -> Result<(), ServiceError> {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+
+    // SAFETY: process-wide restriction to the documented System32 search set;
+    // no caller path, module handle or mutable buffer enters this call.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map_err(|error| win_error(ServiceOperation::HardenRepairProcess, error))
+}
+
 pub(crate) fn require_elevated() -> Result<(), ServiceError> {
     require_elevation(true)
 }

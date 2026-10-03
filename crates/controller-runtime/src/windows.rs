@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Safe delegation to the reviewed Windows-only service owner. No local FFI.
+//! Safe delegation to the Windows service owner and fixed installation boundary.
+//! Native FFI remains confined to installation_ffi; none lives in this adapter.
 
 use std::{
     net::SocketAddr,
@@ -55,6 +56,10 @@ fn hold<T: Clone>(slot: &mut Option<(Instant, T)>, fresh: Option<T>, now: Instan
 }
 
 impl PlatformAdapter for WindowsPlatformAdapter {
+    fn observe_installation_integrity(&self) -> Option<crate::InstallationIntegrityView> {
+        Some(crate::installation_ffi::check())
+    }
+
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError> {
         let status = windows_service_host::query_status().map_err(status_error)?;
         observation(status)
@@ -181,6 +186,11 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             ServiceAction::Stop => ServiceControlIntent::Stop,
             ServiceAction::Restart => ServiceControlIntent::Restart,
             ServiceAction::Uninstall => ServiceControlIntent::Uninstall,
+            ServiceAction::Repair => {
+                return Ok(ServiceCommandOutcome::Repair(
+                    crate::installation_ffi::repair(),
+                ));
+            }
         };
         let result = match windows_service_host::request_elevated_control_from_ui(intent) {
             Ok(result) => result,

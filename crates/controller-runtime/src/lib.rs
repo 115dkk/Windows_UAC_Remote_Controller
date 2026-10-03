@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Native-owned presentation orchestration. This crate does not authorize UAC.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
 
 mod contract;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod installation_ffi;
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+mod integrity;
 #[cfg(any(windows, test))]
 mod pc_history;
 mod phone_history;
@@ -18,6 +24,7 @@ mod windows_pairing;
 pub use contract::*;
 /// The validated external-access choice passed to `PlatformAdapter`.
 pub use direct_network::ExternalAccess;
+pub use integrity::{RepairOutcome, repair_exit_outcome};
 pub use notification_policy::{AlertMode, NotificationPolicy, Schedule};
 pub use phone_history::{
     MAX_PHONE_HISTORY_JSON_BYTES, decode_phone_history_json, encode_phone_history,

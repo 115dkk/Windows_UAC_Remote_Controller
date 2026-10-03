@@ -42,6 +42,7 @@ pub enum ServiceCommandOutcome {
     Completed { observation: ServiceObservation },
     CompletionStatusUnknown,
     HelperFailed,
+    Repair(crate::RepairOutcome),
 }
 
 /// Stable categories, with no native code, path, or supplied string payload.
@@ -91,6 +92,10 @@ impl From<PlatformError> for AppIssue {
 /// serialize access to one `AppRuntime`; never block its WebView/UI thread.
 pub trait PlatformAdapter: Send {
     fn observe_service(&self) -> Result<ServiceObservation, PlatformError>;
+    /// Slow read-only check, called by the serialized blocking host worker.
+    fn observe_installation_integrity(&self) -> Option<crate::InstallationIntegrityView> {
+        None
+    }
     fn observe_management(&self) -> Result<ManagementObservation, PlatformError> {
         Err(PlatformError::Unsupported)
     }
@@ -270,6 +275,9 @@ pub struct AppRuntime {
     adapter: Box<dyn PlatformAdapter>,
     last_service: Option<ServiceView>,
     last_management: Option<ManagementObservation>,
+    installation_integrity: Option<crate::InstallationIntegrityView>,
+    integrity_checked_at: Option<Instant>,
+    integrity_watcher: Option<crate::WatcherStatusView>,
     confirmed_relay_configured: bool,
     confirmed_relay_mode: RelayMode,
     service_issue: Option<AppIssue>,
@@ -336,6 +344,9 @@ impl AppRuntime {
             adapter,
             last_service: None,
             last_management: None,
+            installation_integrity: None,
+            integrity_checked_at: None,
+            integrity_watcher: None,
             confirmed_relay_configured: false,
             confirmed_relay_mode: RelayMode::Unknown,
             service_issue: None,
@@ -377,8 +388,40 @@ impl AppRuntime {
                     });
                 }
             }
+            self.refresh_integrity(false);
         }
         self.present()
+    }
+
+    fn refresh_integrity(&mut self, force: bool) {
+        let watcher = self
+            .last_management
+            .as_ref()
+            .and_then(|value| value.watcher);
+        let newly_unavailable = watcher != self.integrity_watcher
+            && watcher.is_some_and(|value| {
+                value.state == crate::WatcherStateView::Unavailable
+                    && matches!(
+                        value.refusal,
+                        Some(
+                            crate::WatcherRefusalView::HelperDamaged
+                                | crate::WatcherRefusalView::HelperFailed
+                        )
+                    )
+            });
+        // Missing optional reads do not count as recovery and therefore do not
+        // repeatedly retrigger a large hash read when the service is busy.
+        if watcher.is_some() {
+            self.integrity_watcher = watcher;
+        }
+        if integrity_check_due(
+            self.integrity_checked_at,
+            Instant::now(),
+            force || newly_unavailable,
+        ) {
+            self.installation_integrity = self.adapter.observe_installation_integrity();
+            self.integrity_checked_at = Some(Instant::now());
+        }
     }
 
     /// Policy construction/decoding is validated by notification-policy and the
@@ -400,6 +443,9 @@ impl AppRuntime {
             return Err(issue);
         }
         let before = self.snapshot();
+        if action == ServiceAction::Repair {
+            return self.repair_installation();
+        }
         if let Some(issue) = before.issue {
             return Err(issue);
         }
@@ -448,13 +494,79 @@ impl AppRuntime {
                 self.disable_service_actions();
                 Ok(self.present())
             }
-            ServiceCommandOutcome::HelperFailed => {
+            ServiceCommandOutcome::HelperFailed | ServiceCommandOutcome::Repair(_) => {
                 self.disable_service_actions();
                 self.service_action_issue = Some(service_action_failed());
                 self.service_issue = self.service_action_issue;
                 Ok(self.present())
             }
         }
+    }
+
+    fn repair_installation(&mut self) -> Result<AppSnapshot, AppIssue> {
+        use crate::RepairOutcome;
+        // Repair must work even when the installed control helper is damaged or
+        // SCM status is unavailable. It uses only the separate protected source.
+        let outcome = if self
+            .installation_integrity
+            .as_ref()
+            .is_some_and(|value| value.state == crate::IntegrityStateView::Damaged)
+        {
+            self.adapter.control_service(ServiceAction::Repair)
+        } else {
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::SourceUnusable))
+        };
+        self.service_action_issue = match outcome {
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::Repaired)) => None,
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::UserCancelled)) => Some(AppIssue {
+                code: "service_user_cancelled",
+                message: "관리자 확인을 취소했습니다.",
+                next_action: None,
+            }),
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::SourceUnusable)) => {
+                Some(crate::integrity::repair_issue(true))
+            }
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::StillRunning)) => {
+                self.control_progress = ControlProgress::StillRunning;
+                None
+            }
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::CompletionStatusUnknown)) => {
+                self.control_progress = ControlProgress::CompletionUnknown;
+                None
+            }
+            _ => Some(crate::integrity::repair_issue(false)),
+        };
+        // Reuse the existing cancelled-elevation copy without reporting repair
+        // success. Refresh ordinary observations first; if their watcher trigger
+        // already forced a check, do not hash twice for this same repair reply.
+        self.integrity_checked_at = Some(Instant::now());
+        let previous_check = self.integrity_checked_at;
+        let _ = self.snapshot();
+        if self.integrity_checked_at == previous_check {
+            self.refresh_integrity(true);
+        }
+        let mut snapshot = self.present();
+        if matches!(
+            outcome,
+            Ok(ServiceCommandOutcome::Repair(RepairOutcome::Repaired))
+        ) && (!self
+            .installation_integrity
+            .as_ref()
+            .is_some_and(|value| value.state == crate::IntegrityStateView::Intact)
+            || !snapshot
+                .service
+                .as_ref()
+                .is_some_and(|service| service.state == Some(ServiceState::Running)))
+        {
+            self.service_action_issue = Some(crate::integrity::repair_issue(false));
+            if let Some(service) = snapshot.service.as_mut() {
+                service.action_issue = self.service_action_issue;
+            }
+        }
+        if let Some(issue) = self.service_action_issue {
+            snapshot.issue = Some(issue);
+        }
+        Ok(snapshot)
     }
 
     /// Trusted Rust/Kotlin lifecycle input only. Do not register this method as
@@ -839,6 +951,18 @@ impl AppRuntime {
     fn present(&mut self) -> AppSnapshot {
         if let Some(service) = self.last_service.as_mut() {
             service.action_issue = self.service_action_issue;
+            service
+                .allowed_actions
+                .retain(|action| *action != ServiceAction::Repair);
+            if self.control_progress == ControlProgress::Idle
+                && self
+                    .installation_integrity
+                    .as_ref()
+                    .is_some_and(|value| value.state == crate::IntegrityStateView::Damaged)
+            {
+                // Damaged is produced only after both protected sources match.
+                service.allowed_actions.push(ServiceAction::Repair);
+            }
         }
         let pairing = self.pairing_view();
         let progress_issue = self.progress_issue().map(|mut issue| {
@@ -906,6 +1030,7 @@ impl AppRuntime {
                 self.confirmed_relay_configured
             },
             relay_status: self.relay_status_view(),
+            installation_integrity: self.installation_integrity.clone(),
             watcher_status: self
                 .last_management
                 .as_ref()
@@ -949,6 +1074,10 @@ impl AppRuntime {
             issue,
         }
     }
+}
+
+fn integrity_check_due(last: Option<Instant>, now: Instant, force: bool) -> bool {
+    force || last.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(600))
 }
 
 fn validate_management(
@@ -1034,7 +1163,7 @@ fn management_device_view(device: &ManagementDevice) -> crate::PairedDeviceView 
 
 fn action_reached(action: ServiceAction, state: ObservedServiceState) -> bool {
     match action {
-        ServiceAction::Start | ServiceAction::Restart => {
+        ServiceAction::Start | ServiceAction::Restart | ServiceAction::Repair => {
             state == ObservedServiceState::Installed(ServiceState::Running)
         }
         ServiceAction::Stop => state == ObservedServiceState::Installed(ServiceState::Stopped),
@@ -1259,4 +1388,27 @@ fn display_computer_name(platform: Platform, supplied: Option<&str>) -> String {
         return String::new();
     }
     name.to_owned()
+}
+
+#[cfg(test)]
+mod integrity_schedule_tests {
+    use super::*;
+
+    #[test]
+    fn first_check_ten_minute_refresh_and_explicit_triggers() {
+        let now = Instant::now();
+        assert!(integrity_check_due(None, now, false));
+        assert!(!integrity_check_due(Some(now), now, false));
+        assert!(!integrity_check_due(
+            Some(now),
+            now + Duration::from_secs(599),
+            false
+        ));
+        assert!(integrity_check_due(
+            Some(now),
+            now + Duration::from_secs(600),
+            false
+        ));
+        assert!(integrity_check_due(Some(now), now, true));
+    }
 }

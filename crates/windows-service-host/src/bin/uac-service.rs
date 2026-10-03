@@ -12,13 +12,13 @@ fn run() -> Result<(), ServiceError> {
     if command == Command::Help {
         writeln!(
             io::stdout().lock(),
-            "uac-service [status|relay-status|service|install|start|stop|restart|uninstall|probe-once|help]\n\
+            "uac-service [status|relay-status|service|install|repair|start|stop|restart|uninstall|probe-once|help]\n\
              uac-service remove <32자리 소문자 휴대폰 식별자>\n\
              uac-service relay <숫자 IP:포트>\n\
              uac-service external auto|forward <공유기 외부 포트>|fixed <공인 IP:포트>\n\
              uac-service pair <64자리 소문자 공개 식별자>\n\
              uac-service pair-renderer <64자리 공개 식별자> <64자리 표시 식별자>\n\
-             기본 동작은 상태 확인입니다. 설치·시작·중지·재시작·제거는 관리자 권한이 필요합니다.\n\
+             기본 동작은 상태 확인입니다. 설치·복구·시작·중지·재시작·제거는 관리자 권한이 필요합니다.\n\
              서비스 실행 상태는 휴대폰 연결이나 Windows 승인 기능의 동작을 뜻하지 않습니다."
         )
         .map_err(|_| ServiceError::OutputUnavailable)?;
@@ -40,6 +40,29 @@ fn run() -> Result<(), ServiceError> {
     }
     if command == Command::UsbBootstrap {
         return windows_service_host::run_usb_bootstrap();
+    }
+    if command == Command::Repair {
+        #[cfg(windows)]
+        {
+            #[derive(serde::Serialize)]
+            struct RepairReport {
+                schema: u8,
+                restored: Vec<&'static str>,
+                service: &'static str,
+            }
+            let outcome = windows_service_host::repair()?;
+            let report = RepairReport {
+                schema: 1,
+                restored: outcome.restored().collect(),
+                service: "running",
+            };
+            let mut output = io::stdout().lock();
+            serde_json::to_writer(&mut output, &report)
+                .map_err(|_| ServiceError::OutputUnavailable)?;
+            return writeln!(output).map_err(|_| ServiceError::OutputUnavailable);
+        }
+        #[cfg(not(windows))]
+        return Err(ServiceError::UnsupportedPlatform);
     }
     if command == Command::ProbeOnce {
         let accepted = windows_service_host::request_probe_once()?;
@@ -103,6 +126,7 @@ fn run() -> Result<(), ServiceError> {
         }
         Command::Service
         | Command::RelayStatus
+        | Command::Repair
         | Command::Help
         | Command::ProbeOnce
         | Command::Pair(_)

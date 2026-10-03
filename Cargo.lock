@@ -654,8 +654,10 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "windows 0.62.2",
  "windows-service-host",
 ]
 

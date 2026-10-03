@@ -364,7 +364,9 @@ export function useController(bridge: ControllerBridge) {
       const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
       // Native cancellation and errors are AppIssue results, never local success.
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
+      // A finished repair is otherwise silent: its notice just disappears.
+      const repaired = command.kind === 'service' && command.action === 'repair' && !snapshot.issue;
+      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: repaired ? ko.repairDone : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;

@@ -13,7 +13,12 @@ export type Schedule = { readonly mode: 'always' } | { readonly mode: 'never' }
 export interface NotificationPolicy { readonly schedule: Schedule; readonly alert: AlertMode }
 export type ServiceState = 'stopped' | 'start_pending' | 'stop_pending' | 'running'
   | 'continue_pending' | 'pause_pending' | 'paused';
-export type ServiceAction = 'install' | 'start' | 'stop' | 'restart' | 'uninstall';
+export type ServiceAction = 'install' | 'start' | 'stop' | 'restart' | 'uninstall' | 'repair';
+export type IntegrityState = 'intact' | 'damaged' | 'source_damaged' | 'unknown';
+export interface InstallationIntegrity {
+  readonly state: IntegrityState;
+  readonly damaged: readonly string[];
+}
 export interface ServiceView {
   readonly installed: boolean;
   readonly state: ServiceState | null;
@@ -156,6 +161,7 @@ export interface AppSnapshot {
   readonly relayConfigured: boolean;
   readonly relayStatus?: RelayStatus | null;
   readonly watcherStatus?: WatcherStatus | null;
+  readonly installationIntegrity?: InstallationIntegrity | null;
   /** Null or absent: not Windows, service not running, or not observed. */
   readonly externalAccess?: ExternalAccessView | null;
   readonly requests: readonly RequestView[];

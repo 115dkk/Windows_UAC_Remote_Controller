@@ -273,6 +273,7 @@ fn unknown_contradictory_and_unexposed_actions_never_reach_control() {
         ServiceAction::Install,
         ServiceAction::Restart,
         ServiceAction::Uninstall,
+        ServiceAction::Repair,
     ] {
         let port = Port::new(&[stopped()]);
         assert!(snapshot(&port, OwnerOperation::ControlService(action)).is_err());

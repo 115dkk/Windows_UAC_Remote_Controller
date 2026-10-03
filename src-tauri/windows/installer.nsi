@@ -671,13 +671,58 @@ Section Install
     Call UacFail
   ${EndIf}
 
-  ; Copy resources
+  ; Copy only the three fixed repair resources. PREINSTALL created and pinned
+  ; $INSTDIR\repair after validating that an existing path was a safe directory.
   {{#each resources_dirs}}
-    CreateDirectory "$INSTDIR\\{{this}}"
+    !if "{{this}}" != "repair"
+      !error "Unexpected resource directory in the fixed service package."
+    !endif
+    !ifdef UAC_REPAIR_DIRECTORY_INCLUDED
+      !error "Duplicate repair resource directory."
+    !endif
+    !define UAC_REPAIR_DIRECTORY_INCLUDED
   {{/each}}
+  !ifndef UAC_REPAIR_DIRECTORY_INCLUDED
+    !error "Missing repair resource directory."
+  !endif
+  StrCpy $UacFailure "$(UacCopyFailed)"
   {{#each resources}}
+    !if "{{this.[1]}}" == "repair\uac-service.exe"
+      !ifndef UAC_REPAIR_SERVICE_INCLUDED
+        !define UAC_REPAIR_SERVICE_INCLUDED
+      !else
+        !error "Duplicate repair service resource."
+      !endif
+    !else if "{{this.[1]}}" == "repair\uac-prompt-probe.exe"
+      !ifndef UAC_REPAIR_PROBE_INCLUDED
+        !define UAC_REPAIR_PROBE_INCLUDED
+      !else
+        !error "Duplicate repair prompt resource."
+      !endif
+    !else if "{{this.[1]}}" == "repair\repair-manifest.json"
+      !ifndef UAC_REPAIR_MANIFEST_INCLUDED
+        !define UAC_REPAIR_MANIFEST_INCLUDED
+      !else
+        !error "Duplicate repair manifest resource."
+      !endif
+    !else
+      !error "Unexpected resource in the fixed service package."
+    !endif
+    ClearErrors
     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
+    ${If} ${Errors}
+      Call UacFail
+    ${EndIf}
   {{/each}}
+  !ifndef UAC_REPAIR_SERVICE_INCLUDED
+    !error "Missing repair service resource."
+  !endif
+  !ifndef UAC_REPAIR_PROBE_INCLUDED
+    !error "Missing repair prompt resource."
+  !endif
+  !ifndef UAC_REPAIR_MANIFEST_INCLUDED
+    !error "Missing repair manifest resource."
+  !endif
 
   ; Copy external binaries
   {{#each binaries}}
@@ -802,10 +847,23 @@ Section Uninstall
     Call un.UacFail
   ${EndIf}
 
-  ; Delete resources
-  {{#each resources}}
-    Delete "$INSTDIR\\{{this.[1]}}"
-  {{/each}}
+  ; Delete the three fixed repair resources after service removal. Their checked
+  ; parent remains pinned; PREUNINSTALL already closed every checked child file.
+  ClearErrors
+  Delete "$INSTDIR\repair\uac-service.exe"
+  ${If} ${Errors}
+    Call un.UacFail
+  ${EndIf}
+  ClearErrors
+  Delete "$INSTDIR\repair\uac-prompt-probe.exe"
+  ${If} ${Errors}
+    Call un.UacFail
+  ${EndIf}
+  ClearErrors
+  Delete "$INSTDIR\repair\repair-manifest.json"
+  ${If} ${Errors}
+    Call un.UacFail
+  ${EndIf}
 
   ; Delete external binaries
   {{#each binaries}}
@@ -839,15 +897,24 @@ Section Uninstall
     Call un.UacFail
   ${EndIf}
 
-  {{#each resources_ancestors}}
-  RMDir /REBOOTOK "$INSTDIR\\{{this}}"
-  {{/each}}
+  ; Repair files are fixed above. Close the checked directory pin, then attempt
+  ; to remove only the now-empty fixed directory.
+  ${If} $UacRepairDirectoryPin <> 0
+    System::Call 'kernel32::CloseHandle(p $UacRepairDirectoryPin)'
+    StrCpy $UacRepairDirectoryPin 0
+  ${EndIf}
+  ; Unknown contents are not ours to remove. A nonempty repair directory is
+  ; retained just like a nonempty $INSTDIR, and uninstall continues.
+  ClearErrors
+  RMDir "$INSTDIR\repair"
+  ClearErrors ; Deliberately discard nonempty-directory failure and continue cleanup.
   ; Keep parent pins, release only the directory being removed.
   ${If} $UacDirectoryPin <> 0
     System::Call 'kernel32::CloseHandle(p $UacDirectoryPin)'
     StrCpy $UacDirectoryPin 0
   ${EndIf}
-  RMDir "$INSTDIR" ; Nonempty (unowned) contents are deliberately retained.
+  ; Nonempty (unowned) contents are deliberately retained.
+  RMDir "$INSTDIR"
 
   ; Remove shortcuts if not updating
   ${If} $UpdateMode <> 1

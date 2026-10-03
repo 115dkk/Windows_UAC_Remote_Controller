@@ -4,6 +4,11 @@
     "externalBin": [
       "../target/windows-package/inputs/uac-service",
       "../target/windows-package/inputs/uac-prompt-probe"
-    ]
+    ],
+    "resources": {
+      "../target/windows-package/repair/uac-service.exe": "repair/uac-service.exe",
+      "../target/windows-package/repair/uac-prompt-probe.exe": "repair/uac-prompt-probe.exe",
+      "../target/windows-package/repair/repair-manifest.json": "repair/repair-manifest.json"
+    }
   }
 }

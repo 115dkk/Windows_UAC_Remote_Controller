@@ -81,15 +81,19 @@ fn remove_named_rules(
 
 /// Install/update only this product's private-network TCP relay allowance.
 /// The caller keeps service installation disabled until this succeeds.
-pub(crate) fn provision_embedded_relay_firewall() -> Result<(), ServiceError> {
+pub(crate) fn provision_embedded_relay_firewall_for(
+    executable: &std::path::Path,
+) -> Result<(), ServiceError> {
     require_elevated()?;
-    let installation = validate_installation(true)?;
-    let application = BSTR::from(
-        installation
-            .executable()
-            .to_str()
-            .ok_or(ServiceError::UnsafePath)?,
-    );
+    let expected = super::expected_executable()?;
+    if !executable
+        .to_str()
+        .zip(expected.to_str())
+        .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    {
+        return Err(ServiceError::UntrustedInstallation);
+    }
+    let application = BSTR::from(executable.to_str().ok_or(ServiceError::UnsafePath)?);
     let operation = ServiceOperation::ConfigureFirewall;
     let _apartment = ComApartment::enter(operation)?;
     // SAFETY: fixed Windows firewall classes, no aggregation, elevated intact-OS
