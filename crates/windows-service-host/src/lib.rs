@@ -100,6 +100,8 @@ pub mod peer_runtime;
 mod probe_supervisor;
 #[cfg(windows)]
 mod repair;
+// Parsed only by the Windows repair verb; its tests run everywhere.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 mod repair_manifest;
 #[cfg(any(windows, test))]
 pub mod tls_signer;
