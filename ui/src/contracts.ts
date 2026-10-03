@@ -34,6 +34,11 @@ export interface RelayStatus {
 export type ListenerFault =
   | { readonly kind: 'port_in_use'; readonly port: number; readonly pid: number; readonly program: string | null }
   | { readonly kind: 'port_reserved'; readonly port: number };
+export type WatcherRefusal = 'no_signed_in_user' | 'helper_damaged' | 'helper_failed';
+export interface WatcherStatus {
+  readonly state: 'starting' | 'running' | 'unavailable';
+  readonly refusal: WatcherRefusal | null;
+}
 export type ExternalAccessMode = 'automatic' | 'router_forward' | 'fixed';
 export type ExternalCandidateSource = 'pcp' | 'upnp' | 'stun' | 'fixed' | 'public_interface';
 export type ExternalAccessFailure = 'no_mapping_protocol' | 'private_external_address' | 'public_address_unavailable';
@@ -150,6 +155,7 @@ export interface AppSnapshot {
   readonly devices: readonly PairedDeviceView[];
   readonly relayConfigured: boolean;
   readonly relayStatus?: RelayStatus | null;
+  readonly watcherStatus?: WatcherStatus | null;
   /** Null or absent: not Windows, service not running, or not observed. */
   readonly externalAccess?: ExternalAccessView | null;
   readonly requests: readonly RequestView[];

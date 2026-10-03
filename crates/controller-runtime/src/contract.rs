@@ -116,6 +116,29 @@ impl std::fmt::Debug for ListenerFaultView {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum WatcherStateView {
+    Starting,
+    Running,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherRefusalView {
+    NoSignedInUser,
+    HelperDamaged,
+    HelperFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatcherStatusView {
+    pub state: WatcherStateView,
+    pub refusal: Option<WatcherRefusalView>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DirectConnectionState {
     Unknown,
     Discovering,
@@ -416,6 +439,8 @@ pub struct ManagementDevice {
 pub struct ManagementObservation {
     pub relay_configured: bool,
     pub relay_status: RelayStatusView,
+    /// Optional separate read; None when the service did not answer it.
+    pub watcher: Option<WatcherStatusView>,
     pub devices: Vec<ManagementDevice>,
     pub activity: Option<Vec<ActivityView>>,
     /// Optional separate read; None when the service did not answer it.
@@ -621,6 +646,8 @@ pub struct AppSnapshot {
     pub relay_configured: bool,
     pub relay_status: Option<RelayStatusView>,
     /// None: not Windows, service not running, or not observed.
+    pub watcher_status: Option<WatcherStatusView>,
+    /// None: not Windows, service not running, or not observed.
     pub external_access: Option<ExternalAccessView>,
     pub devices: Vec<PairedDeviceView>,
     pub requests: Vec<RequestView>,
@@ -650,6 +677,7 @@ impl AppSnapshot {
             policy: None,
             relay_configured: false,
             relay_status: None,
+            watcher_status: None,
             external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),
@@ -693,6 +721,7 @@ impl AppSnapshot {
             policy: Some(policy),
             relay_configured: false,
             relay_status: None,
+            watcher_status: None,
             external_access: None,
             devices: Vec::new(),
             requests: Vec::new(),

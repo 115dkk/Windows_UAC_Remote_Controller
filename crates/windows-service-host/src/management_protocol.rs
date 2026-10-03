@@ -36,6 +36,8 @@ pub enum ManagementRequest {
     QueryExternal,
     /// Separate optional read of the embedded listener diagnostic.
     QueryListener,
+    /// Separate optional read of the UAC watcher health.
+    QueryWatcher,
     /// Elevated CLI only. The value is validated on both encode and decode.
     SetExternalAccess {
         access: ExternalAccess,
@@ -210,8 +212,46 @@ fn validate_program(program: &str) -> Result<(), ManagementCodecError> {
     }
 }
 
+/// Bounded reasons a watcher is unavailable; numeric values are wire-stable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum WatcherRefusal {
+    NoSignedInUser = 1,
+    HelperDamaged = 2,
+    HelperFailed = 3,
+}
+
+/// Current local prompt-watcher state; it is diagnostic, never authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatcherHealth {
+    Starting,
+    Running,
+    Unavailable(WatcherRefusal),
+}
+
+fn watcher_refusal(value: u8) -> Result<WatcherRefusal, ManagementCodecError> {
+    match value {
+        1 => Ok(WatcherRefusal::NoSignedInUser),
+        2 => Ok(WatcherRefusal::HelperDamaged),
+        3 => Ok(WatcherRefusal::HelperFailed),
+        _ => Err(ManagementCodecError::Malformed),
+    }
+}
+
+fn watcher_refusal_byte(refusal: WatcherRefusal) -> u8 {
+    match refusal {
+        WatcherRefusal::NoSignedInUser => 1,
+        WatcherRefusal::HelperDamaged => 2,
+        WatcherRefusal::HelperFailed => 3,
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ManagementResponse {
+    WatcherStatus {
+        health: WatcherHealth,
+    },
     ListenerStatus {
         port: u16,
         fault: Option<ListenerFault>,
@@ -252,6 +292,10 @@ pub enum ManagementResponse {
 impl fmt::Debug for ManagementResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::WatcherStatus { health } => f
+                .debug_struct("ManagementResponse::WatcherStatus")
+                .field("health", health)
+                .finish(),
             Self::ListenerStatus { port, fault } => f
                 .debug_struct("ManagementResponse::ListenerStatus")
                 .field("port", port)
@@ -291,6 +335,7 @@ pub fn encode_request(request: &ManagementRequest) -> Result<Vec<u8>, Management
         ManagementRequest::QueryDirect => writer.byte(5),
         ManagementRequest::QueryExternal => writer.byte(6),
         ManagementRequest::QueryListener => writer.byte(8),
+        ManagementRequest::QueryWatcher => writer.byte(9),
         ManagementRequest::UseEmbeddedRelay => writer.byte(4),
         ManagementRequest::SetExternalAccess { access } => {
             writer.byte(7);
@@ -317,6 +362,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
         5 => ManagementRequest::QueryDirect,
         6 => ManagementRequest::QueryExternal,
         8 => ManagementRequest::QueryListener,
+        9 => ManagementRequest::QueryWatcher,
         4 => ManagementRequest::UseEmbeddedRelay,
         7 => ManagementRequest::SetExternalAccess {
             access: reader.external_access()?,
@@ -337,6 +383,23 @@ pub fn decode_request(bytes: &[u8]) -> Result<ManagementRequest, ManagementCodec
 pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, ManagementCodecError> {
     let mut writer = Writer::new();
     match response {
+        ManagementResponse::WatcherStatus { health } => {
+            writer.byte(0x87);
+            match health {
+                WatcherHealth::Starting => {
+                    writer.byte(0);
+                    writer.byte(0);
+                }
+                WatcherHealth::Running => {
+                    writer.byte(1);
+                    writer.byte(0);
+                }
+                WatcherHealth::Unavailable(refusal) => {
+                    writer.byte(2);
+                    writer.byte(watcher_refusal_byte(*refusal));
+                }
+            }
+        }
         ManagementResponse::ListenerStatus { port, fault } => {
             writer.byte(0x86);
             writer.u16(*port);
@@ -475,6 +538,17 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
 pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCodecError> {
     let mut reader = Reader::new(bytes)?;
     let value = match reader.byte()? {
+        0x87 => {
+            let state = reader.byte()?;
+            let refusal = reader.byte()?;
+            let health = match (state, refusal) {
+                (0, 0) => WatcherHealth::Starting,
+                (1, 0) => WatcherHealth::Running,
+                (2, value) => WatcherHealth::Unavailable(watcher_refusal(value)?),
+                _ => return Err(ManagementCodecError::Malformed),
+            };
+            ManagementResponse::WatcherStatus { health }
+        }
         0x86 => {
             let port = reader.u16()?;
             let fault = match reader.byte()? {
@@ -924,6 +998,7 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         for request in [
             ManagementRequest::Query,
+            ManagementRequest::QueryWatcher,
             ManagementRequest::UseEmbeddedRelay,
             ManagementRequest::RemoveDevice { device: device(1) },
             ManagementRequest::SetRelay { address },
@@ -933,6 +1008,9 @@ mod tests {
             assert!(wire.len() <= MAX_MANAGEMENT_FRAME);
         }
         let responses = [
+            ManagementResponse::WatcherStatus {
+                health: WatcherHealth::Running,
+            },
             ManagementResponse::Done,
             ManagementResponse::Refused("요청을 처리할 수 없습니다.".into()),
             ManagementResponse::Snapshot {
@@ -1177,6 +1255,59 @@ mod tests {
         let mut done = encode_response(&ManagementResponse::Done).unwrap();
         done.push(0);
         assert!(decode_response(&done).is_err());
+    }
+
+    #[test]
+    fn watcher_health_round_trips_and_rejects_noncanonical_fields() {
+        assert_eq!(
+            encode_request(&ManagementRequest::QueryWatcher).unwrap(),
+            b"UCMG\x03\x09"
+        );
+        assert_eq!(
+            decode_request(b"UCMG\x03\x09"),
+            Ok(ManagementRequest::QueryWatcher)
+        );
+        assert!(decode_request(b"UCMG\x03\x09\x00").is_err());
+        assert_eq!(
+            encode_request(&ManagementRequest::QueryListener).unwrap(),
+            b"UCMG\x03\x08"
+        );
+
+        for (health, expected) in [
+            (WatcherHealth::Starting, &b"UCMG\x03\x87\x00\x00"[..]),
+            (WatcherHealth::Running, &b"UCMG\x03\x87\x01\x00"[..]),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::NoSignedInUser),
+                &b"UCMG\x03\x87\x02\x01"[..],
+            ),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::HelperDamaged),
+                &b"UCMG\x03\x87\x02\x02"[..],
+            ),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::HelperFailed),
+                &b"UCMG\x03\x87\x02\x03"[..],
+            ),
+        ] {
+            let response = ManagementResponse::WatcherStatus { health };
+            let wire = encode_response(&response).unwrap();
+            assert_eq!(wire, expected);
+            assert!(format!("{response:?}").contains("WatcherStatus"));
+            assert_eq!(decode_response(&wire), Ok(response));
+        }
+
+        for wire in [
+            &b"UCMG\x03\x87\x00"[..],
+            b"UCMG\x03\x87\x02\x00",
+            b"UCMG\x03\x87\x00\x01",
+            b"UCMG\x03\x87\x01\x03",
+            b"UCMG\x03\x87\x03\x00",
+            b"UCMG\x03\x87\x02\x04",
+            b"UCMG\x03\x87\xff\x00",
+            b"UCMG\x03\x87\x01\x00\x00",
+        ] {
+            assert_eq!(decode_response(wire), Err(ManagementCodecError::Malformed));
+        }
     }
 
     #[test]

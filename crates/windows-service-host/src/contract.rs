@@ -562,6 +562,8 @@ pub enum ServiceError {
     ConfigurationConflict,
     #[error("the executable is not in the required protected installation")]
     UntrustedInstallation,
+    #[error("a protected installed executable has an invalid PE header")]
+    DamagedInstallation,
     #[error("protected path validation rejected a reparse point or path alias")]
     UnsafePath,
     #[error("protected object owner or access control is unsupported or unsafe")]
@@ -725,6 +727,7 @@ impl ServiceError {
             Self::UnsafePath
             | Self::UnsafePermissions
             | Self::UntrustedInstallation
+            | Self::DamagedInstallation
             | Self::ConfigurationConflict => 5,
             Self::Timeout => 6,
             Self::JournalProvisioningRequired | Self::JournalUnavailable => 7,
@@ -1030,6 +1033,7 @@ mod tests {
             ServiceError::ElevationRequired,
             ServiceError::UnsupportedPlatform,
             ServiceError::UnsafePermissions,
+            ServiceError::DamagedInstallation,
             ServiceError::Timeout,
             ServiceError::JournalUnavailable,
             ServiceError::RegistryUnavailable,

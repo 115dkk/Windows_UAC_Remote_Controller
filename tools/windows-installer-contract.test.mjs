@@ -277,14 +277,14 @@ test('source contract runs PREINSTALL before destination writes and POSTINSTALL 
   for (const index of writes) assert.ok(before < index && index < after, `Destination write outside pre/post hooks: ${install[index]}`);
   ordered(install, ['StrCpy $UacFailure "$(UacCopyFailed)"', 'ClearErrors', 'SetOutPath $INSTDIR', '${If} ${Errors}', 'Call UacFail']);
   const pre = hook('PREINSTALL');
-  assert.ok(position(pre, 'Call UacInspectFiles') < checkedExec(pre, 'stop', 'UacFail'));
+  assert.ok(position(pre, 'Call UacInspectFiles') < position(pre, 'Call UacStopService'));
   ordered(pre, ['Call UacPrepare', '${If} $UacDirectoryPin = 0', 'Call UacInspectFiles',
-    'Call UacRequireServiceAbsent', 'Call UacReleaseFiles']);
+    'Call UacStopService', 'Call UacRequireServiceAbsent', 'Call UacReleaseFiles']);
   assert.ok(!pre.includes('Call UacRelease'), 'Parent/directory pins must survive binary replacement');
 });
 
-test('source contract restricts elevated child execution to four checked fixed service verbs', () => {
-  assert.deepEqual(hooks.filter((line) => line.startsWith('ExecWait ')), ['stop', 'install', 'start', 'uninstall']
+test('source contract restricts elevated child execution to three checked fixed service verbs', () => {
+  assert.deepEqual(hooks.filter((line) => line.startsWith('ExecWait ')), ['install', 'start', 'uninstall']
     .map((verb) => 'ExecWait \'"$INSTDIR\\uac-service.exe" ' + verb + '\' $0'));
   const post = hook('POSTINSTALL');
   ordered(post, ['Call UacInspectFiles', '${If} $UacServicePin = 0', '${OrIf} $UacProbePin = 0',
@@ -371,6 +371,33 @@ test('source contract pins the x86 Unicode SECURITY_ATTRIBUTES layout before all
     "System::Call '*(i 12,p $UacDescriptor,i 0)p.r7'", '${If} $7 = 0', 'Call UacFail',
     'System::Call \'kernel32::CreateDirectoryW(w "$INSTDIR",p r7)i.r8\'', 'System::Free $7',
     '${If} $8 = 0', 'Call UacFail', 'StrCpy $UacAllowMissing 0', 'Call UacOpenChecked']);
+});
+
+test('source contract stops the existing service through SCM without running its image', () => {
+  const stop = native('UacStopService');
+  ordered(stop, [
+    "System::Call 'advapi32::OpenSCManagerW(p 0,p 0,i 1)p.r4'",
+    'System::Call \'advapi32::OpenServiceW(p r4,w "UacRemoteController",i 0x24)p.r5 ?e\'',
+    'Pop $6', '${If} $5 = 0', "System::Call 'advapi32::CloseServiceHandle(p r4)'",
+    'StrCpy $4 0', '${If} $6 = 1060', 'Call ${PREFIX}UacRequireServiceAbsent',
+    'Return', 'System::Alloc 28', 'Pop $7',
+    'StrCpy $9 240', 'uac_stop_poll:',
+    "System::Call 'advapi32::QueryServiceStatus(p r5,p r7)i.r8'", 'IntCmp $8 0 uac_stop_fail',
+    "System::Call '*$7(i,i.r8)'", 'IntCmp $8 1 uac_stop_done', '${If} $8 = 4', '${OrIf} $8 = 7',
+    "System::Call 'advapi32::ControlService(p r5,i 1,p r7)i.r8 ?e'",
+    'Pop $6', '${If} $8 = 0', '${AndIf} $6 <> 1061', '${AndIf} $6 <> 1062', 'Goto uac_stop_fail',
+    'IntCmp $9 0 uac_stop_fail', 'Sleep 250', 'IntOp $9 $9 - 1', 'Goto uac_stop_poll',
+    'uac_stop_fail:', 'System::Free $7', 'Call ${PREFIX}UacFail', 'Return',
+    'uac_stop_done:', 'System::Free $7',
+    "System::Call 'advapi32::CloseServiceHandle(p r5)'", "System::Call 'advapi32::CloseServiceHandle(p r4)'",
+  ]);
+  assert.equal(stop.filter((line) => line === 'System::Free $7').length, 2);
+  assert.equal(stop.filter((line) => line === "System::Call 'advapi32::CloseServiceHandle(p r5)'").length, 3);
+  assert.equal(stop.filter((line) => line === "System::Call 'advapi32::CloseServiceHandle(p r4)'").length, 4);
+  assert.equal(stop.filter((line) => line === 'Call ${PREFIX}UacFail').length, 4);
+  assert.equal(stop.filter((line) => line === 'Call ${PREFIX}UacRequireServiceAbsent').length, 1);
+  assert.equal(stop.filter((line) => line === 'Sleep 250').length, 1);
+  assert.ok(!stop.some((line) => /Exec|uac-service\.exe/u.test(line)));
 });
 
 test('source contract captures Win32 errors on the exact CreateFile and OpenService calls', () => {

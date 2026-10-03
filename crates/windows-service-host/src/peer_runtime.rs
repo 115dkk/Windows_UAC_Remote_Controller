@@ -530,6 +530,7 @@ pub struct ServiceSession<'key> {
     relay_retry_at: Instant,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay_listener_fault: Option<crate::management_protocol::ListenerFault>,
+    watcher_health: crate::management_protocol::WatcherHealth,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay_owner_lookup: Option<(Instant, Option<windows_port_owner::ListenerOwner>)>,
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -650,6 +651,7 @@ impl<'key> ServiceSession<'key> {
             relay_retry_at: epoch_start,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_listener_fault: None,
+            watcher_health: crate::management_protocol::WatcherHealth::Starting,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_owner_lookup: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
@@ -716,6 +718,12 @@ impl<'key> ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     pub(crate) fn use_external_access(&mut self, access: direct_network::ExternalAccess) {
         self.external_access = access;
+    }
+
+    /// Updates the service worker's current watcher observation for read-only
+    /// management clients. It grants no prompt or helper authority.
+    pub(crate) fn set_watcher_health(&mut self, health: crate::management_protocol::WatcherHealth) {
+        self.watcher_health = health;
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -1680,6 +1688,7 @@ impl<'key> ServiceSession<'key> {
                 | ManagementRequest::QueryDirect
                 | ManagementRequest::QueryExternal
                 | ManagementRequest::QueryListener
+                | ManagementRequest::QueryWatcher
         ) && class != crate::ffi::ManagementClientClass::CliElevated
         {
             return Ok(Some(ManagementResponse::Refused(
@@ -1690,6 +1699,9 @@ impl<'key> ServiceSession<'key> {
             ManagementRequest::QueryDirect => Ok(Some(self.direct_status())),
             ManagementRequest::QueryExternal => Ok(Some(self.external_status())),
             ManagementRequest::QueryListener => Ok(Some(self.listener_status())),
+            ManagementRequest::QueryWatcher => Ok(Some(ManagementResponse::WatcherStatus {
+                health: self.watcher_health,
+            })),
             ManagementRequest::SetExternalAccess { access } => {
                 // Persist first, on this worker, through the same protected
                 // owner as the relay choice; a failed write changes nothing.

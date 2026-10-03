@@ -4,6 +4,7 @@
 //! Phone authorization remains distinct from the watcher's observed Windows outcome.
 #![forbid(unsafe_code)]
 
+use crate::management_protocol::{WatcherHealth, WatcherRefusal};
 use crate::peer_runtime::{PeerRuntimeError, ServiceSession, SessionCleanup, SessionProgress};
 use crate::startup_phase::{
     ReadyRequest, RunningRequest, ready_handshake, run_platform_step, running_handshake,
@@ -304,7 +305,14 @@ fn run(
             // After a power loss every start refused it and the service
             // restarted every 30 s for hours with only "code 1" to show.
             let mut watch_retry = WatchRetry::new(Instant::now());
-            watch = start_watch(&mut journal, &mut watch_retry, Instant::now())?;
+            let mut watcher_health_heartbeats = 0;
+            watch = start_watch(
+                &mut journal,
+                &mut watch_retry,
+                &mut session,
+                &mut watcher_health_heartbeats,
+                Instant::now(),
+            )?;
             if cancellation_requested(stop) {
                 return Ok(());
             }
@@ -318,7 +326,13 @@ fn run(
                 }
                 let iteration_now = Instant::now();
                 if watch.is_none() && watch_retry.due(iteration_now) {
-                    watch = start_watch(&mut journal, &mut watch_retry, iteration_now)?;
+                    watch = start_watch(
+                        &mut journal,
+                        &mut watch_retry,
+                        &mut session,
+                        &mut watcher_health_heartbeats,
+                        iteration_now,
+                    )?;
                 }
                 if last_activity_read
                     .is_none_or(|at| iteration_now.duration_since(at) >= Duration::from_secs(1))
@@ -342,14 +356,28 @@ fn run(
                 for event in events {
                     // Fixed lifecycle kinds only: the events carry no prompt content here.
                     match &event {
-                        crate::WatchEvent::HelperRestarted { .. } => append(
-                            &mut journal,
-                            ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
-                        )?,
-                        crate::WatchEvent::HelperUnavailable => append(
-                            &mut journal,
-                            ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
-                        )?,
+                        crate::WatchEvent::HelperRestarted { .. } => {
+                            // Ignore heartbeats accumulated by the failed helper;
+                            // only a later increment proves the restarted one ran.
+                            watcher_health_heartbeats = current_watch_heartbeats(&watch);
+                            session.set_watcher_health(WatcherHealth::Starting);
+                            append(
+                                &mut journal,
+                                ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
+                            )?;
+                        }
+                        crate::WatchEvent::HelperUnavailable => {
+                            // Pin the terminal count so stale earlier heartbeats do
+                            // not replace this refusal with Running below.
+                            watcher_health_heartbeats = current_watch_heartbeats(&watch);
+                            session.set_watcher_health(WatcherHealth::Unavailable(
+                                WatcherRefusal::HelperFailed,
+                            ));
+                            append(
+                                &mut journal,
+                                ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
+                            )?;
+                        }
                         _ => {}
                     }
                     let progress = session
@@ -357,11 +385,12 @@ fn run(
                         .map_err(session_error)?;
                     journal_prompt_progress(&mut journal, progress)?;
                 }
-                if !watcher_alive_journaled
-                    && watch
-                        .as_ref()
-                        .is_some_and(|watcher| watcher.heartbeats() > 0)
-                {
+                let current_heartbeats = current_watch_heartbeats(&watch);
+                if current_heartbeats > watcher_health_heartbeats {
+                    watcher_health_heartbeats = current_heartbeats;
+                    session.set_watcher_health(WatcherHealth::Running);
+                }
+                if !watcher_alive_journaled && current_heartbeats > 0 {
                     watcher_alive_journaled = true;
                     append(
                         &mut journal,
@@ -747,10 +776,14 @@ impl WatchRetry {
 fn start_watch(
     journal: &mut Journal,
     retry: &mut WatchRetry,
+    session: &mut ServiceSession<'_>,
+    health_heartbeats: &mut u32,
     now: Instant,
 ) -> Result<Option<WatchSession>, ServiceError> {
     match WatchSession::for_running_service() {
         Ok(watch) => {
+            *health_heartbeats = 0;
+            session.set_watcher_health(WatcherHealth::Starting);
             append(
                 journal,
                 ActivityEvent::Service(ServiceOutcome::WatcherStarted),
@@ -758,6 +791,7 @@ fn start_watch(
             Ok(Some(watch))
         }
         Err(error) => {
+            session.set_watcher_health(WatcherHealth::Unavailable(classify(error)));
             let first = retry.failures == 0;
             if retry.failed(error, now) {
                 crate::public_diagnostics::record(
@@ -772,6 +806,21 @@ fn start_watch(
             }
             Ok(None)
         }
+    }
+}
+
+fn current_watch_heartbeats(watch: &Option<WatchSession>) -> u32 {
+    watch.as_ref().map_or(0, WatchSession::heartbeats)
+}
+
+/// Collapses internal watcher startup failures into the bounded management view.
+fn classify(error: ProbeSupervisorError) -> WatcherRefusal {
+    match error {
+        ProbeSupervisorError::NoInteractiveSession
+        | ProbeSupervisorError::SessionChanged
+        | ProbeSupervisorError::AmbiguousSessions => WatcherRefusal::NoSignedInUser,
+        ProbeSupervisorError::HelperDamaged => WatcherRefusal::HelperDamaged,
+        _ => WatcherRefusal::HelperFailed,
     }
 }
 
@@ -795,6 +844,32 @@ mod tests {
         assert!(cancellation_requested(&receiver));
         drop(sender);
         assert!(cancellation_requested(&receiver));
+    }
+
+    #[test]
+    fn watcher_start_failures_map_to_public_refusals() {
+        for error in [
+            ProbeSupervisorError::NoInteractiveSession,
+            ProbeSupervisorError::SessionChanged,
+            ProbeSupervisorError::AmbiguousSessions,
+        ] {
+            assert_eq!(classify(error), WatcherRefusal::NoSignedInUser);
+        }
+        assert_eq!(
+            classify(ProbeSupervisorError::HelperDamaged),
+            WatcherRefusal::HelperDamaged
+        );
+        for error in [
+            ProbeSupervisorError::UnsupportedPlatform,
+            ProbeSupervisorError::ProtectedHelperUnavailable,
+            ProbeSupervisorError::HelperFailed(2),
+            ProbeSupervisorError::Native {
+                stage: crate::SupervisorStage::CreateChild,
+                hresult: -2147024894,
+            },
+        ] {
+            assert_eq!(classify(error), WatcherRefusal::HelperFailed);
+        }
     }
 
     #[test]

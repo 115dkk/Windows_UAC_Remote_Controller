@@ -128,6 +128,7 @@ fn installed(state: ServiceState) -> ServiceObservation {
 
 fn management(devices: Vec<ManagementDevice>, relay_configured: bool) -> ManagementObservation {
     ManagementObservation {
+        watcher: None,
         activity: None,
         external_access: None,
         relay_configured,
@@ -546,6 +547,96 @@ fn listener_fault_reaches_the_snapshot_without_becoming_readiness() {
 }
 
 #[test]
+fn watcher_status_reaches_the_snapshot_without_becoming_readiness() {
+    use controller_runtime::{WatcherRefusalView, WatcherStateView, WatcherStatusView};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    for (watcher, expected) in [
+        (
+            Some(WatcherStatusView {
+                state: WatcherStateView::Running,
+                refusal: None,
+            }),
+            json!({"state": "running", "refusal": null}),
+        ),
+        (
+            Some(WatcherStatusView {
+                state: WatcherStateView::Unavailable,
+                refusal: Some(WatcherRefusalView::HelperDamaged),
+            }),
+            json!({"state": "unavailable", "refusal": "helper_damaged"}),
+        ),
+        (None, json!(null)),
+    ] {
+        let mut observation = management(Vec::new(), false);
+        observation.watcher = watcher;
+        owner.set_management(Ok(observation));
+        let snapshot = runtime.snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json.get("watcherStatus"), Some(&expected));
+        assert_eq!(snapshot.watcher_status, watcher);
+        assert!(!snapshot.relay_configured);
+        assert!(!snapshot.service.unwrap().remote_requests_ready);
+        assert_eq!(snapshot.data_availability.devices, Availability::Available);
+        assert!(snapshot.issue.is_none());
+    }
+}
+
+#[test]
+fn watcher_status_is_null_when_service_or_management_is_not_current() {
+    use controller_runtime::{WatcherRefusalView, WatcherStateView, WatcherStatusView};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = SyntheticOwner::new(Ok(installed(ServiceState::Running)));
+    let mut observation = management(Vec::new(), false);
+    observation.watcher = Some(WatcherStatusView {
+        state: WatcherStateView::Unavailable,
+        refusal: Some(WatcherRefusalView::HelperDamaged),
+    });
+    owner.set_management(Ok(observation.clone()));
+    let mut runtime = windows_runtime(&directory, owner.clone());
+    for service in [
+        Ok(absent(ControlHint::Available)),
+        Ok(installed(ServiceState::Stopped)),
+        Ok(installed(ServiceState::StartPending)),
+        Ok(installed(ServiceState::StopPending)),
+        Ok(installed(ServiceState::ContinuePending)),
+        Ok(installed(ServiceState::PausePending)),
+        Ok(installed(ServiceState::Paused)),
+        Err(PlatformError::StatusUnavailable),
+    ] {
+        owner.set_observation(Ok(installed(ServiceState::Running)));
+        assert_eq!(runtime.snapshot().watcher_status, observation.watcher);
+        owner.set_observation(service);
+        let json = serde_json::to_value(runtime.snapshot()).unwrap();
+        assert_eq!(json.get("watcherStatus"), Some(&json!(null)));
+    }
+    owner.set_observation(Ok(installed(ServiceState::Running)));
+    assert_eq!(runtime.snapshot().watcher_status, observation.watcher);
+    owner.set_management(Err(PlatformError::StatusUnavailable));
+    let json = serde_json::to_value(runtime.snapshot()).unwrap();
+    assert_eq!(json.get("watcherStatus"), Some(&json!(null)));
+}
+
+#[test]
+fn android_snapshots_have_no_watcher_observation() {
+    use controller_runtime::{AppSnapshot, NotificationPolicy, PhoneServiceView};
+    for snapshot in [
+        AppSnapshot::from_android_service(
+            PhoneServiceView::UNAVAILABLE,
+            MobileReadiness::UNAVAILABLE,
+        ),
+        AppSnapshot::from_android_policy(
+            NotificationPolicy::default(),
+            MobileReadiness::UNAVAILABLE,
+        ),
+    ] {
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json.get("watcherStatus"), Some(&json!(null)));
+    }
+}
+
+#[test]
 fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let owner = SyntheticOwner::new(Ok(installed(ServiceState::Stopped)));
@@ -570,6 +661,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         RelayState::Unknown
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        watcher: None,
         activity: None,
         external_access: None,
         relay_configured: false,
@@ -588,6 +680,7 @@ fn selecting_embedded_relay_while_stopped_is_configuration_not_listener_evidence
         RelayState::WaitingNetwork
     );
     *owner.0.management.lock().unwrap() = Ok(ManagementObservation {
+        watcher: None,
         activity: None,
         external_access: None,
         relay_configured: true,
@@ -1099,6 +1192,7 @@ fn dto_serialization_matches_the_camel_case_snapshot_and_snake_case_policy() {
             "policy": {"schedule": {"mode": "always"}, "alert": "sound"},
             "relayConfigured": false,
             "relayStatus": {"mode": "unknown", "state": "unknown", "internetState": null, "listenerFault": null},
+            "watcherStatus": null,
             "externalAccess": null,
             "devices": [], "requests": [], "activity": [],
             "requestCatalog": null, "requestReview": null,

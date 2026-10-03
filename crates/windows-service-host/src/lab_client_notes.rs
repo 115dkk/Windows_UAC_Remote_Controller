@@ -182,6 +182,7 @@ fn service(error: ServiceError) -> (&'static str, i64) {
         ServiceError::WindowsCall { code, .. } => ("service_windows", i64::from(code)),
         ServiceError::ConfigurationConflict => ("service_configuration", 0),
         ServiceError::UntrustedInstallation => ("service_untrusted_installation", 0),
+        ServiceError::DamagedInstallation => ("service_damaged_installation", 0),
         ServiceError::UnsafePath => ("service_unsafe_path", 0),
         ServiceError::UnsafePermissions => ("service_unsafe_permissions", 0),
         ServiceError::ElevationRequired => ("service_elevation_required", 0),

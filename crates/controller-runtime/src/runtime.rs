@@ -906,6 +906,11 @@ impl AppRuntime {
                 self.confirmed_relay_configured
             },
             relay_status: self.relay_status_view(),
+            watcher_status: self
+                .last_management
+                .as_ref()
+                .filter(|_| management_running)
+                .and_then(|management| management.watcher),
             external_access: self
                 .last_management
                 .as_ref()

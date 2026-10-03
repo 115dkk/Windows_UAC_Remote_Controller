@@ -311,6 +311,19 @@ same rendezvous and pinned TLS before anything else happens, so discovery is
 outside the symbolic authorization model. No theorem, rule, canary, proof
 budget or expected verdict changes; CI must still run the current-source proofs.
 
+### Watcher health source binding review (2026-10-03)
+
+`peer_runtime.rs` gains one field holding the watcher's observed health
+(starting, running, or unavailable with a coarse reason, ADR 0044), a setter the
+service worker calls from its watcher start and lifecycle events, and one arm
+answering the new local management query `QueryWatcher` with that value. The
+query is admitted by the same read-only rule as `QueryListener` and travels only
+over the local management pipe. Nothing is sent to or read from a peer. Peer
+admission, signed messages, address advertisements, prompt events, decisions,
+request authorization and lease renewal are unchanged, and the value never
+gates any of them. No theorem, rule, canary, proof budget or expected verdict
+changes; CI must still run the current-source proofs.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |
