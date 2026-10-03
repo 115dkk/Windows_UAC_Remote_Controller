@@ -316,6 +316,54 @@ fn listener_read_is_medium_client_diagnostic_and_clears_on_mode_change_or_close(
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn watcher_read_is_a_medium_client_query_of_current_health() {
+    use crate::{
+        ffi::ManagementClientClass,
+        management_protocol::{
+            ManagementRequest, ManagementResponse, WatcherHealth, WatcherRefusal,
+        },
+    };
+    exercise(|session, _, _, _| {
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryWatcher,
+                )
+                .unwrap(),
+            Some(ManagementResponse::WatcherStatus {
+                health: WatcherHealth::Starting,
+            })
+        );
+        session.set_watcher_health(WatcherHealth::Unavailable(WatcherRefusal::HelperDamaged));
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryWatcher,
+                )
+                .unwrap(),
+            Some(ManagementResponse::WatcherStatus {
+                health: WatcherHealth::Unavailable(WatcherRefusal::HelperDamaged),
+            })
+        );
+        session.set_watcher_health(WatcherHealth::Running);
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryWatcher,
+                )
+                .unwrap(),
+            Some(ManagementResponse::WatcherStatus {
+                health: WatcherHealth::Running,
+            })
+        );
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
 fn external_status(
     session: &mut ServiceSession<'_>,
     class: crate::ffi::ManagementClientClass,

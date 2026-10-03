@@ -650,6 +650,79 @@ Function ${PREFIX}UacInspectFiles
   StrCpy $UacHandle 0
 FunctionEnd
 
+Function ${PREFIX}UacStopService
+  System::Call 'advapi32::OpenSCManagerW(p 0,p 0,i 1)p.r4'
+  ${If} $4 = 0
+    Call ${PREFIX}UacFail
+  ${EndIf}
+  ; SERVICE_STOP | SERVICE_QUERY_STATUS. No installed executable is trusted to
+  ; stop itself before its bytes are replaced.
+  System::Call 'advapi32::OpenServiceW(p r4,w "UacRemoteController",i 0x24)p.r5 ?e'
+  Pop $6
+  ${If} $5 = 0
+    System::Call 'advapi32::CloseServiceHandle(p r4)'
+    StrCpy $4 0
+    ${If} $6 = 1060
+      ; Preserve PREINSTALL's existing absent-registration recheck semantics.
+      Call ${PREFIX}UacRequireServiceAbsent
+      Return
+    ${EndIf}
+    Call ${PREFIX}UacFail
+  ${EndIf}
+  ; SERVICE_STATUS is seven DWORDs in this x86 installer; dwCurrentState is
+  ; the second DWORD and is read at offset4 by the System plug-in signature.
+  System::Alloc 28
+  Pop $7
+  ${If} $7 = 0
+    System::Call 'advapi32::CloseServiceHandle(p r5)'
+    System::Call 'advapi32::CloseServiceHandle(p r4)'
+    StrCpy $5 0
+    StrCpy $4 0
+    Call ${PREFIX}UacFail
+  ${EndIf}
+  ; Poll first, then ask: a service still starting refuses STOP (1061), as the
+  ; old `uac-service.exe stop` handled by waiting. At most 240 waits of 250 ms.
+  StrCpy $9 240
+  uac_stop_poll:
+    System::Call 'advapi32::QueryServiceStatus(p r5,p r7)i.r8'
+    IntCmp $8 0 uac_stop_fail
+    System::Call '*$7(i,i.r8)'
+    IntCmp $8 1 uac_stop_done
+    ; RUNNING (4) or PAUSED (7) is asked to stop; START_PENDING and
+    ; STOP_PENDING are waited out.
+    ${If} $8 = 4
+    ${OrIf} $8 = 7
+      System::Call 'advapi32::ControlService(p r5,i 1,p r7)i.r8 ?e'
+      Pop $6
+      ; 1061: still initializing, retried. 1062: no longer active.
+      ${If} $8 = 0
+      ${AndIf} $6 <> 1061
+      ${AndIf} $6 <> 1062
+        Goto uac_stop_fail
+      ${EndIf}
+    ${EndIf}
+    IntCmp $9 0 uac_stop_fail
+    Sleep 250
+    IntOp $9 $9 - 1
+    Goto uac_stop_poll
+  uac_stop_fail:
+  System::Free $7
+  System::Call 'advapi32::CloseServiceHandle(p r5)'
+  System::Call 'advapi32::CloseServiceHandle(p r4)'
+  StrCpy $7 0
+  StrCpy $5 0
+  StrCpy $4 0
+  Call ${PREFIX}UacFail
+  Return
+  uac_stop_done:
+  System::Free $7
+  System::Call 'advapi32::CloseServiceHandle(p r5)'
+  System::Call 'advapi32::CloseServiceHandle(p r4)'
+  StrCpy $7 0
+  StrCpy $5 0
+  StrCpy $4 0
+FunctionEnd
+
 Function ${PREFIX}UacRequireServiceAbsent
   System::Call 'advapi32::OpenSCManagerW(p 0,p 0,i 1)p.r4'
   ${If} $4 = 0
@@ -703,12 +776,7 @@ FunctionEnd
   Call UacInspectFiles
   StrCpy $UacFailure "$(UacStopFailed)"
   ${If} $UacServicePin <> 0
-    ClearErrors
-    ExecWait '"$INSTDIR\uac-service.exe" stop' $0
-    ${If} ${Errors}
-    ${OrIf} $0 <> 0
-      Call UacFail
-    ${EndIf}
+    Call UacStopService
   ${Else}
     Call UacRequireServiceAbsent
   ${EndIf}

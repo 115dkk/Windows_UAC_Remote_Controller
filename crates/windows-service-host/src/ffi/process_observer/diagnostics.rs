@@ -187,6 +187,7 @@ fn classification(error: ServiceError) -> (&'static str, u32) {
         ServiceError::UnsafePermissions => ("permissions", 0),
         ServiceError::UnsafePath => ("path", 0),
         ServiceError::UntrustedInstallation => ("installation", 0),
+        ServiceError::DamagedInstallation => ("damaged_installation", 0),
         ServiceError::ConfigurationConflict => ("configuration", 0),
         ServiceError::IdentityPolicy(_) => ("identity_policy", error.service_diagnostic_code()),
         ServiceError::IdentityMalformed(_) => {

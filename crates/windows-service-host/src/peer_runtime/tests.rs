@@ -683,6 +683,20 @@ fn exercise(
     }
 }
 
+#[test]
+fn service_session_watcher_health_starts_and_updates_without_native_owners() {
+    use crate::management_protocol::{WatcherHealth, WatcherRefusal};
+
+    exercise(|session, _, _, _| {
+        assert_eq!(session.watcher_health, WatcherHealth::Starting);
+        session.set_watcher_health(WatcherHealth::Unavailable(WatcherRefusal::HelperFailed));
+        assert_eq!(
+            session.watcher_health,
+            WatcherHealth::Unavailable(WatcherRefusal::HelperFailed)
+        );
+    });
+}
+
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
 fn management_query_reads_the_current_software_registry_snapshot() {

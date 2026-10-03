@@ -335,6 +335,9 @@ mod tests {
                     hresult: -2147024891,
                 },
             },
+            Event::WatcherStartFailed {
+                error: ProbeSupervisorError::HelperDamaged,
+            },
             Event::LanAnnounceFailed { code: 5 },
             Event::RuntimeFailure {
                 step: 4,
@@ -368,6 +371,24 @@ mod tests {
                 .contains(&key.as_str())
             }));
         }
+    }
+
+    #[test]
+    fn damaged_helper_has_a_distinct_closed_diagnostic_kind() {
+        assert_eq!(
+            serde_json::to_value(row(Event::WatcherStartFailed {
+                error: ProbeSupervisorError::HelperDamaged,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "watcher_start_failed",
+                "error": {"kind": "helper_damaged"}
+            })
+        );
     }
 
     #[test]

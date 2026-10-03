@@ -355,6 +355,8 @@
   "다른 프로그램(PID {pid})이 {port} 포트를 쓰고 있어 휴대폰 연결을 받지 못합니다. 작업 관리자의 [세부 정보] 탭에서 이 PID의 프로그램을 확인하십시오. 포트가 비면 자동으로 다시 받습니다.": "Another program (PID {pid}) is using port {port}, so the PC cannot accept phone connections. Find the program with this PID on the [Details] tab of Task Manager. Connections resume automatically once the port is free.",
   "{port} 포트를 쓸 수 없어 휴대폰 연결을 받지 못합니다. 다른 프로그램이 쓰고 있거나 직전 연결이 아직 정리되지 않았습니다. 자동으로 다시 시도합니다.": "Port {port} cannot be used, so the PC cannot accept phone connections. Another program is using it, or a previous connection has not closed yet. Trying again automatically.",
   "Windows가 {port} 포트를 쓰지 못하게 막아 휴대폰 연결을 받지 못합니다. Hyper-V, WSL, Docker 같은 기능이 이 포트를 예약해 두었는지 확인하십시오. 자동으로 다시 시도합니다.": "Windows does not allow port {port} to be used, so the PC cannot accept phone connections. Check whether a feature such as Hyper-V, WSL or Docker has reserved this port. Trying again automatically.",
+  "UAC 창을 감시하는 보조 프로그램 파일이 손상되어 휴대폰으로 승인 요청을 보내지 못합니다. 이 PC에 같은 버전을 다시 설치하십시오.": "The helper program file that monitors UAC dialogs is damaged, so approval requests cannot be sent to your phone. Reinstall the same version on this PC.",
+  "UAC 창을 감시하는 보조 프로그램이 시작되지 않아 휴대폰으로 승인 요청을 보내지 못합니다. 자동으로 다시 시도합니다. 계속되면 이 PC에 같은 버전을 다시 설치하십시오.": "The helper program that monitors UAC dialogs did not start, so approval requests cannot be sent to your phone. Trying again automatically. If this continues, reinstall the same version on this PC.",
   "휴대폰이 접속할 곳": "Where the phone connects",
   "이 PC (기본)": "This PC (default)",
   "휴대폰 승인이 켜져 있으면 앱 창을 닫아도 휴대폰이 이 PC에 직접 접속합니다.": "While phone approval is on, the phone connects directly to this PC even when the app window is closed.",

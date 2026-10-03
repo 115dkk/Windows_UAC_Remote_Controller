@@ -30,6 +30,7 @@ static LAST_DIRECT: Mutex<Option<(Instant, crate::DirectConnectionState)>> = Mut
 static LAST_EXTERNAL: Mutex<Option<(Instant, crate::ExternalAccessView)>> = Mutex::new(None);
 // The inner None is a successful no-fault read and clears a held fault.
 static LAST_LISTENER: Mutex<Option<(Instant, Option<crate::ListenerFaultView>)>> = Mutex::new(None);
+static LAST_WATCHER: Mutex<Option<(Instant, crate::WatcherStatusView)>> = Mutex::new(None);
 
 fn held<T: Clone>(slot: &Mutex<Option<(Instant, T)>>, fresh: Option<T>) -> Option<T> {
     match slot.lock() {
@@ -123,7 +124,19 @@ impl PlatformAdapter for WindowsPlatformAdapter {
             }
             None
         };
+        // Independent of the relay: an older service or a failed optional read
+        // leaves the watcher unobserved once the last answer's hold expires.
+        let watcher = held(
+            &LAST_WATCHER,
+            match windows_service_host::management_watcher_query() {
+                Ok(ManagementResponse::WatcherStatus { health }) => {
+                    Some(watcher_status_view(health))
+                }
+                _ => None,
+            },
+        );
         Ok(ManagementObservation {
+            watcher,
             external_access,
             activity: activity.map(crate::pc_history::project),
             relay_configured: relay.is_some(),
@@ -270,6 +283,31 @@ fn listener_fault_view(
             crate::ListenerFaultView::PortInUse { port, pid, program }
         }
         ListenerFault::Reserved => crate::ListenerFaultView::PortReserved { port },
+    }
+}
+
+fn watcher_status_view(
+    health: windows_service_host::management_protocol::WatcherHealth,
+) -> crate::WatcherStatusView {
+    use crate::{WatcherRefusalView, WatcherStateView, WatcherStatusView};
+    use windows_service_host::management_protocol::{WatcherHealth, WatcherRefusal};
+    match health {
+        WatcherHealth::Starting => WatcherStatusView {
+            state: WatcherStateView::Starting,
+            refusal: None,
+        },
+        WatcherHealth::Running => WatcherStatusView {
+            state: WatcherStateView::Running,
+            refusal: None,
+        },
+        WatcherHealth::Unavailable(refusal) => WatcherStatusView {
+            state: WatcherStateView::Unavailable,
+            refusal: Some(match refusal {
+                WatcherRefusal::NoSignedInUser => WatcherRefusalView::NoSignedInUser,
+                WatcherRefusal::HelperDamaged => WatcherRefusalView::HelperDamaged,
+                WatcherRefusal::HelperFailed => WatcherRefusalView::HelperFailed,
+            }),
+        },
     }
 }
 
@@ -448,6 +486,63 @@ mod tests {
             serde_json::to_value(listener_fault_view(7443, ListenerFault::Reserved)).unwrap(),
             serde_json::json!({"kind": "port_reserved", "port": 7443})
         );
+    }
+
+    #[test]
+    fn watcher_health_projects_without_inventing_a_refusal() {
+        use windows_service_host::management_protocol::{WatcherHealth, WatcherRefusal};
+        for (health, expected) in [
+            (
+                WatcherHealth::Starting,
+                serde_json::json!({"state": "starting", "refusal": null}),
+            ),
+            (
+                WatcherHealth::Running,
+                serde_json::json!({"state": "running", "refusal": null}),
+            ),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::NoSignedInUser),
+                serde_json::json!({"state": "unavailable", "refusal": "no_signed_in_user"}),
+            ),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::HelperDamaged),
+                serde_json::json!({"state": "unavailable", "refusal": "helper_damaged"}),
+            ),
+            (
+                WatcherHealth::Unavailable(WatcherRefusal::HelperFailed),
+                serde_json::json!({"state": "unavailable", "refusal": "helper_failed"}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(watcher_status_view(health)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_reads_hold_misses_but_replace_a_refusal_on_recovery() {
+        use windows_service_host::management_protocol::{WatcherHealth, WatcherRefusal};
+        let unavailable =
+            watcher_status_view(WatcherHealth::Unavailable(WatcherRefusal::HelperDamaged));
+        let running = watcher_status_view(WatcherHealth::Running);
+        let now = Instant::now();
+        let mut slot = None;
+        assert_eq!(hold(&mut slot, None, now), None);
+        assert_eq!(hold(&mut slot, Some(unavailable), now), Some(unavailable));
+        assert_eq!(
+            hold(&mut slot, None, now + OPTIONAL_READ_HOLD),
+            Some(unavailable)
+        );
+        assert_eq!(
+            hold(&mut slot, Some(running), now + OPTIONAL_READ_HOLD),
+            Some(running)
+        );
+        assert_eq!(
+            hold(&mut slot, None, now + OPTIONAL_READ_HOLD * 2),
+            Some(running)
+        );
+        assert_eq!(hold(&mut slot, None, now + OPTIONAL_READ_HOLD * 3), None);
     }
 
     #[test]

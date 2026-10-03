@@ -33,7 +33,10 @@ impl Preflight {
         let sid = OwnServiceSid::lookup().map_err(|_| Error::NotRunningService)?;
         let sid_bytes = sid.bytes();
         let token = CurrentToken::observe(&sid_bytes)?;
-        let pins = validate_probe_installation().map_err(|_| Error::ProtectedHelperUnavailable)?;
+        let pins = validate_probe_installation().map_err(|error| match error {
+            crate::ServiceError::DamagedInstallation => Error::HelperDamaged,
+            _ => Error::ProtectedHelperUnavailable,
+        })?;
         let service = crate::native::running_service_for_probe(pins.service())
             .map_err(|_| Error::NotRunningService)?;
         required_privileges(&service)?;

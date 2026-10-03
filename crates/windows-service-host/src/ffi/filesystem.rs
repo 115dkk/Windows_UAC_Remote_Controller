@@ -8,7 +8,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND},
+        Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF},
         Security::SECURITY_ATTRIBUTES,
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
@@ -173,11 +173,78 @@ pub(crate) fn validate_probe_installation() -> Result<ValidatedProbeInstallation
         ObjectPolicy::Installation,
         &policy::trusted_system_sids(),
     )?;
+    let header = read_probe_header(&pin)?;
+    if !pe_header_is_plausible(&header) {
+        return Err(ServiceError::DamagedInstallation);
+    }
     Ok(ValidatedProbeInstallation {
         installation,
         probe,
         _probe_pin: pin,
     })
+}
+
+/// Reads only the bounded PE prefix through the retained checked leaf handle.
+#[cfg(target_pointer_width = "64")]
+fn read_probe_header(pin: &OwnedHandle) -> Result<Vec<u8>, ServiceError> {
+    const HEADER_BYTES: usize = 4096;
+
+    let info = file_info(pin)?;
+    let file_bytes = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+    let read_bytes = file_bytes.min(HEADER_BYTES as u64) as usize;
+    let mut bytes = vec![0u8; read_bytes];
+    if bytes.is_empty() {
+        return Ok(bytes);
+    }
+    read_at_zero(pin, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Reads an exact prefix at explicit file offset0 through the retained pin.
+#[cfg(target_pointer_width = "64")]
+fn read_at_zero(pin: &OwnedHandle, bytes: &mut [u8]) -> Result<(), ServiceError> {
+    use windows::Win32::{Storage::FileSystem::ReadFile, System::IO::OVERLAPPED};
+
+    let mut received = 0;
+    let mut overlapped = OVERLAPPED::default();
+    // SAFETY: same live helper pin with FILE_READ_DATA, initialized bounded output
+    // storage and exclusive zero-initialized OVERLAPPED (Offset/OffsetHigh == 0).
+    // The synchronous handle completes before return and retains no pointers.
+    unsafe {
+        ReadFile(
+            pin.0,
+            Some(bytes),
+            Some(&mut received),
+            Some(&mut overlapped),
+        )
+    }
+    .map_err(|error| win_error(ServiceOperation::InspectProtectedPath, error))?;
+    if received as usize != bytes.len() {
+        return Err(ServiceError::WindowsCall {
+            operation: ServiceOperation::InspectProtectedPath,
+            code: windows::core::HRESULT::from_win32(ERROR_HANDLE_EOF.0).0 as u32,
+        });
+    }
+    Ok(())
+}
+
+/// Minimal architecture/header screen for a bounded PE prefix; not signature trust.
+fn pe_header_is_plausible(bytes: &[u8]) -> bool {
+    if bytes.len() < 0x40 || bytes.get(..2) != Some(b"MZ") {
+        return false;
+    }
+    let offset = u32::from_le_bytes([bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f]]) as usize;
+    if offset < 0x40 || !offset.is_multiple_of(4) {
+        return false;
+    }
+    let Some(header_end) = offset.checked_add(6) else {
+        return false;
+    };
+    let Some(header) = bytes.get(offset..header_end) else {
+        return false;
+    };
+    header.get(..4) == Some(b"PE\0\0")
+        && matches!(u16::from_le_bytes([header[4], header[5]]), 0x8664 | 0xAA64)
 }
 
 /// Fixed installed pairing participants. Pins establish protected path/file
@@ -733,6 +800,42 @@ mod tests {
             assert!(same_native_image_path(&value, &expected).is_err());
             assert!(same_native_image_path(&expected, &value).is_err());
         }
+    }
+
+    fn minimal_pe(machine: u16) -> Vec<u8> {
+        let mut bytes = vec![0; 0x48];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+        bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+        bytes[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn plausible_pe_header_accepts_supported_machines() {
+        assert!(pe_header_is_plausible(&minimal_pe(0x8664)));
+        assert!(pe_header_is_plausible(&minimal_pe(0xAA64)));
+    }
+
+    #[test]
+    fn plausible_pe_header_rejects_damaged_or_unsupported_images() {
+        assert!(!pe_header_is_plausible(&vec![0; 307_200]));
+        assert!(!pe_header_is_plausible(&[]));
+        assert!(!pe_header_is_plausible(b"MZ"));
+        assert!(!pe_header_is_plausible(&[0; 0x3f]));
+        assert!(!pe_header_is_plausible(&minimal_pe(0x014c)));
+
+        let mut out_of_range = minimal_pe(0x8664);
+        out_of_range[0x3c..0x40].copy_from_slice(&0x1000_u32.to_le_bytes());
+        assert!(!pe_header_is_plausible(&out_of_range));
+
+        let mut misaligned = minimal_pe(0x8664);
+        misaligned[0x3c..0x40].copy_from_slice(&0x42_u32.to_le_bytes());
+        assert!(!pe_header_is_plausible(&misaligned));
+
+        let mut wrong_signature = minimal_pe(0x8664);
+        wrong_signature[0x40..0x44].copy_from_slice(b"PX\0\0");
+        assert!(!pe_header_is_plausible(&wrong_signature));
     }
 
     #[test]

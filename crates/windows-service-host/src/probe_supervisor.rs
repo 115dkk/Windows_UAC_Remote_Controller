@@ -69,6 +69,7 @@ pub enum ProbeSupervisorError {
     RestrictedTokenMismatch,
     UnsupportedToken,
     ProtectedHelperUnavailable,
+    HelperDamaged,
     NoInteractiveSession,
     AmbiguousSessions,
     SessionChanged,
@@ -607,6 +608,14 @@ mod tests {
         assert_eq!(
             crate::SERVICE_EXECUTABLE,
             windows_prompt_probe::supervision::SERVICE_EXECUTABLE
+        );
+    }
+
+    #[test]
+    fn damaged_helper_serializes_as_a_distinct_closed_kind() {
+        assert_eq!(
+            serde_json::to_value(ProbeSupervisorError::HelperDamaged).unwrap(),
+            serde_json::json!({"kind": "helper_damaged"})
         );
     }
 
