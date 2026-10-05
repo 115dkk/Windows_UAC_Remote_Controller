@@ -7,10 +7,12 @@ import { EmptyState } from './StatusPanels';
 import { currentLocale, tr } from './i18n';
 import { displayText } from './displayText';
 import { useConnectionDisplay } from './useConnectionDisplay';
+import { Spinner } from './PcConnectionStatus';
 
 function DeviceConnectionLine({ device, active }: { device: PairedDeviceView; active: boolean }) {
   const connected = useConnectionDisplay(active && device.connected, `${device.id}:${device.revision}`, active);
-  return <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connected ? ko.connected : ko.disconnected}</p>;
+  if (connected === 'reconnecting') return <p className="state-line is-progress"><Spinner />{ko.reconnecting}</p>;
+  return <p className={`state-line ${connected === 'connected' ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connected === 'connected' ? ko.connected : ko.disconnected}</p>;
 }
 
 export function DevicesPanel({ snapshot, disabled, onPair, onPairUsb, onOpenStatus, onOpenNetwork, onRemove }: {

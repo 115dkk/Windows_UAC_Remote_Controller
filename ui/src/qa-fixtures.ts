@@ -104,6 +104,12 @@ export function qaCase(name: string): QaCase {
     case 'desktop-running': return { page: 'status', snapshot: { ...windows, service: { installed: true, state: 'running', allowedActions: ['restart', 'stop', 'uninstall'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-connected': return { page: 'status', snapshot: { ...relayRunning,
       devices: [{ id: 'synthetic-connected-phone', name: '화면 예시 휴대폰', revision: 1, connected: true, routePresent: true, lastSeenLabel: null }] } };
+    // Connected first; the next synthetic observation has lost the phone.
+    case 'desktop-status-phone-reconnecting': {
+      const phone = { id: 'synthetic-connected-phone', name: '화면 예시 휴대폰', revision: 1, connected: true, routePresent: true, lastSeenLabel: null };
+      return { page: 'status', snapshot: { ...relayWithPhone, devices: [phone] },
+        later: { ...relayWithPhone, devices: [{ ...phone, connected: false }] } };
+    }
     case 'desktop-pairing-ready': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: true,
       service: { installed: true, state: 'running', allowedActions: ['stop'], controlHint: 'available', remoteRequestsReady: false } } };
     case 'desktop-pairing-relay-first': return { page: 'devices', snapshot: { ...windows, canPair: true, relayConfigured: false,

@@ -168,6 +168,26 @@ async function firewall(page: Page, selected: FeedbackCase, locale: GalleryLocal
   await capture('firewall-paired-offline', 'CLIENT/SYNTHETIC · paired phone not connected: uac-service.exe firewall paragraph');
 }
 
+async function phoneReconnect(page: Page, selected: FeedbackCase, locale: GalleryLocale, capture: (stage: string, caption: string) => Promise<void>): Promise<void> {
+  const card = page.locator('.service-card');
+  await expect(card.getByText(galleryText(locale, '휴대폰 연결됨'), { exact: true })).toBeVisible();
+  // The next synthetic observation has lost the phone.
+  await page.getByRole('button', { name: galleryText(locale, '다시 확인'), exact: true }).click();
+  const line = card.getByText(galleryText(locale, '휴대폰에 다시 연결하는 중'), { exact: true });
+  await expect(line).toBeVisible();
+  await expect(line.locator('.progress-indicator')).toHaveCount(1);
+  await expect(card.getByText(galleryText(locale, '휴대폰 연결 안 됨'), { exact: true })).toHaveCount(0);
+  await expect(page.getByText(galleryText(locale, firewallCopy), { exact: true })).toHaveCount(0);
+  await expect(card.locator('.notice-box')).toHaveCount(0);
+  await line.scrollIntoViewIfNeeded();
+  await capture('pc-phone-reconnecting', 'CLIENT/SYNTHETIC · a connected phone dropped: spinner, no failure guidance yet; no native disconnect');
+  await page.clock.fastForward(selected.clockMillis![0]!);
+  const lost = card.getByText(galleryText(locale, '휴대폰 연결 안 됨'), { exact: true });
+  await expect(lost).toBeVisible();
+  await expect(line).toHaveCount(0);
+  await capture('pc-phone-lost', 'CLIENT/SYNTHETIC · after the synthetic 61 s clock jump the card says not connected');
+}
+
 for (const selected of feedbackCases) {
   test(selected.id, async ({ page, gallery }) => {
     const { locale } = selected;
@@ -176,6 +196,7 @@ for (const selected of feedbackCases) {
     const capture = (stage: string, caption: string) => gallery.capture(stage, caption);
     if (selected.kind === 'decision') await decision(page, selected, locale, capture);
     else if (selected.kind === 'connection') await connection(page, selected, locale, capture);
+    else if (selected.kind === 'phone-reconnect') await phoneReconnect(page, selected, locale, capture);
     else await firewall(page, selected, locale, capture);
   });
 }

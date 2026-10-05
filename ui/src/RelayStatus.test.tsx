@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Synthetic DTO/client regression cases, not native listener or UAC proof.
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { PHONE_RECONNECT_GRACE_MS } from './useConnectionDisplay';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
@@ -238,6 +239,31 @@ describe('PC status card says each fact once', () => {
     expect(await screen.findByText('휴대폰 연결됨')).toBeVisible();
     expect(relayLine(card.container)).toBeNull();
     expect(directLine(card.container)).not.toBeNull();
+  });
+
+  it('shows a dropped phone as reconnecting without failure guidance, then as not connected after the grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const connected = qaCase('desktop-connected').snapshot;
+      const lost = { ...connected, devices: connected.devices.map(device => ({ ...device, connected: false })) };
+      const view = render(<ServicePanel snapshot={connected} disabled={false} onAction={vi.fn()} />);
+      view.rerender(<ServicePanel snapshot={lost} disabled={false} onAction={vi.fn()} />);
+      const line = screen.getByText('휴대폰에 다시 연결하는 중');
+      expect(line).toHaveClass('is-progress');
+      expect(line.querySelector('.spinner')).not.toBeNull();
+      expect(screen.queryByText('휴대폰 연결 안 됨')).not.toBeInTheDocument();
+      expect(relayLine(view.container)).toBeNull();
+      expect(view.container.querySelector('.notice-box')).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(PHONE_RECONNECT_GRACE_MS); });
+      expect(screen.getByText('휴대폰 연결 안 됨')).toBeVisible();
+      expect(screen.queryByText('휴대폰에 다시 연결하는 중')).not.toBeInTheDocument();
+      expect(relayLine(view.container)).not.toBeNull();
+      const list = render(<DevicesPanel snapshot={connected} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} />);
+      list.rerender(<DevicesPanel snapshot={lost} disabled={false} onPair={vi.fn()} onRemove={vi.fn()} />);
+      expect(within(list.container).getAllByText('다시 연결하는 중').length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hides the computer-name row while no name is supplied', () => {

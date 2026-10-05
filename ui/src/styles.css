@@ -201,6 +201,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .service-card > .state-line { margin-top: var(--space-5); }
 .state-dot { display: inline-block; width: var(--space-2); height: var(--space-2); flex: 0 0 auto; border-radius: 50%; background: currentColor; }
 .state-line.is-success { color: var(--success); }
+.state-line.is-progress :is(.progress-indicator, .spinner, .spinner-still) { width: 0.875em; height: 0.875em; }
 .pairing-entry > .relay-state, .service-card > .relay-state { margin-block: var(--space-3) var(--space-4); font-size: var(--text-small); }
 .service-card > .supporting-text { margin-top: var(--space-3); }
 .direct-connection { margin-block: var(--space-3) var(--space-4); }
