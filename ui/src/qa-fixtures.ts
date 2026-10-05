@@ -244,15 +244,20 @@ function feedbackCase(name: string, phone: AppSnapshot): QaCase | null {
   return connection ? { page: 'requests', snapshot: disconnected(connection) } : null;
 }
 
-export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure'], diagnosticsExportPending?: QaCase['diagnosticsExportPending'], later?: AppSnapshot): ControllerBridge {
+/**
+ * `later` replaces the snapshot on the first read after `laterDue()` turns true.
+ * The client also reads on focus and every 5 s, so the gallery ties the change to
+ * an explicit click instead of to the second read.
+ */
+export function createQaBridge(initial: AppSnapshot, scannerFailure?: QaCase['scannerFailure'], diagnosticsExportPending?: QaCase['diagnosticsExportPending'], later?: AppSnapshot,
+  laterDue: () => boolean = () => true): ControllerBridge {
   let value = initial;
   let next = later;
   function reply(next: AppSnapshot): Promise<AppSnapshot> { value = next; return Promise.resolve(value); }
   return {
     snapshot: () => {
-      const current = value;
-      if (next) { value = next; next = undefined; }
-      return Promise.resolve(current);
+      if (next && laterDue()) { value = next; next = undefined; }
+      return Promise.resolve(value);
     },
     savePolicy: (policy) => reply({ ...value, policy, issue: null }),
     controlService: (action) => {
