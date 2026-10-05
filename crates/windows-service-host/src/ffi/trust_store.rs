@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     INSTALLATION_FOLDER, ServiceError,
-    external_access::{self, StoredExternalAccess},
+    external_access::{self, ExternalAccessSetting, StoredExternalAccess},
     policy::{self, ObjectPolicy},
 };
 use std::{
@@ -362,12 +362,12 @@ impl TrustDirectory {
     /// Same owner, protections and replace-then-verify path as the relay file.
     pub(crate) fn write_external_access(
         &mut self,
-        access: direct_network::ExternalAccess,
+        setting: ExternalAccessSetting,
     ) -> Result<(), ServiceError> {
         if !matches!(self.context, AccessContext::Elevated) {
             return Err(unavailable());
         }
-        let bytes = external_access::encode(access).ok_or(ServiceError::InvalidArguments)?;
+        let bytes = external_access::encode(setting).ok_or(ServiceError::InvalidArguments)?;
         self.replace_configuration(
             EXTERNAL_FILE_NAME,
             EXTERNAL_STAGING_FILE_NAME,

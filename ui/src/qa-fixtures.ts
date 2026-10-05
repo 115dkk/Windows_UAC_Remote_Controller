@@ -52,7 +52,7 @@ export function qaCase(name: string): QaCase {
     service: { installed: true, state: 'running', allowedActions: ['restart', 'stop'], controlHint: 'available', remoteRequestsReady: false },
     relayStatus: { mode: 'embedded', state: 'listening' } };
   const externalAccess: ExternalAccessView = { mode: 'automatic', externalPort: null, fixedAddress: null,
-    externalAddress: null, source: null, lanAddress: '192.168.0.23', relayPort: 7443, failure: null };
+    externalAddress: null, source: null, lanAddress: '192.168.0.23', forwardOrigin: null, relayPort: 7443, failure: null };
   const relayWithPhone: AppSnapshot = { ...relayRunning, devices: offlinePhones };
   const relayStopped: AppSnapshot = { ...relayRunning, relayConfigured: false,
     service: { ...relayRunning.service!, state: 'stopped', allowedActions: ['start', 'uninstall'] },
@@ -88,6 +88,11 @@ export function qaCase(name: string): QaCase {
     case 'desktop-network-forward-stun': return { page: 'network', snapshot: { ...relayWithPhone,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
       externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 17443, externalAddress: '198.51.100.24:17443', source: 'stun' } } };
+    // The forward was saved while this PC had .103; DHCP has since given it .102.
+    case 'desktop-network-forward-moved': return { page: 'network', snapshot: { ...relayWithPhone,
+      relayStatus: { mode: 'embedded', state: 'listening', internetState: 'candidate' },
+      externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 17443, externalAddress: '198.51.100.24:17443', source: 'stun',
+        lanAddress: '192.168.0.102', forwardOrigin: '192.168.0.103' } } };
     case 'desktop-network-forward-unavailable': return { page: 'network', snapshot: { ...relayWithPhone,
       relayStatus: { mode: 'embedded', state: 'listening', internetState: 'lan_only' },
       externalAccess: { ...externalAccess, mode: 'router_forward', externalPort: 41327, failure: 'public_address_unavailable' } } };

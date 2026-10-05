@@ -396,13 +396,17 @@ fn external_read_is_a_gui_query_and_its_mutation_is_elevated_cli_only() {
                 source: None,
                 failure: None,
                 lan: None,
+                forward_origin: None,
             }
         );
         crate::management_protocol::encode_response(&status).unwrap();
         let forward = ExternalAccess::RouterForward {
             external_port: 8443,
         };
-        session.use_external_access(forward);
+        session.use_external_access(crate::external_access::ExternalAccessSetting {
+            access: forward,
+            forward_origin: None,
+        });
         assert!(matches!(
             external_status(session, ManagementClientClass::GuiMedium),
             ManagementResponse::ExternalStatus { access, .. } if access == forward
@@ -432,6 +436,7 @@ fn external_read_is_a_gui_query_and_its_mutation_is_elevated_cli_only() {
             Some(ManagementResponse::Refused(_))
         ));
         assert_eq!(session.external_access, forward);
+        assert_eq!(session.external_forward_origin, None);
     });
 }
 
@@ -453,7 +458,10 @@ fn a_changed_external_access_replaces_the_owner_like_a_changed_endpoint() {
         session.embedded_mode = true;
         session.embedded_relay =
             Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
-        session.use_external_access(first);
+        session.use_external_access(crate::external_access::ExternalAccessSetting {
+            access: first,
+            forward_origin: None,
+        });
         session.poll_direct_gateway(Some(internal));
         assert_eq!(
             session
@@ -473,7 +481,10 @@ fn a_changed_external_access_replaces_the_owner_like_a_changed_endpoint() {
             Some(first)
         );
 
-        session.use_external_access(second);
+        session.use_external_access(crate::external_access::ExternalAccessSetting {
+            access: second,
+            forward_origin: None,
+        });
         // The old owner's observation is not reported under the new mode.
         let ManagementResponse::ExternalStatus {
             access,

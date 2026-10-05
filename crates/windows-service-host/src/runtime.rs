@@ -539,7 +539,7 @@ const EXTERNAL_ACCESS_STAGE: u8 = 8;
 
 fn startup_external_access(
     stored: crate::external_access::StoredExternalAccess,
-) -> direct_network::ExternalAccess {
+) -> crate::external_access::ExternalAccessSetting {
     if stored == crate::external_access::StoredExternalAccess::Invalid {
         crate::public_diagnostics::record(crate::public_diagnostics::Event::ConfigurationIgnored {
             stage: EXTERNAL_ACCESS_STAGE,
@@ -547,7 +547,7 @@ fn startup_external_access(
         #[cfg(feature = "lab-software-identity")]
         crate::lab::record_note("external access configuration ignored; using automatic");
     }
-    stored.effective()
+    stored.effective_setting()
 }
 
 fn session_error(error: PeerRuntimeError) -> ServiceError {

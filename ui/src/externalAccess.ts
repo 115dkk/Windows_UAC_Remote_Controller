@@ -178,3 +178,45 @@ export function lanEndpoint(view: ExternalAccessView): string | null {
   if (!view.lanAddress) return null;
   return view.lanAddress.includes(':') ? `[${view.lanAddress}]:${String(view.relayPort)}` : `${view.lanAddress}:${String(view.relayPort)}`;
 }
+
+export const addressMovedText = {
+  title: '경고, PC의 IP 주소가 바뀌었습니다.',
+  origin: '원본',
+  current: '현재',
+  forward: '공유기의 포트포워딩을 현재 IP로 다시 설정하십시오.',
+  reservation: 'DHCP 고정 할당이 켜져 있는지 다시 확인하십시오. 이 설정이 켜져 있어야 PC의 IP가 바뀌지 않습니다.',
+  confirm: '공유기를 고쳤습니다',
+  confirmHint: '공유기 설정을 고친 뒤 누르면 현재 IP를 새 기준으로 기억하고 이 경고를 닫습니다.',
+} as const;
+
+/** The LAN IP saved with the router forward and the current one, when they
+ * differ. Only the native owner's two observations are compared; nothing here
+ * learns where the router actually forwards. */
+export function forwardAddressMoved(view: ExternalAccessView | null | undefined): { readonly origin: string; readonly current: string } | null {
+  if (view?.mode !== 'router_forward' || !view.forwardOrigin || !view.lanAddress) return null;
+  return view.forwardOrigin === view.lanAddress ? null : { origin: view.forwardOrigin, current: view.lanAddress };
+}
+
+export interface AddressPart { readonly text: string; readonly changed: boolean }
+
+/** `address` split into runs marked where it differs from `other`. Dotted
+ * IPv4 is compared octet by octet; within an octet of the same length only the
+ * differing digits are marked, otherwise the whole octet. */
+export function addressDiff(address: string, other: string): readonly AddressPart[] {
+  const mine = address.split('.');
+  const theirs = other.split('.');
+  if (mine.length !== 4 || theirs.length !== 4) return [{ text: address, changed: address !== other }];
+  const parts: AddressPart[] = [];
+  const push = (text: string, changed: boolean) => {
+    const last = parts[parts.length - 1];
+    if (last && last.changed === changed) parts[parts.length - 1] = { text: last.text + text, changed };
+    else if (text) parts.push({ text, changed });
+  };
+  mine.forEach((octet, index) => {
+    if (index > 0) push('.', false);
+    const peer = theirs[index] ?? '';
+    if (octet.length !== peer.length) { push(octet, true); return; }
+    for (let digit = 0; digit < octet.length; digit += 1) push(octet[digit] ?? '', octet[digit] !== peer[digit]);
+  });
+  return parts;
+}

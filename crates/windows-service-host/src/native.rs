@@ -385,15 +385,18 @@ pub(crate) fn configure_external_access(
         return Err(ServiceError::UnexpectedState);
     }
     let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
-    directory.write_external_access(access)
+    directory.write_external_access(crate::external_access::ExternalAccessSetting {
+        access,
+        forward_origin: None,
+    })
 }
 
 pub(crate) fn configure_external_access_for_running_service(
-    access: direct_network::ExternalAccess,
+    setting: crate::external_access::ExternalAccessSetting,
 ) -> Result<(), ServiceError> {
     windows_identity::verify_service_context().map_err(ServiceError::from_identity)?;
     let mut directory = ffi::TrustDirectory::open_for_elevated_configuration()?;
-    directory.write_external_access(access)
+    directory.write_external_access(setting)
 }
 
 pub(crate) fn remove_device(device: approval_protocol::DeviceId) -> Result<(), ServiceError> {

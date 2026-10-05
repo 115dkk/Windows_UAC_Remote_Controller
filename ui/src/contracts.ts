@@ -58,6 +58,8 @@ export interface ExternalAccessView {
   readonly source: ExternalCandidateSource | null;
   /** This PC's routed LAN IP without port, for router instructions. */
   readonly lanAddress: string | null;
+  /** router_forward only: this PC's LAN IP when the forward was saved. */
+  readonly forwardOrigin: string | null;
   /** The embedded relay's port on this PC (7443). */
   readonly relayPort: number;
   readonly failure: ExternalAccessFailure | null;
