@@ -36,7 +36,10 @@ if (root && ceremony) {
     offer: () => Promise.resolve({ version: 'synthetic-gallery', status: fixtureName === 'desktop-taskbar-available' ? 'available' : 'unavailable' }),
     request: () => Promise.resolve<TaskbarStatus>('declined'),
   } : undefined;
-  const bridge = createQaBridge(selected.snapshot, selected.scannerFailure, selected.diagnosticsExportPending, selected.later);
+  // A synthetic later observation waits for the reviewer's first click (다시 확인).
+  let clicked = false;
+  if (selected.later) window.addEventListener('click', () => { clicked = true; }, { capture: true, once: true });
+  const bridge = createQaBridge(selected.snapshot, selected.scannerFailure, selected.diagnosticsExportPending, selected.later, () => clicked);
   createRoot(root).render(<div className="qa-frame">{banner}
     <App bridge={bridge} initialPage={selected.page} taskbarClient={taskbarClient} /></div>);
 }
