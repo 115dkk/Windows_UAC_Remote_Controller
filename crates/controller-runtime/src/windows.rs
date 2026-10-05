@@ -106,7 +106,8 @@ impl PlatformAdapter for WindowsPlatformAdapter {
                     source,
                     failure,
                     lan,
-                }) => external_access_view(access, external, source, failure, lan),
+                    forward_origin,
+                }) => external_access_view(access, external, source, failure, lan, forward_origin),
                 _ => None,
             },
         );
@@ -250,6 +251,7 @@ fn external_access_view(
     source: Option<direct_network::CandidateSource>,
     failure: Option<direct_network::DirectFailure>,
     lan: Option<SocketAddr>,
+    forward_origin: Option<std::net::Ipv4Addr>,
 ) -> Option<crate::ExternalAccessView> {
     use crate::{ExternalAccessFailure as Failure, ExternalAccessMode as Mode};
     use direct_network::{CandidateSource as Source, DirectFailure};
@@ -273,6 +275,7 @@ fn external_access_view(
             Source::PublicInterface => crate::ExternalCandidateSource::PublicInterface,
         }),
         lan_address: lan.map(|address| address.ip().to_string()),
+        forward_origin: forward_origin.map(|address| address.to_string()),
         relay_port: windows_service_host::EMBEDDED_RELAY_PORT,
         failure: failure.map(|failure| match failure {
             DirectFailure::NoMappingProtocol => Failure::NoMappingProtocol,
@@ -585,6 +588,7 @@ mod tests {
             None,
             Some(DirectFailure::NoMappingProtocol),
             Some(lan),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -592,7 +596,7 @@ mod tests {
             serde_json::json!({
                 "mode": "automatic", "externalPort": null, "fixedAddress": null,
                 "externalAddress": null, "source": null, "lanAddress": "192.168.1.50",
-                "relayPort": 7443, "failure": "no_mapping_protocol"
+                "forwardOrigin": null, "relayPort": 7443, "failure": "no_mapping_protocol"
             })
         );
         let forward = external_access_view(
@@ -603,6 +607,7 @@ mod tests {
             Some(CandidateSource::Stun),
             None,
             Some(lan),
+            Some("192.168.1.49".parse().unwrap()),
         )
         .unwrap();
         assert_eq!(
@@ -610,7 +615,8 @@ mod tests {
             serde_json::json!({
                 "mode": "router_forward", "externalPort": 8443, "fixedAddress": null,
                 "externalAddress": "93.184.216.34:8443", "source": "stun",
-                "lanAddress": "192.168.1.50", "relayPort": 7443, "failure": null
+                "lanAddress": "192.168.1.50", "forwardOrigin": "192.168.1.49",
+                "relayPort": 7443, "failure": null
             })
         );
         let fixed_address: SocketAddr = "[2606:4700::1111]:7443".parse().unwrap();
@@ -622,6 +628,7 @@ mod tests {
             Some(CandidateSource::Fixed),
             None,
             Some("[2606:4700::5]:7443".parse().unwrap()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -630,13 +637,15 @@ mod tests {
                 "mode": "fixed", "externalPort": null,
                 "fixedAddress": "[2606:4700::1111]:7443",
                 "externalAddress": "[2606:4700::1111]:7443", "source": "fixed",
-                "lanAddress": "2606:4700::5", "relayPort": 7443, "failure": null
+                "lanAddress": "2606:4700::5", "forwardOrigin": null,
+                "relayPort": 7443, "failure": null
             })
         );
         // An invalid access or a contradictory observation is not presented.
         assert!(
             external_access_view(
                 ExternalAccess::RouterForward { external_port: 0 },
+                None,
                 None,
                 None,
                 None,
@@ -648,6 +657,7 @@ mod tests {
             external_access_view(
                 ExternalAccess::Automatic,
                 Some("93.184.216.34:7443".parse().unwrap()),
+                None,
                 None,
                 None,
                 None

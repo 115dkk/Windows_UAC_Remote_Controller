@@ -20,6 +20,8 @@ const HINT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 /// answered. The phone drops its query ten seconds after sending it and ends a
 /// connection that answers one it no longer holds, so this stays well inside.
 const DEFERRED_ANSWER_WINDOW: Duration = Duration::from_secs(6);
+#[cfg(all(windows, target_pointer_width = "64"))]
+const FORWARD_ORIGIN_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A query that arrived while the gateway owner was still discovering, kept to
 /// be answered once the owner settles. Without it a phone that reconnects right
@@ -487,6 +489,52 @@ impl ServiceSession<'_> {
         }
     }
 
+    /// An old forward setting has no origin. Once its matching gateway owner is
+    /// running with a usable routed IPv4, adopt that address through the same
+    /// protected writer. A failed write is retried no sooner than one minute.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    pub(super) fn adopt_forward_origin(&mut self, now: Instant) {
+        if !matches!(
+            self.external_access,
+            direct_network::ExternalAccess::RouterForward { .. }
+        ) || self.external_forward_origin.is_some()
+            || self.closing
+            || self.pending_relay.is_some()
+            || self
+                .forward_origin_retry_at
+                .is_some_and(|retry| now < retry)
+        {
+            return;
+        }
+        if !self
+            .direct_gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.access() == self.external_access)
+        {
+            return;
+        }
+        let Some(origin) = self.direct_internal.and_then(|internal| match internal {
+            SocketAddr::V4(address)
+                if crate::external_access::usable_forward_origin(*address.ip()) =>
+            {
+                Some(*address.ip())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let setting = crate::external_access::ExternalAccessSetting {
+            access: self.external_access,
+            forward_origin: Some(origin),
+        };
+        if crate::native::configure_external_access_for_running_service(setting).is_ok() {
+            self.external_forward_origin = Some(origin);
+            self.forward_origin_retry_at = None;
+        } else {
+            self.forward_origin_retry_at = Some(now + FORWARD_ORIGIN_RETRY_INTERVAL);
+        }
+    }
+
     /// The configured mode and, when the current owner runs that mode, its
     /// observation. Addresses go to local management clients of this PC only.
     /// Every field is checked here so the reply always encodes.
@@ -524,6 +572,12 @@ impl ServiceSession<'_> {
                 .direct_internal
                 .filter(|_| !self.closing && self.direct_gateway.is_some())
                 .filter(usable),
+            forward_origin: matches!(
+                self.external_access,
+                direct_network::ExternalAccess::RouterForward { .. }
+            )
+            .then_some(self.external_forward_origin)
+            .flatten(),
         }
     }
 

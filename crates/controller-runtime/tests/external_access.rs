@@ -16,6 +16,7 @@ fn view(mode: ExternalAccessMode) -> ExternalAccessView {
         external_address: None,
         source: None,
         lan_address: Some("192.168.1.50".into()),
+        forward_origin: None,
         relay_port: 7443,
         failure: None,
     }
@@ -36,6 +37,7 @@ fn view_serializes_camel_case_fields_and_snake_case_values_with_nulls() {
             "externalAddress": null,
             "source": null,
             "lanAddress": "192.168.1.50",
+            "forwardOrigin": null,
             "relayPort": 7443,
             "failure": "no_mapping_protocol"
         })
@@ -44,6 +46,7 @@ fn view_serializes_camel_case_fields_and_snake_case_values_with_nulls() {
         external_port: Some(8443),
         external_address: Some("93.184.216.34:8443".into()),
         source: Some(ExternalCandidateSource::Stun),
+        forward_origin: Some("192.168.1.49".into()),
         ..view(ExternalAccessMode::RouterForward)
     };
     assert_eq!(
@@ -55,6 +58,7 @@ fn view_serializes_camel_case_fields_and_snake_case_values_with_nulls() {
             "externalAddress": "93.184.216.34:8443",
             "source": "stun",
             "lanAddress": "192.168.1.50",
+            "forwardOrigin": "192.168.1.49",
             "relayPort": 7443,
             "failure": null
         })
@@ -75,6 +79,7 @@ fn view_serializes_camel_case_fields_and_snake_case_values_with_nulls() {
             "externalAddress": "[2606:4700::1111]:7443",
             "source": "fixed",
             "lanAddress": null,
+            "forwardOrigin": null,
             "relayPort": 7443,
             "failure": null
         })
@@ -140,6 +145,14 @@ fn contradictory_views_are_dropped() {
         ExternalAccessView {
             relay_port: 0,
             ..view(ExternalAccessMode::Automatic)
+        },
+        ExternalAccessView {
+            forward_origin: Some("192.168.1.49".into()),
+            ..view(ExternalAccessMode::Automatic)
+        },
+        ExternalAccessView {
+            forward_origin: Some("192.168.1.49".into()),
+            ..view(ExternalAccessMode::Fixed)
         },
     ] {
         assert!(bad.checked().is_none());

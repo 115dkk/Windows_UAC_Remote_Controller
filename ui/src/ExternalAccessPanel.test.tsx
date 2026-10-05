@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, ExternalAccessFailure, ExternalAccessInput, ExternalCandidateSource } from './contracts';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
-import { checkFixedAddress, parseFixedAddress, parsePort, suggestExternalPort } from './externalAccess';
+import { addressDiff, checkFixedAddress, forwardAddressMoved, parseFixedAddress, parsePort, suggestExternalPort } from './externalAccess';
 import { locales, setPreviewLanguage, tr } from './i18n';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
@@ -407,6 +407,53 @@ describe('external port suggestion', () => {
   });
 });
 
+describe('a router forward saved for another PC address', () => {
+  const movedTitle = '경고, PC의 IP 주소가 바뀌었습니다.';
+
+  it('names both addresses, bolds only the digits that changed and lists the two steps', () => {
+    panel(qaCase('desktop-network-forward-moved').snapshot);
+    const alert = screen.getByRole('alert');
+    expect(within(alert).getByRole('heading', { name: movedTitle })).toBeVisible();
+    const origin = within(alert).getByText('원본', { selector: 'dt' }).nextElementSibling as HTMLElement;
+    const current = within(alert).getByText('현재', { selector: 'dt' }).nextElementSibling as HTMLElement;
+    expect(origin).toHaveTextContent('192.168.0.103');
+    expect(current).toHaveTextContent('192.168.0.102');
+    expect([...origin.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['3']);
+    expect([...current.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['2']);
+    expect(within(alert).getByText('공유기의 포트포워딩을 현재 IP로 다시 설정하십시오.')).toBeVisible();
+    expect(within(alert).getByText('DHCP 고정 할당이 켜져 있는지 다시 확인하십시오. 이 설정이 켜져 있어야 PC의 IP가 바뀌지 않습니다.')).toBeVisible();
+  });
+
+  it('saves the same port again so the native owner records the current address', async () => {
+    const user = userEvent.setup();
+    const source = qaCase('desktop-network-forward-moved').snapshot;
+    const onSave = vi.fn<(input: ExternalAccessInput) => Promise<AppSnapshot | null>>().mockResolvedValue(source);
+    panel(source, onSave);
+    await user.click(screen.getByRole('button', { name: '공유기를 고쳤습니다' }));
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ mode: 'router_forward', externalPort: 17443 });
+  });
+
+  it('stays hidden while the addresses match, the read is stale or another mode is saved', () => {
+    const source = qaCase('desktop-network-forward-moved').snapshot;
+    const view = source.externalAccess!;
+    expect(forwardAddressMoved({ ...view, forwardOrigin: view.lanAddress })).toBeNull();
+    expect(forwardAddressMoved({ ...view, forwardOrigin: null })).toBeNull();
+    expect(forwardAddressMoved({ ...view, lanAddress: null })).toBeNull();
+    expect(forwardAddressMoved({ ...view, mode: 'automatic', externalPort: null })).toBeNull();
+    panel(source, undefined, true);
+    expect(screen.queryByText(movedTitle)).not.toBeInTheDocument();
+  });
+
+  it('marks differing digits within an octet and whole octets of another length', () => {
+    const marked = (a: string, b: string) => addressDiff(a, b).map(part => part.changed ? `[${part.text}]` : part.text).join('');
+    expect(marked('111.222.333.123', '111.222.333.124')).toBe('111.222.333.12[3]');
+    expect(marked('192.168.0.103', '192.168.1.130')).toBe('192.168.[0].1[03]');
+    expect(marked('192.168.0.99', '192.168.0.102')).toBe('192.168.0.[99]');
+    expect(marked('10.0.0.5', '192.168.0.5')).toBe('[10].[0].0.5');
+    expect(marked('10.0.0.5', '10.0.0.5')).toBe('10.0.0.5');
+  });
+});
+
 describe('external access localization', () => {
   it.each(locales)('translates every visible string of the tab in %s', (locale) => {
     setPreviewLanguage(locale);
@@ -416,5 +463,12 @@ describe('external access localization', () => {
     expect(container.textContent).toContain('7443');
     if (locale !== 'ko') expect(container.textContent).not.toMatch(/[가-힣]/u);
     expect(container.textContent).not.toMatch(/\{[a-z]+\}/u);
+  });
+
+  it.each(locales)('translates the changed-address warning in %s', (locale) => {
+    setPreviewLanguage(locale);
+    const { container } = render(<ExternalAccessPanel snapshot={qaCase('desktop-network-forward-moved').snapshot} disabled={false} onSave={vi.fn()} onSetRelay={vi.fn()} />);
+    expect(container.querySelector('.address-moved')?.textContent).toContain('192.168.0.103');
+    if (locale !== 'ko') expect(container.textContent).not.toMatch(/[가-힣]/u);
   });
 });

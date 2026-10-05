@@ -525,6 +525,12 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     external_access: direct_network::ExternalAccess,
     #[cfg(all(windows, target_pointer_width = "64"))]
+    external_forward_origin: Option<std::net::Ipv4Addr>,
+    /// The earliest time an automatic forward-origin write may be retried after
+    /// a failure. `None` means adoption has not failed and may run immediately.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    forward_origin_retry_at: Option<Instant>,
+    #[cfg(all(windows, target_pointer_width = "64"))]
     embedded_mode: bool,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay_retry_at: Instant,
@@ -646,6 +652,10 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             external_access: direct_network::ExternalAccess::Automatic,
             #[cfg(all(windows, target_pointer_width = "64"))]
+            external_forward_origin: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            forward_origin_retry_at: None,
+            #[cfg(all(windows, target_pointer_width = "64"))]
             embedded_mode: false,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_retry_at: epoch_start,
@@ -716,8 +726,13 @@ impl<'key> ServiceSession<'key> {
 
     /// The stored choice read at service start, before any gateway owner runs.
     #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(crate) fn use_external_access(&mut self, access: direct_network::ExternalAccess) {
-        self.external_access = access;
+    pub(crate) fn use_external_access(
+        &mut self,
+        setting: crate::external_access::ExternalAccessSetting,
+    ) {
+        self.external_access = setting.access;
+        self.external_forward_origin = setting.forward_origin;
+        self.forward_origin_retry_at = None;
     }
 
     /// Updates the service worker's current watcher observation for read-only
@@ -846,6 +861,7 @@ impl<'key> ServiceSession<'key> {
             }
         }
         self.poll_direct_gateway(endpoint);
+        self.adopt_forward_origin(now);
         self.poll_lan_announcement(now);
         Ok(())
     }
@@ -1439,6 +1455,7 @@ impl<'key> ServiceSession<'key> {
                 .is_some_and(relay_service::HostedRelay::is_running)
             {
                 self.poll_direct_gateway(None);
+                self.adopt_forward_origin(now);
             }
             self.poll_embedded_relay(now)?;
             self.answer_deferred_queries(now)?;
@@ -1703,14 +1720,31 @@ impl<'key> ServiceSession<'key> {
                 health: self.watcher_health,
             })),
             ManagementRequest::SetExternalAccess { access } => {
+                let forward_origin = match (access, self.direct_internal) {
+                    (
+                        direct_network::ExternalAccess::RouterForward { .. },
+                        Some(std::net::SocketAddr::V4(internal)),
+                    ) if crate::external_access::usable_forward_origin(*internal.ip()) => {
+                        Some(*internal.ip())
+                    }
+                    _ => None,
+                };
+                let setting = crate::external_access::ExternalAccessSetting {
+                    access,
+                    forward_origin,
+                };
                 // Persist first, on this worker, through the same protected
                 // owner as the relay choice; a failed write changes nothing.
-                if crate::native::configure_external_access_for_running_service(access).is_err() {
+                if crate::native::configure_external_access_for_running_service(setting).is_err() {
                     return Ok(Some(ManagementResponse::Refused(
                         "외부 연결 설정을 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.".into(),
                     )));
                 }
+                // Always update both values, even when the mode and port stayed
+                // unchanged: saving again acknowledges the current LAN address.
                 self.external_access = access;
+                self.external_forward_origin = forward_origin;
+                self.forward_origin_retry_at = None;
                 // The next gateway poll drains an owner of another mode and
                 // starts one with this mode; do not wait for the relay retry.
                 self.relay_retry_at = Instant::now();

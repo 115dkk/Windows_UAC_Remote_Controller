@@ -209,6 +209,8 @@ pub struct ExternalAccessView {
     pub source: Option<ExternalCandidateSource>,
     /// This PC's routed LAN IP without a port, for router instructions.
     pub lan_address: Option<String>,
+    /// router_forward only: this PC's LAN IP when the forward was saved.
+    pub forward_origin: Option<String>,
     /// The embedded relay's port on this PC.
     pub relay_port: u16,
     pub failure: Option<ExternalAccessFailure>,
@@ -219,13 +221,17 @@ impl ExternalAccessView {
     pub fn checked(self) -> Option<Self> {
         let mode_fields = match self.mode {
             ExternalAccessMode::Automatic => {
-                self.external_port.is_none() && self.fixed_address.is_none()
+                self.external_port.is_none()
+                    && self.fixed_address.is_none()
+                    && self.forward_origin.is_none()
             }
             ExternalAccessMode::RouterForward => {
                 self.external_port.is_some_and(|port| port != 0) && self.fixed_address.is_none()
             }
             ExternalAccessMode::Fixed => {
-                self.external_port.is_none() && self.fixed_address.is_some()
+                self.external_port.is_none()
+                    && self.fixed_address.is_some()
+                    && self.forward_origin.is_none()
             }
         };
         let candidate = self.external_address.is_some() == self.source.is_some()

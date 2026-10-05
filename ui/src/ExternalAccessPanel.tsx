@@ -10,7 +10,9 @@ import { displayText } from './displayText';
 import { RelayStatusLine } from './RelayStatusLine';
 import { DirectConnectionStatus, FirewallGuidance } from './DirectConnectionStatus';
 import { RelaySettings } from './RelaySettings';
+import { Icon } from './icons';
 import {
+  addressDiff, addressMovedText, forwardAddressMoved,
   addressInvalidText, addressUnreachableText, DEFAULT_RELAY_PORT, draftChanged, draftFromView, failureText, FIXED_ADDRESS_EXAMPLE,
   inputFromDraft, lanEndpoint, modeText, parsePort, portChangeHint, portInvalidText, portSuggestHint, portSuggestText, sourceText,
   suggestExternalPort,
@@ -45,6 +47,60 @@ function ExternalAccessStatus({ snapshot, stale }: { snapshot: AppSnapshot; stal
         <div><dt>{tr('주소를 얻은 방법')}</dt><dd>{!view ? unknown : view.source ? tr(sourceText[view.source]) : tr('없음')}</dd></div>
         <div><dt>{tr('이 PC의 내부 주소')}</dt><dd>{lan ? <bdi dir="ltr">{displayText(lan)}</bdi> : unknown}</dd></div>
       </dl>
+    </div>
+  </section>;
+}
+
+/** One address with the digits that differ from `other` in bold. */
+function AddressCompared({ address, other }: { address: string; other: string }) {
+  return <bdi dir="ltr" className="address-compared">{addressDiff(address, other).map((part, index) =>
+    part.changed ? <strong key={index}>{part.text}</strong> : <Fragment key={index}>{part.text}</Fragment>)}</bdi>;
+}
+
+/** The LAN IP saved with the router forward no longer matches this PC's. The
+ * button saves the same port again, which makes the native owner record the
+ * current address; nothing here checks or changes the router. */
+function ForwardAddressMoved({ snapshot, stale, disabled, onSave }: {
+  snapshot: AppSnapshot; stale: boolean; disabled: boolean;
+  onSave: (input: ExternalAccessInput) => Promise<AppSnapshot | null>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submitLock = useRef(false);
+  const view = stale ? null : snapshot.externalAccess ?? null;
+  const moved = forwardAddressMoved(view);
+  if (!moved || view?.externalPort == null) return null;
+  const externalPort = view.externalPort;
+  async function confirm() {
+    if (disabled || submitLock.current) return;
+    submitLock.current = true;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const confirmed = await onSave({ mode: 'router_forward', externalPort });
+      if (!confirmed || confirmed.issue) setError(ko.saveFailure);
+    } catch {
+      setError(ko.saveFailure);
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
+    }
+  }
+  return <section className="notice-box warning address-moved" role="alert"><Icon name="alert" />
+    <div>
+      <h2>{tr(addressMovedText.title)}</h2>
+      <dl className="address-moved-facts">
+        <div><dt>{tr(addressMovedText.origin)}</dt><dd><AddressCompared address={moved.origin} other={moved.current} /></dd></div>
+        <div><dt>{tr(addressMovedText.current)}</dt><dd><AddressCompared address={moved.current} other={moved.origin} /></dd></div>
+      </dl>
+      <ul className="address-moved-steps">
+        <li>{tr(addressMovedText.forward)}</li>
+        <li>{tr(addressMovedText.reservation)}</li>
+      </ul>
+      <button type="button" className="button secondary" disabled={disabled || submitting} onClick={() => { void confirm(); }}>
+        {submitting ? ko.saving : tr(addressMovedText.confirm)}</button>
+      <p className="supporting-text">{tr(addressMovedText.confirmHint)}</p>
+      {error && <p className="field-error">{error}</p>}
     </div>
   </section>;
 }
@@ -177,6 +233,7 @@ export function ExternalAccessPanel({ snapshot, disabled, stale = false, onSave,
   const id = useId();
   if (snapshot.platform !== 'windows') return null;
   return <>
+    <ForwardAddressMoved snapshot={snapshot} stale={stale} disabled={disabled} onSave={onSave} />
     <ExternalAccessStatus snapshot={snapshot} stale={stale} />
     <ExternalAccessForm snapshot={snapshot} stale={stale} disabled={disabled} onSave={onSave} />
     <section className="network-section" aria-labelledby={`${id}-relay`}>

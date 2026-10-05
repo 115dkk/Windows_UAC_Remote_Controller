@@ -251,6 +251,13 @@ button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-vis
 .notice-box.error { border-color: var(--danger); }
 .notice-box.error > .icon { color: var(--danger); }
 .notice-box .supporting-text { margin-top: var(--space-1); }
+.address-moved-facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: var(--space-2) 0; }
+.address-moved-facts > div { display: contents; }
+.address-moved-facts dt { color: var(--muted); font-size: var(--text-caption); }
+.address-moved-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.address-compared strong { font-weight: 700; color: var(--text); }
+.address-moved-steps { margin: 0; padding-inline-start: var(--space-4); font-size: var(--text-caption); }
+.address-moved-steps li + li { margin-top: var(--space-1); }
 .stale-label { display: flex; gap: var(--space-2); align-items: flex-start; color: var(--warning); font-size: var(--text-caption); margin-bottom: var(--space-4); }
 .stale-label > .icon { margin-top: var(--space-1); }
 .global-feedback { color: var(--muted); font-size: var(--text-caption); }

@@ -112,10 +112,12 @@ fn direct_failure_byte(value: Option<DirectFailure>) -> u8 {
 /// A published candidate always names its source, and a failure is reported
 /// only while no candidate is published. Addresses follow the relay rules.
 fn validate_external(
+    access: ExternalAccess,
     external: Option<SocketAddr>,
     source: Option<CandidateSource>,
     failure: Option<DirectFailure>,
     lan: Option<SocketAddr>,
+    forward_origin: Option<Ipv4Addr>,
 ) -> Result<(), ManagementCodecError> {
     if external.is_some() != source.is_some()
         || (external.is_some() && failure.is_some())
@@ -123,6 +125,9 @@ fn validate_external(
             .into_iter()
             .chain(lan)
             .any(|address| crate::contract::validate_relay_endpoint(address).is_err())
+        || (forward_origin.is_some() && !matches!(access, ExternalAccess::RouterForward { .. }))
+        || forward_origin
+            .is_some_and(|address| !crate::external_access::usable_forward_origin(address))
     {
         return Err(ManagementCodecError::Malformed);
     }
@@ -271,6 +276,8 @@ pub enum ManagementResponse {
         failure: Option<DirectFailure>,
         /// The owner's internal endpoint: this PC's routed address and port.
         lan: Option<SocketAddr>,
+        /// Router-forward only: this PC's LAN IPv4 when that choice was saved.
+        forward_origin: Option<Ipv4Addr>,
     },
     Snapshot {
         relay: Option<SocketAddr>,
@@ -434,14 +441,16 @@ pub fn encode_response(response: &ManagementResponse) -> Result<Vec<u8>, Managem
             source,
             failure,
             lan,
+            forward_origin,
         } => {
-            validate_external(*external, *source, *failure, *lan)?;
+            validate_external(*access, *external, *source, *failure, *lan, *forward_origin)?;
             writer.byte(0x85);
             writer.external_access(*access)?;
             writer.optional_address(*external);
             writer.byte(candidate_source_byte(*source));
             writer.byte(direct_failure_byte(*failure));
             writer.optional_address(*lan);
+            writer.optional_ipv4(*forward_origin);
         }
         ManagementResponse::Snapshot {
             relay,
@@ -586,13 +595,15 @@ pub fn decode_response(bytes: &[u8]) -> Result<ManagementResponse, ManagementCod
             let source = candidate_source(reader.byte()?)?;
             let failure = direct_failure(reader.byte()?)?;
             let lan = reader.optional_address()?;
-            validate_external(external, source, failure, lan)?;
+            let forward_origin = reader.optional_ipv4()?;
+            validate_external(access, external, source, failure, lan, forward_origin)?;
             ManagementResponse::ExternalStatus {
                 access,
                 external,
                 source,
                 failure,
                 lan,
+                forward_origin,
             }
         }
         0x81 => {
@@ -719,6 +730,15 @@ impl Writer {
             }
         }
     }
+    fn optional_ipv4(&mut self, value: Option<Ipv4Addr>) {
+        match value {
+            None => self.byte(0),
+            Some(address) => {
+                self.byte(1);
+                self.bytes(&address.octets());
+            }
+        }
+    }
     fn address(&mut self, value: SocketAddr) {
         match value.ip() {
             IpAddr::V4(ip) => {
@@ -834,6 +854,13 @@ impl<'a> Reader<'a> {
         match self.byte()? {
             0 => Ok(None),
             1 => self.address().map(Some),
+            _ => Err(ManagementCodecError::Malformed),
+        }
+    }
+    fn optional_ipv4(&mut self) -> Result<Option<Ipv4Addr>, ManagementCodecError> {
+        match self.byte()? {
+            0 => Ok(None),
+            1 => Ok(Some(Ipv4Addr::from(self.array::<4>()?))),
             _ => Err(ManagementCodecError::Malformed),
         }
     }
@@ -1401,12 +1428,13 @@ mod tests {
         "93.184.216.34:7443".parse().unwrap()
     }
 
-    fn external_status(
+    fn external_status_with_origin(
         access: ExternalAccess,
         external: Option<SocketAddr>,
         source: Option<CandidateSource>,
         failure: Option<DirectFailure>,
         lan: Option<SocketAddr>,
+        forward_origin: Option<Ipv4Addr>,
     ) -> ManagementResponse {
         ManagementResponse::ExternalStatus {
             access,
@@ -1414,7 +1442,18 @@ mod tests {
             source,
             failure,
             lan,
+            forward_origin,
         }
+    }
+
+    fn external_status(
+        access: ExternalAccess,
+        external: Option<SocketAddr>,
+        source: Option<CandidateSource>,
+        failure: Option<DirectFailure>,
+        lan: Option<SocketAddr>,
+    ) -> ManagementResponse {
+        external_status_with_origin(access, external, source, failure, lan, None)
     }
 
     #[test]
@@ -1577,8 +1616,34 @@ mod tests {
                 None
             ))
             .unwrap(),
-            b"UCMG\x03\x85\x00\x00\x00\x00\x00"
+            b"UCMG\x03\x85\x00\x00\x00\x00\x00\x00"
         );
+    }
+
+    #[test]
+    fn external_forward_origin_round_trips_present_and_absent() {
+        let access = ExternalAccess::RouterForward {
+            external_port: 7443,
+        };
+        for origin in [None, Some(Ipv4Addr::new(192, 168, 219, 102))] {
+            let response = external_status_with_origin(access, None, None, None, None, origin);
+            let wire = encode_response(&response).unwrap();
+            assert_eq!(decode_response(&wire), Ok(response));
+            if let Some(origin) = origin {
+                assert_eq!(
+                    &wire[wire.len() - 5..],
+                    &[
+                        1,
+                        origin.octets()[0],
+                        origin.octets()[1],
+                        origin.octets()[2],
+                        origin.octets()[3]
+                    ]
+                );
+            } else {
+                assert_eq!(wire.last(), Some(&0));
+            }
+        }
     }
 
     #[test]
@@ -1631,6 +1696,32 @@ mod tests {
                 None,
                 None,
             ),
+            external_status_with_origin(
+                ExternalAccess::Automatic,
+                None,
+                None,
+                None,
+                None,
+                Some(Ipv4Addr::new(192, 168, 1, 50)),
+            ),
+            external_status_with_origin(
+                ExternalAccess::Fixed { address: public() },
+                None,
+                None,
+                None,
+                None,
+                Some(Ipv4Addr::new(192, 168, 1, 50)),
+            ),
+            external_status_with_origin(
+                ExternalAccess::RouterForward {
+                    external_port: 7443,
+                },
+                None,
+                None,
+                None,
+                None,
+                Some(Ipv4Addr::UNSPECIFIED),
+            ),
         ] {
             assert_eq!(
                 encode_response(&response),
@@ -1645,8 +1736,8 @@ mod tests {
             None,
         ))
         .unwrap();
-        // access, external flag, source, failure, lan flag.
-        for (offset, value) in [(6, 3), (7, 2), (8, 6), (9, 4), (10, 2)] {
+        // access, external flag, source, failure, lan flag, origin flag.
+        for (offset, value) in [(6, 3), (7, 2), (8, 6), (9, 4), (10, 2), (11, 2)] {
             let mut invalid = valid.clone();
             invalid[offset] = value;
             assert_eq!(

@@ -1111,6 +1111,7 @@ fn external_view() -> controller_runtime::ExternalAccessView {
         external_address: Some("93.184.216.34:8443".into()),
         source: Some(controller_runtime::ExternalCandidateSource::Stun),
         lan_address: Some("192.168.1.50".into()),
+        forward_origin: Some("192.168.1.49".into()),
         relay_port: 7443,
         failure: None,
     }
@@ -1130,6 +1131,7 @@ fn external_access_is_presented_only_from_a_current_running_observation() {
     assert_eq!(wire["externalAccess"]["mode"], "router_forward");
     assert_eq!(wire["externalAccess"]["externalPort"], 8443);
     assert_eq!(wire["externalAccess"]["lanAddress"], "192.168.1.50");
+    assert_eq!(wire["externalAccess"]["forwardOrigin"], "192.168.1.49");
     assert_eq!(wire["externalAccess"]["relayPort"], 7443);
 
     // An inconsistent optional read is dropped without losing the device list.
