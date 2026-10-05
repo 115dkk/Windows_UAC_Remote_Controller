@@ -119,6 +119,7 @@ export const ko = {
   pairingUsbFailure: 'USB 연결 화면을 열지 못했습니다. 케이블을 확인하거나 QR 코드로 연결하십시오.',
   connected: '연결됨',
   disconnected: '연결 안 됨',
+  reconnecting: '다시 연결하는 중',
   removeDevice: '등록 삭제',
   removeTitle: '이 휴대폰의 등록을 삭제하시겠습니까?',
   removeBody: '이 휴대폰으로 요청을 받으려면 QR 또는 USB로 다시 등록해야 합니다.',

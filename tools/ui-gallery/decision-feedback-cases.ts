@@ -2,7 +2,7 @@
 import type { GalleryCase } from './cases';
 import type { GalleryLocale } from './i18n-cases';
 
-export type FeedbackKind = 'decision' | 'connection' | 'firewall';
+export type FeedbackKind = 'decision' | 'connection' | 'firewall' | 'phone-reconnect';
 export interface FeedbackCase extends GalleryCase {
   readonly locale: GalleryLocale;
   readonly kind: FeedbackKind;
@@ -52,4 +52,6 @@ export const feedbackCases: readonly FeedbackCase[] = [
   row('firewall', 'firewall-paired-offline-network-760', 'desktop-network-auto-no-mapping', 760, { height: 900 }),
   row('firewall', 'firewall-connected-980', 'desktop-connected', 980, { height: 900 }),
   row('firewall', 'firewall-unpaired-network-760', 'desktop-relay-listening', 760, { height: 900 }),
+  row('phone-reconnect', 'pc-phone-reconnecting-980', 'desktop-status-phone-reconnecting', 980, { height: 900, clockMillis: [past] }),
+  row('phone-reconnect', 'pc-phone-reconnecting-de-760', 'desktop-status-phone-reconnecting', 760, { locale: 'de', height: 900, clockMillis: [past] }),
 ];

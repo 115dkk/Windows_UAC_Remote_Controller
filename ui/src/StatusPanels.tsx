@@ -10,6 +10,7 @@ import { RelayStatusLine } from './RelayStatusLine';
 import { DirectConnectionStatus } from './DirectConnectionStatus';
 import { directConnectionState } from './directConnection';
 import { useConnectionDisplay } from './useConnectionDisplay';
+import { Spinner } from './PcConnectionStatus';
 
 export function EmptyState({ icon, title, description, children }: {
   icon: IconName; title: string; description: string; children?: ReactNode;
@@ -31,7 +32,10 @@ export function ServicePanel({ snapshot, disabled, onAction, onOpenNetwork, stal
   const connectionKnown = service?.state === 'running' && snapshot.dataAvailability.devices === 'available';
   const connected = useConnectionDisplay(connectionKnown ? snapshot.devices.some(device => device.connected) : null,
     snapshot.devices.map(device => `${device.id}:${device.revision}`).sort().join('|'));
-  const connectionText = connected === true ? tr('휴대폰 연결됨') : connected === false ? tr('휴대폰 연결 안 됨') : connectionUnknownText(snapshot);
+  const connectionText = connected === 'connected' ? tr('휴대폰 연결됨') : connected === 'reconnecting' ? tr('휴대폰에 다시 연결하는 중')
+    : connected === 'disconnected' ? tr('휴대폰 연결 안 됨') : connectionUnknownText(snapshot);
+  // A reconnecting phone shows no failure guidance yet, as the phone shows its PC.
+  const guidance = connected !== 'connected' && connected !== 'reconnecting';
   const description = !service ? ko.serviceUnknownBody : !service.installed ? ko.serviceMissingBody
     : service.state === 'running' ? null
       : service.state === 'stopped' ? (service.allowedActions.includes('start') ? ko.serviceStoppedBody : ko.serviceUnknownBody)
@@ -47,11 +51,13 @@ export function ServicePanel({ snapshot, disabled, onAction, onOpenNetwork, stal
   return <>
     <section className="surface service-card" aria-labelledby="service-heading">
       <div className="service-heading-row"><span className="feature-icon"><Icon name="pc" /></span><div><h2 id="service-heading">{serviceTitle}</h2></div></div>
-      {service && <p className={`state-line ${connected ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connectionText}</p>}
+      {service && (connected === 'reconnecting'
+        ? <p className="state-line is-progress"><Spinner />{connectionText}</p>
+        : <p className={`state-line ${connected === 'connected' ? 'is-success' : ''}`}><span className="state-dot" aria-hidden="true" />{connectionText}</p>)}
       {description && <p className="service-description">{description}</p>}
-      {!approvalOff && connected !== true && <RelayStatusLine snapshot={snapshot} stale={stale} />}
-      {/* Never beside a line that still says a phone is connected. */}
-      {!approvalOff && <DirectConnectionStatus snapshot={snapshot} stale={stale} guidance={connected !== true} />}
+      {!approvalOff && guidance && <RelayStatusLine snapshot={snapshot} stale={stale} />}
+      {/* Never beside a line that still says a phone is connected or reconnecting. */}
+      {!approvalOff && <DirectConnectionStatus snapshot={snapshot} stale={stale} guidance={guidance} />}
       {networkSetup && <div className="network-setup-action"><button type="button" className="button secondary" disabled={disabled} onClick={onOpenNetwork}>{ko.networkSetup}</button></div>}
       {actionIssue && !issueAlreadyGlobal && <section className="notice-box warning" role="alert"><Icon name="alert" /><div><p>{tr(actionIssue.message)}</p>{actionIssue.nextAction && <p className="supporting-text">{tr(actionIssue.nextAction)}</p>}</div></section>}
       {/* No computer name is supplied yet; an empty row would read as a failed load. */}
