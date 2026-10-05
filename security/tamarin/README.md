@@ -485,3 +485,14 @@ The canaries test the model/runner's sensitivity to the specified missing mechan
 `peer_runtime.rs` gains one comment above the `ApplyOutcome` mapping pointing to
 ADR 0040; no code changes. No theorem, rule, canary, proof budget or expected
 verdict changes; CI must still run the current-source proofs.
+
+### Router forward origin binding review (2026-10-05)
+
+`peer_runtime.rs` gains the recorded router-forward LAN address and its retry
+time on the service session, takes them from the stored setting at startup,
+calls the adoption step after each gateway poll, and records the current LAN
+IPv4 when the local management pipe saves the external access mode (ADR 0046).
+The address is local configuration shown to this PC's own app. Nothing reaches
+or comes from a peer, and admission, signed messages, advertisements, decisions
+and request authorization are unchanged, so no theorem, rule, canary or expected
+verdict changes. Rebinding approved by the user.
