@@ -52,3 +52,22 @@ ignore = false
 unmaintained = "workspace"
 # A withdrawn release is always this workspace's problem, whoever pulled it in.
 yanked = "deny"
+# Unsound code is denied as deep as a vulnerability is. Exactly one exception
+# stands, and only while it is unavoidable:
+#
+# RUSTSEC-2024-0429 (GHSA-wrw7-89jp-8q8g, glib < 0.20) arrives through Tauri's
+# Linux backend: tauri, wry and tao -> gtk 0.18 -> glib 0.18. The newest wry
+# still requires gtk 0.18, so no upgrade removes it. It is never compiled into
+# the shipped Windows or Android builds, and nothing here calls the affected
+# glib::VariantStrIter.
+#
+# tools/glib-upgrade-watch.mjs fails the Cargo Deny job as soon as the newest
+# releases of those dependencies resolve without glib < 0.20, and
+# unused-ignored-advisory fails it once Cargo.lock no longer holds that glib.
+# Either way the entry below must go, and from then on glib < 0.20 is denied
+# again like any other unsound crate.
+unsound = "all"
+unused-ignored-advisory = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0429", reason = "glib < 0.20 only via Tauri's Linux GTK backend; no upgrade exists yet; watched by tools/glib-upgrade-watch.mjs" },
+]

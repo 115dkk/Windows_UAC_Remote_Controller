@@ -1,0 +1,46 @@
+name: Advisory watch
+
+# The Cargo Deny job in quality.yml runs only for pull requests, so on a quiet
+# repository nobody would learn that a new advisory was published or that the
+# glib exception in deny.toml has become avoidable. This repeats those two
+# checks on main every day. It is not a release gate: a failure here blocks
+# nothing by itself, GitHub reports it to the repository owner, and the next
+# pull request's Cargo Deny job fails the same way until it is dealt with.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: Cargo Deny advisories and glib upgrade watch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out this revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - name: Check locked workspace advisories with Cargo Deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          rust-version: '1.97.0'
+          arguments: --locked --all-features --workspace
+          command: check
+          command-arguments: advisories
+      - name: Set up repository-pinned Node
+        if: ${{ !cancelled() }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
+      - name: Install repository-pinned Rust
+        if: ${{ !cancelled() }}
+        run: rustup show active-toolchain
+      - name: Watch for an upgrade that ends the tolerated glib advisory
+        # Runs even when the advisory step failed, so one report carries both.
+        if: ${{ !cancelled() }}
+        run: node tools/glib-upgrade-watch.mjs
