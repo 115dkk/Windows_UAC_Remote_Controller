@@ -18,13 +18,13 @@ phone-state-store = { path = "../phone-state-store" }
 secure-channel = { path = "../secure-channel" }
 service-protocol = { path = "../service-protocol" }
 thiserror.workspace = true
-tokio = { version = "=1.53.1", features = ["net"] }
+tokio = { version = "=1.53.3", features = ["net"] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 
 [dev-dependencies]
 p256.workspace = true
 tempfile = "3.23.0"
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

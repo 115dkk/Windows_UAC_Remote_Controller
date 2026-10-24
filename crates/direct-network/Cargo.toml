@@ -9,7 +9,7 @@ publish.workspace = true
 description = "Direct relay address candidates from router mapping, STUN or a typed address; routing hints, not peer authentication"
 
 [dependencies]
-tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "time", "macros"] }
+tokio = { version = "=1.53.3", features = ["rt", "net", "io-util", "time", "macros"] }
 tokio-util = "=0.7.19"
 socket2 = "=0.6.5"
 getrandom.workspace = true

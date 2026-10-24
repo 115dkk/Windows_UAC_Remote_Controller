@@ -45,7 +45,7 @@ service-protocol = { path = "../service-protocol" }
 framed-transport = { path = "../framed-transport" }
 relay-service = { path = "../relay-service" }
 direct-network = { path = "../direct-network" }
-tokio = { version = "=1.53.1", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
+tokio = { version = "=1.53.3", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
 sha2.workspace = true
 p256 = { workspace = true, features = ["pkcs8"] }
 qrcode = { version = "0.14", default-features = false }
@@ -57,7 +57,7 @@ notification-policy = { path = "../notification-policy" }
 phone-request-core = { path = "../phone-request-core" }
 phone-state-store = { path = "../phone-state-store" }
 tempfile = "3.23.0"
-rqrr = "0.9"
+rqrr = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows-identity = { path = "../windows-identity" }

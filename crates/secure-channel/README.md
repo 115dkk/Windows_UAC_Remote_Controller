@@ -3,7 +3,7 @@
 A safe, owned, sans-I/O TLS 1.3 transport for one enrolled phone/PC pair. This
 crate contains **no socket, relay account, enrollment UI, QR secret, PKI roots,
 production identity-key generator/export or software-private-key fallback**.
-It uses pinned rustls 0.23.44 with an explicit ring provider. It does not install
+It uses pinned rustls 0.23.46 with an explicit ring provider. It does not install
 or inherit a process-global provider.
 Rustls generates its ordinary ephemeral TLS session keys through that provider;
 this is not a fallback identity key.
