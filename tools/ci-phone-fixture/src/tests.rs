@@ -192,7 +192,7 @@ fn pc_wire_rejects_tampered_content_even_with_a_valid_test_pc_signature() {
     getrandom::fill(secret.as_mut()).unwrap();
     let signer = SigningKey::from_bytes((&*secret).into()).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_encoded_point(false).as_bytes())
+        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     let content =
         RequestContent::new("uac-ci-request.exe", "C:/ci-fixture.exe", "publisher").unwrap();

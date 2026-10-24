@@ -325,7 +325,7 @@ mod tests {
     fn public(seed: u8) -> TlsPublicKey {
         let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
         let public = p256::PublicKey::from_sec1_bytes(
-            signing.verifying_key().to_encoded_point(false).as_bytes(),
+            signing.verifying_key().to_sec1_point(false).as_bytes(),
         )
         .unwrap();
         TlsPublicKey::from_spki_der(public.to_public_key_der().unwrap().as_bytes()).unwrap()

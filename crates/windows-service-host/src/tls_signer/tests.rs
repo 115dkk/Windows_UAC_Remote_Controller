@@ -29,10 +29,9 @@ struct SoftwareSigner {
 impl SoftwareSigner {
     fn new(seed: u8) -> Self {
         let key = SigningKey::from_slice(&[seed; 32]).unwrap();
-        let point = p256::PublicKey::from_sec1_bytes(
-            key.verifying_key().to_encoded_point(false).as_bytes(),
-        )
-        .unwrap();
+        let point =
+            p256::PublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
+                .unwrap();
         let public =
             TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes()).unwrap();
         Self { key, public }

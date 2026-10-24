@@ -43,17 +43,11 @@ impl PhoneFixture {
 
     fn public_keys(&self) -> DeviceKeys {
         let approval = DecisionPublicKey::from_sec1_bytes(
-            self.approval
-                .verifying_key()
-                .to_encoded_point(true)
-                .as_bytes(),
+            self.approval.verifying_key().to_sec1_point(true).as_bytes(),
         )
         .unwrap();
         let denial = DecisionPublicKey::from_sec1_bytes(
-            self.denial
-                .verifying_key()
-                .to_encoded_point(true)
-                .as_bytes(),
+            self.denial.verifying_key().to_sec1_point(true).as_bytes(),
         )
         .unwrap();
         DeviceKeys::new(approval, denial).unwrap()

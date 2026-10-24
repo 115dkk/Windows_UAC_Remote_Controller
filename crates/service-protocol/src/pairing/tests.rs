@@ -17,10 +17,7 @@ fn signer(seed: u8) -> SigningKey {
 }
 fn public(seed: u8) -> TlsPublicKey {
     let key = p256::PublicKey::from_sec1_bytes(
-        signer(seed)
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes(),
+        signer(seed).verifying_key().to_sec1_point(false).as_bytes(),
     )
     .unwrap();
     TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()

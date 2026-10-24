@@ -164,7 +164,7 @@ impl Fixture {
             SigningKey::from_slice(&[3; 32])
                 .unwrap()
                 .verifying_key()
-                .to_encoded_point(false)
+                .to_sec1_point(false)
                 .as_bytes(),
         )
         .unwrap();

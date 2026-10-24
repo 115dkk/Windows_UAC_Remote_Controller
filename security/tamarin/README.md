@@ -496,3 +496,20 @@ The address is local configuration shown to this PC's own app. Nothing reaches
 or comes from a peer, and admission, signed messages, advertisements, decisions
 and request authorization are unchanged, so no theorem, rule, canary or expected
 verdict changes. Rebinding approved by the user.
+
+### P-256 library upgrade binding review (2026-10-25)
+
+p256 moves from 0.13.2 to 0.14.0 (ecdsa 0.17.0, elliptic-curve 0.14.2) so that
+crypto-bigint leaves 0.5.5, which RUSTSEC-2026-0387 reports as not
+constant-time. Two bound files change only where the library renamed its API.
+`approval-protocol/src/lib.rs` compresses the decision key with
+`to_sec1_point(true)` in place of `to_encoded_point(true)`, which yields the same
+SEC1 bytes. It and `service-protocol/src/message.rs` call `normalize_s()`, which
+now always returns the low-S form, in place of `normalize_s().unwrap_or(sig)`,
+which did the same. p256 0.14 still sets `NORMALIZE_S = false`, so verification
+keeps accepting high-S signatures from Android Keystore, and the strict-DER
+round trip in `from_der` is untouched. Wire bytes, the frozen vectors,
+admission, signed messages, decisions and request authorization are unchanged,
+so no theorem, rule, canary or expected verdict changes. Strict DER parsing,
+signature malleability and constant-time behaviour stay outside the models, as
+stated above. Rebinding approved by the user on 2026-10-25.

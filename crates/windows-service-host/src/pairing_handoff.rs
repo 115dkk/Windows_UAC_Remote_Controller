@@ -908,7 +908,7 @@ mod tests {
         let public = |seed: u8| {
             let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
             let public = p256::PublicKey::from_sec1_bytes(
-                signing.verifying_key().to_encoded_point(false).as_bytes(),
+                signing.verifying_key().to_sec1_point(false).as_bytes(),
             )
             .unwrap();
             secure_channel::TlsPublicKey::from_spki_der(

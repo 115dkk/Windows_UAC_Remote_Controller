@@ -56,8 +56,7 @@ fn clock(ms: u64) -> InboxClock {
 fn verified(event: PcEvent) -> VerifiedPcEvent {
     let key = SigningKey::from_slice(&[7; 32]).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
-            .unwrap();
+        PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes()).unwrap();
     let unsigned = UnsignedPcEvent::new(event).unwrap();
     let signature: Signature = key.sign(&unsigned.signing_bytes());
     unsigned

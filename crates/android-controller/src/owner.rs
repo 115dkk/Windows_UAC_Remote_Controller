@@ -1249,7 +1249,7 @@ mod liveness_unwind_tests {
         let public = |seed: u8| {
             let key = SigningKey::from_slice(&[seed; 32]).unwrap();
             let point = p256::PublicKey::from_sec1_bytes(
-                key.verifying_key().to_encoded_point(false).as_bytes(),
+                key.verifying_key().to_sec1_point(false).as_bytes(),
             )
             .unwrap();
             TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes()).unwrap()

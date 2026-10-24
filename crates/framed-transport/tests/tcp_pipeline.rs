@@ -35,7 +35,7 @@ struct SyntheticTransportSigner(SigningKey);
 impl PlatformTlsSigner for SyntheticTransportSigner {
     fn public_key(&self) -> Result<TlsPublicKey, SignerError> {
         let point =
-            PublicKey::from_sec1_bytes(self.0.verifying_key().to_encoded_point(false).as_bytes())
+            PublicKey::from_sec1_bytes(self.0.verifying_key().to_sec1_point(false).as_bytes())
                 .unwrap();
         TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes())
             .map_err(|_| SignerError::Unavailable)
@@ -189,7 +189,7 @@ async fn signed_service_event_crosses_real_rendezvous_and_mutually_pinned_tls() 
         let service_key = PcPublicKey::from_sec1_bytes(
             service_signer
                 .verifying_key()
-                .to_encoded_point(false)
+                .to_sec1_point(false)
                 .as_bytes(),
         )
         .unwrap();

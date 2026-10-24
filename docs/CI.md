@@ -24,6 +24,27 @@ includes workspace, build and development dependencies. Unaccepted/unknown
 licensing fails the job. The upstream Docker action is commit-pinned and uses
 cargo-deny0.20.2, with no Node20 action runtime.
 
+The same job checks RustSec advisories in a step of its own
+(`cargo deny --locked --all-features --workspace check advisories`), so a newly
+published advisory never reads as a license failure. Vulnerable and unsound
+crates are denied at any depth. `deny.toml` tolerates exactly one advisory,
+RUSTSEC-2024-0429 (glib < 0.20), which Tauri's Linux GTK backend pulls in and no
+release has yet moved past. Two checks end that exception:
+
+- `unused-ignored-advisory = "deny"` fails the advisory step once Cargo.lock no
+  longer holds that glib.
+- `node tools/glib-upgrade-watch.mjs`, the job's last step, takes the
+  workspace's own declarations of the crates that pull that glib in, resolves
+  their newest releases in a throwaway package outside the repository, and
+  fails once they resolve without it. It also fails if that probe cannot
+  resolve at all, so it never passes without having looked.
+
+Either failure means the same thing: upgrade, then delete the ignore entry, the
+watch and its steps. From then on glib < 0.20 is denied like any other unsound
+crate. Quality runs only for pull requests and release dispatches, so the
+advisory step and the watch look again whenever one of those runs, not on a
+schedule.
+
 `node tools/quality.mjs --extended` additionally runs Android Rust **core** Clippy,
 excluding `controller-app` and the host-only `controller-uniffi-bindgen` tool.
 The host jobs check the generator. Install the target first
@@ -33,7 +54,7 @@ Android app build. The full shell needs SDK, NDK, Gradle, Kotlin and device gate
 
 Install the frontend with `npm ci`, using the Node version in `.node-version`.
 Linux host jobs install the official Tauri Debian/Ubuntu development packages
-before testing the full workspace. The package lock pins compatible Vitest 4.1.11
+before testing the full workspace. The package lock pins compatible Vitest 4.1.12
 and TypeScript 6.0.3; newer incompatible test/type packages are not accepted by
 weakening `skipLibCheck` or the typed lint rules.
 

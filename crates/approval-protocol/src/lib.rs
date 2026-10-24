@@ -428,7 +428,7 @@ impl DecisionPublicKey {
         }
         let key =
             VerifyingKey::from_sec1_bytes(bytes).map_err(|_| SignatureError::MalformedPublicKey)?;
-        let point = key.to_encoded_point(true);
+        let point = key.to_sec1_point(true);
         let compressed_sec1 = point
             .as_bytes()
             .try_into()
@@ -477,7 +477,7 @@ impl SignedDecision {
             .map_err(|_| SignatureError::MalformedPublicKey)?;
         // Normalize S for verifier compatibility, not for replay detection.
         // The input DER itself was already strictly validated in from_der.
-        let signature = self.signature.normalize_s().unwrap_or(self.signature);
+        let signature = self.signature.normalize_s();
         verifying_key
             .verify(&self.statement.signing_bytes(), &signature)
             .map_err(|_| SignatureError::VerificationFailed)

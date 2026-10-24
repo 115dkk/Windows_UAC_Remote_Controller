@@ -22,7 +22,7 @@ fn fields() -> AddressAdvertisementFields {
 fn key(seed: u8) -> (SigningKey, PcPublicKey) {
     let signer = SigningKey::from_slice(&[seed; 32]).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_encoded_point(false).as_bytes())
+        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     (signer, public)
 }

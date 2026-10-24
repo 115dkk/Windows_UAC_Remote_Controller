@@ -37,7 +37,7 @@ pub(super) fn signature_from_cng(raw: &[u8]) -> Result<IdentitySignature, Identi
     // RustCrypto rejects zero/out-of-range scalars and performs DER encoding.
     let signature =
         Signature::from_slice(raw).map_err(|_| IdentityEncodingError::SignatureScalar)?;
-    let canonical = signature.normalize_s().unwrap_or(signature);
+    let canonical = signature.normalize_s();
     Ok(IdentitySignature(canonical.to_der().as_bytes().to_vec()))
 }
 
