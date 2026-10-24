@@ -29,7 +29,7 @@ fn public_key(seed: u8, compressed: bool) -> DecisionPublicKey {
     DecisionPublicKey::from_sec1_bytes(
         synthetic
             .verifying_key()
-            .to_encoded_point(compressed)
+            .to_sec1_point(compressed)
             .as_bytes(),
     )
     .unwrap()

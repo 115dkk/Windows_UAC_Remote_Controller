@@ -68,7 +68,7 @@ fn verified(event: PcEvent) -> VerifiedPcEvent {
     // Published synthetic software fixture only, never an enrolled/native key.
     let signer = SigningKey::from_slice(&[7; 32]).expect("synthetic P-256 key");
     let public =
-        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_encoded_point(false).as_bytes())
+        PcPublicKey::from_sec1_bytes(signer.verifying_key().to_sec1_point(false).as_bytes())
             .expect("synthetic public key");
     let unsigned = UnsignedPcEvent::new(event).expect("valid synthetic event");
     let signature: Signature = signer.sign(&unsigned.signing_bytes());

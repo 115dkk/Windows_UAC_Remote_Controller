@@ -180,7 +180,7 @@ fn malformed_and_noncanonical_public_keys_are_rejected() {
     // Compressed SEC1 is mathematically valid, but not the enrolled canonical
     // uncompressed SPKI form accepted by this protocol.
     let software = SigningKey::from_slice(&[1; 32]).unwrap();
-    let compressed = software.verifying_key().to_encoded_point(true);
+    let compressed = software.verifying_key().to_sec1_point(true);
     let mut compressed_spki = valid.as_spki_der()[..26].to_vec();
     compressed_spki[1] = 57;
     compressed_spki[24] = 34;
@@ -301,12 +301,9 @@ fn legitimate_high_s_native_der_signatures_work_in_both_handshake_directions() {
     let signing = SigningKey::from_slice(&[1; 32]).unwrap();
     let message = frame(EndpointRole::Client, 32);
     let signature: Signature = signing.sign(&message);
-    let low = signature.normalize_s().unwrap_or(signature);
+    let low = signature.normalize_s();
     let high = Signature::from_scalars(low.r().to_bytes(), (-low.s()).to_bytes()).unwrap();
-    assert!(
-        high.normalize_s().is_some(),
-        "fixture must actually be high-S"
-    );
+    assert_ne!(high, high.normalize_s(), "fixture must actually be high-S");
     let der = CertificateVerifySignature::from_der(high.to_der().as_bytes()).unwrap();
     assert!(key(1).verify(&message, &der));
     assert!(!key(2).verify(&message, &der));
@@ -568,13 +565,11 @@ fn debug_output_redacts_transport_keys_and_signing_inputs() {
     );
     let signing = SigningKey::from_slice(&[1; 32]).unwrap();
     assert_eq!(
-        p256::PublicKey::from_sec1_bytes(
-            signing.verifying_key().to_encoded_point(false).as_bytes()
-        )
-        .unwrap()
-        .to_public_key_der()
-        .unwrap()
-        .as_bytes(),
+        p256::PublicKey::from_sec1_bytes(signing.verifying_key().to_sec1_point(false).as_bytes())
+            .unwrap()
+            .to_public_key_der()
+            .unwrap()
+            .as_bytes(),
         identity.public_key().as_spki_der()
     );
 }

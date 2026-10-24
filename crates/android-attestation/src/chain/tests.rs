@@ -138,7 +138,7 @@ fn public_chain_rejects_changed_signature_wrong_key_and_added_certificate() {
         Err(Error::Signature)
     ));
     let wrong = SigningKey::from_bytes((&[9u8; 32]).into()).unwrap();
-    let point = wrong.verifying_key().to_encoded_point(false);
+    let point = wrong.verifying_key().to_sec1_point(false);
     let public = p256::PublicKey::from_sec1_bytes(point.as_bytes()).unwrap();
     let wrong =
         TlsPublicKey::from_spki_der(public.to_public_key_der().unwrap().as_bytes()).unwrap();

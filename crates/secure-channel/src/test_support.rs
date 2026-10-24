@@ -23,12 +23,11 @@ pub(crate) struct SyntheticSigner {
 impl SyntheticSigner {
     pub(crate) fn new(seed: u8) -> Self {
         let key = SigningKey::from_slice(&[seed; 32]).expect("valid synthetic fixture scalar");
-        let public = p256::PublicKey::from_sec1_bytes(
-            key.verifying_key().to_encoded_point(false).as_bytes(),
-        )
-        .expect("synthetic public point")
-        .to_public_key_der()
-        .expect("synthetic public SPKI");
+        let public =
+            p256::PublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
+                .expect("synthetic public point")
+                .to_public_key_der()
+                .expect("synthetic public SPKI");
         let public =
             TlsPublicKey::from_spki_der(public.as_bytes()).expect("canonical fixture SPKI");
         Self {
@@ -75,7 +74,7 @@ impl PlatformTlsSigner for SyntheticSigner {
         }
         let mut signature: Signature = self.key.sign(&message);
         if self.high_s {
-            let low = signature.normalize_s().unwrap_or(signature);
+            let low = signature.normalize_s();
             signature = Signature::from_scalars(low.r().to_bytes(), (-low.s()).to_bytes())
                 .map_err(|_| SignerError::InvalidSignature)?;
         }

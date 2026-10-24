@@ -83,7 +83,7 @@ define its own request/response semantics.
   16 KiB copied, even when a larger output slice is supplied.
 - Queued outgoing ciphertext and readable application plaintext each have a
   checked 64 KiB upper bound. Rustls write buffering has record-overhead headroom;
-  ingress is backpressured when output is near capacity. Rustls 0.23.44's own
+  ingress is backpressured when output is near capacity. Rustls 0.23.46's own
   received-plaintext limit is stricter, and its handshake deframer has a 65535-byte
   message bound. These are queue limits, not a promise that total process memory
   is 64 KiB. The runtime owner must also cap simultaneous channels.

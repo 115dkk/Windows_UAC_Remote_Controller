@@ -33,8 +33,7 @@ fn verify_event(event: PcEvent) -> VerifiedPcEvent {
         .unwrap()
         .to_wire();
     let public =
-        PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
-            .unwrap();
+        PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes()).unwrap();
     VerifiedPcEvent::from_wire(&wire, pc, &public).unwrap()
 }
 fn phone_clock(ms: u64, minute: u16) -> ClockReading {
@@ -53,13 +52,11 @@ fn signed_request_to_phone_decision_preserves_service_binding_and_one_shot_autho
     let denial = synthetic_key(3);
     let keys = DeviceKeys::new(
         DecisionPublicKey::from_sec1_bytes(
-            approval.verifying_key().to_encoded_point(false).as_bytes(),
+            approval.verifying_key().to_sec1_point(false).as_bytes(),
         )
         .unwrap(),
-        DecisionPublicKey::from_sec1_bytes(
-            denial.verifying_key().to_encoded_point(false).as_bytes(),
-        )
-        .unwrap(),
+        DecisionPublicKey::from_sec1_bytes(denial.verifying_key().to_sec1_point(false).as_bytes())
+            .unwrap(),
     )
     .unwrap();
     let mut registry = PrivilegedDeviceRegistry::initialize_for_privileged_host(1).unwrap();

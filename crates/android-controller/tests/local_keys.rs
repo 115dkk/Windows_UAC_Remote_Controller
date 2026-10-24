@@ -26,7 +26,7 @@ fn challenge(value: u8) -> LocalAttestationChallenge {
 fn public_key(seed: u8) -> TlsPublicKey {
     let synthetic = SigningKey::from_slice(&[seed; 32]).unwrap();
     let point =
-        PublicKey::from_sec1_bytes(synthetic.verifying_key().to_encoded_point(false).as_bytes())
+        PublicKey::from_sec1_bytes(synthetic.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes()).unwrap()
 }

@@ -52,7 +52,7 @@ fn state(policy: NotificationPolicy) -> PhoneInbox {
 fn verified(event: PcEvent) -> VerifiedPcEvent {
     let signing = SigningKey::from_slice(&[7; 32]).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(signing.verifying_key().to_encoded_point(false).as_bytes())
+        PcPublicKey::from_sec1_bytes(signing.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     let unsigned = UnsignedPcEvent::new(event).unwrap();
     let signature: Signature = signing.sign(&unsigned.signing_bytes());

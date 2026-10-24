@@ -62,10 +62,9 @@ fn challenge(value: u8) -> LocalAttestationChallenge {
 }
 fn public(seed: u8) -> TlsPublicKey {
     let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
-    let public = p256::PublicKey::from_sec1_bytes(
-        signing.verifying_key().to_encoded_point(false).as_bytes(),
-    )
-    .unwrap();
+    let public =
+        p256::PublicKey::from_sec1_bytes(signing.verifying_key().to_sec1_point(false).as_bytes())
+            .unwrap();
     TlsPublicKey::from_spki_der(public.to_public_key_der().unwrap().as_bytes()).unwrap()
 }
 fn local(which: u8, first_key: u8) -> LocalKeySetDescriptor {
@@ -684,7 +683,7 @@ fn corrupt_association_keeps_full_open_intent_order_but_policy_preflight_writes_
 fn verified(event: PcEvent) -> VerifiedPcEvent {
     let signing = SigningKey::from_slice(&[20; 32]).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(signing.verifying_key().to_encoded_point(false).as_bytes())
+        PcPublicKey::from_sec1_bytes(signing.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     let unsigned = UnsignedPcEvent::new(event).unwrap();
     let signature: Signature = signing.sign(&unsigned.signing_bytes());

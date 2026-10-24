@@ -44,7 +44,7 @@ fn key(seed: u8) -> SigningKey {
 }
 fn public(seed: u8) -> TlsPublicKey {
     let point =
-        PublicKey::from_sec1_bytes(key(seed).verifying_key().to_encoded_point(false).as_bytes())
+        PublicKey::from_sec1_bytes(key(seed).verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     TlsPublicKey::from_spki_der(point.to_public_key_der().unwrap().as_bytes()).unwrap()
 }
@@ -741,7 +741,7 @@ fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one
         received
             .verify(
                 &DecisionPublicKey::from_sec1_bytes(
-                    key(3).verifying_key().to_encoded_point(false).as_bytes(),
+                    key(3).verifying_key().to_sec1_point(false).as_bytes(),
                 )
                 .unwrap(),
             )
@@ -845,7 +845,7 @@ fn denial_reaches_same_peer_and_keeps_fence_until_committed_terminal_evidence() 
     received
         .verify(
             &DecisionPublicKey::from_sec1_bytes(
-                key(4).verifying_key().to_encoded_point(false).as_bytes(),
+                key(4).verifying_key().to_sec1_point(false).as_bytes(),
             )
             .unwrap(),
         )

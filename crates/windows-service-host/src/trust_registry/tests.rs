@@ -23,13 +23,12 @@ pub(super) fn relay(seed: u8) -> SocketAddr {
 
 fn point(seed: u8) -> DecisionPublicKey {
     let key = SigningKey::from_bytes((&[seed; 32]).into()).unwrap();
-    DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
-        .unwrap()
+    DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes()).unwrap()
 }
 fn tls(seed: u8) -> TlsPublicKey {
     let key = SigningKey::from_bytes((&[seed; 32]).into()).unwrap();
     let public =
-        p256::PublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+        p256::PublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     TlsPublicKey::from_spki_der(public.to_public_key_der().unwrap().as_bytes()).unwrap()
 }

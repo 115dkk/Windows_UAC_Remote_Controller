@@ -70,8 +70,7 @@ fn verified(event: PcEvent) -> VerifiedPcEvent {
     // registry. Signatures exercise the real verified-event parsing boundary.
     let key = SigningKey::from_slice(&[7; 32]).unwrap();
     let public =
-        PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
-            .unwrap();
+        PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes()).unwrap();
     let unsigned = UnsignedPcEvent::new(event).unwrap();
     let signature: Signature = key.sign(&unsigned.signing_bytes());
     unsigned
@@ -198,10 +197,9 @@ fn full_disjoint_history(pending_ids: &BTreeSet<[u8; 32]>) -> OutcomeHistory {
 
 fn public(seed: u8) -> TlsPublicKey {
     let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
-    let key = p256::PublicKey::from_sec1_bytes(
-        signing.verifying_key().to_encoded_point(false).as_bytes(),
-    )
-    .unwrap();
+    let key =
+        p256::PublicKey::from_sec1_bytes(signing.verifying_key().to_sec1_point(false).as_bytes())
+            .unwrap();
     TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
 }
 
