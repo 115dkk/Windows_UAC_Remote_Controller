@@ -40,9 +40,32 @@ jobs:
           gh auth setup-git
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Point only the version-commit push at the release deploy key
+        # main's "Required checks" ruleset requires every PR check and lets
+        # only deploy keys through; the version commit has no checks of its
+        # own, and GitHub does not accept GitHub Actions as a ruleset bypass
+        # actor on a personal repository. Only that push uses the key: the
+        # pushurl is removed again before the tag push, which stays on the
+        # workflow token so it does not start release.yml a second time.
+        env:
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/release_deploy_key"
+          known="$RUNNER_TEMP/github_known_hosts"
+          (umask 077 && echo "$RELEASE_DEPLOY_KEY" > "$key")
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known"
+          git config core.sshCommand "ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known -o StrictHostKeyChecking=yes"
+          git config remote.origin.pushurl "git@github.com:$GITHUB_REPOSITORY.git"
       - name: Select semantic version and commit only release metadata
         id: prepare
         run: node tools/release-version.mjs
+      - name: Return later pushes to the workflow token
+        if: always()
+        run: |
+          git config --unset remote.origin.pushurl || true
+          git config --unset core.sshCommand || true
+          rm -f "$RUNNER_TEMP/release_deploy_key"
       - name: Execute every release gate on the exact versioned commit
         if: steps.prepare.outputs.skip != 'true'
         env:
