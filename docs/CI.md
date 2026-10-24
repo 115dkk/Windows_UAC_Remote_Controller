@@ -41,8 +41,9 @@ release has yet moved past. Two checks end that exception:
 
 Either failure means the same thing: upgrade, then delete the ignore entry, the
 watch and its steps. From then on glib < 0.20 is denied like any other unsound
-crate. Quality runs only for pull requests, so `advisory-watch.yml` repeats the
-advisory step and the watch on main every day; it is not a release gate.
+crate. Quality runs only for pull requests and release dispatches, so the
+advisory step and the watch look again whenever one of those runs, not on a
+schedule.
 
 `node tools/quality.mjs --extended` additionally runs Android Rust **core** Clippy,
 excluding `controller-app` and the host-only `controller-uniffi-bindgen` tool.
