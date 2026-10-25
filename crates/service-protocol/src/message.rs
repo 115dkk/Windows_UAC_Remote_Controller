@@ -252,7 +252,7 @@ impl PcPublicKey {
         der: &[u8],
     ) -> Result<(), PcEventError> {
         let signature = signature(der)?;
-        let normalized = signature.normalize_s().unwrap_or(signature);
+        let normalized = signature.normalize_s();
         self.0
             .verify(transcript, &normalized)
             .map_err(|_| PcEventError::InvalidSignature)

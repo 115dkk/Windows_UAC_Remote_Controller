@@ -3,7 +3,7 @@
 A safe, owned, sans-I/O TLS 1.3 transport for one enrolled phone/PC pair. This
 crate contains **no socket, relay account, enrollment UI, QR secret, PKI roots,
 production identity-key generator/export or software-private-key fallback**.
-It uses pinned rustls 0.23.44 with an explicit ring provider. It does not install
+It uses pinned rustls 0.23.46 with an explicit ring provider. It does not install
 or inherit a process-global provider.
 Rustls generates its ordinary ephemeral TLS session keys through that provider;
 this is not a fallback identity key.
@@ -83,7 +83,7 @@ define its own request/response semantics.
   16 KiB copied, even when a larger output slice is supplied.
 - Queued outgoing ciphertext and readable application plaintext each have a
   checked 64 KiB upper bound. Rustls write buffering has record-overhead headroom;
-  ingress is backpressured when output is near capacity. Rustls 0.23.44's own
+  ingress is backpressured when output is near capacity. Rustls 0.23.46's own
   received-plaintext limit is stricter, and its handshake deframer has a 65535-byte
   message bound. These are queue limits, not a promise that total process memory
   is 64 KiB. The runtime owner must also cap simultaneous channels.

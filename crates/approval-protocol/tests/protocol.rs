@@ -22,7 +22,7 @@ fn fixture_key(seed: u8) -> SigningKey {
 }
 
 fn public_key(key: &SigningKey) -> DecisionPublicKey {
-    DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(true).as_bytes())
+    DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(true).as_bytes())
         .expect("fixture public key")
 }
 
@@ -221,7 +221,7 @@ fn both_s_representatives_interoperate_without_becoming_replay_identities() {
     let key = fixture_key(1);
     let statement = statement(DecisionPurpose::Approve);
     let signature: Signature = key.sign(&statement.signing_bytes());
-    let low = signature.normalize_s().unwrap_or(signature);
+    let low = signature.normalize_s();
     let (r, s) = low.split_bytes();
     let s_scalar = Option::<Scalar>::from(Scalar::from_repr(s)).unwrap();
     let high = Signature::from_scalars(r, (-s_scalar).to_bytes()).unwrap();
@@ -238,10 +238,10 @@ fn both_s_representatives_interoperate_without_becoming_replay_identities() {
 fn sec1_keys_have_one_equality_representation_and_invalid_points_fail() {
     let key = fixture_key(1);
     let compressed =
-        DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(true).as_bytes())
+        DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(true).as_bytes())
             .unwrap();
     let uncompressed =
-        DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+        DecisionPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     assert_eq!(compressed, uncompressed);
     for bad in [vec![], vec![0], vec![4; 33], vec![4; 64], vec![0xff; 65]] {

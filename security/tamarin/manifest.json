@@ -16,7 +16,7 @@
     },
     {
       "path": "crates/approval-protocol/src/lib.rs",
-      "sha256": "78fbb6770bca968005d7db1b3a571bdc37c54315ed22ce9e78bdc6ae99aa89c9"
+      "sha256": "bd38a901a201ffdab2613b71e3051e215e1dae7cdb1629e599088659b8c48667"
     },
     {
       "path": "crates/approval-core/src/lib.rs",
@@ -24,7 +24,7 @@
     },
     {
       "path": "crates/service-protocol/src/message.rs",
-      "sha256": "ccabd2f518a44916d49427f2caab8375425b56fb1c04c998200b7355e9efed5a"
+      "sha256": "adbf8b5a2a6f6019a8e05158d5a39b60878c22cddae4018b93dd08745d8dda33"
     },
     {
       "path": "crates/service-protocol/src/codec.rs",

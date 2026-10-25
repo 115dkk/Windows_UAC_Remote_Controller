@@ -82,7 +82,7 @@ impl SyntheticSigner {
 impl PlatformTlsSigner for SyntheticSigner {
     fn public_key(&self) -> Result<TlsPublicKey, SignerError> {
         let key =
-            PublicKey::from_sec1_bytes(self.0.verifying_key().to_encoded_point(false).as_bytes())
+            PublicKey::from_sec1_bytes(self.0.verifying_key().to_sec1_point(false).as_bytes())
                 .unwrap();
         TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes())
             .map_err(|_| SignerError::Unavailable)

@@ -19,7 +19,7 @@ fn key() -> SigningKey {
     SigningKey::from_slice(&[3; 32]).unwrap()
 }
 fn public(key: &SigningKey) -> PcPublicKey {
-    PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes()).unwrap()
+    PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes()).unwrap()
 }
 fn binding(content: &RequestContent, expiry: u64) -> RequestBinding {
     RequestBinding::new(
@@ -184,7 +184,7 @@ fn verification_retains_the_actual_key_across_same_pc_reregistration() {
 fn canonical_spki_and_sec1_identify_the_same_verification_key() {
     let key = key();
     let point =
-        p256::PublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+        p256::PublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
             .unwrap();
     let der = point.to_public_key_der().unwrap();
     let parsed = PcPublicKey::from_spki_der(der.as_bytes()).unwrap();

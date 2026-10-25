@@ -29,7 +29,7 @@ fn fixture_key() -> SigningKey {
 }
 
 fn public(key: &SigningKey) -> PcPublicKey {
-    PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+    PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
         .expect("synthetic public key")
 }
 

@@ -163,11 +163,11 @@ an awaited shutdown receipt. Root tests must use explicit cancellation and join
 to prove socket/task cleanup. No blocking task or custom unsafe socket operation
 exists in this crate.
 
-Dependencies are pinned to the verified Tokio 1.53.1 and tokio-util 0.7.19 APIs;
+Dependencies are pinned to the verified Tokio 1.53.3 and tokio-util 0.7.19 APIs;
 first-party code forbids unsafe, while dependency internals are a separate
 boundary. JoinSet abortion must be followed by joining its tasks, which this
 implementation does.
-[Tokio](https://docs.rs/tokio/1.53.1/tokio/),
+[Tokio](https://docs.rs/tokio/1.53.3/tokio/),
 [CancellationToken](https://docs.rs/tokio-util/0.7.19/tokio_util/sync/struct.CancellationToken.html).
 
 ## Optional foreground CLI

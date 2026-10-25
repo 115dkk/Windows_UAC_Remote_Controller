@@ -17,10 +17,7 @@ fn signer(seed: u8) -> SigningKey {
 
 fn public(seed: u8) -> TlsPublicKey {
     let key = p256::PublicKey::from_sec1_bytes(
-        signer(seed)
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes(),
+        signer(seed).verifying_key().to_sec1_point(false).as_bytes(),
     )
     .unwrap();
     TlsPublicKey::from_spki_der(key.to_public_key_der().unwrap().as_bytes()).unwrap()
@@ -243,11 +240,11 @@ fn intended_revision_matches_the_actual_allocator_and_rejects_exhaustion_without
     assert_eq!(value.intended_registry_revision, 1);
     let keys = DeviceKeys::new(
         DecisionPublicKey::from_sec1_bytes(
-            signer(1).verifying_key().to_encoded_point(false).as_bytes(),
+            signer(1).verifying_key().to_sec1_point(false).as_bytes(),
         )
         .unwrap(),
         DecisionPublicKey::from_sec1_bytes(
-            signer(2).verifying_key().to_encoded_point(false).as_bytes(),
+            signer(2).verifying_key().to_sec1_point(false).as_bytes(),
         )
         .unwrap(),
     )

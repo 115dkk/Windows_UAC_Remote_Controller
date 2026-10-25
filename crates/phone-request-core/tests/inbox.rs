@@ -39,9 +39,8 @@ fn request_id(value: u64) -> RequestId {
 fn verified(event: PcEvent) -> VerifiedPcEvent {
     let expected_pc = event.pc();
     let key = SigningKey::from_slice(&[7; 32]).expect("public synthetic test key, never enrolled");
-    let public =
-        PcPublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
-            .expect("synthetic public key");
+    let public = PcPublicKey::from_sec1_bytes(key.verifying_key().to_sec1_point(false).as_bytes())
+        .expect("synthetic public key");
     let unsigned = UnsignedPcEvent::new(event).expect("valid synthetic event");
     let signature: Signature = key.sign(&unsigned.signing_bytes());
     unsigned
