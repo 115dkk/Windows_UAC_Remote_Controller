@@ -206,6 +206,14 @@ test('stable publication cannot overwrite assets or silently change the Android 
   const main = readFileSync(new URL('../.github/workflows/main-release.yml', import.meta.url), 'utf8');
   assert.match(main, /gh workflow run release\.yml --ref "\$tag"/u);
   assert.doesNotMatch(main, /--force|--no-verify/u);
+  // Only the version-commit push uses the deploy key the main ruleset lets
+  // through; the tag push stays on the workflow token, which starts no run.
+  const keyed = main.indexOf('git config remote.origin.pushurl');
+  const versioned = main.indexOf('node tools/release-version.mjs');
+  const unkeyed = main.indexOf('git config --unset remote.origin.pushurl');
+  const tagged = main.indexOf('git push origin "refs/tags/$tag"');
+  assert.match(main, /secrets\.RELEASE_DEPLOY_KEY/u);
+  assert.ok(keyed > 0 && keyed < versioned && versioned < unkeyed && unkeyed < tagged);
 });
 
 test('late older release never replaces a higher stable release as latest', () => {

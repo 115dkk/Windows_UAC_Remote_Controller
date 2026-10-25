@@ -202,6 +202,15 @@ without path filters, plus `workflow_dispatch`. None of them runs on `push`.
   head merged into `main`; otherwise update the branch from `main` first.
 - On `main`, `main-release.yml` dispatches every gate once on the exact release
   commit. A push trigger would run the same gates a second time on that commit.
+- `main` has a "Required checks" ruleset that requires every gate's PR check
+  and lets only deploy keys through. The version commit has no checks of its
+  own, and GitHub does not accept GitHub Actions as a ruleset bypass actor on
+  a personal repository, so `main-release.yml` pushes that one commit over SSH
+  with the `RELEASE_DEPLOY_KEY` write deploy key and removes the key before
+  the tag push. The tag push stays on the workflow token, so it does not start
+  `release.yml` a second time beside the explicit dispatch. The deploy-key push
+  does start `main-release.yml` again, whose job skips `chore(release): `
+  commits.
 
 `tools/release-version.test.mjs` fails if a gate regains a push trigger or a
 path filter.
