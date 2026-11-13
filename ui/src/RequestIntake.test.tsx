@@ -284,6 +284,41 @@ describe('native request presentation integration', () => {
     expect(await screen.findByText(/앱이 다른 작업을 처리하는 중/u)).toBeInTheDocument();
   });
 
+  it('reads again soon after a read finds the owner busy, instead of waiting for the periodic read', async () => {
+    const shown = pending();
+    const busy: AppSnapshot = { ...shown, requests: [], requestCatalog: null, issue: busyOwner,
+      dataAvailability: { ...shown.dataAvailability, requests: 'unavailable' } };
+    const { wake, watchRequests } = wakeable();
+    const reads = vi.fn<ControllerBridge['snapshot']>()
+      .mockResolvedValueOnce(shown).mockResolvedValueOnce(busy).mockResolvedValue(shown);
+    view(shown, { snapshot: reads, watchRequests });
+    await screen.findByText('설정 도우미.exe');
+    await settled();
+    act(() => { wake.notify(); });
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
+    // No further wake arrives. The periodic read is five seconds away.
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(3); }, { timeout: 1000 });
+    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+    expect(screen.queryByText(/앱이 다른 작업을 처리하는 중/u)).not.toBeInTheDocument();
+  });
+
+  it('asks once for a lease that ends with the request instead of reading until it does', async () => {
+    const initial = pending();
+    const started = performance.now();
+    // The same lease every time: it ends when the request does, 1500 ms in.
+    const until = (): AppSnapshot => ({ ...initial, requests: initial.requests.map((request) => ({
+      ...request, refreshAfterMillis: Math.max(0, 1500 - (performance.now() - started)) })) });
+    const reads = vi.fn<ControllerBridge['snapshot']>(() => Promise.resolve(until()));
+    view(until(), { snapshot: reads });
+    await screen.findByText('설정 도우미.exe');
+    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); }, { timeout: 1000 });
+    // The early read came back with the lease it already had. Asking again for
+    // it read the owner without pause for the last second of every request.
+    await act(() => new Promise((resolve) => { window.setTimeout(resolve, 700); }));
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+  });
+
   it('reads details after the snapshot read that holds the native admission instead of failing', async () => {
     const shown = pending();
     const original = createQaBridge(shown);

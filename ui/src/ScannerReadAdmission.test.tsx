@@ -229,7 +229,10 @@ describe('owner commands wait for the actual background read', () => {
     expect(result.current.busy).toBeNull();
   });
 
-  it('never holds an approval back until a later read', async () => {
+  // This used to assert the opposite: the approval went out at once, into the
+  // admission the read was holding, and was refused as busy. The refusal took
+  // the request off the screen until the next read brought it back.
+  it('sends an approval once the running read lets go, instead of losing it as busy', async () => {
     const snapshot = qaCase('phone-pending').snapshot;
     const request = snapshot.requests.find((item) => item.state === 'pending' && item.canApprove)!;
     const test = held(snapshot);
@@ -238,9 +241,109 @@ describe('owner commands wait for the actual background read', () => {
     const { result } = renderHook(() => useController(bridge));
     await waitFor(() => expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length));
     act(() => { void result.current.refresh(); });
+    let approved!: Promise<AppSnapshot | null>;
+    act(() => { approved = result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    expect(decide).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe('decision');
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+    await act(async () => { test.pending.resolve(snapshot); await approved; });
+    expect(decide).toHaveBeenCalledExactlyOnceWith(request.id, 'approve');
+    expect(result.current.stale).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.busy).toBeNull();
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+  });
+
+  it('drops a kept approval when the completed read no longer shows that request', async () => {
+    const snapshot = qaCase('phone-pending').snapshot;
+    const request = snapshot.requests.find((item) => item.state === 'pending' && item.canApprove)!;
+    const test = held(snapshot);
+    const decide = vi.fn<ControllerBridge['decide']>(() => test.admit(snapshot));
+    const bridge = { ...createQaBridge(snapshot), snapshot: test.read, decide };
+    const { result } = renderHook(() => useController(bridge));
+    await waitFor(() => expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length));
+    act(() => { void result.current.refresh(); });
+    let approved!: Promise<AppSnapshot | null>;
+    act(() => { approved = result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    const resolved = { ...snapshot, requests: [] };
+    await act(async () => { test.pending.resolve(resolved); await approved; });
+    expect(decide).not.toHaveBeenCalled();
+    expect(result.current.snapshot).toBe(resolved);
+    expect(result.current.busy).toBeNull();
+    expect(result.current.stale).toBe(false);
+  });
+});
+
+describe('a decision is not lost to a busy native side', () => {
+  const busyIssue = { code: 'app_busy', message: '앱이 다른 작업을 처리하는 중입니다.', nextAction: '잠시 후 다시 시도하십시오.' };
+  function shown() {
+    const snapshot = qaCase('phone-pending').snapshot;
+    const request = snapshot.requests.find((item) => item.state === 'pending' && item.canApprove)!;
+    return { snapshot, request };
+  }
+  async function ready(bridge: ControllerBridge, count: number) {
+    const hook = renderHook(() => useController(bridge));
+    await waitFor(() => expect(hook.result.current.snapshot?.requests).toHaveLength(count));
+    return hook.result;
+  }
+
+  it('offers the same tap again after a busy refusal and keeps the request on screen meanwhile', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>()
+      .mockRejectedValueOnce(busyIssue).mockRejectedValueOnce(busyIssue).mockResolvedValue(snapshot);
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    let approved!: Promise<AppSnapshot | null>;
+    act(() => { approved = result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    await waitFor(() => { expect(decide).toHaveBeenCalledTimes(2); });
+    // Between tries the card is still there and still says the tap was taken.
+    expect(result.current.busy).toBe('decision');
+    expect(result.current.stale).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+    await act(async () => { await approved; });
+    expect(decide).toHaveBeenCalledTimes(3);
+    for (const call of decide.mock.calls) expect(call).toEqual([request.id, 'approve']);
+    expect(result.current.busy).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.stale).toBe(false);
+  });
+
+  it('tries again when busy comes back as the snapshot issue, without showing that issue', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>()
+      .mockResolvedValueOnce({ ...snapshot, issue: busyIssue }).mockResolvedValue(snapshot);
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    const issues: (string | undefined)[] = [];
+    let approved!: Promise<AppSnapshot | null>;
+    act(() => { approved = result.current.run({ kind: 'decision', requestId: request.id, decision: 'deny' }); });
+    await waitFor(() => { issues.push(result.current.snapshot?.issue?.code); expect(decide).toHaveBeenCalledTimes(2); });
+    await act(async () => { await approved; });
+    expect(issues.every((code) => code === undefined)).toBe(true);
+    expect(result.current.snapshot?.issue).toBeNull();
+    expect(decide).toHaveBeenCalledTimes(2);
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+  });
+
+  it('says the app is busy only after the waits run out, and leaves the request where it was', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>().mockRejectedValue(busyIssue);
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    await act(async () => { await result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    expect(decide).toHaveBeenCalledTimes(6);
+    expect(result.current.error).toEqual({ message: busyIssue.message, nextAction: busyIssue.nextAction });
+    // Refused before anything began: the screen is not stale and nothing left it.
+    expect(result.current.stale).toBe(false);
+    expect(result.current.busy).toBeNull();
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+  });
+
+  it('still withdraws the request and marks the screen stale for a refusal that is not busy', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>().mockRejectedValue(new Error('synthetic transport failure'));
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
     await act(async () => { await result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
     expect(decide).toHaveBeenCalledOnce();
-    await act(async () => { test.pending.resolve(snapshot); await test.pending.promise; });
-    expect(decide).toHaveBeenCalledOnce();
+    expect(result.current.stale).toBe(true);
+    expect(result.current.snapshot?.requests).toHaveLength(0);
   });
 });

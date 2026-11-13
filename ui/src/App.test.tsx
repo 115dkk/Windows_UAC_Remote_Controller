@@ -430,25 +430,30 @@ describe('request interaction boundaries', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('suppresses duplicate decisions and ignores an older refresh result', async () => {
+  it('suppresses duplicate decisions and sends the one tap after the read that was running', async () => {
     const user = userEvent.setup();
     const initial = qaCase('phone-pending').snapshot;
-    const oldRead = deferred<AppSnapshot>();
+    const running = deferred<AppSnapshot>();
     const decision = deferred<AppSnapshot>();
-    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(initial).mockImplementation(() => oldRead.promise);
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(initial).mockImplementation(() => running.promise);
     const decide = vi.fn<ControllerBridge['decide']>(() => decision.promise);
     render(<App bridge={bridgeFor(initial, { snapshot: read, decide })} />);
     const approve = await screen.findByRole('button', { name: ko.approve });
     await user.click(screen.getByRole('button', { name: ko.refresh }));
     fireEvent.click(approve);
     fireEvent.click(approve);
-    expect(decide).toHaveBeenCalledOnce();
+    // The read holds the native admission. The tap is kept, the request stays
+    // on screen, and a second tap is not a second decision.
+    expect(decide).not.toHaveBeenCalled();
     expect(approve).toBeDisabled();
+    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+    await act(async () => { running.resolve(initial); await running.promise; });
+    await waitFor(() => { expect(decide).toHaveBeenCalledExactlyOnceWith('synthetic-request-1', 'approve'); });
     const confirmed = { ...initial, requests: [] };
     await act(async () => { decision.resolve(confirmed); await decision.promise; });
     expect(await screen.findByRole('heading', { name: ko.requestEmpty })).toBeInTheDocument();
-    await act(async () => { oldRead.resolve(initial); await oldRead.promise; });
     expect(screen.queryByRole('button', { name: ko.approve })).not.toBeInTheDocument();
+    expect(decide).toHaveBeenCalledOnce();
   });
 
   it('keeps recovery but withdraws request bodies and decisions after refresh failure', async () => {
