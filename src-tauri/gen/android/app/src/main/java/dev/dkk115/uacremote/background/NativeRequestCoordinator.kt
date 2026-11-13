@@ -52,6 +52,9 @@ internal class NativeRequestCoordinator(
     private val notificationRefreshQueued = AtomicBoolean(false)
     private var expiry: Runnable? = null
     private var lastFiredCutoff = 0uL
+    // One run of Busy passes while a signed approval waits to be handed over.
+    // Replaced by the first pass that is not Busy.
+    @Volatile private var heldDeliveryRetry = ApprovalBusyRetry()
     private class ReadTicket(val callback: (NativeRequestReadReply) -> Unit, val details: Boolean) {
         @Volatile var value: NativeRequestReadReply? = null
         val done = AtomicBoolean(false)
@@ -64,15 +67,16 @@ internal class NativeRequestCoordinator(
         if (!stopped.get() && ready() && maintenanceQueued.compareAndSet(false, true)) {
             if (!enqueue {
                 maintenanceWanted.set(false)
+                var busy = false
                 try {
                     val controller = owner() ?: throw BridgeException.Closed()
                     platform.refreshPresentationClock()
                     val catalog = controller.maintainNativeRequests()
                     if (platform.requests.catalogMaintained(catalog)) sessionEnded()
-                    advanceDeliveries(controller)
+                    busy = advanceDeliveries(controller)
                     externalProgress()
                     maintenanceFailures.set(0)
-                } catch (_: BridgeException.Busy) { }
+                } catch (_: BridgeException.Busy) { busy = true }
                 catch (_: BridgeException.PresentationRefreshRequired) { /* Real clock invalidation already queued rewarm. */ }
                 catch (_: BridgeException.RequestUnavailable) { }
                 catch (failure: Exception) { maintenanceFailure(failure) }
@@ -81,11 +85,29 @@ internal class NativeRequestCoordinator(
                     // Only another actual event received during this job asks
                     // for one additional pass; Busy itself never grants one.
                     if (maintenanceWanted.getAndSet(false)) progress()
+                    else if (busy) retryHeldDelivery()
+                    else heldDeliveryRetry = ApprovalBusyRetry()
                 }
                 // Do not self-poll a Busy result; only a new real event retries it.
+                // The one exception is retryHeldDelivery, and it is bounded.
             }) maintenanceQueued.set(false)
         }
     }
+    /**
+     * A signed approval is waiting to be handed to the socket and the pass that
+     * would have handed it over met a busy owner. Nothing else is certain to
+     * wake this coordinator before the request's lease runs out, and until then
+     * the person who approved is looking at a request that says it is being
+     * sent. So that one case asks for another pass, a few times, a little later
+     * each time. Without a held approval a Busy pass still waits for a real
+     * event, as it always has.
+     */
+    private fun retryHeldDelivery() {
+        if (stopped.get() || !ready() || platform.requests.deliveries().isEmpty()) return
+        val delay = heldDeliveryRetry.next() ?: return
+        main.postDelayed({ progress() }, delay)
+    }
+
     /** A previously rejected queue insertion, not a retry of a Busy operation. */
     fun resumeQueued() {
         if (maintenanceWanted.get() && !maintenanceQueued.get()) progress()
@@ -346,7 +368,9 @@ internal class NativeRequestCoordinator(
         }
         changed()
     }
-    private fun advanceDeliveries(controller: MobileController) {
+    /** True when a busy owner kept at least one held approval from advancing. */
+    private fun advanceDeliveries(controller: MobileController): Boolean {
+        var busy = false
         for (delivery in platform.requests.deliveries()) {
             val locator = delivery.locator
             val submission = delivery.submission
@@ -366,10 +390,11 @@ internal class NativeRequestCoordinator(
                     NativeDecisionProgress.WRITTEN_TO_SOCKET -> NativeRequestPhase.AWAITING_OUTCOME
                     NativeDecisionProgress.STOPPED, NativeDecisionProgress.REJECTED -> NativeRequestPhase.UNAVAILABLE
                 }, observation)
-            } catch (_: BridgeException.Busy) { }
+            } catch (_: BridgeException.Busy) { busy = true }
             catch (_: Exception) { platform.requests.phase(locator, generation, NativeRequestPhase.UNAVAILABLE, observation) }
             finally { claim.close() }
         }
+        return busy
     }
 
     fun review(): NativeRequestReview = if (stopped.get() || !ready()) throw BridgeException.NativeUnavailable() else platform.requests.review()

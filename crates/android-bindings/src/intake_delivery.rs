@@ -163,7 +163,7 @@ impl MobileController {
         &self,
         submission: Arc<NativeApprovalSubmission>,
     ) -> Result<NativeDecisionProgress, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         if !submission.belongs_to_controller(self) || submission.is_cancelled() {
             return Err(BridgeError::ApprovalRejected);
         }

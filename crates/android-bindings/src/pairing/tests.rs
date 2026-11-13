@@ -457,6 +457,7 @@ impl Fixture {
             creation_slot: Mutex::new(Weak::<CreationState>::new()),
             approval_alive: Arc::new(AtomicBool::new(true)),
             active: AtomicBool::new(false),
+            admission_gate: Default::default(),
             cleanup_pending: AtomicBool::new(false),
             notification_cleanup_failed: AtomicBool::new(false),
             key_cleanup_pending: AtomicBool::new(false),

@@ -194,6 +194,7 @@ impl Fixture {
             state: Mutex::new(Some(inbox)),
             creation_slot: Mutex::new(Weak::<super::super::CreationState>::new()),
             active: AtomicBool::new(false),
+            admission_gate: Default::default(),
             cleanup_pending: AtomicBool::new(false),
             notification_cleanup_failed: AtomicBool::new(false),
             key_cleanup_pending: AtomicBool::new(false),

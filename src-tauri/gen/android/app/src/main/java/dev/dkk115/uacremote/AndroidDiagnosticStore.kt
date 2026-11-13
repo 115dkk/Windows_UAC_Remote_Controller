@@ -68,7 +68,7 @@ internal object AndroidDiagnosticStore {
         "DURABLE_HISTORY", "DURABLE_LIFECYCLE_INTEGRATION", "DURABLE_LOCAL_KEY_RECONCILIATION", "DURABLE_NATIVE_LOCAL_KEYS", "DURABLE_LOCAL_KEYS", "DURABLE_DIRECTORY_SYNCHRONIZATION", "DURABLE_TRANSITION_INCOMPLETE",
         "CHECKPOINT_INVALID_BOOT", "CHECKPOINT_MISSING_BOOT", "CHECKPOINT_CLOCK_REGRESSED", "CHECKPOINT_INVALID_STATE", "CHECKPOINT_UNSUPPORTED_VERSION", "CHECKPOINT_TOO_LARGE", "CHECKPOINT_LEGACY_OUTCOME", "CHECKPOINT_OUTCOME_RETENTION",
     )
-    private val measurementNames = mapOf("APPROVAL_EXPIRED_ON_WORKER" to "phase", "APPROVAL_CLEANUP_REFUSED" to "reason", "APPROVAL_CLEANUP_COMPLETE" to "admission_waits", "APPROVAL_RETIRE_BUSY" to "waits", "APPROVAL_CLEANUP_WAKE" to "posted", "NOTIFICATION_REMAINING" to "millis")
+    private val measurementNames = mapOf("APPROVAL_EXPIRED_ON_WORKER" to "phase", "APPROVAL_CLEANUP_REFUSED" to "reason", "APPROVAL_CLEANUP_COMPLETE" to "admission_waits", "APPROVAL_RETIRE_BUSY" to "waits", "APPROVAL_WORK_BUSY" to "waits", "APPROVAL_CLEANUP_WAKE" to "posted", "NOTIFICATION_REMAINING" to "millis")
     private val throwSites = setOf("INTAKE_PROGRESS", "PRESENTATION_CLOCK", "PUBLISH_PENDING_REQUEST", "WITHDRAW_REQUESTS", "CLOCK", "REGISTRY_PUBLISH_CAUSE", "APPROVAL_CLOSE_SUBMISSION", "APPROVAL_RETIRE", "APPROVAL_CLOSE_ATTEMPT", "APPROVAL_CLOSE_PLAN", "APPROVAL_CLEANUP_COMPLETE")
     private val nativePatterns = listOf(
         Regex("UAC_NATIVE_DECISION_V1 sample=[0-9]+ action=(?:approve|deny) outcome=(?:approved|denied|failed|cancelled|expired|expired_locally|pc_completed) timing_eligible=(?:true|false) action_to_receipt_ms=[0-9]+ action_to_auth_ms=(?:none|[0-9]+) auth_to_receipt_ms=(?:none|[0-9]+) local_ready_to_receipt_ms=(?:none|[0-9]+)"),
