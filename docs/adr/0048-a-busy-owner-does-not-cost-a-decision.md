@@ -3,7 +3,9 @@
 
 Status: implemented source with unit coverage (Rust, JVM, UI). Not yet seen on
 a real phone. The causes below were found by reading the code after the
-report; no diagnostic file from the affected phone was read.
+report; no diagnostic file from the affected phone was read. A static audit of
+the first version found four defects, listed under Review, and this is the
+corrected decision.
 
 ## Evidence
 
@@ -65,19 +67,35 @@ a decision the person has made.
 - **The screen keeps the tap.** A decision waits for the read that holds the
   command slot. If that read still shows the request, the decision goes out
   with the locator the tapped card had; if it does not, the tap is dropped and
-  the read is shown. A decision answered `app_busy` is offered again after 60,
-  120, 250, 500 and 500 ms while the request is on screen and inside its
-  display lease. Only after that does the busy line appear, and the request
-  stays where it was: the refusal happened before anything began, so the
-  screen is not stale. Any other refusal still withdraws the request and marks
-  the screen stale.
+  the read is shown. A decision refused as busy before the native side took it
+  is offered again after 60, 120, 250, 500 and 500 ms while the request is on
+  screen and inside its display lease. Only after that does the busy line
+  appear, and the request stays where it was: nothing began, so the screen is
+  not stale. Any other refusal still withdraws the request and marks the
+  screen stale.
+- **Only a refused decision is offered again.** The snapshot a decision
+  returns is read after the decision, so `app_busy` on it can come from one of
+  those reads while the decision went in. The native reply for a decision that
+  was not admitted now carries its own code, `request_action_busy`, and the
+  screen repeats a decision for that code or for a command-slot rejection, and
+  for nothing else.
+- **A busy answer that read nothing is not a withdrawn request.** When the
+  reads behind a decision's answer found the owner busy, the answer lists no
+  requests. The card stays; a refused decision is offered again, and an
+  admitted one is followed by a read.
+- **Leaving the app gives up a kept tap.** A page that goes to the background
+  withdraws its request text. A decision still waiting for a read is not sent
+  after that, and an answer that arrives on a hidden page puts no request text
+  back. A denial needs no identity check, so it would otherwise have gone
+  through for a request no longer on screen.
 - **A background read that found the owner busy reads again** after 150, 300
   and 600 ms instead of leaving a withdrawn request for the periodic read.
-- **Display validity follows the schedule.** `display_until` extends a preview
-  past the minute boundary for each following local minute the same policy
-  snapshot allows, up to the request deadline and never more than five
-  minutes. The screen asks early once per lease, not repeatedly for a lease
-  that ends with the request.
+- **A policy with no schedule keeps a preview until the request deadline.**
+  The schedule is evaluated per local minute, which is why display validity
+  ended with the minute. With no schedule every local minute is allowed, so
+  nothing can change at the boundary. A weekly schedule keeps the minute.
+  The screen asks early once per lease, not repeatedly for a lease that ends
+  with the request.
 
 ## What does not change
 
@@ -89,7 +107,27 @@ signature. A wall-clock or zone change moves the time epoch and invalidates
 previews at once; a changed policy withdraws the request through the inbox.
 Display validity is display only.
 
+## Review
+
+The first version was audited from the source before it was merged. Four
+findings, all corrected above:
+
+1. A decision was repeated whenever the returned snapshot's issue was
+   `app_busy`, which a read made after an admitted decision also produces.
+2. Display validity was extended minute by minute through a weekly schedule's
+   windows. That assumes the next local minute is the next wall minute, and a
+   daylight-saving change inside one zone breaks it without moving the time
+   epoch, so a preview could outlive a window that had just ended.
+3. A refused decision whose answer read nothing published that empty answer
+   and took the request off the screen.
+4. A denial kept behind a read was sent after the app had been left.
+
 ## Not covered
+
+- With a weekly schedule a request is still read again at each minute
+  boundary and leaves the screen for as long as that read takes. Lifting this
+  needs the zone's next offset change in the native time observation, so the
+  lease can stop there.
 
 - The PC renews a live prompt's lease in its last 30 s (80 s in). An identity
   check that is open at that moment is cancelled with the old lease, and the
