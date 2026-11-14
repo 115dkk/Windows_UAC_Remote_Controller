@@ -15,6 +15,7 @@ use framed_transport::{SocketClock, SocketClockUnavailable};
 use service_protocol::{MAX_PAIRING_INVITATION_QR_TEXT_BYTES, PairingInvitation};
 use std::{
     fmt,
+    mem::DropGuard,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -93,23 +94,10 @@ impl ScanGuard {
         Ok(now)
     }
     fn observe(&self) -> Result<Instant, BridgeError> {
-        struct Observation<'a> {
-            guard: &'a ScanGuard,
-            complete: bool,
-        }
-        impl Drop for Observation<'_> {
-            fn drop(&mut self) {
-                if !self.complete {
-                    self.guard.cancel();
-                }
-            }
-        }
         // A foreign callback unwind must revoke direct check_current and the
         // retained intent's clock too, not just an accept-invitation worker.
-        let mut observation = Observation {
-            guard: self,
-            complete: false,
-        };
+        // Only a completed observation dismisses the revocation.
+        let revoke = DropGuard::new(self, |guard| guard.cancel());
         let result = (|| {
             self.ensure_open()?;
             if callback_active() {
@@ -142,7 +130,9 @@ impl ScanGuard {
             self.ensure_open()?;
             Ok(after)
         })();
-        observation.complete = result.is_ok();
+        if result.is_ok() {
+            DropGuard::dismiss(revoke);
+        }
         result
     }
 }
@@ -234,21 +224,8 @@ impl NativePairingScan {
             self.cancel();
             return NativePairingScanResult::Unavailable;
         }
-        struct Work<'a> {
-            guard: &'a ScanGuard,
-            complete: bool,
-        }
-        impl Drop for Work<'_> {
-            fn drop(&mut self) {
-                if !self.complete {
-                    self.guard.cancel();
-                }
-            }
-        }
-        let mut work = Work {
-            guard: &self.guard,
-            complete: false,
-        };
+        // Every exit but a completed read cancels the scan, an unwind included.
+        let revoke = DropGuard::new(&self.guard, |guard| guard.cancel());
         let result = (|| {
             self.guard.observe()?;
             // Native scanner must also bound before its foreign String copy;
@@ -308,7 +285,7 @@ impl NativePairingScan {
         })();
         match result {
             Ok(()) => {
-                work.complete = true;
+                DropGuard::dismiss(revoke);
                 NativePairingScanResult::Read
             }
             Err(error) => {

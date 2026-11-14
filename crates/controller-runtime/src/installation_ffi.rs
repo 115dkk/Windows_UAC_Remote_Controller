@@ -410,7 +410,9 @@ fn image_matches(file: &mut File, expected: &integrity::ManifestFile) -> io::Res
     let expected_bytes: Vec<_> = expected
         .sha256
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let digit = |byte: u8| {
                 if byte.is_ascii_digit() {

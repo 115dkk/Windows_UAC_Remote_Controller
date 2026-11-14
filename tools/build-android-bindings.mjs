@@ -18,6 +18,8 @@ import {
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const UNIFFI_VERSION = '0.32.0';
 const LIBRARY = 'uac_android_controller';
+const BINDINGS_PACKAGE = 'android-bindings';
+const MAX_BUILD_UNITS = 256;
 const PACKAGE = 'dev.dkk115.uacremote.nativecore';
 const MARKER = '.controller-uniffi.generated.json';
 const CONFIG = 'uniffi-global.toml';
@@ -67,6 +69,7 @@ const FIXED_PREFLIGHT_MESSAGES = new Set([
   'Generated output contains a linked or nonregular entry.',
   'The successful Android build did not produce the expected regular cdylib.',
   'The built cdylib has an unexpected hard-link relationship.',
+  'This package has more Cargo build units than are inspected; clean its build directory.',
   'The built cdylib ELF header does not match the selected Android ABI.',
   'The generator did not produce the expected Kotlin bindings.',
   `No NDK location is configured. Set NDK_HOME or an Android SDK path containing NDK ${NDK_REVISION}.`,
@@ -226,7 +229,7 @@ export function createBuildPlan({ options, environment, platform, cwd, ndk, host
     probe: { command: rustc, args: ['-vV'], environment: { ...environment } },
     build: {
       command: 'cargo', environment: nativeEnvironment,
-      args: ['rustc', '--locked', '--package', 'android-bindings', '--lib', '--target', rustTarget,
+      args: ['rustc', '--locked', '--package', BINDINGS_PACKAGE, '--lib', '--target', rustTarget,
         '--manifest-path', paths.join(cwd, 'Cargo.toml'), '--target-dir', targetDirectory,
         '--profile', options.variant === 'debug' ? 'dev' : 'release', '--',
         '-C', `linker=${ndk.clang}`, '-C', `link-arg=${clangTargetFlag}`],
@@ -352,6 +355,50 @@ export function validateBuiltLibraryHeader(bytes, abi = DEFAULT_ANDROID_ABI) {
   catch { throw new Error('The built cdylib ELF header does not match the selected Android ABI.'); }
 }
 
+/** Where the pinned Cargo keeps what one build unit of this package produced:
+ * `build/<package>/<unit>/out/` beside the top-level artifact (ADR 0050).
+ * Cargo 1.97 kept every unit's output in one `deps` directory instead. */
+export function cargoUnitArtifact(library, unit, platform) {
+  const paths = pathsFor(platform);
+  return paths.join(cargoUnits(library, platform), unit, 'out', paths.basename(library));
+}
+
+function cargoUnits(library, platform) {
+  const paths = pathsFor(platform);
+  return paths.join(paths.dirname(library), 'build', BINDINGS_PACKAGE);
+}
+
+/** Pure decision over lstat records. `<unit>` is Cargo's own hash, so every
+ * unit of this package is a candidate; exactly one must be the same file as
+ * the top-level cdylib, and the two names must be all the names it has. */
+export function hasCargoUnitPeer(original, candidates) {
+  if (!Array.isArray(candidates) || candidates.length > MAX_BUILD_UNITS) return false;
+  const same = candidates.filter((candidate) => candidate.dev === original.dev && candidate.ino === original.ino);
+  return original.nlink === 2n && same.length === 1 && same[0].regular && same[0].nlink === 2n;
+}
+
+function cargoUnitArtifacts(plan) {
+  const paths = pathsFor(plan.platform);
+  const units = cargoUnits(plan.library, plan.platform);
+  safeDirectory(units, plan.platform);
+  const candidates = [];
+  let inspected = 0;
+  const handle = opendirSync(units);
+  try {
+    for (let entry = handle.readSync(); entry !== null; entry = handle.readSync()) {
+      if (++inspected > MAX_BUILD_UNITS) throw new Error('This package has more Cargo build units than are inspected; clean its build directory.');
+      const artifact = cargoUnitArtifact(plan.library, entry.name, plan.platform);
+      let metadata;
+      try { metadata = lstatSync(artifact, { bigint: true }); }
+      // A unit that produced no cdylib (a build script, a check-only unit).
+      catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue; throw error; }
+      safeDirectory(paths.dirname(artifact), plan.platform);
+      candidates.push({ dev: metadata.dev, ino: metadata.ino, nlink: metadata.nlink, regular: metadata.isFile() && !metadata.isSymbolicLink() });
+    }
+  } finally { handle.closeSync(); }
+  return candidates;
+}
+
 function requireLibrary(plan) {
   const paths = pathsFor(plan.platform);
   safeDirectory(paths.dirname(plan.library), plan.platform);
@@ -360,17 +407,13 @@ function requireLibrary(plan) {
       || paths.relative(plan.library, realpathSync(plan.library)) !== '') {
     throw new Error('The successful Android build did not produce the expected regular cdylib.');
   }
-  // Cargo normally hard-links the top-level cdylib to its exact deps artifact.
-  // This is a read-only input, not a generated output that we overwrite. Permit
-  // only that observed two-name pair; do not copy it or relax output-file rules.
+  // Cargo normally hard-links the top-level cdylib to the artifact of the build
+  // unit that linked it. This is a read-only input, not a generated output that
+  // we overwrite. Permit only that observed two-name pair; do not copy it or
+  // relax output-file rules.
   if (metadata.nlink !== 1) {
-    const deps = paths.join(paths.dirname(plan.library), 'deps');
-    safeDirectory(deps, plan.platform);
-    const peerPath = paths.join(deps, paths.basename(plan.library));
-    const peer = lstatSync(peerPath, { bigint: true });
     const original = lstatSync(plan.library, { bigint: true });
-    if (!peer.isFile() || peer.isSymbolicLink() || original.nlink !== 2n || peer.nlink !== 2n
-        || original.dev !== peer.dev || original.ino !== peer.ino) {
+    if (!hasCargoUnitPeer(original, cargoUnitArtifacts(plan))) {
       throw new Error('The built cdylib has an unexpected hard-link relationship.');
     }
   }

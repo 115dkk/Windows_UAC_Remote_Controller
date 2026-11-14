@@ -33,6 +33,10 @@ owners. All handwritten shared/Android Rust still forbids unsafe; dependency
 internals are not claimed unsafe-free.
 [Rustix flock API](https://docs.rs/rustix/1.1.6/rustix/fs/fn.flock.html).
 
+Later: Rust 1.100's std locks files on Android with the same call, and the
+three owners use it directly. The rustix dependency is gone
+([ADR 0050](0050-rust-1-100-and-the-workarounds-it-retires.md)).
+
 Native authority files must use `Context.getNoBackupFilesDir()`. Explicit legacy
 and Android12+ cloud/device-transfer exclusion rules supplement allowBackup=false.
 No cross-platform transfer target is declared; future bindings must not move

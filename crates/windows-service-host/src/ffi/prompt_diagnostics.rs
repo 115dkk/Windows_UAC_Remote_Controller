@@ -41,7 +41,7 @@ static PROMPTS: AtomicU32 = AtomicU32::new(0);
 /// Starts one prompt's rows. Called once per mapped dialog, before its labels.
 pub(crate) fn begin() {
     if PROMPTS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             (count < MAX_PROMPTS).then_some(count + 1)
         })
         .is_ok()
@@ -119,7 +119,7 @@ pub(crate) fn refusal(reason: RefusalReason) {
 
 /// Takes one row from the current prompt's budget, or refuses.
 fn admit() -> bool {
-    ROWS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    ROWS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         (count < MAX_ROWS).then_some(count + 1)
     })
     .is_ok()

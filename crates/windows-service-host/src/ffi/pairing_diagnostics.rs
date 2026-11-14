@@ -133,7 +133,7 @@ fn service_failure(point: Point, error: ServiceError) {
 }
 fn reserve(counter: &AtomicU32) -> bool {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
             if n < 32 { Some(n + 1) } else { None }
         })
         .is_ok()

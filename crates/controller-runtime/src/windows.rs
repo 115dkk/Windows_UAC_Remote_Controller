@@ -348,7 +348,10 @@ fn remove_device_intent(device_id: &str) -> Result<ServiceControlIntent, Platfor
         _ => Err(PlatformError::ControlFailed),
     };
     let mut bytes = [0; 16];
-    for (output, pair) in bytes.iter_mut().zip(device_id.as_bytes().chunks_exact(2)) {
+    for (output, pair) in bytes
+        .iter_mut()
+        .zip(device_id.as_bytes().as_chunks::<2>().0)
+    {
         *output = digit(pair[0])? * 16 + digit(pair[1])?;
     }
     let windows_service_host::management_protocol::ManagementRequest::RemoveDevice { device } =

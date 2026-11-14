@@ -240,8 +240,8 @@ fn ports(internal: u16) -> io::Result<Vec<u16>> {
     let mut random = [0_u8; 2 * RANDOM_PORTS];
     getrandom::fill(&mut random).map_err(|_| io::Error::other("port choice unavailable"))?;
     let mut ports = vec![internal];
-    for pair in random.chunks_exact(2) {
-        let port = 20000 + u16::from_be_bytes([pair[0], pair[1]]) % 41000;
+    for pair in random.as_chunks::<2>().0 {
+        let port = 20000 + u16::from_be_bytes(*pair) % 41000;
         if !ports.contains(&port) {
             ports.push(port);
         }

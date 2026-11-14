@@ -19,7 +19,7 @@ impl MobileController {
         }
         let _admission = self.enter()?;
         let mut bytes = [0_u8; 32];
-        for (byte, pair) in bytes.iter_mut().zip(pc_id.as_bytes().chunks_exact(2)) {
+        for (byte, pair) in bytes.iter_mut().zip(pc_id.as_bytes().as_chunks::<2>().0) {
             let digit = |value: u8| {
                 if value <= b'9' {
                     value - b'0'

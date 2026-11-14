@@ -297,8 +297,10 @@ fn provision(trace: &mut diagnostics::Trace, startup_began: Instant) -> Result<(
     }
     // DWORD storage gives the ACL its native alignment, unlike a Vec<u8>.
     let aligned: Vec<u32> = merged
-        .chunks_exact(4)
-        .map(|part| u32::from_le_bytes([part[0], part[1], part[2], part[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|part| u32::from_le_bytes(*part))
         .collect();
     // SAFETY: pure policy validated every ACL/ACE bound; this complete owned
     // DWORD-aligned allocation remains immutable through validation/publication.

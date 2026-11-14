@@ -156,7 +156,7 @@ pub struct WatchSession {
     #[cfg(all(windows, target_pointer_width = "64"))]
     inner: crate::ffi::probe_supervisor::WatchOwner,
     #[cfg(not(all(windows, target_pointer_width = "64")))]
-    _unconstructible: std::convert::Infallible,
+    _unconstructible: !,
 }
 impl fmt::Debug for WatchSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -427,7 +427,7 @@ pub struct ServiceProbeSupervisor {
     #[cfg(all(windows, target_pointer_width = "64"))]
     inner: crate::ffi::probe_supervisor::Supervisor,
     #[cfg(not(all(windows, target_pointer_width = "64")))]
-    _unconstructible: std::convert::Infallible,
+    _unconstructible: !,
 }
 impl fmt::Debug for ServiceProbeSupervisor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

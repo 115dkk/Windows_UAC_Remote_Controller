@@ -124,16 +124,17 @@ directory sync is needed for directory-entry durability. This is a conditional
 OS/filesystem contract, not a completed device power-loss test.
 
 Windows receipts are only `FileSyncedOnly`, intended for filesystem model tests.
-Rust 1.97 uses `FlushFileBuffers` for file sync and `MoveFileExW`/a rename fallback;
+Rust 1.100 uses `FlushFileBuffers` for file sync and `MoveFileExW`/a rename fallback;
 these safe std operations do not establish the Android directory-barrier
 contract. The Windows intent is not claimed power-loss persistent. Other
 platforms return `UnsupportedPlatform`.
 
-Source inspection found Rust 1.97's standard `File::try_lock` does not implement
-Android. ROOT approved Android-only `rustix` 1.1.6 with `std`/`fs` features. The
-store uses safe `flock(&File, NonBlockingLockExclusive)` there and the lifetime
-standard OS lock on Windows/Linux. Contention and OS failure are separate fixed
-errors; no unlocked fallback exists. Android cross-build/device gates remain.
+The store takes the standard lifetime OS lock, `File::try_lock`, on every
+platform. From Rust 1.100 the standard library implements it on Android as a
+nonblocking exclusive `flock`, the call the store used to make itself through
+`rustix` while Rust 1.97 left Android out (ADR 0050). Contention and OS failure
+are separate fixed errors; no unlocked fallback exists. Android device gates
+remain.
 
 The host provisions the directory and protects it and its ancestors from other
 writers. The constructor rejects relative/parent-traversal paths, symlinks and
@@ -187,12 +188,13 @@ real app-private directory/lock/fsync/process-kill/power-loss validation. ROOT
 must separately test persistence-before-effects in the domain owner and explicit
 failure behavior at each synchronization/rename boundary.
 
-Primary implementation references, read 2026-09-09:
+Primary implementation references. The two Rust files were read again at
+1.100.0 on 2026-11-14, from the toolchain's own `rust-src`; the others were
+read 2026-09-09:
 
-- [Rust 1.97 Unix file sync and lock implementation](https://github.com/rust-lang/rust/blob/1.97.0/library/std/src/sys/fs/unix.rs)
-- [Rust 1.97 Windows file implementation](https://github.com/rust-lang/rust/blob/1.97.0/library/std/src/sys/fs/windows.rs)
+- [Rust 1.100 Unix file sync and lock implementation](https://github.com/rust-lang/rust/blob/1.100.0/library/std/src/sys/fs/unix.rs)
+- [Rust 1.100 Windows file implementation](https://github.com/rust-lang/rust/blob/1.100.0/library/std/src/sys/fs/windows.rs)
 - [Linux fsync directory requirement](https://man7.org/linux/man-pages/man2/fsync.2.html)
 - [Microsoft FlushFileBuffers contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
-- [Rustix 1.1.6 safe flock API](https://docs.rs/rustix/1.1.6/rustix/fs/fn.flock.html)
 
 Original project code is GPL-2.0-or-later. Dependency licenses remain their own.

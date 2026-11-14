@@ -9,6 +9,7 @@ import { ANDROID_ABIS, selectAndroidAbi } from './android-abi.mjs';
 import {
   createBuildPlan, parseArguments, parseRustHost, runAndroidBindings,
   validateGeneratedEntries, bindingFailureDiagnostic, validateBuiltLibraryHeader,
+  cargoUnitArtifact, hasCargoUnitPeer,
 } from './build-android-bindings.mjs';
 
 function planFixture({ platform = 'linux', environment = {}, options = parseArguments([]) } = {}) {
@@ -214,6 +215,7 @@ test('build preflight diagnostics expose only bounded fixed reasons, never raw e
     'Generated configuration changed; inspect it before rebuilding.',
     'Build directory aliases, symlinks and non-directory entries are not supported.',
     'The built cdylib has an unexpected hard-link relationship.',
+    'This package has more Cargo build units than are inspected; clean its build directory.',
     `NDK source.properties must specify exactly one Pkg.Revision = ${NDK_REVISION}.`,
   ]) {
     const diagnostic = bindingFailureDiagnostic(new Error(message));
@@ -382,6 +384,31 @@ test('built-library identity rejects a wrong ABI or non-Android library before K
   fixture.options.args = ['--abi', 'x86_64'];
   assert.throws(() => runAndroidBindings(fixture.options), /selected Android ABI/);
   assert.equal(fixture.calls.length, 2, 'no generator runs after a mismatched actual library');
+});
+
+test('the cdylib may share its file only with the one Cargo build unit that linked it', () => {
+  for (const platform of ['linux', 'win32']) {
+    const plan = planFixture({ platform });
+    const normalized = cargoUnitArtifact(plan.library, '0123456789abcdef', platform).replaceAll('\\', '/');
+    assert.ok(normalized.endsWith('/target/aarch64-linux-android/debug/build/android-bindings/0123456789abcdef/out/libuac_android_controller.so'));
+    assert.ok(!normalized.includes('/deps/'), 'Cargo 1.100 has no shared deps directory');
+  }
+  const original = { dev: 7n, ino: 41n, nlink: 2n };
+  const peer = { dev: 7n, ino: 41n, nlink: 2n, regular: true };
+  const stale = { dev: 7n, ino: 99n, nlink: 1n, regular: true };
+  assert.equal(hasCargoUnitPeer(original, [peer]), true);
+  assert.equal(hasCargoUnitPeer(original, [stale, peer, stale]), true);
+  for (const [first, candidates] of [
+    [original, []],
+    [original, [stale]],
+    [original, [peer, peer]],
+    [original, [{ ...peer, regular: false }]],
+    [original, [{ ...peer, dev: 8n }]],
+    [original, [{ ...peer, nlink: 3n }]],
+    [{ ...original, nlink: 3n }, [peer]],
+    [original, null],
+    [original, [...Array.from({ length: 256 }, () => stale), peer]],
+  ]) assert.equal(hasCargoUnitPeer(first, candidates), false);
 });
 
 test('x86_64 runner generates Kotlin from its exact Android output rather than host or arm64 artifacts', () => {

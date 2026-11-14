@@ -62,7 +62,9 @@ export function classifyDiagnostics(result) {
   // Native CLI calls LSP Hints "WeakWarning". Only cfg branch shading is
   // informational here; every other diagnostic, including other hints, fails.
   // Keep this exact and visible, never a blanket WeakWarning/Warning exclusion.
-  const isInactiveHint = (line) => line.includes(': WeakWarning Ra("inactive-code", WeakWarning) from ')
+  // The spelling is the pinned 1.100 analyzer's; 1.97 printed
+  // `Ra("inactive-code", WeakWarning)`, which now fails as format drift.
+  const isInactiveHint = (line) => line.includes(': WeakWarning RaLint("inactive_code", WeakWarning) from ')
     && line.includes(': code is inactive due to #[cfg] directives:');
   const configurationHints = reportedDiagnostics.filter(isInactiveHint);
   const diagnostics = reportedDiagnostics.filter((line) => !isInactiveHint(line));

@@ -232,11 +232,8 @@ pub(in crate::ffi) fn descriptor(
         return Err(Error::Malformed);
     }
     let mut principal = String::from("S-1-5-80");
-    for word in sid[12..].chunks_exact(4) {
-        principal.push_str(&format!(
-            "-{}",
-            u32::from_le_bytes(word.try_into().map_err(|_| Error::Malformed)?)
-        ));
+    for word in sid[12..].as_chunks::<4>().0 {
+        principal.push_str(&format!("-{}", u32::from_le_bytes(*word)));
     }
     let (admin, service) = profile_rights(profile);
     SecurityDescriptor::from_sddl(&format!(

@@ -802,8 +802,10 @@ fn config_string(words: &[usize], length: usize, pointer: PWSTR) -> Result<Strin
     // never dereferenced directly. Terminator and UTF16 validated within bounds.
     let bytes = unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), length) };
     let units: Vec<u16> = bytes[offset..]
-        .chunks_exact(2)
-        .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_ne_bytes(*pair))
         .collect();
     let end = units.iter().position(|value| *value == 0).ok_or(())?;
     if end == 0 || end > 2048 {

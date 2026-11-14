@@ -341,7 +341,7 @@ impl NativePendingRequest {
             return Err(BridgeError::RequestUnavailable);
         }
         self.floor
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |previous| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |previous| {
                 (now >= previous).then_some(now)
             })
             .map_err(|_| BridgeError::RequestUnavailable)?;

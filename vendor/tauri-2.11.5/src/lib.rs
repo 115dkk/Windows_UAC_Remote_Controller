@@ -764,7 +764,10 @@ pub trait Manager<R: Runtime>: sealed::ManagerBase<R> {
 
   /// The path resolver.
   fn path(&self) -> &crate::path::PathResolver<R> {
-    self.state::<crate::path::PathResolver<R>>().inner()
+    // Local patch (vendor/ANDROID_LIFECYCLE_PATCHES.md): the same call, named
+    // by its path. The pinned 1.100 analyzer does not find `inner` as a method
+    // for this one generic `State`, although rustc does.
+    State::inner(&self.state::<crate::path::PathResolver<R>>())
   }
 
   /// Adds a capability to the app.
