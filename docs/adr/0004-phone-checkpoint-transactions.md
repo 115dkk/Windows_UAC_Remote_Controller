@@ -27,11 +27,11 @@ explicit weaker file-only profile for host tests; native factories reject it.
 The model factory is absent from Android builds. Actual Android locking, power
 loss, backup/transfer and OS-notification behavior remain unproven.
 
-Rust 1.97's std file locking excludes Android. Android-only rustix 1.1.4 safe
+Rust 1.97's std file locking excludes Android. Android-only rustix 1.1.6 safe
 borrowed-file flock is used by the new store and existing preference/journal
 owners. All handwritten shared/Android Rust still forbids unsafe; dependency
 internals are not claimed unsafe-free.
-[Rustix flock API](https://docs.rs/rustix/1.1.4/rustix/fs/fn.flock.html).
+[Rustix flock API](https://docs.rs/rustix/1.1.6/rustix/fs/fn.flock.html).
 
 Native authority files must use `Context.getNoBackupFilesDir()`. Explicit legacy
 and Android12+ cloud/device-transfer exclusion rules supplement allowBackup=false.
