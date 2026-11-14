@@ -75,6 +75,74 @@ fn genuine_software_signatures_compose_only_under_the_private_test_anchor() {
 }
 
 #[test]
+fn every_boot_state_passes_with_the_same_keys_and_the_bundle_reports_the_least_vouched_for() {
+    let status = fresh_status();
+    let fixture = SyntheticRkp::new();
+    let proof = verify(&fixture, &status).unwrap();
+    assert_eq!(proof.boot_assurance(), BootAssurance::Manufacturer);
+
+    for (locked, state, expected) in [
+        (true, 1, BootAssurance::Owner),
+        (false, 2, BootAssurance::Unverified),
+    ] {
+        let mut fixture = SyntheticRkp::new();
+        for (index, role) in [KeyRole::Approval, KeyRole::Denial, KeyRole::Transport]
+            .into_iter()
+            .enumerate()
+        {
+            let description = SyntheticRkp::description_with_boot(role, locked, state);
+            fixture.replace_leaf_description(index, &description);
+        }
+        let proof = verify(&fixture, &status).unwrap();
+        assert_eq!(proof.boot_assurance(), expected);
+        // The same three public keys come out as from a locked phone.
+        assert_eq!(
+            proof.into_current_keys(&fixture.policy, &status).unwrap(),
+            fixture.expected.keys
+        );
+    }
+
+    // One chain from an unlocked phone lowers the whole bundle, whichever role.
+    for (index, role) in [KeyRole::Approval, KeyRole::Denial, KeyRole::Transport]
+        .into_iter()
+        .enumerate()
+    {
+        let mut fixture = SyntheticRkp::new();
+        let description = SyntheticRkp::description_with_boot(role, false, 2);
+        fixture.replace_leaf_description(index, &description);
+        let proof = verify(&fixture, &status).unwrap();
+        assert_eq!(proof.boot_assurance(), BootAssurance::Unverified);
+    }
+
+    // Failed verified boot is refused even on one chain.
+    let mut fixture = SyntheticRkp::new();
+    let description = SyntheticRkp::description_with_boot(KeyRole::Transport, true, 3);
+    fixture.replace_leaf_description(2, &description);
+    assert!(matches!(
+        verify(&fixture, &status),
+        Err(VerificationError::PlatformPolicy)
+    ));
+}
+
+#[test]
+fn an_unlocked_phone_still_needs_per_operation_authentication_on_the_approval_key() {
+    // An unlocked phone offering a key with no authentication as its approval
+    // key is refused for the key, exactly as a locked phone is.
+    let mut fixture = SyntheticRkp::new();
+    for (index, role) in [KeyRole::Denial, KeyRole::Denial, KeyRole::Transport]
+        .into_iter()
+        .enumerate()
+    {
+        let description = SyntheticRkp::description_with_boot(role, false, 2);
+        fixture.replace_leaf_description(index, &description);
+    }
+    assert!(matches!(
+        verify(&fixture, &fresh_status()),
+        Err(VerificationError::KeyPolicy)
+    ));
+}
+
+#[test]
 fn approval_requires_per_operation_authentication_even_with_valid_signatures() {
     let mut fixture = SyntheticRkp::new();
     fixture.replace_leaf_description(0, &SyntheticRkp::default_description(KeyRole::Denial));

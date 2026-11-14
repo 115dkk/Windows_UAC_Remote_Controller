@@ -29,6 +29,23 @@ pub(crate) enum HardwareLevel {
     StrongBox,
 }
 
+/// Who vouched for the operating system when the phone last started, as its
+/// secure hardware reported it. This says nothing about the keys: the key
+/// properties are checked the same way for every value (ADR 0049). It is not a
+/// claim that the phone is uncompromised now, and no value grants enrollment.
+///
+/// The order is from most to least vouched for, so the greatest of several
+/// values is the one a whole bundle can honestly carry.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BootAssurance {
+    /// Locked bootloader, operating system verified with the manufacturer's key.
+    Manufacturer,
+    /// Locked bootloader, operating system verified with a key its owner installed.
+    Owner,
+    /// Unlocked bootloader. Nothing vouched for the operating system.
+    Unverified,
+}
+
 pub(crate) struct DescriptionPolicy<'a> {
     pub(crate) challenge: &'a [u8; 32],
     pub(crate) signer_digests: &'a [[u8; 32]],
@@ -55,6 +72,7 @@ pub(crate) struct KeyDescription {
     pub(crate) vendor_patch: Option<u32>,
     pub(crate) boot_patch: Option<u32>,
     pub(crate) app_version: u64,
+    pub(crate) boot_assurance: BootAssurance,
 }
 impl fmt::Debug for KeyDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,7 +90,7 @@ struct Authorizations<'a> {
     origin: Option<u64>,
     no_auth: bool,
     auth_type: Option<u64>,
-    root: bool,
+    root: Option<BootAssurance>,
     os: Option<u32>,
     patch: Option<u32>,
     vendor: Option<u32>,
@@ -203,26 +221,44 @@ fn versions(attestation: u32, keymint: u32) -> Result<(), Error> {
     }
 }
 
-fn root_of_trust(value: AnyRef<'_>, version: u32) -> Result<(), Error> {
+/// Classifies the boot state instead of requiring one. The bootloader, not the
+/// operating system, tells secure hardware how the phone started, and secure
+/// hardware signs it, so the value is as trustworthy as the key properties.
+/// What it describes is the operating system, which no key property rests on.
+fn root_of_trust(value: AnyRef<'_>, version: u32) -> Result<BootAssurance, Error> {
     let mut root = nested(value, Tag::Sequence)?;
     let boot_key = octets(next(&mut root)?)?;
-    if boot_key.is_empty() || boot_key.len() > 128 {
-        return Err(Error::PlatformPolicy);
-    }
     let locked = next(&mut root)?
         .decode_as::<bool>()
         .map_err(|_| Error::Der)?;
     let state = enumerated(next(&mut root)?)?;
-    if !locked || state != 0 {
+    // 0 Verified, 1 SelfSigned, 2 Unverified, 3 Failed. A locked bootloader is
+    // what makes the first two mean anything: once it is unlocked the next
+    // start may load any image, so an unlocked phone is Unverified whatever it
+    // reported for this start. Locked yet Unverified is defined nowhere, Failed
+    // is the hardware saying the image did not pass, and an unknown value is
+    // not guessed at; all three are refused.
+    let assurance = match (locked, state) {
+        (true, 0) => BootAssurance::Manufacturer,
+        (true, 1) => BootAssurance::Owner,
+        (false, 0..=2) => BootAssurance::Unverified,
+        _ => return Err(Error::PlatformPolicy),
+    };
+    // A locked phone names the key that verified it and what was verified. An
+    // unlocked one has neither: the key is zeroes, and before the interface
+    // fixed its length it could be shorter or absent, so absence is not held
+    // against it. The upper bound applies to both.
+    let boot_hash = if version >= 3 {
+        Some(octets(next(&mut root)?)?)
+    } else {
+        None
+    };
+    finish(root)?;
+    let bounded = |field: &[u8]| field.len() <= 128 && !(locked && field.is_empty());
+    if !bounded(boot_key) || boot_hash.is_some_and(|hash| !bounded(hash)) {
         return Err(Error::PlatformPolicy);
     }
-    if version >= 3 {
-        let boot_hash = octets(next(&mut root)?)?;
-        if boot_hash.is_empty() || boot_hash.len() > 128 {
-            return Err(Error::PlatformPolicy);
-        }
-    }
-    finish(root)
+    Ok(assurance)
 }
 
 fn authorizations<'a>(
@@ -282,10 +318,7 @@ fn authorizations<'a>(
                     return Err(Error::UnsupportedProfile);
                 }
                 match tag {
-                    704 => {
-                        root_of_trust(inner, version)?;
-                        result.root = true;
-                    }
+                    704 => result.root = Some(root_of_trust(inner, version)?),
                     705 => result.os = Some(integer32(inner)?),
                     706 => result.patch = Some(integer32(inner)?),
                     718 => result.vendor = Some(integer32(inner)?),
@@ -456,10 +489,10 @@ pub(crate) fn verify_description(
             if hardware.no_auth && hardware.auth_type.is_none() => {}
         _ => return Err(Error::KeyPolicy),
     }
+    let boot_assurance = hardware.root.ok_or(Error::PlatformPolicy)?;
     let os_version = hardware.os.ok_or(Error::PlatformPolicy)?;
     let os_patch = hardware.patch.ok_or(Error::PlatformPolicy)?;
-    if !hardware.root
-        || !(110000..=999999).contains(&os_version)
+    if !(110000..=999999).contains(&os_version)
         || os_version < policy.min_os_version
         || !valid_month(os_patch)
         || os_patch < policy.min_os_patch
@@ -485,6 +518,7 @@ pub(crate) fn verify_description(
         vendor_patch: hardware.vendor,
         boot_patch: hardware.boot,
         app_version,
+        boot_assurance,
     })
 }
 
