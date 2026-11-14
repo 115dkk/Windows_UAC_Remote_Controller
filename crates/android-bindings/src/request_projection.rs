@@ -350,8 +350,9 @@ impl NativePendingRequest {
 }
 const MINUTE_NANOS: u64 = 60_000_000_000;
 /// No request lives longer than `MAX_REQUEST_LIFETIME_MILLIS`, five minutes.
-/// The walk below stops at the deadline long before this; the bound is for a
-/// deadline that is not what the protocol says it is.
+/// The walk below stops at the deadline long before it has added this many
+/// minutes to the current one; the bound is for a deadline that is not what
+/// the protocol says it is.
 const MAX_DISPLAY_MINUTES: u32 = 5;
 
 /// The local minute after `local`, in the same wall calendar the policy uses.

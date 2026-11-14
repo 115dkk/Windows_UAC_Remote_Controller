@@ -40,14 +40,16 @@ internal object PresentationClockRules {
      * A daylight-saving change keeps the zone and the UTC wall clock, so it
      * moves no epoch here, yet the local minute after it is not the next wall
      * minute. Rust ends anything it derived for a later local minute at this
-     * value. It is counted from the sample's first elapsed reading, so it is
-     * never later than the change itself.
+     * value. It is counted from the sample's first elapsed reading, and the
+     * wall reading is a whole millisecond whose real time lies anywhere inside
+     * it, so that millisecond is counted as already spent. Both keep the value
+     * from being later than the change itself.
      */
     fun offsetChange(elapsedBefore: Long, wallAfter: Long, nextTransitionMillis: Long?): ULong {
         if (nextTransitionMillis == null) return ULong.MAX_VALUE
-        if (elapsedBefore < 0) return 0uL
-        val millis = nextTransitionMillis - wallAfter
-        if (millis <= 0) return elapsedBefore.toULong()
+        if (elapsedBefore < 0 || wallAfter < 0) return 0uL
+        if (nextTransitionMillis <= wallAfter) return elapsedBefore.toULong()
+        val millis = nextTransitionMillis - wallAfter - 1
         if (millis > (Long.MAX_VALUE - elapsedBefore) / 1_000_000L) return ULong.MAX_VALUE
         return (elapsedBefore + millis * 1_000_000L).toULong()
     }
