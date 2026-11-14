@@ -6,9 +6,7 @@ use crate::{
 };
 use android_controller::{AssociatedPendingRequest, DurableInbox, NativePeerLease};
 use approval_protocol::RequestContent;
-use notification_policy::{
-    AlertMode, LocalTime, NotificationPolicy, RequestKey, RequestOutcome, Weekday,
-};
+use notification_policy::{AlertMode, NotificationPolicy, RequestKey, RequestOutcome, Schedule};
 use phone_request_core::PhoneBootId;
 use service_protocol::MappedRequestWindow;
 use std::{
@@ -225,12 +223,7 @@ impl NativePendingRequest {
         Ok(NativeRequestPreview {
             selection: self.selection(),
             deadline_nanos: self.deadline,
-            valid_until_nanos: display_until(
-                &self.policy,
-                sample.clock.reading().local,
-                sample.minute_cutoff,
-                self.deadline,
-            ),
+            valid_until_nanos: display_until(&self.policy, sample.minute_cutoff, self.deadline),
             time_epoch: sample.time_epoch,
             has_details: !body.details().is_empty() || program_elided || path_elided,
             program,
@@ -347,69 +340,26 @@ impl NativePendingRequest {
         Ok(sample)
     }
 }
-const MINUTE_NANOS: u64 = 60_000_000_000;
-/// No request lives longer than `MAX_REQUEST_LIFETIME_MILLIS`, five minutes.
-/// The walk below stops at the deadline long before this; the bound is for a
-/// deadline that is not what the protocol says it is.
-const MAX_DISPLAY_MINUTES: u32 = 5;
-
-/// The local minute after `local`, in the same wall calendar the policy uses.
-fn next_minute(local: LocalTime) -> Option<LocalTime> {
-    let minute = local.minute().checked_add(1)?;
-    if let Ok(same_day) = LocalTime::new(local.weekday(), minute) {
-        return Some(same_day);
-    }
-    let tomorrow = match local.weekday() {
-        Weekday::Monday => Weekday::Tuesday,
-        Weekday::Tuesday => Weekday::Wednesday,
-        Weekday::Wednesday => Weekday::Thursday,
-        Weekday::Thursday => Weekday::Friday,
-        Weekday::Friday => Weekday::Saturday,
-        Weekday::Saturday => Weekday::Sunday,
-        Weekday::Sunday => Weekday::Monday,
-    };
-    LocalTime::new(tomorrow, 0).ok()
-}
-
-/// How long this preview may stay on screen: to the request's own deadline, or
-/// to the end of the last local minute this policy allows, whichever is first.
+/// How long this preview may stay on screen.
 ///
-/// It used to stop at the end of the current minute whatever the next one
-/// allowed, so every request left the screen at each minute boundary for as
-/// long as the next read took, and a request that arrived at :58 was on screen
-/// for two seconds. The schedule is the only thing that changes at a minute
-/// boundary, and it is the same policy snapshot `check` enforces, so the
-/// minutes it allows are read from it here rather than assumed to be zero.
+/// It used to end with the current wall minute for every policy, so every
+/// request left the screen at each minute boundary for as long as the next
+/// read took, and one that arrived at :58 was on screen for two seconds. The
+/// minute matters because the schedule is evaluated per local minute. A policy
+/// with no schedule allows every local minute, so nothing can change at the
+/// boundary and the preview holds until the request's own deadline.
 ///
-/// This widens nothing an action relies on. A wall-clock or zone change moves
-/// `time_epoch`, which fails `check` and the display cache at once; a changed
-/// policy withdraws the request through the inbox; and approval and denial are
-/// each checked again by their own owner, never by this value.
-fn display_until(
-    policy: &NotificationPolicy,
-    local: LocalTime,
-    minute_cutoff: u64,
-    deadline: u64,
-) -> u64 {
-    let mut cutoff = minute_cutoff;
-    let mut local = local;
-    for _ in 0..MAX_DISPLAY_MINUTES {
-        if cutoff >= deadline {
-            break;
-        }
-        let Some(next) = next_minute(local) else {
-            break;
-        };
-        if !policy.allows(next) {
-            break;
-        }
-        let Some(extended) = cutoff.checked_add(MINUTE_NANOS) else {
-            break;
-        };
-        cutoff = extended;
-        local = next;
+/// A weekly schedule keeps the minute. Walking its windows forward would have
+/// to assume the next local minute is the next wall minute, and a daylight
+/// saving change inside the same zone breaks that without moving `time_epoch`.
+///
+/// Display only. Approval and denial are checked again by their own owners,
+/// and a changed policy withdraws the request through the inbox.
+fn display_until(policy: &NotificationPolicy, minute_cutoff: u64, deadline: u64) -> u64 {
+    match policy.schedule() {
+        Schedule::Always => deadline,
+        Schedule::Never | Schedule::Weekly(_) => deadline.min(minute_cutoff),
     }
-    cutoff.min(deadline)
 }
 
 fn elide(value: &str, max_units: usize) -> (String, bool) {
@@ -594,99 +544,40 @@ impl Drop for ProjectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notification_policy::{DayMask, Schedule, TimeWindow, WeeklySchedule};
+    use notification_policy::{DayMask, LocalTime, TimeWindow, Weekday, WeeklySchedule};
 
     const SECOND: u64 = 1_000_000_000;
 
-    fn at(weekday: Weekday, minute: u16) -> LocalTime {
-        LocalTime::new(weekday, minute).unwrap()
+    #[test]
+    fn a_policy_with_no_schedule_keeps_the_preview_until_the_request_deadline() {
+        let policy = NotificationPolicy::default();
+        assert_eq!(policy.schedule(), &Schedule::Always);
+        // Two seconds of the minute are left and the request has ninety.
+        let cutoff = 102 * SECOND;
+        let deadline = 190 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, deadline), deadline);
+        // A deadline inside the minute is still the end.
+        assert_eq!(display_until(&policy, cutoff, 101 * SECOND), 101 * SECOND);
     }
-    fn weekly(days: DayMask, start: u16, end: u16) -> NotificationPolicy {
-        let window = TimeWindow::new(days, start, end).unwrap();
-        NotificationPolicy::new(
+
+    #[test]
+    fn a_weekly_schedule_keeps_the_minute_even_when_it_allows_the_next_one() {
+        let window = TimeWindow::new(DayMask::ALL, 0, 1440).unwrap();
+        let policy = NotificationPolicy::new(
             Some(Schedule::Weekly(WeeklySchedule::new([window]).unwrap())),
             AlertMode::Silent,
-        )
+        );
+        let next = LocalTime::new(Weekday::Monday, 601).unwrap();
+        assert!(policy.allows(next));
+        let cutoff = 102 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, 190 * SECOND), cutoff);
+        assert_eq!(display_until(&policy, cutoff, 101 * SECOND), 101 * SECOND);
     }
 
     #[test]
-    fn an_always_on_policy_keeps_the_preview_until_the_request_deadline() {
-        let policy = NotificationPolicy::default();
-        assert!(policy.allows(at(Weekday::Monday, 600)));
-        // Two seconds of the minute are left and the request has ninety.
-        let cutoff = 100 * SECOND + 2 * SECOND;
-        let deadline = 100 * SECOND + 90 * SECOND;
-        assert_eq!(
-            display_until(&policy, at(Weekday::Monday, 600), cutoff, deadline),
-            deadline
-        );
-    }
-
-    #[test]
-    fn the_preview_ends_with_the_last_minute_the_schedule_allows() {
-        // Allowed 10:00 to 10:02, so 10:01 is the last allowed minute.
-        let policy = weekly(DayMask::ALL, 600, 602);
-        let cutoff = 100 * SECOND + 2 * SECOND;
-        let deadline = cutoff + 300 * SECOND;
-        assert_eq!(
-            display_until(&policy, at(Weekday::Monday, 600), cutoff, deadline),
-            cutoff + MINUTE_NANOS
-        );
-        // In the last allowed minute nothing is added to it.
-        assert_eq!(
-            display_until(&policy, at(Weekday::Monday, 601), cutoff, deadline),
-            cutoff
-        );
-    }
-
-    #[test]
-    fn a_deadline_inside_the_current_minute_is_never_extended() {
-        let policy = NotificationPolicy::default();
-        let cutoff = 100 * SECOND + 30 * SECOND;
-        let deadline = 100 * SECOND + 5 * SECOND;
-        assert_eq!(
-            display_until(&policy, at(Weekday::Monday, 600), cutoff, deadline),
-            deadline
-        );
-    }
-
-    #[test]
-    fn the_minute_after_the_last_one_of_a_day_is_the_first_of_the_next_day() {
-        assert_eq!(
-            next_minute(at(Weekday::Monday, 1439)),
-            Some(at(Weekday::Tuesday, 0))
-        );
-        assert_eq!(
-            next_minute(at(Weekday::Sunday, 1439)),
-            Some(at(Weekday::Monday, 0))
-        );
-        assert_eq!(
-            next_minute(at(Weekday::Friday, 600)),
-            Some(at(Weekday::Friday, 601))
-        );
-        // All of Sunday and nothing else: a preview shown in Sunday's last
-        // minute ends with it, and one shown a minute earlier gets that minute.
-        let sunday = DayMask::from_days(&[Weekday::Sunday]).unwrap();
-        let policy = weekly(sunday, 0, 1440);
-        let cutoff = 10 * SECOND;
-        let deadline = cutoff + 300 * SECOND;
-        assert_eq!(
-            display_until(&policy, at(Weekday::Sunday, 1439), cutoff, deadline),
-            cutoff
-        );
-        assert_eq!(
-            display_until(&policy, at(Weekday::Sunday, 1438), cutoff, deadline),
-            cutoff + MINUTE_NANOS
-        );
-    }
-
-    #[test]
-    fn a_deadline_that_is_not_a_request_lifetime_cannot_stretch_the_preview_past_five_minutes() {
-        let policy = NotificationPolicy::default();
-        let cutoff = 10 * SECOND;
-        assert_eq!(
-            display_until(&policy, at(Weekday::Monday, 600), cutoff, u64::MAX),
-            cutoff + u64::from(MAX_DISPLAY_MINUTES) * MINUTE_NANOS
-        );
+    fn a_disabled_schedule_never_outlives_the_minute() {
+        let policy = NotificationPolicy::new(Some(Schedule::Never), AlertMode::Silent);
+        let cutoff = 102 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, 190 * SECOND), cutoff);
     }
 }
