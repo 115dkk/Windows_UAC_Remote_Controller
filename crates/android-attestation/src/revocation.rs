@@ -332,10 +332,8 @@ fn serial_key(value: &str) -> Result<Vec<u8>, DataFault> {
         serial.push(nibble(*first)?);
         digits = rest;
     }
-    for pair in digits.chunks_exact(2) {
-        let [high, low] = pair else {
-            return Err(DataFault::Shape);
-        };
+    // An odd first digit was taken above, so no remainder is left behind.
+    for [high, low] in digits.as_chunks::<2>().0 {
         serial.push((nibble(*high)? << 4) | nibble(*low)?);
     }
     Ok(serial)

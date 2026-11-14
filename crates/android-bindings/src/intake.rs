@@ -614,13 +614,9 @@ impl MobileController {
         let thread = std::thread::Builder::new()
             .name("uac-native-io".into())
             .spawn(move || {
-                struct Finish(Arc<AtomicBool>);
-                impl Drop for Finish {
-                    fn drop(&mut self) {
-                        self.0.store(true, Ordering::Release);
-                    }
-                }
-                let _finished = Finish(done);
+                // Marks the thread finished on every exit path, an unwind included.
+                let _finished =
+                    std::mem::DropGuard::new(done, |done| done.store(true, Ordering::Release));
                 let _owner_lease = owner_lease;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -641,7 +637,7 @@ impl MobileController {
                 if !matches!(result, Ok(Ok(()))) || intake.failed.load(Ordering::Acquire) {
                     fail_reactor(&weak, &intake);
                 }
-                _finished.0.store(true, Ordering::Release);
+                _finished.store(true, Ordering::Release);
                 // All owned I/O resources dropped before the completion wake. A
                 // failing native notification cannot unwind this outer guard or
                 // leave the remaining controller logically live.

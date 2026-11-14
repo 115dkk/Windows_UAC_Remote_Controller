@@ -248,7 +248,9 @@ impl PreferenceStore {
         if metadata.len() != 0 {
             return Err(PreferenceError::UnexpectedLockContent);
         }
-        match try_lock_file(&lock) {
+        // std's File::try_lock covers Android from Rust 1.100: a nonblocking
+        // exclusive flock. Never continue with an unlocked writer.
+        match lock.try_lock() {
             Ok(()) => (),
             Err(TryLockError::WouldBlock) => return Err(PreferenceError::WriterLocked),
             Err(TryLockError::Error(_)) => return Err(PreferenceError::ReadFailed),
@@ -438,28 +440,6 @@ fn options(write: bool) -> OpenOptions {
     options
 }
 
-fn try_lock_file(file: &File) -> Result<(), TryLockError> {
-    // Rust 1.97's std Unix file-lock implementation excludes Android. Use a
-    // safe borrowed-fd wrapper there; never continue with an unlocked writer.
-    #[cfg(target_os = "android")]
-    {
-        rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-            |error| {
-                let error = io::Error::from(error);
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    TryLockError::WouldBlock
-                } else {
-                    TryLockError::Error(error)
-                }
-            },
-        )
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        file.try_lock()
-    }
-}
-
 fn checked_file(path: &Path) -> Result<Option<Metadata>, PreferenceError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -511,17 +491,16 @@ fn same_file_at_path(path: &Path, opened: &Metadata) -> Result<(), PreferenceErr
 }
 
 fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
+
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
-        false
+        metadata.file_type().is_symlink()
     }
 }

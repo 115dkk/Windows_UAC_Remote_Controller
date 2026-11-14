@@ -54,7 +54,7 @@ impl PendingElevationId {
             _ => Err(ServiceError::InvalidArguments),
         };
         let mut bytes = [0; 32];
-        for (output, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        for (output, pair) in bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
             *output = digit(pair[0])? * 16 + digit(pair[1])?;
         }
         Self::from_bytes(bytes)
@@ -305,7 +305,7 @@ pub fn parse_device_hex(value: &str) -> Result<approval_protocol::DeviceId, Serv
         return Err(ServiceError::InvalidArguments);
     }
     let mut bytes = [0; 16];
-    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (output, pair) in bytes.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
         let digit = |digit| match digit {
             b'0'..=b'9' => Ok(digit - b'0'),
             b'a'..=b'f' => Ok(digit - b'a' + 10),

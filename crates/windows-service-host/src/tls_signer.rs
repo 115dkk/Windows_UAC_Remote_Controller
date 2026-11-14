@@ -253,7 +253,7 @@ impl ServiceTlsSigner {
             .ok_or(TlsSigningBridgeError::TimedOut)?;
         self.shared
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < MAX_TLS_SIGNING_REQUESTS).then_some(count + 1)
             })
             .map_err(|_| TlsSigningBridgeError::Busy)?;

@@ -60,7 +60,9 @@ impl Storage {
         if metadata.len() != 0 {
             return Err(JournalError::UnexpectedLockContent);
         }
-        match try_lock_file(&lock) {
+        // std's File::try_lock covers Android from Rust 1.100: a nonblocking
+        // exclusive flock held for the life of this file.
+        match lock.try_lock() {
             Ok(()) => Ok(Self {
                 directory,
                 _lock: lock,
@@ -166,19 +168,17 @@ fn validate_regular(metadata: &Metadata, target: FileTarget) -> Result<(), Journ
 }
 
 fn is_link_or_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
 
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
-        false
+        metadata.file_type().is_symlink()
     }
 }
 
@@ -193,28 +193,6 @@ fn io_error(operation: IoOperation, error: io::Error) -> JournalError {
     JournalError::Io {
         operation,
         kind: error.kind(),
-    }
-}
-
-fn try_lock_file(file: &File) -> Result<(), TryLockError> {
-    // std File::try_lock is Unsupported on Android in Rust 1.97. The safe
-    // rustix API retains the same nonblocking, lifetime-of-this-file contract.
-    #[cfg(target_os = "android")]
-    {
-        rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-            |error| {
-                let error = io::Error::from(error);
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    TryLockError::WouldBlock
-                } else {
-                    TryLockError::Error(error)
-                }
-            },
-        )
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        file.try_lock()
     }
 }
 

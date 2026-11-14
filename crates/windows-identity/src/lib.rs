@@ -92,7 +92,7 @@ pub struct PcIdentityKey {
     #[cfg(windows)]
     inner: ffi::ServiceKey,
     #[cfg(not(windows))]
-    _unconstructible: std::convert::Infallible,
+    _unconstructible: !,
 }
 
 impl PcIdentityKey {

@@ -53,7 +53,7 @@ pub fn write(tag: &'static [u8], line: &str) {
         return;
     }
     if WRITTEN
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             (count < MAX_LINES).then_some(count + 1)
         })
         .is_err()

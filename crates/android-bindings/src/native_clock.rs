@@ -6,6 +6,7 @@ use phone_request_core::{InboxClock, PhoneBootId};
 use std::{
     cell::Cell,
     fmt,
+    mem::DropGuard,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -15,22 +16,17 @@ use std::{
 
 #[cfg(not(target_os = "android"))]
 thread_local! { static CALLBACK_DEPTH: Cell<u32> = const { Cell::new(0) }; }
-// Android uses lazy OS TLS. Rust1.97's OS macro wraps even a const block in a
-// non-const initializer, triggering Clippy on that generated function. Default
-// is genuinely runtime initialization with the same zero u32, not a lint bypass
-// or an alternate reentry policy. No allow/expect or hand-written TLS/unsafe.
+// Android uses lazy OS TLS. Its macro wraps even a const block in a non-const
+// initializer, triggering Clippy on that generated function; Rust 1.97 did
+// this and 1.100 still does (tried again 2026-11-14). Default is genuinely
+// runtime initialization with the same zero u32, not a lint bypass or an
+// alternate reentry policy. No allow/expect or hand-written TLS/unsafe.
 #[cfg(target_os = "android")]
 thread_local! { static CALLBACK_DEPTH: Cell<u32> = Cell::default(); }
 pub(crate) fn callback_active() -> bool {
     CALLBACK_DEPTH.with(|depth| depth.get() != 0)
 }
 pub(crate) fn native_callback<T>(call: impl FnOnce() -> T) -> T {
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            CALLBACK_DEPTH.with(|depth| depth.set(depth.get() - 1));
-        }
-    }
     CALLBACK_DEPTH.with(|depth| {
         depth.set(
             depth
@@ -39,7 +35,10 @@ pub(crate) fn native_callback<T>(call: impl FnOnce() -> T) -> T {
                 .expect("bounded native callback depth"),
         )
     });
-    let _guard = Guard;
+    // Leaves the callback on every exit path, an unwind included.
+    let _leave = DropGuard::new((), |()| {
+        CALLBACK_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    });
     call()
 }
 
@@ -171,7 +170,7 @@ impl SocketClock for NativeSocketClock {
             return Err(SocketClockUnavailable);
         }
         self.floor
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |floor| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |floor| {
                 (now >= floor).then_some(now)
             })
             .map_err(|_| SocketClockUnavailable)?;

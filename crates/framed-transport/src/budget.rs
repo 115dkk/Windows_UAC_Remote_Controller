@@ -38,7 +38,7 @@ impl ConnectionBudget {
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Result<Reservation, ConnectionBudgetError> {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < self.limit).then_some(active + 1)
             })
             .map_err(|_| ConnectionBudgetError::Exhausted)?;

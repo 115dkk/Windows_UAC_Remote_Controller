@@ -77,7 +77,7 @@ pub struct ServiceRegistry<'identity> {
     #[cfg(windows)]
     _identity: &'identity windows_identity::PcIdentityKey,
     #[cfg(not(windows))]
-    _unconstructible: std::convert::Infallible,
+    _unconstructible: !,
     #[cfg(not(windows))]
     _lifetime: std::marker::PhantomData<&'identity ()>,
 }

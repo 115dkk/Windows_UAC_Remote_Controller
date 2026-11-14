@@ -123,7 +123,7 @@ fn decode_sha256(text: &str) -> Result<[u8; 32], InvalidRepairManifest> {
         _ => Err(InvalidRepairManifest),
     };
     let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (output, pair) in digest.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
         *output = digit(pair[0])? * 16 + digit(pair[1])?;
     }
     Ok(digest)

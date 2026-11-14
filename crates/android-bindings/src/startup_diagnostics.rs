@@ -185,7 +185,7 @@ fn emit(stage: Stage, reason: &'static str) {
         use std::sync::atomic::{AtomicU8, Ordering};
         static COUNT: AtomicU8 = AtomicU8::new(0);
         if COUNT
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < 8).then_some(count + 1)
             })
             .is_err()

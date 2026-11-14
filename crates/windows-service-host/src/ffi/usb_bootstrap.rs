@@ -145,8 +145,10 @@ fn terminated_text(bytes: &[u8]) -> Result<String> {
         return Err(());
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|v| u16::from_le_bytes([v[0], v[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| u16::from_le_bytes(*v))
         .collect();
     let end = units.iter().position(|v| *v == 0).ok_or(())?;
     String::from_utf16(&units[..end]).map_err(|_| ())
@@ -228,8 +230,10 @@ fn paths() -> Result<Vec<Vec<u16>>> {
             return Err(());
         }
         let units: Vec<u16> = data[..count as usize]
-            .chunks_exact(2)
-            .map(|v| u16::from_le_bytes([v[0], v[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|v| u16::from_le_bytes(*v))
             .collect();
         if !units.ends_with(&[0, 0]) {
             return Err(());

@@ -761,8 +761,8 @@ fn pipe_sddl(role: PairingPeerRole, service_sid: &[u8]) -> Result<String, Pairin
         return Err(PairingPeerError::Malformed);
     }
     let mut sid = String::from("S-1-5-80");
-    for bytes in service_sid[12..].chunks_exact(4) {
-        let number = u32::from_le_bytes(bytes.try_into().map_err(|_| PairingPeerError::Malformed)?);
+    for bytes in service_sid[12..].as_chunks::<4>().0 {
+        let number = u32::from_le_bytes(*bytes);
         sid.push_str(&format!("-{number}"));
     }
     let mut descriptor = format!("O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})");

@@ -16,11 +16,6 @@ thiserror.workspace = true
 # Constants for safe std no-follow/directory opens only; no libc calls.
 libc = "0.2.177"
 
-[target.'cfg(target_os = "android")'.dependencies]
-# Rust 1.97 std File::try_lock is unsupported on Android. Safe borrowed-fd
-# flock only; no first-party FFI and no unlocked fallback.
-rustix.workspace = true
-
 [dev-dependencies]
 tempfile = "3.23.0"
 

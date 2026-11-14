@@ -159,8 +159,10 @@ pub(super) fn utf16_property_matches(bytes: &[u8], expected: &str) -> bool {
     let expected_units = expected.encode_utf16().chain(std::iter::once(0));
     bytes.len() == expected_units.clone().count() * 2
         && bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .eq(expected_units)
 }
 
@@ -185,8 +187,8 @@ pub(super) fn service_sid_sddl(bytes: &[u8]) -> Result<String, IdentityError> {
     }
     // Only validated binary DWORDs become decimal digits, never caller text.
     let mut sid = String::from("S-1-5");
-    for part in bytes[8..].chunks_exact(4) {
-        let subauthority = u32::from_le_bytes([part[0], part[1], part[2], part[3]]);
+    for part in bytes[8..].as_chunks::<4>().0 {
+        let subauthority = u32::from_le_bytes(*part);
         sid.push('-');
         sid.push_str(&subauthority.to_string());
     }
