@@ -30,9 +30,11 @@ function assertProductionObligations(manifest) {
     ['pinned-channel', 4, 1],
     ['request-authorization', 9, 2],
     ['prompt-lease-renewal', 4, 1],
+    ['hardware-key-evidence', 6, 2],
   ]);
   assert.equal(rows.slice(0, 2).reduce((total, [, positives, controls]) => total + positives + controls, 0), 16);
-  assert.equal(rows.reduce((total, [, positives, controls]) => total + positives + controls, 0), 21);
+  assert.equal(rows.slice(0, 3).reduce((total, [, positives, controls]) => total + positives + controls, 0), 21);
+  assert.equal(rows.reduce((total, [, positives, controls]) => total + positives + controls, 0), 29);
 }
 
 test('closed canary profiles retain original obligations alongside five mandatory renewal rows', () => {
@@ -492,7 +494,10 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
     if (renewalControl && (!source.includes(', Lease(pc, request, old)') || source.includes('// CANARY_RETIRED_LEASE'))) {
       throw new Error('Synthetic renewal control requires the exact registered old-slot retention mutation');
     }
-    const mutant = source.includes('MUTANT') || file.endsWith('missing-pc-pin.spthy') || renewalControl;
+    const mutant = source.includes('MUTANT') || file.endsWith('missing-pc-pin.spthy') || renewalControl ||
+      source.includes('// CANARY_KEY_ATTESTATION_DISABLED') || source.includes('// CANARY_APPROVAL_USE_POLICY_DISABLED');
+    const existential = new Set(${JSON.stringify(config.models.flatMap(model =>
+      Object.entries(model.expected).filter(([, wanted]) => wanted.trace === 'exists-trace').map(([name]) => name)))});
     const helpers = new Set(${JSON.stringify(config.models.flatMap(model => Object.keys(model.helpers ?? {})))});
     console.log('summary of summaries:\\n analyzed: ' + file);
     const selected = process.argv.filter(x => x.startsWith('--prove=')).map(arg => arg.slice(8));
@@ -501,7 +506,7 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
       if (${omitHelper} && name === ${JSON.stringify(Object.keys(auxiliary ?? {})[0] ?? '')}) continue;
       if (renewalControl && !helpers.has(name) && ${JSON.stringify(badRenewalControl)} === 'missing') continue;
       const attack = name.startsWith('attack_');
-      const kind = attack || name === 'executable' || name.startsWith('honest_') || name.startsWith('checked_') ? 'exists-trace' : 'all-traces';
+      const kind = attack || existential.has(name) || name === 'executable' || name.startsWith('honest_') || name.startsWith('checked_') ? 'exists-trace' : 'all-traces';
       const negative = /-(sorry|contradiction)\\.spthy$/.test(file);
       const verdict = renewalControl && !helpers.has(name) && ${JSON.stringify(badRenewalControl)} !== null ? ${JSON.stringify(badRenewalControl)}
         : ${badRenewalBaseline} && file.endsWith('prompt-lease-renewal.spthy') && name === 'retired_lease_never_accepted' ? 'unknown'
@@ -523,13 +528,13 @@ function runnerFixture(t, { auxiliary, omitHelper = false, discharge = false, ba
   return { root, directory, config, save };
 }
 
-test('synthetic counterexample orchestration retains all twenty-one rows and both request-canary contexts',
+test('synthetic counterexample orchestration retains all twenty-nine rows and both request-canary contexts',
   { skip: process.platform !== 'linux' }, async (t) => {
     const f = runnerFixture(t, { counterexamples: true });
     await runProtocolSecurity(f.root);
     const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
     assert.equal(summary.passed, true); // Synthetic runner behavior, not proof evidence.
-    assert.equal(summary.runs.length, 21);
+    assert.equal(summary.runs.length, 29);
     const rows = summary.runs.filter(row => row.mode === 'checked-counterexample');
     assert.equal(rows.length, 2);
     for (const row of rows) {
@@ -562,7 +567,24 @@ test('synthetic counterexample orchestration retains all twenty-one rows and bot
       assert.deepEqual(row.arguments, proofArguments(join(f.directory, row.model), wanted));
     }
     const calls = readFileSync(join(f.root, 'invocations.log'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(calls.length, 24, 'one version + nineteen ordinary rows + four attack contexts');
+    const evidence = f.config.models.find(model => model.id === 'hardware-key-evidence');
+    const evidenceRows = summary.runs.filter(row => row.id.startsWith('hardware-key-evidence-') ||
+      evidence.canaries.some(canary => canary.id === row.id));
+    assert.deepEqual(evidenceRows.map(row => row.id), [
+      ...Object.keys(evidence.expected).map((_, index) => `hardware-key-evidence-${index + 1}`),
+      'unchecked-key-attestation', 'approval-key-without-authentication',
+    ]);
+    for (const [index, row] of evidenceRows.entries()) {
+      const names = Object.keys(evidence.expected);
+      const wanted = index < names.length ? { [names[index]]: evidence.expected[names[index]] }
+        : evidence.canaries[index - names.length].expected;
+      assert.equal(row.ok, true);
+      assert.deepEqual(row.helperLemmas, []);
+      assert.deepEqual(row.targetLemmas, Object.keys(wanted));
+      assert.deepEqual(row.verdicts, wanted);
+      assert.deepEqual(row.arguments, proofArguments(join(f.directory, row.model), wanted));
+    }
+    assert.equal(calls.length, 32, 'one version + twenty-seven ordinary rows + four attack contexts');
   });
 
 test('synthetic no-trace baseline failure cannot discharge either canary despite verified mutant attacks',
@@ -570,7 +592,7 @@ test('synthetic no-trace baseline failure cannot discharge either canary despite
     const f = runnerFixture(t, { counterexamples: true, badCounterexampleBaseline: true });
     await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
     const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
-    assert.equal(summary.passed, false); assert.equal(summary.runs.length, 21);
+    assert.equal(summary.passed, false); assert.equal(summary.runs.length, 29);
     for (const row of summary.runs.filter(row => row.mode === 'checked-counterexample')) {
       assert.equal(row.counterexampleDischarge.checks[0].ok, true);
       assert.equal(row.counterexampleDischarge.checks[1].ok, false);
@@ -585,7 +607,7 @@ test('synthetic renewal controls reject missing, verified and inconclusive count
       await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
       const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
       assert.equal(summary.passed, false);
-      assert.equal(summary.runs.length, 21);
+      assert.equal(summary.runs.length, 29);
       const control = summary.runs.find(row => row.id === 'retained-retired-lease');
       assert.equal(control.ok, false);
       assert.deepEqual(control.targetLemmas, ['retired_lease_never_accepted']);
@@ -599,7 +621,7 @@ test('synthetic renewal baseline remains required even when the old-lease mutant
     await assert.rejects(() => runProtocolSecurity(f.root), /proofs\/negative controls failed/);
     const summary = JSON.parse(readFileSync(join(f.directory, 'summary.json'), 'utf8'));
     assert.equal(summary.passed, false);
-    assert.equal(summary.runs.length, 21);
+    assert.equal(summary.runs.length, 29);
     assert.equal(summary.runs.find(row => row.id === 'prompt-lease-renewal-2').ok, false);
     assert.equal(summary.runs.find(row => row.id === 'retained-retired-lease').ok, true);
   });

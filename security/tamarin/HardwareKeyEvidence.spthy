@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Symbolic contract, not native/implementation refinement. It asks what a PC
+// can conclude from Android key attestation when it trusts NOTHING the phone's
+// operating system says, whatever boot state the phone reports (ADR 0049).
+//
+// The Dolev-Yao attacker IS the phone's operating system here: it sees every
+// output, chooses every request to secure hardware, fills in the application
+// identity, picks the bytes to sign and decides what the screen shows. It never
+// obtains a key held in secure hardware, and it cannot make a signature with a
+// per-use-authentication key unless secure hardware first checked a credential
+// or biometric for that one operation.
+//
+// Trusted premises, not conclusions: secure hardware follows its key policy in
+// every boot state; an attestation key certified under the pinned Google root
+// has not left its hardware (a known leak is the revocation list's business,
+// crates/android-attestation/src/revocation.rs); signatures are unforgeable.
+// WHO presented the credential and WHAT the screen showed at that moment are
+// outside what hardware attests on any phone: the last lemma exhibits it.
+theory HardwareKeyEvidence
+begin
+
+builtins: signing
+
+restriction Equality:
+  "All left right #i. Eq(left, right) @i ==> left = right"
+
+// One phone's secure hardware (TEE or StrongBox). CertifiedAttester abstracts
+// chain validation up to the pinned root (chain.rs, roots.rs).
+rule ManufactureSecureHardware:
+  [ Fr(~hardware), Fr(~attester_sk) ]
+  -->
+  [ !SecureHardware(~hardware, ~attester_sk),
+    !CertifiedAttester(pk(~attester_sk)),
+    Out(<~hardware, pk(~attester_sk)>) ]
+
+// The bootloader, not the operating system, tells secure hardware how the
+// phone started. Every state is reachable and no universal lemma assumes one.
+rule BootloaderReportsBootState:
+  [ !SecureHardware(hardware, attester_sk) ]
+  --[ Booted(hardware, $state) ]->
+  [ !BootState(hardware, $state) ]
+
+// Any software may ask for a key. The challenge and the application identity
+// arrive from the operating system; secure hardware signs them next to the
+// policy it will itself enforce and the boot state it was told.
+rule HardwareGeneratesKeyWithPerUseAuthentication:
+  let public_key = pk(~sk)
+      description = <'attested-key', public_key, challenge, 'per-use-authentication', state, software_claim>
+  in
+  [ !SecureHardware(hardware, attester_sk), !BootState(hardware, state),
+    Fr(~sk), In(<challenge, software_claim>) ]
+  --[ HardwareGenerated(hardware, public_key, 'per-use-authentication'),
+      HardwareHolds(hardware, ~sk) ]->
+  [ !AuthenticatedUseKey(hardware, ~sk),
+    Out(<public_key, sign(description, attester_sk)>) ]
+
+rule HardwareGeneratesKeyWithoutAuthentication:
+  let public_key = pk(~sk)
+      description = <'attested-key', public_key, challenge, 'no-authentication', state, software_claim>
+  in
+  [ !SecureHardware(hardware, attester_sk), !BootState(hardware, state),
+    Fr(~sk), In(<challenge, software_claim>) ]
+  --[ HardwareGenerated(hardware, public_key, 'no-authentication'),
+      HardwareHolds(hardware, ~sk) ]->
+  [ !UnauthenticatedUseKey(hardware, ~sk),
+    Out(<public_key, sign(description, attester_sk)>) ]
+
+// A per-use-authentication key signs once per operation, and only after
+// secure hardware minted a token for that operation. The operating system
+// starts the operation, chooses what the screen shows while the credential is
+// presented, and supplies the bytes to sign afterwards.
+rule HardwareBeginsOperation:
+  [ !AuthenticatedUseKey(hardware, sk), Fr(~operation) ]
+  --[ OperationBegun(hardware, ~operation) ]->
+  [ PendingOperation(hardware, sk, ~operation), Out(~operation) ]
+
+rule HardwareChecksAuthentication:
+  [ !SecureHardware(hardware, attester_sk), In(<operation, shown>) ]
+  --[ HardwareAuthenticated(hardware, operation),
+      ScreenShowed(hardware, operation, shown) ]->
+  [ AuthenticationToken(hardware, operation) ]
+
+rule HardwareSignsAuthenticatedOperation:
+  [ PendingOperation(hardware, sk, operation),
+    AuthenticationToken(hardware, operation), In(message) ]
+  --[ HardwareSigned(hardware, pk(sk), message, operation) ]->
+  [ Out(sign(message, sk)) ]
+
+rule HardwareSignsWithoutAuthentication:
+  [ !UnauthenticatedUseKey(hardware, sk), In(message) ]
+  --[ HardwareSignedWithoutAuthentication(hardware, pk(sk), message) ]->
+  [ Out(sign(message, sk)) ]
+
+rule CreatePc:
+  [ Fr(~pc) ]
+  -->
+  [ !Pc(~pc), Out(~pc) ]
+
+rule PcStartsCeremony:
+  [ !Pc(pc), Fr(~challenge) ]
+  --[ CeremonyStarted(pc, ~challenge) ]->
+  [ Ceremony(pc, ~challenge), Out(~challenge) ]
+
+// description.rs and lib.rs: the PC checks the live challenge, the use policy
+// of each role and the application identity under a certified attester, and
+// ACCEPTS EVERY boot state, recording it. The application identity is checked
+// as the code checks it, although here the attacker is the one reporting it.
+rule PcEnrollsAttestedKeys:
+  let approval_description = <'attested-key', approval_key, challenge,
+        'per-use-authentication', approval_state, 'release-application'> // CANARY_APPROVAL_USE_POLICY
+      denial_description = <'attested-key', denial_key, challenge,
+        'no-authentication', denial_state, 'release-application'>
+  in
+  [ Ceremony(pc, challenge),
+    !CertifiedAttester(approval_attester), !CertifiedAttester(denial_attester),
+    In(<approval_key, approval_state, approval_attestation, approval_attester,
+        denial_key, denial_state, denial_attestation, denial_attester>) ]
+  --[ Eq(verify(approval_attestation, approval_description, approval_attester), true), // CANARY_KEY_ATTESTATION
+      Eq(verify(denial_attestation, denial_description, denial_attester), true),
+      Enrolled(pc, approval_key, denial_key, approval_state, denial_state) ]->
+  [ !Registry(pc, approval_key, denial_key) ]
+
+rule PcOpensRequest:
+  [ !Pc(pc), Fr(~request) ]
+  --[ RequestOpened(pc, ~request) ]->
+  [ PendingRequest(pc, ~request), Out(~request) ]
+
+rule PcAcceptsApproval:
+  [ PendingRequest(pc, request), !Registry(pc, approval_key, denial_key),
+    In(signature) ]
+  --[ Eq(verify(signature, <'approve', pc, request>, approval_key), true),
+      ApprovalAccepted(pc, approval_key, request) ]->
+  [ ]
+
+lemma unlocked_phone_enrolls_and_approves_trace:
+  exists-trace
+  "Ex pc hardware approval denial request operation #b #g #e #u #s #a.
+     Booted(hardware, 'unverified')@b
+     & HardwareGenerated(hardware, approval, 'per-use-authentication')@g
+     & Enrolled(pc, approval, denial, 'unverified', 'unverified')@e
+     & HardwareAuthenticated(hardware, operation)@u
+     & HardwareSigned(hardware, approval, <'approve', pc, request>, operation)@s
+     & ApprovalAccepted(pc, approval, request)@a
+     & b < g & g < e & e < a & u < s & s < a"
+
+lemma enrolled_approval_key_is_hardware_made_with_per_use_authentication:
+  all-traces
+  "All pc approval denial approval_state denial_state #e.
+     Enrolled(pc, approval, denial, approval_state, denial_state)@e
+     ==> (Ex hardware #g.
+            HardwareGenerated(hardware, approval, 'per-use-authentication')@g
+            & g < e)"
+
+lemma hardware_held_private_keys_stay_secret:
+  all-traces
+  "not (Ex hardware sk #g #k. HardwareHolds(hardware, sk)@g & K(sk)@k)"
+
+lemma accepted_approval_needs_hardware_authentication_for_that_signature:
+  all-traces
+  "All pc approval request #a.
+     ApprovalAccepted(pc, approval, request)@a
+     ==> (Ex hardware operation #u #s.
+            HardwareAuthenticated(hardware, operation)@u
+            & HardwareSigned(hardware, approval, <'approve', pc, request>, operation)@s
+            & u < s & s < a)"
+
+lemma one_hardware_authentication_signs_at_most_once:
+  all-traces
+  "All hardware first_key second_key first_message second_message operation #s1 #s2.
+     HardwareSigned(hardware, first_key, first_message, operation)@s1
+     & HardwareSigned(hardware, second_key, second_message, operation)@s2
+     ==> #s1 = #s2"
+
+lemma authentication_is_not_bound_to_what_the_screen_showed:
+  exists-trace
+  "Ex pc hardware approval request operation shown #u #s #a.
+     ScreenShowed(hardware, operation, shown)@u
+     & HardwareSigned(hardware, approval, <'approve', pc, request>, operation)@s
+     & ApprovalAccepted(pc, approval, request)@a
+     & not (shown = request)
+     & u < s & s < a"
+
+end

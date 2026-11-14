@@ -513,3 +513,88 @@ admission, signed messages, decisions and request authorization are unchanged,
 so no theorem, rule, canary or expected verdict changes. Strict DER parsing,
 signature malleability and constant-time behaviour stay outside the models, as
 stated above. Rebinding approved by the user on 2026-10-25.
+
+## HardwareKeyEvidence.spthy (added 2026-11-14, ADR 0049)
+
+This fourth model answers one question: what can the PC conclude from Android
+key attestation if it trusts nothing the phone's operating system says, and
+does the answer depend on the boot state the phone reports. It was written
+when the verifier stopped refusing unlocked and owner-signed phones.
+
+The attacker is the phone's operating system. Every request to secure
+hardware arrives through `In`, so the attacker chooses the challenge, fills in
+the application identity, starts operations, decides what the screen shows
+while a credential is presented and supplies the bytes to sign. Thirteen rules
+cover secure hardware (manufacture, the boot state the bootloader reports,
+two key-generation rules that differ only in use policy, the three-step
+authenticated signing operation and unauthenticated signing) and the PC
+(ceremony challenge, enrollment, request, acceptance). `PcEnrollsAttestedKeys`
+takes the boot state of each key from the attacker and accepts any value.
+
+Trusted premises, none of them proved here: secure hardware follows its key
+policy in every boot state; an attestation key certified under the pinned
+root has not left its hardware; signatures are unforgeable. `CertifiedAttester`
+abstracts chain validation, profiles and revocation. The model does not say
+who presented the credential that `HardwareChecksAuthentication` accepted:
+the KeyMint interface itself states that an operating system which has
+captured the lock-screen credential can present it.
+
+| Lemma | Kind | Expected verdict |
+| --- | --- | --- |
+| `unlocked_phone_enrolls_and_approves_trace` | exists-trace | verified, with both keys' boot state fixed at `'unverified'` |
+| `enrolled_approval_key_is_hardware_made_with_per_use_authentication` | all-traces | verified |
+| `hardware_held_private_keys_stay_secret` | all-traces | verified |
+| `accepted_approval_needs_hardware_authentication_for_that_signature` | all-traces | verified |
+| `one_hardware_authentication_signs_at_most_once` | all-traces | verified |
+| `authentication_is_not_bound_to_what_the_screen_showed` | exists-trace | verified: an accepted approval whose authentication showed something other than the request |
+
+The last row is a limit, not a goal. It is required to exist so that the
+model cannot be read as proving that the person saw what they approved. No
+attestation proves that on any phone, locked or not.
+
+No universal lemma mentions the boot state. That absence is the result: the
+four conclusions hold for every value the attacker gives it.
+
+| Model operation | Implementation boundary |
+| --- | --- |
+| A certified attester signed the description | `crates/android-attestation/src/lib.rs`: `verify_with_anchors`; `src/chain.rs`, `src/roots.rs`, `src/revocation.rs` |
+| Challenge, use policy per role, application identity | `crates/android-attestation/src/description.rs`: `verify_description`, `authorizations`, `application_id` |
+| Every boot state accepted and carried forward | `description.rs`: `root_of_trust`, `BootAssurance`; `lib.rs`: `VerifiedKeyBundle::boot_assurance` |
+| An approval is a signature by the enrolled approval key | `crates/approval-protocol/src/lib.rs`: `SignedDecision::verify`. Binding, replay and revocation are the request model's, not repeated here |
+| Secure hardware's key generation, operations and tokens | Android KeyMint and its authenticators. Trusted premise |
+
+`description.rs` and `lib.rs` are source-bound in the manifest, so a change to
+the verifier's policy needs this model looked at again.
+
+### Negative controls
+
+`unchecked-key-attestation` replaces exactly
+
+```text
+Eq(verify(approval_attestation, approval_description, approval_attester), true), // CANARY_KEY_ATTESTATION
+```
+
+with a comparison of that `verify` term against itself, marked
+`// CANARY_KEY_ATTESTATION_DISABLED`. The attacker then enrolls a key it made
+itself and approves with it.
+
+`approval-key-without-authentication` replaces exactly
+
+```text
+'per-use-authentication', approval_state, 'release-application'> // CANARY_APPROVAL_USE_POLICY
+```
+
+with the same line carrying `'no-authentication'`, marked
+`// CANARY_APPROVAL_USE_POLICY_DISABLED`. The attacker then enrolls a genuine
+hardware key that needs no authentication as the approval key and signs with
+it at will.
+
+Each control must falsify both
+`enrolled_approval_key_is_hardware_made_with_per_use_authentication` and
+`accepted_approval_needs_hardware_authentication_for_that_signature` with an
+actual trace. The manifest now holds 23 positive rows and 6 controls in four
+models, 29 rows in all; the 21 that were there before are unchanged.
+
+This is a symbolic contract. It proves nothing about a particular phone's
+secure hardware, about Android's biometric pipeline, or about whether a
+manufacturer's hardware still attests after its bootloader is unlocked.
