@@ -266,7 +266,18 @@ impl SyntheticRkp {
         Self::description_for_challenge(role, CHALLENGE)
     }
 
+    /// The default description with another boot report: bootloader lock and
+    /// verified-boot state (0 Verified, 1 SelfSigned, 2 Unverified, 3 Failed).
+    /// Every key, application and patch field stays as it is.
+    pub(crate) fn description_with_boot(role: KeyRole, locked: bool, state: u8) -> Vec<u8> {
+        Self::description(role, CHALLENGE, locked, state)
+    }
+
     fn description_for_challenge(role: KeyRole, challenge: [u8; 32]) -> Vec<u8> {
+        Self::description(role, challenge, true, 0)
+    }
+
+    fn description(role: KeyRole, challenge: [u8; 32], locked: bool, state: u8) -> Vec<u8> {
         // Match the product's minimum Android versionCode. This is still only
         // a software-signed claim under an explicit, non-shipping test root.
         let package = sequence([octets(b"dev.dkk115.uacremote"), uint(1_000)]);
@@ -278,8 +289,8 @@ impl SyntheticRkp {
         };
         let root_of_trust = sequence([
             octets(&[1; 32]),
-            true.to_der().expect("synthetic BOOLEAN"),
-            enumerated(0),
+            locked.to_der().expect("synthetic BOOLEAN"),
+            enumerated(state),
             octets(&[2; 32]),
         ]);
         let hardware = sequence([

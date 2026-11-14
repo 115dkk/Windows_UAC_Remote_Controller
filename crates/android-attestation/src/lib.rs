@@ -2,7 +2,9 @@
 //! PC-side verification of bounded, untrusted Android public-key evidence.
 //!
 //! Key properties are not owner enrollment intent, key possession, proof of a
-//! currently uncompromised phone, or a registry commit. Verification is pure;
+//! currently uncompromised phone, or a registry commit. They are checked the
+//! same way whatever the phone's boot state; that state is reported, not
+//! required (ADR 0049). Verification is pure;
 //! the separate status fetch accepts no caller-selected URI, path or trust store.
 //! No private key, signer, native operation or renderer entry is exposed here.
 #![forbid(unsafe_code)]
@@ -15,6 +17,7 @@ mod policy;
 mod revocation;
 mod roots;
 
+pub use description::BootAssurance;
 pub use fetch::fetch_google_status;
 pub use policy::{PlatformMinimums, TrustedStatusSnapshot, VerificationPolicy};
 use secure_channel::TlsPublicKey;
@@ -103,6 +106,7 @@ pub struct VerifiedKeyBundle {
     keys: [TlsPublicKey; 3],
     challenge: [u8; 32],
     policy: [u8; 32],
+    boot_assurance: BootAssurance,
     checked_utc: Duration,
     utc_deadline: Option<Duration>,
     deadline: Instant,
@@ -116,6 +120,13 @@ impl fmt::Debug for VerifiedKeyBundle {
 impl VerifiedKeyBundle {
     pub const fn challenge(&self) -> &[u8; 32] {
         &self.challenge
+    }
+
+    /// The least vouched-for boot state among the three keys, for the owner to
+    /// see before deciding. No key property was relaxed for any value, and this
+    /// is neither a statement about the phone now nor a reason to enroll it.
+    pub const fn boot_assurance(&self) -> BootAssurance {
+        self.boot_assurance
     }
 
     /// Consume immediately at the protected registry's logical mutation point.
@@ -236,6 +247,9 @@ fn verify_with_anchors(
         description::KeyRole::Transport,
     ];
     let description_policy = policy.description(&expected.challenge);
+    // Three chains are not proof of one phone, so the bundle carries the least
+    // vouched-for state any of them reported rather than the first one seen.
+    let mut boot_assurance = BootAssurance::Manufacturer;
     for ((chain, key), role) in evidence.chains.into_iter().zip(&expected.keys).zip(roles) {
         let verified = chain::verify_with_anchors(chain, key, now.utc, &status.entries, anchors)?;
         let metadata =
@@ -246,6 +260,7 @@ fn verify_with_anchors(
         {
             return Err(VerificationError::PlatformPolicy);
         }
+        boot_assurance = boot_assurance.max(metadata.boot_assurance);
         if let Some(expiry) = verified.valid_until {
             let remaining = expiry
                 .checked_sub(now.utc)
@@ -270,6 +285,7 @@ fn verify_with_anchors(
         keys: expected.keys.clone(),
         challenge: expected.challenge,
         policy: policy.fingerprint(),
+        boot_assurance,
         checked_utc: after.utc,
         utc_deadline,
         deadline,

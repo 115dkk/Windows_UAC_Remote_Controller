@@ -439,8 +439,25 @@ fn der_rejects_ber_nonminimal_integer_wrong_enum_null_and_explicit_trailing_valu
 }
 
 #[test]
-fn root_of_trust_requires_locked_verified_and_versioned_field_count() {
-    for (locked, state) in [(false, 0), (true, 1), (true, 2), (true, 3)] {
+fn boot_state_is_classified_and_only_a_failed_or_contradictory_report_is_refused() {
+    for (locked, state, expected) in [
+        (true, 0, BootAssurance::Manufacturer),
+        (true, 1, BootAssurance::Owner),
+        // An unlocked bootloader can load any image at the next start, so what
+        // it reported for this one does not raise the class.
+        (false, 0, BootAssurance::Unverified),
+        (false, 1, BootAssurance::Unverified),
+        (false, 2, BootAssurance::Unverified),
+    ] {
+        for role in [KeyRole::Approval, KeyRole::Denial, KeyRole::Transport] {
+            let mut fixture = Fixture::new(role);
+            fixture.set_hardware(704, root_value(400, locked, state));
+            assert_eq!(fixture.check(role).unwrap().boot_assurance, expected);
+        }
+    }
+    // Locked yet unverified contradicts itself, Failed is the hardware saying
+    // the image did not pass, and a value outside the schema is not guessed at.
+    for (locked, state) in [(true, 2), (true, 3), (false, 3), (true, 4), (false, 4)] {
         let mut fixture = Fixture::new(KeyRole::Approval);
         fixture.set_hardware(704, root_value(400, locked, state));
         assert!(matches!(
@@ -448,6 +465,14 @@ fn root_of_trust_requires_locked_verified_and_versioned_field_count() {
             Err(Error::PlatformPolicy)
         ));
     }
+    let mut missing = Fixture::new(KeyRole::Approval);
+    missing.hardware.retain(|(tag, _)| *tag != 704);
+    assert!(matches!(
+        missing.check(KeyRole::Approval),
+        Err(Error::PlatformPolicy)
+    ));
+    assert!(BootAssurance::Manufacturer < BootAssurance::Owner);
+    assert!(BootAssurance::Owner < BootAssurance::Unverified);
     let mut fixture = Fixture::new(KeyRole::Approval);
     fixture.set_hardware(704, root_value(2, true, 0));
     assert!(matches!(fixture.check(KeyRole::Approval), Err(Error::Der)));
@@ -473,6 +498,115 @@ fn root_of_trust_requires_locked_verified_and_versioned_field_count() {
         );
         assert!(matches!(
             fixture.check(KeyRole::Approval),
+            Err(Error::PlatformPolicy)
+        ));
+    }
+    // An unlocked phone reports a key of zeroes, and older hardware a shorter
+    // or absent one. Only a locked phone has to name its key and its hash.
+    let unlocked = |key: &[u8], hash: &[u8]| {
+        let mut fixture = Fixture::new(KeyRole::Approval);
+        fixture.set_hardware(
+            704,
+            sequence([
+                blob(key),
+                false.to_der().unwrap(),
+                enum_value(2),
+                blob(hash),
+            ]),
+        );
+        fixture.check(KeyRole::Approval)
+    };
+    for (key, hash) in [(32, 32), (16, 32), (0, 32), (32, 0), (0, 0)] {
+        let observed = unlocked(&vec![0; key], &vec![3; hash]).unwrap();
+        assert_eq!(observed.boot_assurance, BootAssurance::Unverified);
+    }
+    for (key, hash) in [(129, 32), (32, 129)] {
+        assert!(matches!(
+            unlocked(&vec![0; key], &vec![3; hash]),
+            Err(Error::PlatformPolicy)
+        ));
+    }
+    let mut hashless = Fixture::new(KeyRole::Approval);
+    hashless.set_hardware(
+        704,
+        sequence([
+            blob(&[1; 32]),
+            true.to_der().unwrap(),
+            enum_value(1),
+            blob(&[]),
+        ]),
+    );
+    assert!(matches!(
+        hashless.check(KeyRole::Approval),
+        Err(Error::PlatformPolicy)
+    ));
+}
+
+/// The boot state is the only thing an unlocked or owner-signed phone is let
+/// off. Each row is a check a manufacturer-verified phone also has to pass.
+#[test]
+fn an_unlocked_or_owner_signed_phone_is_held_to_every_other_check() {
+    for (locked, state) in [(true, 1), (false, 2)] {
+        let rooted = |role: KeyRole| {
+            let mut fixture = Fixture::new(role);
+            fixture.set_hardware(704, root_value(400, locked, state));
+            fixture
+        };
+        // A key that needs no authentication cannot be the approval key.
+        assert!(matches!(
+            rooted(KeyRole::Denial).check(KeyRole::Approval),
+            Err(Error::KeyPolicy)
+        ));
+        // Authentication valid for a period is not authentication per use.
+        let mut timed = rooted(KeyRole::Approval);
+        timed.set_hardware(505, uint(30));
+        assert!(matches!(
+            timed.check(KeyRole::Approval),
+            Err(Error::KeyPolicy)
+        ));
+        // An imported key was not made inside secure hardware.
+        let mut imported = rooted(KeyRole::Approval);
+        imported.set_hardware(702, uint(2));
+        assert!(matches!(
+            imported.check(KeyRole::Approval),
+            Err(Error::KeyPolicy)
+        ));
+        // Software-level keys and attesters stay refused.
+        let mut software_key = rooted(KeyRole::Approval);
+        software_key.keymint_level = 0;
+        assert!(matches!(
+            software_key.check(KeyRole::Approval),
+            Err(Error::PlatformPolicy)
+        ));
+        let mut software_attester = rooted(KeyRole::Approval);
+        software_attester.attestation_level = 0;
+        assert!(matches!(
+            software_attester.check(KeyRole::Approval),
+            Err(Error::PlatformPolicy)
+        ));
+        // The live challenge, the release application and the patch floor.
+        let mut stale = rooted(KeyRole::Approval);
+        stale.challenge = vec![6; 32];
+        assert!(matches!(
+            stale.check(KeyRole::Approval),
+            Err(Error::ChallengeMismatch)
+        ));
+        let mut other_app = rooted(KeyRole::Approval);
+        other_app.set_software(709, blob(&app_id(&[(b"dev.example.other", 2)], &SIGNERS)));
+        assert!(matches!(
+            other_app.check(KeyRole::Approval),
+            Err(Error::AppIdentity)
+        ));
+        let mut other_signer = rooted(KeyRole::Approval);
+        other_signer.set_software(709, blob(&app_id(&[(PACKAGE, 2)], &[[8; 32], [10; 32]])));
+        assert!(matches!(
+            other_signer.check(KeyRole::Approval),
+            Err(Error::AppIdentity)
+        ));
+        let mut unpatched = rooted(KeyRole::Approval);
+        unpatched.set_hardware(706, uint(202512));
+        assert!(matches!(
+            unpatched.check(KeyRole::Approval),
             Err(Error::PlatformPolicy)
         ));
     }

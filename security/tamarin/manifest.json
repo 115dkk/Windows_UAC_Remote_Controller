@@ -49,6 +49,14 @@
     {
       "path": "crates/windows-service-host/src/peer_runtime/prompt.rs",
       "sha256": "84b352872e7be74e8e0628d346dbe05c44a4f5b6a9de1659440cd1937848ade9"
+    },
+    {
+      "path": "crates/android-attestation/src/description.rs",
+      "sha256": "9f6ab1cb77e512010f961c3b1020695c681c68f6d82a893728d78b156f6e0f3d"
+    },
+    {
+      "path": "crates/android-attestation/src/lib.rs",
+      "sha256": "b38743643e6737a58d528cb4e299e12ad000538bf5c7e0522205492d7c747675"
     }
   ],
   "models": [
@@ -231,6 +239,72 @@
           },
           "expected": {
             "retired_lease_never_accepted": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "hardware-key-evidence",
+      "path": "security/tamarin/HardwareKeyEvidence.spthy",
+      "expected": {
+        "unlocked_phone_enrolls_and_approves_trace": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        },
+        "enrolled_approval_key_is_hardware_made_with_per_use_authentication": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "hardware_held_private_keys_stay_secret": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "accepted_approval_needs_hardware_authentication_for_that_signature": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "one_hardware_authentication_signs_at_most_once": {
+          "trace": "all-traces",
+          "verdict": "verified"
+        },
+        "authentication_is_not_bound_to_what_the_screen_showed": {
+          "trace": "exists-trace",
+          "verdict": "verified"
+        }
+      },
+      "canaries": [
+        {
+          "id": "unchecked-key-attestation",
+          "mutation": {
+            "from": "Eq(verify(approval_attestation, approval_description, approval_attester), true), // CANARY_KEY_ATTESTATION",
+            "to": "Eq(verify(approval_attestation, approval_description, approval_attester), verify(approval_attestation, approval_description, approval_attester)), // CANARY_KEY_ATTESTATION_DISABLED"
+          },
+          "expected": {
+            "enrolled_approval_key_is_hardware_made_with_per_use_authentication": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            },
+            "accepted_approval_needs_hardware_authentication_for_that_signature": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            }
+          }
+        },
+        {
+          "id": "approval-key-without-authentication",
+          "mutation": {
+            "from": "'per-use-authentication', approval_state, 'release-application'> // CANARY_APPROVAL_USE_POLICY",
+            "to": "'no-authentication', approval_state, 'release-application'> // CANARY_APPROVAL_USE_POLICY_DISABLED"
+          },
+          "expected": {
+            "enrolled_approval_key_is_hardware_made_with_per_use_authentication": {
+              "trace": "all-traces",
+              "verdict": "falsified"
+            },
+            "accepted_approval_needs_hardware_authentication_for_that_signature": {
               "trace": "all-traces",
               "verdict": "falsified"
             }

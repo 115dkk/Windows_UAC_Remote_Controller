@@ -3,7 +3,7 @@
 // desktop by crates/windows-service-host/.../renderer_ui.rs, and these captures
 // are never evidence that it painted, that a desktop switched, or that any
 // pairing happened. They exist so the layout and copy can be reviewed.
-import { pairingCeremonyCases } from './pairing-ceremony-cases';
+import { ceremonyBoots, pairingCeremonyCases } from './pairing-ceremony-cases';
 import { test, expect, galleryText } from './session';
 
 for (const selected of pairingCeremonyCases) {
@@ -35,16 +35,53 @@ for (const selected of pairingCeremonyCases) {
       expect(fits.wide, `button text width: ${fits.label ?? ''}`).toBeLessThanOrEqual(fits.room);
     }
 
-    if (selected.fixture === 'pairing-ceremony-comparison') {
+    if (selected.fixture.startsWith('pairing-ceremony-comparison')) {
       await expect(page.getByRole('heading', { name: galleryText(locale, 'UAC 원격 승인 · PC 연결'), exact: true })).toBeVisible();
-      await expect(page.getByText(galleryText(locale, '휴대폰에 표시된 숫자와 같은지 확인해 주세요.'), { exact: true })).toBeVisible();
+      const instruction = page.getByText(galleryText(locale, '휴대폰에 표시된 숫자와 같은지 확인해 주세요.'), { exact: true });
       // The digits are a fixed sample; a real comparison code is minted per
       // attempt and never leaves the protected desktop.
-      await expect(page.getByText('123 456', { exact: true })).toBeVisible();
+      const digits = page.getByText('123 456', { exact: true });
+      await expect(digits).toBeVisible();
       for (const source of ['숫자가 같아요', '다릅니다, 취소']) {
         await expect(page.getByRole('button', { name: galleryText(locale, source), exact: true })).toBeInViewport({ ratio: 1 });
       }
-      await gallery.capture('comparison', 'CLIENT/SYNTHETIC · 여섯 자리 비교와 번역이 들어가는 단추');
+      const notice = screen.locator('[data-boot-notice]');
+      const boot = ceremonyBoots.find(value => selected.fixture === `pairing-ceremony-comparison-${value}`);
+      if (boot === undefined) {
+        // A phone on its manufacturer's verified system: the screen is as it was.
+        await expect(instruction).toBeVisible();
+        await expect(notice).toHaveCount(0);
+        await gallery.capture('comparison', 'CLIENT/SYNTHETIC · 여섯 자리 비교와 번역이 들어가는 단추');
+        return;
+      }
+      // The sentence is never left out, wherever it had to go.
+      await expect(notice).toHaveCount(1);
+      await expect(notice).toHaveText(galleryText(locale, boot === 'unlocked'
+        ? '이 휴대폰은 부트로더가 풀려 있습니다. 직접 푼 것이 아니라면 ESC를 눌러 중지하십시오.'
+        : '이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.'));
+      await expect(notice).toBeInViewport({ ratio: 1 });
+      const whole = await notice.evaluate((node) => ({ scroll: node.scrollHeight, client: node.clientHeight }));
+      expect(whole.scroll, 'boot notice is not cut').toBeLessThanOrEqual(whole.client);
+      const [digitsBox, noticeBox, rowBox, cardBox] = [
+        await digits.boundingBox(), await notice.boundingBox(),
+        await screen.locator('[data-comparison-actions]').boundingBox(), await screen.locator('section').boundingBox(),
+      ];
+      expect(rowBox!.y + rowBox!.height, 'decision row stays on the card').toBeLessThanOrEqual(cardBox!.y + cardBox!.height);
+      const place = await notice.getAttribute('data-boot-notice');
+      // The short display is the one case declared to have no room under the digits.
+      expect(place, 'where the notice went').toBe(selected.viewport.height < 500 ? 'instruction' : 'under-digits');
+      if (place === 'instruction') {
+        // It took the instruction's place, above the digits; the row did not move.
+        await expect(instruction).toHaveCount(0);
+        expect(noticeBox!.y + noticeBox!.height, 'notice clears the digits').toBeLessThanOrEqual(digitsBox!.y);
+      } else {
+        await expect(instruction).toBeVisible();
+        expect(digitsBox!.y + digitsBox!.height, 'notice clears the digits').toBeLessThanOrEqual(noticeBox!.y);
+        expect(noticeBox!.y + noticeBox!.height, 'notice clears the decision row').toBeLessThan(rowBox!.y);
+      }
+      await gallery.capture(`comparison-${boot}`, boot === 'unlocked'
+        ? 'CLIENT/SYNTHETIC · 부트로더가 풀린 휴대폰일 때 더해지는 안내'
+        : 'CLIENT/SYNTHETIC · 제조사 것이 아닌 운영체제로 시작한 휴대폰일 때 더해지는 안내');
       return;
     }
 

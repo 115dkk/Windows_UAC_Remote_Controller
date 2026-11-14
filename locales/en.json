@@ -324,6 +324,8 @@
   "휴대폰 정보를 읽지 못했습니다.": "Could not read phone information.",
   "휴대폰 화면 잠금이 필요해요": "A phone screen lock is required",
   "휴대폰에 표시된 숫자와 같은지 확인해 주세요.": "Check that the numbers match those on your phone.",
+  "이 휴대폰은 부트로더가 풀려 있습니다. 직접 푼 것이 아니라면 ESC를 눌러 중지하십시오.": "This phone's bootloader is unlocked. If you didn't unlock it, press Esc to stop.",
+  "이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.": "This phone started with an OS not made by its manufacturer. If you didn't install it, press Esc to stop.",
   "휴대폰에서 앱을 다시 열어 확인해 주세요.": "Reopen the app on your phone and check again.",
   "휴대폰을 연결했어요.": "Phone paired.",
   "휴대폰을 켤 때 자동 실행": "Start automatically when the phone turns on",

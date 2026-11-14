@@ -20,6 +20,12 @@ not a general remote desktop or arbitrary remote execution tool.
 - **Decision**: one enrolled phone's request-bound signed approval or denial.
   An approval key must require that phone's OS authentication for each use;
   a denial key is separate and does not require it.
+- **Boot assurance**: who vouched for a phone's operating system when its keys
+  were made, as its secure hardware reported it: the manufacturer, a key the
+  owner installed, or nobody (unlocked bootloader). It is shown to the PC's
+  owner during the pairing ceremony and is not a property of the keys: every
+  key check is the same for all three. It is not stored and gates nothing
+  later. See [ADR0049](docs/adr/0049-keys-are-judged-by-secure-hardware-not-by-boot-state.md).
 - **Authorization**: the Rust core has accepted a decision once. This is not
   proof that Windows accepted or applied it. The prompt adapter still has to
   bind the action to the same live prompt and confirm the result.
@@ -61,6 +67,10 @@ explicitly excludes an already-compromised SYSTEM/kernel. Defend against
 unelevated local malware, unpaired/revoked devices and hostile networks/relays.
 Do not turn an exclusion into permission to let unelevated malware gain
 privilege through this service. Keep Secure Desktop and other OS protections on.
+
+The phone is treated the same way. A phone whose root is already in an
+attacker's hands is excluded; a phone its owner rooted or unlocked is not, and
+is held to every key check a locked phone passes (ADR 0049).
 
 ## Current implementation boundary
 

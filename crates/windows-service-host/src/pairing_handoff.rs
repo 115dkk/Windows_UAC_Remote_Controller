@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::{PendingElevationId, RendererInvocation};
+use android_attestation::BootAssurance;
 use service_protocol::{
     MAX_PAIRING_INVITATION_QR_TEXT_BYTES, MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
     PairingComparisonCode, PairingInvitation,
@@ -16,7 +17,7 @@ const LAUNCH_FRAME: usize = 52;
 const RENDERER_PREFIX: usize = 72;
 const INVITATION_MIN_FRAME: usize = RENDERER_PREFIX + 2 + MIN_PAIRING_INVITATION_QR_TEXT_BYTES;
 const INVITATION_MAX_FRAME: usize = RENDERER_PREFIX + 2 + MAX_PAIRING_INVITATION_QR_TEXT_BYTES;
-const COMPARISON_FRAME: usize = RENDERER_PREFIX + 6;
+const COMPARISON_FRAME: usize = RENDERER_PREFIX + 7;
 const BOOLEAN_FRAME: usize = RENDERER_PREFIX + 1;
 
 #[derive(Clone, Eq, PartialEq)]
@@ -63,6 +64,7 @@ pub(crate) enum Frame {
     RendererComparison {
         invocation: RendererInvocation,
         code: ComparisonDigits,
+        boot: BootAssurance,
     },
     RendererDecision {
         invocation: RendererInvocation,
@@ -127,6 +129,23 @@ impl ComparisonDigits {
 impl fmt::Debug for ComparisonDigits {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ComparisonDigits(redacted)")
+    }
+}
+
+fn encode_boot_assurance(boot: BootAssurance) -> u8 {
+    match boot {
+        BootAssurance::Manufacturer => 0,
+        BootAssurance::Owner => 1,
+        BootAssurance::Unverified => 2,
+    }
+}
+
+fn decode_boot_assurance(byte: u8) -> Result<BootAssurance, HandoffError> {
+    match byte {
+        0 => Ok(BootAssurance::Manufacturer),
+        1 => Ok(BootAssurance::Owner),
+        2 => Ok(BootAssurance::Unverified),
+        _ => Err(HandoffError::Frame),
     }
 }
 
@@ -496,9 +515,14 @@ impl Frame {
                 bytes.extend_from_slice(&length.to_be_bytes());
                 bytes.extend_from_slice(text.as_str().as_bytes());
             }
-            Self::RendererComparison { invocation, code } => {
+            Self::RendererComparison {
+                invocation,
+                code,
+                boot,
+            } => {
                 bytes.extend_from_slice(&invocation.display().bytes());
                 bytes.extend_from_slice(code.as_str().as_bytes());
+                bytes.push(encode_boot_assurance(*boot));
             }
             Self::RendererDecision {
                 invocation,
@@ -630,9 +654,16 @@ impl Frame {
                 }
                 (14, COMPARISON_FRAME) => {
                     let code = ComparisonDigits::new(
-                        bytes[72..78].try_into().map_err(|_| HandoffError::Frame)?,
+                        bytes[RENDERER_PREFIX..RENDERER_PREFIX + 6]
+                            .try_into()
+                            .map_err(|_| HandoffError::Frame)?,
                     )?;
-                    return Ok(Self::RendererComparison { invocation, code });
+                    let boot = decode_boot_assurance(bytes[RENDERER_PREFIX + 6])?;
+                    return Ok(Self::RendererComparison {
+                        invocation,
+                        code,
+                        boot,
+                    });
                 }
                 (15 | 16, BOOLEAN_FRAME) => {
                     let value = match bytes[72] {
@@ -1066,6 +1097,7 @@ mod tests {
             Frame::RendererComparison {
                 invocation,
                 code: ComparisonDigits::new(*b"123456").unwrap(),
+                boot: BootAssurance::Manufacturer,
             },
             Frame::RendererDecision {
                 invocation,
@@ -1098,11 +1130,35 @@ mod tests {
         let mut bad_digits = Frame::RendererComparison {
             invocation,
             code: ComparisonDigits::new(*b"123456").unwrap(),
+            boot: BootAssurance::Manufacturer,
         }
         .encode()
         .unwrap();
-        bad_digits[77] = b'x';
+        bad_digits[RENDERER_PREFIX + 5] = b'x';
         assert!(Frame::decode(&bad_digits).is_err());
+        for boot in [
+            BootAssurance::Manufacturer,
+            BootAssurance::Owner,
+            BootAssurance::Unverified,
+        ] {
+            let frame = Frame::RendererComparison {
+                invocation,
+                code: ComparisonDigits::new(*b"123456").unwrap(),
+                boot,
+            };
+            let bytes = frame.encode().unwrap();
+            assert_eq!(Frame::decode(&bytes), Ok(frame));
+        }
+        let mut bad_boot = Frame::RendererComparison {
+            invocation,
+            code: ComparisonDigits::new(*b"123456").unwrap(),
+            boot: BootAssurance::Manufacturer,
+        }
+        .encode()
+        .unwrap();
+        bad_boot[RENDERER_PREFIX + 6] = 3;
+        assert!(Frame::decode(&bad_boot).is_err());
+        assert!(Frame::decode(&bad_boot[..RENDERER_PREFIX + 6]).is_err());
         for frame in [
             Frame::RendererDecision {
                 invocation,

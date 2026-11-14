@@ -12,7 +12,7 @@ use std::{
 };
 
 use android_attestation::{
-    CandidateEvidence, ExpectedKeyBundle, TrustedStatusSnapshot, VerificationError,
+    BootAssurance, CandidateEvidence, ExpectedKeyBundle, TrustedStatusSnapshot, VerificationError,
     VerificationPolicy, VerifiedKeyBundle, fetch_google_status, verify_key_bundle,
 };
 #[cfg(any(test, feature = "lab-e2e"))]
@@ -131,7 +131,10 @@ pub(super) enum EnrollmentProgress {
     Connecting,
     AwaitingSubmission,
     Verifying,
-    CandidateSent { code: PairingComparisonCode },
+    CandidateSent {
+        code: PairingComparisonCode,
+        boot: BootAssurance,
+    },
     PhoneConfirmed,
     AwaitingPcDecision,
     Accepted,
@@ -143,7 +146,10 @@ impl Clone for EnrollmentProgress {
             Self::Connecting => Self::Connecting,
             Self::AwaitingSubmission => Self::AwaitingSubmission,
             Self::Verifying => Self::Verifying,
-            Self::CandidateSent { code } => Self::CandidateSent { code: code.clone() },
+            Self::CandidateSent { code, boot } => Self::CandidateSent {
+                code: code.clone(),
+                boot: *boot,
+            },
             Self::PhoneConfirmed => Self::PhoneConfirmed,
             Self::AwaitingPcDecision => Self::AwaitingPcDecision,
             Self::Accepted => Self::Accepted,
@@ -398,7 +404,7 @@ impl EnrollmentCarrier {
     pub(super) fn send_frozen(
         &mut self,
         frozen: SignedFrozenCandidate,
-    ) -> Result<PairingComparisonCode, EnrollmentError> {
+    ) -> Result<(PairingComparisonCode, BootAssurance), EnrollmentError> {
         if !self.ready_for_frozen() {
             return Err(EnrollmentError::Protocol);
         }
@@ -413,10 +419,18 @@ impl EnrollmentCarrier {
         self.commands
             .try_send(Command::Frozen(frozen))
             .map_err(|_| EnrollmentError::Protocol)?;
-        self.verified.as_ref().ok_or(EnrollmentError::Protocol)?;
+        let boot = self
+            .verified
+            .as_ref()
+            .ok_or(EnrollmentError::Protocol)?
+            .0
+            .boot_assurance();
         self.frozen_sent = true;
-        self.progress = EnrollmentProgress::CandidateSent { code: code.clone() };
-        Ok(code)
+        self.progress = EnrollmentProgress::CandidateSent {
+            code: code.clone(),
+            boot,
+        };
+        Ok((code, boot))
     }
 
     pub(super) fn pc_decision(&mut self, confirmed: bool) -> Result<(), EnrollmentError> {
@@ -1244,7 +1258,10 @@ mod tests {
             .match_original(&carrier.expected_context)
             .unwrap()
             .comparison_code();
-        assert_eq!(carrier.send_frozen(frozen).unwrap(), expected_code);
+        assert_eq!(
+            carrier.send_frozen(frozen).unwrap(),
+            (expected_code, BootAssurance::Manufacturer)
+        );
         wait_progress(&mut carrier, &mut worker, |progress, _carrier| {
             matches!(progress, EnrollmentProgress::PhoneConfirmed)
         });
