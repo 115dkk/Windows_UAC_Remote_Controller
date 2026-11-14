@@ -199,6 +199,13 @@ the one who vouches for the operating system.** When the class is not
 - `Owner`: this phone runs an operating system that is not the
   manufacturer's; if you did not install it yourself, press ESC to stop.
 
+The sentence is never left out. It sits in a band under the digits when it
+fits there whole, in the body font or failing that the smaller hint font, and
+the decision row moves down only as far as the band needs and never off the
+card. On a display with no room for that it takes the place of the instruction
+at the top of the card, which every display that can show this screen has; the
+buttons already say what is being compared.
+
 This is the "out-of-band" verification the attestation page assigns to the
 user, placed at the one moment the owner is already deciding whether to trust
 this phone, on a screen unelevated software cannot draw over. The class
@@ -257,6 +264,9 @@ signature of secure hardware on the approval key's description.
 authentication as the approval key. Each must falsify the first and third
 lemmas with an actual trace.
 
+CI run 43601385971 (`341893e`) reported all 29 rows of the manifest as
+required: these six verified and both controls falsified.
+
 The model's premises are that secure hardware follows its key policy in every
 boot state, that a certified attestation key has not left its hardware, and
 that signatures are unforgeable. It does not model who presented the
@@ -278,6 +288,33 @@ owners a reason to adopt the only configuration that breaks what the PC
 actually relies on. An owner whose unlocked phone is accepted as it is has no
 reason to. Revocation (row 5) is the defence against a leaked key, before and
 after this change.
+
+## Review
+
+A static audit by a second model, read-only and with no part in the
+implementation, went through the verifier, the frame, the screen, the model
+and these documents before merge. It found nothing in the verifier, the bundle
+rule, the frame codec or the model. It found three defects elsewhere, all
+fixed here.
+
+1. On a display with too little room under the digits the first layout cut
+   the notice band short, and on a still smaller one (1280 by 720 at 200%)
+   reduced it to nothing, while the confirm button stayed. A notice the owner
+   cannot see is not a check. The sentence now moves to the instruction's
+   place instead of shrinking, as described under Decision.
+2. The client gallery measured the sentence at a width two pixels wider than
+   it drew it at, so it could report a sentence as whole and then clip it. It
+   now measures in the same box it draws in.
+3. The README said the screen reports a rooted phone. Nothing here detects
+   root. The screen reports what secure hardware said about the start: an
+   unlocked bootloader, or an operating system verified with an owner's key. A
+   phone rooted through an exploit on a locked, verified system shows no
+   notice, and the README now says that the absence of the notice is not
+   evidence the phone is not rooted.
+
+The same pass had not been compiled. The Windows-only screen and frame code
+was first type-checked afterwards, on this change's own branch, against the
+`x86_64-pc-windows-gnu` target.
 
 ## Alternatives rejected
 

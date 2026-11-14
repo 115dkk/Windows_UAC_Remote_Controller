@@ -548,6 +548,11 @@ captured the lock-screen credential can present it.
 | `one_hardware_authentication_signs_at_most_once` | all-traces | verified |
 | `authentication_is_not_bound_to_what_the_screen_showed` | exists-trace | verified: an accepted approval whose authentication showed something other than the request |
 
+Run 43601385971 (`341893e`, 2026-11-14) reported `passed: true` for all 29
+rows of the manifest. The six rows above verified, each in its own invocation,
+in 33, 7, 8, 10, 10 and 26 steps, and both negative controls below falsified
+both of their targets with a trace.
+
 The last row is a limit, not a goal. It is required to exist so that the
 model cannot be read as proving that the person saw what they approved. No
 attestation proves that on any phone, locked or not.
