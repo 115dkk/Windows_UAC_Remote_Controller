@@ -57,11 +57,16 @@ const REQUEST_REFRESH_LEAD_MILLIS = 1200;
 /** A lease this much later than the one already asked about is a new lease. */
 const REQUEST_LEASE_SLACK_MILLIS = 250;
 
-/** Waits between tries while the native side answers a decision with "busy".
- * Busy is refused before anything starts, so the same tap can be offered
- * again; it is the tap on the card as shown, with the locator that card had.
- * About a second and a half in all, each step still inside the display lease. */
+/** Waits between tries while a decision is refused as busy before the native
+ * side takes it. Nothing began, so the same tap can be offered again; it is the
+ * tap on the card as shown, with the locator that card had. About a second and
+ * a half in all, each step still inside the display lease. */
 const DECISION_BUSY_WAITS_MILLIS: readonly number[] = [60, 120, 250, 500, 500];
+
+/** The snapshot issue that says the decision itself was not taken. `app_busy`
+ * on a snapshot does not say that: the snapshot is read after the decision,
+ * and a busy read there says nothing about a decision that may have gone in. */
+const DECISION_REFUSED_BUSY = 'request_action_busy';
 
 /** Reads repeated when a background read finds the owner busy. Without them a
  * withdrawn request stayed off the screen until the five-second periodic read. */
@@ -401,13 +406,16 @@ export function useController(bridge: ControllerBridge) {
       }
       if (command.kind === 'decision') {
         const superseded = () => liveOwner.current !== bridge || attempt !== revision.current;
-        // The request as it is on screen now, while its display lease holds.
+        const visible = () => document.visibilityState === 'visible';
+        // The request as it is on screen now, while its display lease holds. A
+        // page that went to the background has already withdrawn it.
         const shown = (): boolean => {
           const latest = current.current;
           const request = latest.snapshot?.requests.find((item) => item.id === command.requestId);
-          return request !== undefined && latest.snapshot !== null && exposedBySnapshot(latest.snapshot, command)
+          return visible() && request !== undefined && latest.snapshot !== null && exposedBySnapshot(latest.snapshot, command)
             && performance.now() - latest.requestObservedAt < request.refreshAfterMillis;
         };
+        // The tap is given up: nothing is sent, and the next read says what is there.
         const withdrawn = (): null => {
           const latest = current.current;
           publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null });
@@ -422,6 +430,8 @@ export function useController(bridge: ControllerBridge) {
           let fresh: AppSnapshot | null = null;
           try { fresh = await decisionRead.promise; } catch { /* The decision reports its own failure below. */ }
           if (superseded()) return null;
+          // Leaving the app withdrew the request, and withdrew the tap with it.
+          if (!visible()) return withdrawn();
           if (fresh !== null && fresh.issue?.code !== 'app_busy') {
             if (!exposedBySnapshot(fresh, command)) {
               publish({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
@@ -439,11 +449,31 @@ export function useController(bridge: ControllerBridge) {
           if (superseded()) return null;
           const wait = DECISION_BUSY_WAITS_MILLIS[tries];
           if (answer !== null) {
-            // A busy answer still carries a fresh observation of the requests.
-            const again = answer.issue?.code === 'app_busy' && wait !== undefined && exposedBySnapshot(answer, command);
-            publish({ owner: bridge, snapshot: again ? { ...answer, issue: null } : answer, refreshing: false, busy: again ? 'decision' : null,
-              stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
-            if (!again) return answer.issue ? null : answer;
+            const refused = answer.issue?.code === DECISION_REFUSED_BUSY;
+            const observed = answer.dataAvailability.requests === 'available';
+            if (!visible()) {
+              // Answered after the app was left: nothing is offered again, and
+              // no request text goes back on a page nobody is looking at.
+              publish({ owner: bridge, snapshot: withoutRequestBodies(answer), refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
+              return null;
+            }
+            if (!observed && (refused || answer.issue?.code === 'app_busy')) {
+              // The reads behind this answer found the owner busy, so it shows
+              // no requests. That is not a request that went away. Keep the
+              // card; offer a refused decision again, and otherwise read.
+              if (!(refused && wait !== undefined && shown())) {
+                const latest = current.current;
+                publish({ ...latest, refreshing: false, busy: null, notice: null,
+                  error: refused && answer.issue ? { message: answer.issue.message, nextAction: answer.issue.nextAction } : null });
+                if (!refused) refreshWanted.current = true;
+                return null;
+              }
+            } else {
+              const again = refused && wait !== undefined && exposedBySnapshot(answer, command);
+              publish({ owner: bridge, snapshot: again ? { ...answer, issue: null } : answer, refreshing: false, busy: again ? 'decision' : null,
+                stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
+              if (!again) return answer.issue ? null : answer;
+            }
           } else if (!isBusy(refusal)) throw refusal;
           else if (wait === undefined) {
             // Refused before anything began, so what is on screen is still what

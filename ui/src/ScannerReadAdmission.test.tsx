@@ -276,6 +276,10 @@ describe('owner commands wait for the actual background read', () => {
 
 describe('a decision is not lost to a busy native side', () => {
   const busyIssue = { code: 'app_busy', message: '앱이 다른 작업을 처리하는 중입니다.', nextAction: '잠시 후 다시 시도하십시오.' };
+  // The decision itself was not taken. A busy read made after it is `app_busy`.
+  const refusedIssue = { ...busyIssue, code: 'request_action_busy' };
+  const unread = (snapshot: AppSnapshot, issue: AppSnapshot['issue']): AppSnapshot => ({ ...snapshot, requests: [], requestCatalog: null,
+    issue, dataAvailability: { ...snapshot.dataAvailability, requests: 'unavailable' } });
   function shown() {
     const snapshot = qaCase('phone-pending').snapshot;
     const request = snapshot.requests.find((item) => item.state === 'pending' && item.canApprove)!;
@@ -308,10 +312,10 @@ describe('a decision is not lost to a busy native side', () => {
     expect(result.current.stale).toBe(false);
   });
 
-  it('tries again when busy comes back as the snapshot issue, without showing that issue', async () => {
+  it('tries again when the snapshot says the decision itself was refused, without showing that issue', async () => {
     const { snapshot, request } = shown();
     const decide = vi.fn<ControllerBridge['decide']>()
-      .mockResolvedValueOnce({ ...snapshot, issue: busyIssue }).mockResolvedValue(snapshot);
+      .mockResolvedValueOnce({ ...snapshot, issue: refusedIssue }).mockResolvedValue(snapshot);
     const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
     const issues: (string | undefined)[] = [];
     let approved!: Promise<AppSnapshot | null>;
@@ -335,6 +339,88 @@ describe('a decision is not lost to a busy native side', () => {
     expect(result.current.stale).toBe(false);
     expect(result.current.busy).toBeNull();
     expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+  });
+
+  // The snapshot is read after the decision. A busy read there is not a
+  // refused decision, and offering it again could reopen an identity check
+  // the person had just cancelled.
+  it('does not offer the decision again for a busy read made after it', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue({ ...snapshot, issue: busyIssue });
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    await act(async () => { await result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    await act(() => new Promise((resolve) => { window.setTimeout(resolve, 200); }));
+    expect(decide).toHaveBeenCalledOnce();
+    expect(result.current.snapshot?.issue?.code).toBe('app_busy');
+    expect(result.current.busy).toBeNull();
+  });
+
+  it('keeps the card and offers a refused decision again when the answer read nothing', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>()
+      .mockResolvedValueOnce(unread(snapshot, refusedIssue)).mockResolvedValue(snapshot);
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    const counts: (number | undefined)[] = [];
+    let approved!: Promise<AppSnapshot | null>;
+    act(() => { approved = result.current.run({ kind: 'decision', requestId: request.id, decision: 'approve' }); });
+    await waitFor(() => { counts.push(result.current.snapshot?.requests.length); expect(decide).toHaveBeenCalledTimes(2); });
+    await act(async () => { await approved; });
+    // An answer that read nothing is not a request that went away.
+    expect(counts.every((count) => count === snapshot.requests.length)).toBe(true);
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+    expect(result.current.error).toBeNull();
+    expect(decide).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads instead of offering again when the decision went in and the reads after it were busy', async () => {
+    const { snapshot, request } = shown();
+    const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(unread(snapshot, busyIssue));
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValue(snapshot);
+    const result = await ready({ ...createQaBridge(snapshot), snapshot: read, decide }, snapshot.requests.length);
+    const before = read.mock.calls.length;
+    await act(async () => { await result.current.run({ kind: 'decision', requestId: request.id, decision: 'deny' }); });
+    expect(decide).toHaveBeenCalledOnce();
+    expect(result.current.snapshot?.requests).toHaveLength(snapshot.requests.length);
+    await waitFor(() => { expect(read.mock.calls.length).toBeGreaterThan(before); });
+    expect(decide).toHaveBeenCalledOnce();
+    expect(result.current.stale).toBe(false);
+  });
+
+  it('gives up a kept denial when the app is left before the running read lets go', async () => {
+    const { snapshot, request } = shown();
+    const running = deferred<AppSnapshot>();
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(snapshot).mockImplementationOnce(() => running.promise).mockResolvedValue(snapshot);
+    const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
+    const result = await ready({ ...createQaBridge(snapshot), snapshot: read, decide }, snapshot.requests.length);
+    act(() => { void result.current.refresh(); });
+    let denied!: Promise<AppSnapshot | null>;
+    act(() => { denied = result.current.run({ kind: 'decision', requestId: request.id, decision: 'deny' }); });
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      fireEvent(document, new Event('visibilitychange'));
+      await act(async () => { running.resolve(snapshot); await denied; });
+      // A denial needs no identity check, so it would have gone through.
+      expect(decide).not.toHaveBeenCalled();
+      expect(result.current.snapshot?.requests).toHaveLength(0);
+      expect(result.current.busy).toBeNull();
+    } finally { visibility.mockRestore(); }
+  });
+
+  it('puts no request text back on a hidden page when a decision is answered there', async () => {
+    const { snapshot, request } = shown();
+    const answer = deferred<AppSnapshot>();
+    const decide = vi.fn<ControllerBridge['decide']>(() => answer.promise);
+    const result = await ready({ ...createQaBridge(snapshot), decide }, snapshot.requests.length);
+    let denied!: Promise<AppSnapshot | null>;
+    act(() => { denied = result.current.run({ kind: 'decision', requestId: request.id, decision: 'deny' }); });
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      fireEvent(document, new Event('visibilitychange'));
+      await act(async () => { answer.resolve({ ...snapshot, issue: refusedIssue }); await denied; });
+      expect(decide).toHaveBeenCalledOnce();
+      expect(result.current.snapshot?.requests).toHaveLength(0);
+      expect(result.current.busy).toBeNull();
+    } finally { visibility.mockRestore(); }
   });
 
   it('still withdraws the request and marks the screen stale for a refusal that is not busy', async () => {
