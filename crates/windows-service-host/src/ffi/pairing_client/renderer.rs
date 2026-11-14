@@ -341,13 +341,15 @@ impl Owner {
                         self.phase = Phase::Invitation;
                         self.client_mut()?.begin_read()?;
                     }
-                    Frame::RendererComparison { invocation, code }
-                        if self.phase == Phase::Invitation && invocation == self.invocation =>
-                    {
+                    Frame::RendererComparison {
+                        invocation,
+                        code,
+                        boot,
+                    } if self.phase == Phase::Invitation && invocation == self.invocation => {
                         self.window
                             .as_mut()
                             .ok_or(Error::InvalidPhase)?
-                            .show_comparison(code.as_str())
+                            .show_comparison(code.as_str(), boot)
                             .map_err(ui_error)?;
                         self.phase = Phase::Comparison;
                     }

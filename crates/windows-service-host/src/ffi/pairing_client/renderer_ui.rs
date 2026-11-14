@@ -8,6 +8,7 @@
 //! hooks, and it creates no process, network connection, key or pairing grant.
 #![allow(unsafe_code)]
 
+use android_attestation::BootAssurance;
 use presentation_i18n::{Locale, tr};
 use qrcode::{Color, QrCode};
 use std::{fmt, mem, ptr, time::Instant};
@@ -112,6 +113,12 @@ impl Screen {
 const INTRODUCTION_BODY: &str = "휴대폰을 이 PC에 등록합니다. [QR 코드 보기]를 누른 뒤 휴대폰의 UAC 원격 승인기에서 [PC의 QR 코드 촬영]을 누르십시오.";
 const INTRODUCTION_EXIT: &str = "ESC를 누르거나 [취소]를 눌러 언제든 중지할 수 있습니다.";
 const INTRODUCTION_CAUTION: &str = "주의: 다른 사람의 요청으로 이 절차에 들어왔다면 지금 바로 중지하세요. QR 코드를 다른 사람에게 절대 공유하지 마세요.";
+// What the comparison screen adds for a phone that did not start on its
+// manufacturer's verified system (ADR 0049). The PC checked the phone's keys
+// the same way either way; whose operating system it runs is the owner's to
+// confirm, here, before they decide.
+const UNLOCKED_BOOTLOADER_NOTICE: &str = "이 휴대폰은 부트로더가 풀려 있습니다. 직접 푼 것이 아니라면 ESC를 눌러 중지하십시오.";
+const OWNER_SYSTEM_NOTICE: &str = "이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.";
 
 /// The card the QR and its outcomes paint inside. Control layout reads the same
 /// rectangle the painter does, so a button cannot land off the surface.
@@ -155,6 +162,66 @@ struct InvitationLayout {
     countdown_top: i32,
     button_top: i32,
     button_height: i32,
+}
+
+/// The comparison screen below its digits: the caution band for a phone that
+/// did not start on its manufacturer's verified system, and the decision row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ComparisonLayout {
+    notice: Option<RECT>,
+    /// False when the band was cut short to keep the decision row on the card.
+    notice_whole: bool,
+    notice_padding: i32,
+    button_top: i32,
+    button_height: i32,
+}
+
+/// With no notice the decision row rests where it always has. A notice sits
+/// under the digits and the row moves down only as far as the notice needs,
+/// never off the card. On a display too cramped for both, the notice gives
+/// way, not the row.
+fn comparison_layout(
+    card: RECT,
+    client_bottom: i32,
+    dpi: i32,
+    notice_text: Option<i32>,
+) -> ComparisonLayout {
+    let scale = |value: i32| value * dpi / 96;
+    let button_height = scale(72);
+    let resting = client_bottom / 2 + scale(120);
+    let Some(text) = notice_text else {
+        return ComparisonLayout {
+            notice: None,
+            notice_whole: true,
+            notice_padding: 0,
+            button_top: resting,
+            button_height,
+        };
+    };
+    let top = card.top + scale(286 + 12);
+    let gap = scale(12);
+    let lowest = (card.bottom - scale(16) - button_height).max(resting);
+    // Roomy padding where there is room for it, tight where there is not.
+    let notice_padding = if text + scale(16) * 2 <= lowest - gap - top {
+        scale(16)
+    } else {
+        scale(6)
+    };
+    let tall = text + notice_padding * 2;
+    let button_top = resting.max(top + tall + gap).min(lowest);
+    let bottom = (top + tall).min(button_top - gap).max(top);
+    ComparisonLayout {
+        notice: Some(RECT {
+            left: card.left + scale(44),
+            top,
+            right: card.right - scale(44),
+            bottom,
+        }),
+        notice_whole: bottom == top + tall,
+        notice_padding,
+        button_top,
+        button_height,
+    }
 }
 
 fn invitation_layout(card: RECT, dpi: i32, shorter: i32, modules: usize) -> InvitationLayout {
@@ -213,6 +280,9 @@ struct WindowOwner {
     remaining_second: u64,
     screen: Screen,
     code: String,
+    /// What the phone's secure hardware reported about its start. The
+    /// comparison screen says so when it was not the manufacturer's system.
+    boot: BootAssurance,
     event: Option<UiEvent>,
     paint_failed: bool,
     closed: bool,
@@ -281,6 +351,46 @@ impl WindowOwner {
             caution: band(caution_top, caution + scale(40)),
             button_top: caution_top + caution + scale(40 + 32),
             button_height: scale(72),
+        }
+    }
+
+    fn boot_notice(&self) -> Option<&'static str> {
+        match self.boot {
+            BootAssurance::Manufacturer => None,
+            BootAssurance::Owner => Some(self.copy(OWNER_SYSTEM_NOTICE)),
+            BootAssurance::Unverified => Some(self.copy(UNLOCKED_BOOTLOADER_NOTICE)),
+        }
+    }
+
+    /// The comparison screen's layout and the font its notice is set in. The
+    /// notice is measured in the body font first and in the hint font when the
+    /// display has no room for that, so it is cut short only if neither fits.
+    fn comparison_layout(
+        &self,
+        dc: HDC,
+        card: RECT,
+        client: RECT,
+        dpi: i32,
+    ) -> (ComparisonLayout, HFONT) {
+        let Some(notice) = self.boot_notice() else {
+            return (
+                comparison_layout(card, client.bottom, dpi, None),
+                self.body_font,
+            );
+        };
+        let scale = |value: i32| value * dpi / 96;
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
+        // The band's own insets, so the measured width is the drawn width.
+        let width = (card.right - card.left - scale(44) * 2 - scale(24) * 2).max(1);
+        let fitted = |font: HFONT| {
+            let text = measure_text(dc, font, notice, width, flags);
+            comparison_layout(card, client.bottom, dpi, Some(text))
+        };
+        let body = fitted(self.body_font);
+        if body.notice_whole {
+            (body, self.body_font)
+        } else {
+            (fitted(self.hint_font), self.hint_font)
         }
     }
 
@@ -405,6 +515,7 @@ impl WindowOwner {
                 Screen::Introduction
             },
             code: String::new(),
+            boot: BootAssurance::Manufacturer,
             event: None,
             paint_failed: false,
             closed: false,
@@ -493,11 +604,12 @@ impl WindowOwner {
         self.repaint()
     }
 
-    pub(super) fn show_comparison(&mut self, code: &str) -> Result<(), Error> {
+    pub(super) fn show_comparison(&mut self, code: &str, boot: BootAssurance) -> Result<(), Error> {
         if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(Error::InvalidState);
         }
         self.code = format!("{} {}", &code[..3], &code[3..]);
+        self.boot = boot;
         // The introduction's proceed button must never survive into a screen
         // where a click means "the digits match"; replace the whole row.
         self.hide_buttons()?;
@@ -831,16 +943,16 @@ impl WindowOwner {
                     return Ok(());
                 }
                 // Wide enough that the longest translated label needs two lines
-                // rather than three, and tall enough to hold those two.
+                // rather than three; each layout's row is tall enough for those.
                 let width = scale(240);
-                let height = scale(72);
                 let gap = scale(16);
                 let left = (client.right - width * 2 - gap) / 2;
                 let (top, height) = if introducing {
                     let layout = self.introduction_layout(dc, client, dpi);
                     (layout.button_top, layout.button_height)
                 } else {
-                    (client.bottom / 2 + scale(120), height)
+                    let (layout, _) = self.comparison_layout(dc, card, client, dpi);
+                    (layout.button_top, layout.button_height)
                 };
                 let (primary_left, cancel_left) = if self.locale.is_rtl() {
                     (left + width + gap, left)
@@ -981,7 +1093,7 @@ impl WindowOwner {
             Screen::Invitation => {
                 self.draw_invitation(dc, left, top, card_width, card_height, scale)?;
             }
-            Screen::Comparison => self.draw_comparison(dc, left, top, card_width, scale),
+            Screen::Comparison => self.draw_comparison(dc, client, border, dpi),
             Screen::Outcome(enrolled) => self.draw_message(
                 dc,
                 left,
@@ -1278,39 +1390,59 @@ impl WindowOwner {
         Ok(())
     }
 
-    fn draw_comparison(
-        &self,
-        dc: HDC,
-        left: i32,
-        top: i32,
-        card_width: i32,
-        scale: impl Fn(i32) -> i32,
-    ) {
+    fn draw_comparison(&self, dc: HDC, client: RECT, card: RECT, dpi: i32) {
+        let scale = |value: i32| value * dpi / 96;
+        let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction();
         draw_text(
             dc,
             self.body_font,
             self.copy("휴대폰에 표시된 숫자와 같은지 확인해 주세요."),
             RECT {
-                left: left + scale(36),
-                top: top + scale(104),
-                right: left + card_width - scale(36),
-                bottom: top + scale(184),
+                left: card.left + scale(36),
+                top: card.top + scale(104),
+                right: card.right - scale(36),
+                bottom: card.top + scale(184),
             },
             MUTED_INK,
-            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | self.text_direction(),
+            flags,
         );
         draw_text(
             dc,
             self.code_font,
             &self.code,
             RECT {
-                left: left + scale(36),
-                top: top + scale(196),
-                right: left + card_width - scale(36),
-                bottom: top + scale(286),
+                left: card.left + scale(36),
+                top: card.top + scale(196),
+                right: card.right - scale(36),
+                bottom: card.top + scale(286),
             },
             INK,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let (layout, font) = self.comparison_layout(dc, card, client, dpi);
+        let (Some(band), Some(notice)) = (layout.notice, self.boot_notice()) else {
+            return;
+        };
+        // The fill is decoration; the sentence is drawn whether or not it succeeds.
+        if let Ok(surface) = brush(CAUTION_SURFACE) {
+            // SAFETY: the memory DC and the temporary caution brush are live here.
+            unsafe {
+                FillRect(dc, &band, surface);
+                let _ = DeleteObject(HGDIOBJ(surface.0));
+            }
+        }
+        draw_text(
+            dc,
+            font,
+            notice,
+            RECT {
+                left: band.left + scale(24),
+                top: band.top + layout.notice_padding,
+                right: band.right - scale(24),
+                bottom: band.bottom - layout.notice_padding,
+            },
+            CAUTION_INK,
+            flags,
         );
     }
 
@@ -1428,8 +1560,8 @@ impl RendererWindow {
         WindowOwner::create(text, deadline, usb)
     }
 
-    pub(super) fn show_comparison(&mut self, code: &str) -> Result<(), Error> {
-        self.owner.show_comparison(code)
+    pub(super) fn show_comparison(&mut self, code: &str, boot: BootAssurance) -> Result<(), Error> {
+        self.owner.show_comparison(code, boot)
     }
 
     pub(super) fn show_outcome(&mut self, enrolled: bool) -> Result<(), Error> {
@@ -1845,6 +1977,75 @@ mod tests {
                 layout.button_top + layout.button_height <= card.bottom,
                 "{label}: the way out stays on the card"
             );
+        }
+    }
+
+    /// A phone on its manufacturer's verified system leaves the comparison
+    /// screen exactly as it was. For any other phone the notice is shown whole
+    /// on the displays the lab and ordinary PCs use, and the decision row never
+    /// leaves the card or meets the notice, however cramped the display.
+    #[test]
+    fn the_boot_notice_never_costs_the_decision_row_its_place_on_the_card() {
+        let client = |width: i32, height: i32| RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        for (width, height, dpi) in [
+            (1024, 768, 96),
+            (1280, 720, 96),
+            (1366, 768, 96),
+            (1366, 768, 120),
+            (1920, 1080, 96),
+            (1920, 1080, 120),
+            (1920, 1080, 144),
+            (2560, 1440, 96),
+            (2560, 1440, 144),
+            (3840, 2160, 192),
+        ] {
+            let card = card_rect(client(width, height), dpi);
+            let scale = |value: i32| value * dpi / 96;
+            let resting = comparison_layout(card, height, dpi, None);
+            assert_eq!(resting.notice, None);
+            assert_eq!(resting.button_top, height / 2 + scale(120));
+            assert_eq!(resting.button_height, scale(72));
+            // Up to four lines of the body font, more than a sentence needs
+            // at the card's width in any catalog.
+            for lines in 1..=4 {
+                let text = scale(28) * lines;
+                let layout = comparison_layout(card, height, dpi, Some(text));
+                let label = format!("{width}x{height}@{dpi} lines={lines} {layout:?} {card:?}");
+                let band = layout.notice.expect("a notice band");
+                assert!(layout.notice_whole, "{label}: the notice is whole");
+                assert_eq!(band.bottom - band.top, text + layout.notice_padding * 2);
+                assert!(
+                    band.top >= card.top + scale(286),
+                    "{label}: the notice never covers the digits"
+                );
+                assert!(
+                    band.bottom < layout.button_top,
+                    "{label}: the notice never meets the decision row"
+                );
+                assert!(
+                    layout.button_top >= resting.button_top,
+                    "{label}: the row only ever moves down"
+                );
+                assert!(
+                    layout.button_top + layout.button_height <= card.bottom,
+                    "{label}: the decision row stays on the card"
+                );
+            }
+        }
+        // Too cramped for both: the row keeps its place and the notice is cut.
+        for (width, height, dpi) in [(1280, 720, 144), (1366, 768, 144)] {
+            let card = card_rect(client(width, height), dpi);
+            let scale = |value: i32| value * dpi / 96;
+            let layout = comparison_layout(card, height, dpi, Some(scale(28) * 4));
+            let band = layout.notice.expect("a notice band");
+            assert!(!layout.notice_whole);
+            assert!(band.bottom >= band.top && band.bottom < layout.button_top);
+            assert!(layout.button_top + layout.button_height <= card.bottom);
         }
     }
 

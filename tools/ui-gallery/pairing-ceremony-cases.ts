@@ -18,6 +18,19 @@ function ceremony(screen: 'introduction' | 'invitation' | 'comparison', width: n
   };
 }
 
+// The comparison screen for a phone that did not start on its manufacturer's
+// verified system (ADR 0049): 'unlocked' is an unlocked bootloader, 'owner' a
+// locked one running a system its owner installed.
+export const ceremonyBoots = ['unlocked', 'owner'] as const;
+export type CeremonyBootCase = typeof ceremonyBoots[number];
+function comparisonWithNotice(boot: CeremonyBootCase, width: number, height: number, locale: GalleryLocale): CeremonyCase {
+  return {
+    id: `pairing-ceremony-comparison-${boot}-${locale}-${String(width)}x${String(height)}`,
+    fixture: `pairing-ceremony-comparison-${boot}`, locale,
+    viewport: { width, height }, action: 'overview', colorScheme: 'light', forcedColors: 'none',
+  };
+}
+
 export const pairingCeremonyCases: readonly CeremonyCase[] = [
   ceremony('introduction', 1280, 800),
   ceremony('invitation', 1280, 800),
@@ -37,4 +50,10 @@ export const pairingCeremonyCases: readonly CeremonyCase[] = [
   ]),
   ...galleryLocales.filter(locale => !['ko', 'de', 'ar'].includes(locale))
     .map(locale => ceremony('introduction', 1280, 800, locale)),
+  // Both boot notices in every catalogue, so each translation is seen in the
+  // band it ships in, and again on the lab runner's display in the two
+  // languages whose sentences run longest.
+  ...galleryLocales.flatMap(locale => ceremonyBoots.map(boot => comparisonWithNotice(boot, 1280, 800, locale))),
+  ...(['de', 'fr'] as GalleryLocale[]).flatMap(locale =>
+    ceremonyBoots.map(boot => comparisonWithNotice(boot, 1024, 768, locale))),
 ];

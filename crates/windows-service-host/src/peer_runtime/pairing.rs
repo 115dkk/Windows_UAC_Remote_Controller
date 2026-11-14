@@ -20,7 +20,7 @@ use crate::{
     },
     startup_phase::ScmReadyPermit,
 };
-use android_attestation::VerificationPolicy;
+use android_attestation::{BootAssurance, VerificationPolicy};
 use approval_core::RegistryCheckpoint;
 use approval_protocol::{BootEpoch, DeviceId, PcIdentity};
 use relay_service::RouteId;
@@ -220,7 +220,11 @@ impl RendererRun {
         self.invitation_sent = true;
         Ok(())
     }
-    pub(super) fn send_comparison(&mut self, code: &PairingComparisonCode) -> Result<(), Failure> {
+    pub(super) fn send_comparison(
+        &mut self,
+        code: &PairingComparisonCode,
+        boot: BootAssurance,
+    ) -> Result<(), Failure> {
         if !self.ready_idle()
             || !Self::content_state_allows(
                 self.io,
@@ -237,6 +241,7 @@ impl RendererRun {
             Frame::RendererComparison {
                 invocation: self.request.invocation,
                 code,
+                boot,
             },
             RendererIo::ComparisonWrite,
         )?;
@@ -1269,10 +1274,10 @@ impl ServicePairing {
                         ))));
                     }
                 }
-                EnrollmentProgress::CandidateSent { code } => {
+                EnrollmentProgress::CandidateSent { code, boot } => {
                     let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
                     if !renderer.comparison_sent {
-                        renderer.send_comparison(&code)?;
+                        renderer.send_comparison(&code, boot)?;
                     }
                 }
                 EnrollmentProgress::PhoneConfirmed | EnrollmentProgress::AwaitingPcDecision => {
@@ -1335,7 +1340,7 @@ impl ServicePairing {
     }
 
     pub(super) fn frozen_signed(&mut self, frozen: SignedFrozenCandidate) -> Result<(), Failure> {
-        let code = self
+        let (code, boot) = self
             .enrollment
             .as_mut()
             .ok_or(Failure::Protocol)?
@@ -1344,7 +1349,7 @@ impl ServicePairing {
         self.renderer
             .as_mut()
             .ok_or(Failure::Protocol)?
-            .send_comparison(&code)
+            .send_comparison(&code, boot)
     }
 
     pub(super) fn original_nonce(

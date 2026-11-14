@@ -324,6 +324,8 @@
   "휴대폰 정보를 읽지 못했습니다.": "No se pudo leer la información del teléfono.",
   "휴대폰 화면 잠금이 필요해요": "El teléfono necesita un bloqueo de pantalla",
   "휴대폰에 표시된 숫자와 같은지 확인해 주세요.": "Comprueba que los números coincidan con los del teléfono.",
+  "이 휴대폰은 부트로더가 풀려 있습니다. 직접 푼 것이 아니라면 ESC를 눌러 중지하십시오.": "El bootloader de este teléfono está desbloqueado. Si no lo desbloqueaste tú, pulsa Esc para detener el proceso.",
+  "이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.": "Este teléfono arrancó con un sistema operativo ajeno al fabricante. Si no lo instalaste tú, pulsa Esc para detener el proceso.",
   "휴대폰에서 앱을 다시 열어 확인해 주세요.": "Vuelve a abrir la aplicación en el teléfono y compruébalo.",
   "휴대폰을 연결했어요.": "Se conectó el teléfono.",
   "휴대폰을 켤 때 자동 실행": "Inicio automático al encender el teléfono",

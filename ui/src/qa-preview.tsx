@@ -6,7 +6,7 @@ import { createQaBridge, qaCase } from './qa-fixtures';
 import { ko } from './messages';
 import { isPreference, setPreviewLanguage } from './i18n';
 import { PairingCeremony } from './PairingCeremony';
-import type { CeremonyScreen } from './PairingCeremony';
+import type { CeremonyBoot, CeremonyScreen } from './PairingCeremony';
 import type { TaskbarBridge, TaskbarStatus } from './TaskbarSuggestion';
 import './styles.css';
 import './i18n.css';
@@ -23,12 +23,14 @@ const banner = <aside className="qa-label" aria-label={ko.exampleDescription}>{k
 // The native pairing ceremony is painted by GDI on its own private desktop.
 // These two fixtures draw the same geometry and copy in the client so the layout
 // can be reviewed. They are not native proof and they carry no invitation.
+const ceremonyBoot: CeremonyBoot = fixtureName === 'pairing-ceremony-comparison-unlocked' ? 'unverified'
+  : fixtureName === 'pairing-ceremony-comparison-owner' ? 'owner' : 'manufacturer';
 const ceremony: CeremonyScreen | null = fixtureName === 'pairing-ceremony-introduction' ? 'introduction'
   : fixtureName === 'pairing-ceremony-invitation' ? 'invitation'
-    : fixtureName === 'pairing-ceremony-comparison' ? 'comparison' : null;
+    : fixtureName === 'pairing-ceremony-comparison' || ceremonyBoot !== 'manufacturer' ? 'comparison' : null;
 if (root && ceremony) {
   createRoot(root).render(<div className="qa-frame">{banner}
-    <PairingCeremony screen={ceremony} /></div>);
+    <PairingCeremony screen={ceremony} boot={ceremonyBoot} /></div>);
 } else if (root) {
   const taskbarFixture = fixtureName === 'desktop-taskbar-available' || fixtureName === 'desktop-taskbar-unavailable';
   const selected = qaCase(taskbarFixture ? 'desktop-running' : fixtureName);

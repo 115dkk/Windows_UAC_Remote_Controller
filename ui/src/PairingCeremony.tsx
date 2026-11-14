@@ -9,6 +9,9 @@ import { currentLocale, tr } from './i18n';
 import { sampleQrModules, sampleQrWidth } from './pairing-ceremony-sample';
 
 export type CeremonyScreen = 'introduction' | 'invitation' | 'comparison';
+/** What the phone's secure hardware reported about its start (ADR 0049). The
+ * comparison screen adds a sentence for anything but the manufacturer's system. */
+export type CeremonyBoot = 'manufacturer' | 'owner' | 'unverified';
 
 // renderer_ui.rs paints in points at the window's DPI. At 96 DPI one point is
 // 4/3 of a pixel, which is the only conversion the mock needs.
@@ -49,6 +52,24 @@ function invitationLayout(cardHeight: number, shorter: number, modules: number) 
     buttonTop: cardHeight - 118,
     buttonHeight: 56,
   };
+}
+
+/** Mirrors `comparison_layout`, in card coordinates. With no notice the decision
+ * row rests where it always has. A notice sits under the digits and the row
+ * moves down only as far as the notice needs, never off the card; on a display
+ * too cramped for both, the notice gives way, not the row. */
+function comparisonLayout(card: { height: number; top: number }, height: number, noticeText: number | null) {
+  const buttonHeight = 72;
+  const resting = Math.trunc(height / 2) + 120 - card.top;
+  if (noticeText === null) return { notice: null, whole: true, padding: 0, buttonTop: resting };
+  const top = 286 + 12;
+  const gap = 12;
+  const lowest = Math.max(card.height - 16 - buttonHeight, resting);
+  const padding = noticeText + 16 * 2 <= lowest - gap - top ? 16 : 6;
+  const tall = noticeText + padding * 2;
+  const buttonTop = Math.min(Math.max(resting, top + tall + gap), lowest);
+  const bottom = Math.max(Math.min(top + tall, buttonTop - gap), top);
+  return { notice: { top, height: bottom - top }, whole: bottom === top + tall, padding, buttonTop };
 }
 
 function SampleCode({ side, modulePx }: { side: number; modulePx: number }) {
@@ -136,9 +157,40 @@ function Introduction({ width }: { width: number }) {
   </section>;
 }
 
-function Comparison({ width, height }: { width: number; height: number }) {
+function Comparison({ width, height, boot }: { width: number; height: number; boot: CeremonyBoot }) {
   const heading = useId();
   const card = cardRect(width, height);
+  const notice = boot === 'unverified'
+    ? tr('이 휴대폰은 부트로더가 풀려 있습니다. 직접 푼 것이 아니라면 ESC를 눌러 중지하십시오.')
+    : boot === 'owner'
+      ? tr('이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.')
+      : null;
+  // The renderer measures the sentence with DT_CALCRECT in the body font, and in
+  // the hint font when the display has no room for that. Two hidden copies at
+  // the band's text width stand in for those two measurements.
+  const body = useRef<HTMLParagraphElement>(null);
+  const hint = useRef<HTMLParagraphElement>(null);
+  const [measured, setMeasured] = useState<{ body: number; hint: number } | null>(null);
+  const textWidth = Math.max(1, card.width - 44 * 2 - 24 * 2);
+  useLayoutEffect(() => {
+    const [inBody, inHint] = [body.current, hint.current];
+    if (inBody === null || inHint === null) return undefined;
+    const measure = () => { setMeasured({ body: inBody.offsetHeight, hint: inHint.offsetHeight }); };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(inBody);
+    observer.observe(inHint);
+    return () => { observer.disconnect(); };
+  }, [notice, textWidth]);
+  const inBody = notice === null || measured === null ? null : comparisonLayout(card, height, measured.body);
+  const fitted = inBody === null || measured === null ? null
+    : inBody.whole ? { layout: inBody, points: 16 }
+      : { layout: comparisonLayout(card, height, measured.hint), points: 13 };
+  const layout = fitted?.layout ?? comparisonLayout(card, height, null);
+  const measuring = (points: number) => ({
+    position: 'absolute' as const, visibility: 'hidden' as const, insetInlineStart: 0, top: 0,
+    width: textWidth, margin: 0, font: `${pt(points)} var(--font-ui)`,
+  });
   return <section aria-labelledby={heading} style={{
     position: 'relative', width: card.width, height: card.height,
     background: SURFACE, border: `1px solid ${BORDER}`, textAlign: 'center',
@@ -150,8 +202,17 @@ function Comparison({ width, height }: { width: number; height: number }) {
       {tr('휴대폰에 표시된 숫자와 같은지 확인해 주세요.')}
     </p>
     <p style={{ position: 'absolute', insetInline: 36, top: 196, height: 90, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: `700 ${pt(40)} 'UAC Sans', var(--font-ui)`, color: INK }}>123 456</p>
+    {notice === null ? null : <>
+      <p ref={body} aria-hidden style={measuring(16)}>{notice}</p>
+      <p ref={hint} aria-hidden style={measuring(13)}>{notice}</p>
+    </>}
+    {fitted === null || layout.notice === null ? null : <p data-boot-notice style={{
+      position: 'absolute', insetInline: 44, top: layout.notice.top, height: layout.notice.height,
+      boxSizing: 'border-box', margin: 0, padding: `${String(layout.padding)}px 24px`, overflow: 'hidden',
+      background: CAUTION_SURFACE, font: `${pt(fitted.points)} var(--font-ui)`, color: CAUTION_INK,
+    }}>{notice}</p>}
     <div data-comparison-actions style={{
-      position: 'absolute', insetInline: 0, top: height / 2 + 120 - card.top,
+      position: 'absolute', insetInline: 0, top: layout.buttonTop,
       display: 'flex', gap: 16, justifyContent: 'center',
     }}>
       <Button label={tr('숫자가 같아요')} primary />
@@ -192,7 +253,7 @@ function Invitation({ width, height }: { width: number; height: number }) {
 /** Fills whatever box the gallery gives it and lays the screen out at that size,
  * the way the renderer lays out at the display it was handed. Measuring instead
  * of reading the viewport keeps the example banner above it out of the sums. */
-export function PairingCeremony({ screen }: { screen: CeremonyScreen }) {
+export function PairingCeremony({ screen, boot = 'manufacturer' }: { screen: CeremonyScreen; boot?: CeremonyBoot }) {
   const frame = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
   useLayoutEffect(() => {
@@ -215,7 +276,7 @@ export function PairingCeremony({ screen }: { screen: CeremonyScreen }) {
     {box === null ? null : screen === 'introduction'
       ? <Introduction width={box.width} />
       : screen === 'comparison'
-        ? <Comparison width={box.width} height={box.height} />
+        ? <Comparison width={box.width} height={box.height} boot={boot} />
         : <Invitation width={box.width} height={box.height} />}
   </div>;
 }
