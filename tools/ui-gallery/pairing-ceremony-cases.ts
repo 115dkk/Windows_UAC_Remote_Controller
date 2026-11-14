@@ -56,4 +56,7 @@ export const pairingCeremonyCases: readonly CeremonyCase[] = [
   ...galleryLocales.flatMap(locale => ceremonyBoots.map(boot => comparisonWithNotice(boot, 1280, 800, locale))),
   ...(['de', 'fr'] as GalleryLocale[]).flatMap(locale =>
     ceremonyBoots.map(boot => comparisonWithNotice(boot, 1024, 768, locale))),
+  // A display with no room under the digits: the notice takes the
+  // instruction's place instead of being left out.
+  ...ceremonyBoots.map(boot => comparisonWithNotice(boot, 1024, 540, 'de')),
 ];

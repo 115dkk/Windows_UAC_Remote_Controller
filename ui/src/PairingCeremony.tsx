@@ -54,22 +54,27 @@ function invitationLayout(cardHeight: number, shorter: number, modules: number) 
   };
 }
 
+type NoticePlace = { kind: 'absent' } | { kind: 'under-digits'; top: number; height: number; padding: number }
+  | { kind: 'instruction' };
+
 /** Mirrors `comparison_layout`, in card coordinates. With no notice the decision
- * row rests where it always has. A notice sits under the digits and the row
- * moves down only as far as the notice needs, never off the card; on a display
- * too cramped for both, the notice gives way, not the row. */
-function comparisonLayout(card: { height: number; top: number }, height: number, noticeText: number | null) {
+ * row rests where it always has. A notice sits under the digits when it fits
+ * there whole and moves the row down only as far as it needs, never off the
+ * card; when it does not fit whole it takes the instruction's place and the row
+ * stays at rest. The sentence is never left out. */
+function comparisonLayout(card: { height: number; top: number }, height: number, noticeText: number | null):
+  { notice: NoticePlace; buttonTop: number } {
   const buttonHeight = 72;
   const resting = Math.trunc(height / 2) + 120 - card.top;
-  if (noticeText === null) return { notice: null, whole: true, padding: 0, buttonTop: resting };
+  if (noticeText === null) return { notice: { kind: 'absent' }, buttonTop: resting };
   const top = 286 + 12;
   const gap = 12;
   const lowest = Math.max(card.height - 16 - buttonHeight, resting);
-  const padding = noticeText + 16 * 2 <= lowest - gap - top ? 16 : 6;
+  const room = lowest - gap - top;
+  const padding = noticeText + 16 * 2 <= room ? 16 : 6;
   const tall = noticeText + padding * 2;
-  const buttonTop = Math.min(Math.max(resting, top + tall + gap), lowest);
-  const bottom = Math.max(Math.min(top + tall, buttonTop - gap), top);
-  return { notice: { top, height: bottom - top }, whole: bottom === top + tall, padding, buttonTop };
+  if (tall > room) return { notice: { kind: 'instruction' }, buttonTop: resting };
+  return { notice: { kind: 'under-digits', top, height: tall, padding }, buttonTop: Math.max(resting, top + tall + gap) };
 }
 
 function SampleCode({ side, modulePx }: { side: number; modulePx: number }) {
@@ -166,12 +171,12 @@ function Comparison({ width, height, boot }: { width: number; height: number; bo
       ? tr('이 휴대폰은 제조사 것이 아닌 운영체제로 시작했습니다. 직접 설치한 것이 아니라면 ESC를 눌러 중지하십시오.')
       : null;
   // The renderer measures the sentence with DT_CALCRECT in the body font, and in
-  // the hint font when the display has no room for that. Two hidden copies at
-  // the band's text width stand in for those two measurements.
+  // the hint font when there is no room for that. Two hidden copies stand in for
+  // those measurements. They take the band's own insets from the same containing
+  // block as the band, so the measured width is the drawn width.
   const body = useRef<HTMLParagraphElement>(null);
   const hint = useRef<HTMLParagraphElement>(null);
   const [measured, setMeasured] = useState<{ body: number; hint: number } | null>(null);
-  const textWidth = Math.max(1, card.width - 44 * 2 - 24 * 2);
   useLayoutEffect(() => {
     const [inBody, inHint] = [body.current, hint.current];
     if (inBody === null || inHint === null) return undefined;
@@ -181,15 +186,20 @@ function Comparison({ width, height, boot }: { width: number; height: number; bo
     observer.observe(inBody);
     observer.observe(inHint);
     return () => { observer.disconnect(); };
-  }, [notice, textWidth]);
+  }, [notice, card.width]);
   const inBody = notice === null || measured === null ? null : comparisonLayout(card, height, measured.body);
   const fitted = inBody === null || measured === null ? null
-    : inBody.whole ? { layout: inBody, points: 16 }
+    : inBody.notice.kind === 'under-digits' ? { layout: inBody, points: 16 }
       : { layout: comparisonLayout(card, height, measured.hint), points: 13 };
   const layout = fitted?.layout ?? comparisonLayout(card, height, null);
+  const place = layout.notice;
   const measuring = (points: number) => ({
-    position: 'absolute' as const, visibility: 'hidden' as const, insetInlineStart: 0, top: 0,
-    width: textWidth, margin: 0, font: `${pt(points)} var(--font-ui)`,
+    position: 'absolute' as const, visibility: 'hidden' as const, insetInline: 44 + 24, top: 0,
+    margin: 0, font: `${pt(points)} var(--font-ui)`,
+  });
+  const caution = (points: number) => ({
+    position: 'absolute' as const, boxSizing: 'border-box' as const, margin: 0, overflow: 'hidden',
+    background: CAUTION_SURFACE, font: `${pt(points)} var(--font-ui)`, color: CAUTION_INK,
   });
   return <section aria-labelledby={heading} style={{
     position: 'relative', width: card.width, height: card.height,
@@ -198,18 +208,21 @@ function Comparison({ width, height, boot }: { width: number; height: number; bo
     <h2 id={heading} style={{ position: 'absolute', insetInline: 32, top: 26, height: 70, margin: 0, font: `700 ${pt(22)} var(--font-ui)`, color: INK }}>
       {tr('UAC 원격 승인 · PC 연결')}
     </h2>
-    <p style={{ position: 'absolute', insetInline: 36, top: 104, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
-      {tr('휴대폰에 표시된 숫자와 같은지 확인해 주세요.')}
-    </p>
+    {fitted !== null && place.kind === 'instruction'
+      ? <p data-boot-notice="instruction" style={{
+        ...caution(fitted.points), insetInline: 36, top: 104, height: 88, padding: '4px 12px',
+      }}>{notice}</p>
+      : <p style={{ position: 'absolute', insetInline: 36, top: 104, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
+        {tr('휴대폰에 표시된 숫자와 같은지 확인해 주세요.')}
+      </p>}
     <p style={{ position: 'absolute', insetInline: 36, top: 196, height: 90, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: `700 ${pt(40)} 'UAC Sans', var(--font-ui)`, color: INK }}>123 456</p>
     {notice === null ? null : <>
       <p ref={body} aria-hidden style={measuring(16)}>{notice}</p>
       <p ref={hint} aria-hidden style={measuring(13)}>{notice}</p>
     </>}
-    {fitted === null || layout.notice === null ? null : <p data-boot-notice style={{
-      position: 'absolute', insetInline: 44, top: layout.notice.top, height: layout.notice.height,
-      boxSizing: 'border-box', margin: 0, padding: `${String(layout.padding)}px 24px`, overflow: 'hidden',
-      background: CAUTION_SURFACE, font: `${pt(fitted.points)} var(--font-ui)`, color: CAUTION_INK,
+    {fitted === null || place.kind !== 'under-digits' ? null : <p data-boot-notice="under-digits" style={{
+      ...caution(fitted.points), insetInline: 44, top: place.top, height: place.height,
+      padding: `${String(place.padding)}px 24px`,
     }}>{notice}</p>}
     <div data-comparison-actions style={{
       position: 'absolute', insetInline: 0, top: layout.buttonTop,
