@@ -54,6 +54,29 @@ export type ClientCommand =
  * on a real device. */
 const REQUEST_REFRESH_LEAD_MILLIS = 1200;
 
+/** A lease this much later than the one already asked about is a new lease. */
+const REQUEST_LEASE_SLACK_MILLIS = 250;
+
+/** Waits between tries while a decision is refused as busy before the native
+ * side takes it. Nothing began, so the same tap can be offered again; it is the
+ * tap on the card as shown, with the locator that card had. About a second and
+ * a half in all, each step still inside the display lease. */
+const DECISION_BUSY_WAITS_MILLIS: readonly number[] = [60, 120, 250, 500, 500];
+
+/** The snapshot issue that says the decision itself was not taken. `app_busy`
+ * on a snapshot does not say that: the snapshot is read after the decision,
+ * and a busy read there says nothing about a decision that may have gone in. */
+const DECISION_REFUSED_BUSY = 'request_action_busy';
+
+/** Reads repeated when a background read finds the owner busy. Without them a
+ * withdrawn request stayed off the screen until the five-second periodic read. */
+const BUSY_READ_WAITS_MILLIS: readonly number[] = [150, 300, 600];
+
+const isBusy = (value: unknown): boolean =>
+  value !== null && typeof value === 'object' && 'code' in value && value.code === 'app_busy';
+
+const pause = (millis: number): Promise<void> => new Promise((resolve) => { window.setTimeout(resolve, millis); });
+
 interface ViewState {
   readonly owner: ControllerBridge;
   readonly snapshot: AppSnapshot | null;
@@ -152,6 +175,12 @@ export function useController(bridge: ControllerBridge) {
   // admission. A change reported while it is held is remembered here and read
   // once the work in flight lets go, instead of waiting for the periodic read.
   const refreshWanted = useRef(false);
+  const busyReads = useRef(0);
+  const busyReadTimer = useRef<number | undefined>(undefined);
+  // The end of the lease the early read was last started for. A lease clipped
+  // to the request's own deadline comes back unchanged, and asking again for it
+  // read the owner continuously for the last second of every request.
+  const earlyReadLeaseEnd = useRef<number | null>(null);
   const detailsReads = useRef<{ owner: ControllerBridge | null; count: number }>({ owner: null, count: 0 });
   const resumeRefresh = useRef<() => void>(() => undefined);
   const scannerReturn = useRef({ pending: false, opened: false, wake: false });
@@ -203,8 +232,21 @@ export function useController(bridge: ControllerBridge) {
       // again. Only an explicit refresh reports the busy owner.
       if (!announce && snapshot.issue?.code === 'app_busy' && latest.owner === bridge && latest.snapshot !== null) {
         publish({ ...latest, refreshing: false });
+        // The next wake may be a long way off, and a request whose lease ran
+        // out is off the screen until something reads again. Ask a few times.
+        const wait = BUSY_READ_WAITS_MILLIS[busyReads.current];
+        if (wait !== undefined) {
+          busyReads.current += 1;
+          window.clearTimeout(busyReadTimer.current);
+          busyReadTimer.current = window.setTimeout(() => {
+            if (liveOwner.current !== bridge) return;
+            refreshWanted.current = true;
+            resumeRefresh.current();
+          }, wait);
+        }
         return;
       }
+      busyReads.current = 0;
       publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
     } catch (failure) {
       if (liveOwner.current !== bridge || attempt !== revision.current) return;
@@ -254,9 +296,11 @@ export function useController(bridge: ControllerBridge) {
     const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
     const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
-    // Owner commands wait for the held read too. Approval and denial never do:
-    // they answer the request exactly as the screen showed it.
+    // Owner commands wait for the held read too. So do approval and denial:
+    // sent while a read held the native admission they were refused as busy,
+    // and the refusal took the request off the screen until the next read.
     const ownerRead = QUEUED_OWNER_COMMANDS.has(command.kind) && activeRead.current?.owner === bridge ? activeRead.current : null;
+    const decisionRead = command.kind === 'decision' && activeRead.current?.owner === bridge ? activeRead.current : null;
     commandPending.current = true;
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
@@ -360,6 +404,88 @@ export function useController(bridge: ControllerBridge) {
           return null;
         }
       }
+      if (command.kind === 'decision') {
+        const superseded = () => liveOwner.current !== bridge || attempt !== revision.current;
+        const visible = () => document.visibilityState === 'visible';
+        // The request as it is on screen now, while its display lease holds. A
+        // page that went to the background has already withdrawn it.
+        const shown = (): boolean => {
+          const latest = current.current;
+          const request = latest.snapshot?.requests.find((item) => item.id === command.requestId);
+          return visible() && request !== undefined && latest.snapshot !== null && exposedBySnapshot(latest.snapshot, command)
+            && performance.now() - latest.requestObservedAt < request.refreshAfterMillis;
+        };
+        // The tap is given up: nothing is sent, and the next read says what is there.
+        const withdrawn = (): null => {
+          const latest = current.current;
+          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null });
+          refreshWanted.current = true;
+          return null;
+        };
+        if (decisionRead) {
+          // The tap is kept and sent once the read lets go. What it answers is
+          // still the card that was tapped: the read either shows that same
+          // request again, and the tap goes out with the locator it had, or it
+          // shows something else, and the tap is dropped in favour of that.
+          let fresh: AppSnapshot | null = null;
+          try { fresh = await decisionRead.promise; } catch { /* The decision reports its own failure below. */ }
+          if (superseded()) return null;
+          // Leaving the app withdrew the request, and withdrew the tap with it.
+          if (!visible()) return withdrawn();
+          if (fresh !== null && fresh.issue?.code !== 'app_busy') {
+            if (!exposedBySnapshot(fresh, command)) {
+              publish({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
+              return null;
+            }
+            publish({ ...current.current, snapshot: fresh, refreshing: false, busy: 'decision', stale: false, error: null, notice: null, requestObservedAt: performance.now() });
+          } else if (!shown()) return withdrawn();
+        }
+        for (let tries = 0; ; tries += 1) {
+          const started = performance.now();
+          let answer: AppSnapshot | null = null;
+          let refusal: unknown = null;
+          try { answer = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started); }
+          catch (failure) { refusal = failure; }
+          if (superseded()) return null;
+          const wait = DECISION_BUSY_WAITS_MILLIS[tries];
+          if (answer !== null) {
+            const refused = answer.issue?.code === DECISION_REFUSED_BUSY;
+            const observed = answer.dataAvailability.requests === 'available';
+            if (!visible()) {
+              // Answered after the app was left: nothing is offered again, and
+              // no request text goes back on a page nobody is looking at.
+              publish({ owner: bridge, snapshot: withoutRequestBodies(answer), refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
+              return null;
+            }
+            if (!observed && (refused || answer.issue?.code === 'app_busy')) {
+              // The reads behind this answer found the owner busy, so it shows
+              // no requests. That is not a request that went away. Keep the
+              // card; offer a refused decision again, and otherwise read.
+              if (!(refused && wait !== undefined && shown())) {
+                const latest = current.current;
+                publish({ ...latest, refreshing: false, busy: null, notice: null,
+                  error: refused && answer.issue ? { message: answer.issue.message, nextAction: answer.issue.nextAction } : null });
+                if (!refused) refreshWanted.current = true;
+                return null;
+              }
+            } else {
+              const again = refused && wait !== undefined && exposedBySnapshot(answer, command);
+              publish({ owner: bridge, snapshot: again ? { ...answer, issue: null } : answer, refreshing: false, busy: again ? 'decision' : null,
+                stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
+              if (!again) return answer.issue ? null : answer;
+            }
+          } else if (!isBusy(refusal)) throw refusal;
+          else if (wait === undefined) {
+            // Refused before anything began, so what is on screen is still what
+            // the owner holds. Say so and leave the request where it is.
+            publish({ ...current.current, refreshing: false, busy: null, error: authoredIssue(refusal) ?? generic(ko.actionFailure), notice: null });
+            return null;
+          }
+          await pause(wait ?? 0);
+          if (superseded()) return null;
+          if (!shown()) return withdrawn();
+        }
+      }
       const started = performance.now();
       const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
       if (liveOwner.current !== bridge || attempt !== revision.current) return null;
@@ -429,8 +555,12 @@ export function useController(bridge: ControllerBridge) {
     const remaining = Math.max(0, Math.min(...snapshot.requests.map((request) => request.refreshAfterMillis))
       - (performance.now() - state.requestObservedAt));
     const showing = () => liveOwner.current === bridge && current.current.snapshot === snapshot;
-    const early = window.setTimeout(() => {
-      if (showing() && document.visibilityState === 'visible') void refresh();
+    const leaseEnd = performance.now() + remaining;
+    const asked = earlyReadLeaseEnd.current;
+    const early = asked !== null && leaseEnd <= asked + REQUEST_LEASE_SLACK_MILLIS ? undefined : window.setTimeout(() => {
+      if (!showing() || document.visibilityState !== 'visible') return;
+      earlyReadLeaseEnd.current = leaseEnd;
+      void refresh();
     }, Math.max(0, remaining - REQUEST_REFRESH_LEAD_MILLIS));
     const withdraw = window.setTimeout(() => {
       if (!showing()) return;
@@ -457,6 +587,8 @@ export function useController(bridge: ControllerBridge) {
     activeRead.current = null;
     commandPending.current = false;
     refreshWanted.current = false;
+    busyReads.current = 0;
+    earlyReadLeaseEnd.current = null;
     scannerReturn.current = { pending: false, opened: false, wake: false };
     scannerFocusRevision.current = 0;
     // Defer the initial presentation update; the first render already is loading.
@@ -488,6 +620,7 @@ export function useController(bridge: ControllerBridge) {
       liveOwner.current = null;
       revision.current += 1;
       window.clearInterval(timer);
+      window.clearTimeout(busyReadTimer.current);
       window.removeEventListener('focus', onForeground);
       document.removeEventListener('visibilitychange', onForeground);
     };

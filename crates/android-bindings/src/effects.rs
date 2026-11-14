@@ -18,12 +18,12 @@ use std::{
 #[uniffi::export]
 impl MobileController {
     pub fn request_catalog_status(&self) -> Result<NativeRequestCatalogStatus, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.catalog_status_admitted()
     }
     /// Fixed native maintenance wake. No caller clock, effect, event or policy.
     pub fn maintain_native_requests(&self) -> Result<NativeRequestCatalogStatus, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         if let Err(error) = self.maintain_requests_admitted() {
             if error == BridgeError::PresentationRefreshRequired {
                 self.intake.await_temporal_refresh();
@@ -39,7 +39,7 @@ impl MobileController {
         &self,
         request: Arc<NativePendingRequest>,
     ) -> Result<NativeRequestSelection, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.check_pending_request_admitted(request)
     }
 
@@ -50,7 +50,7 @@ impl MobileController {
         &self,
         request: Arc<NativePendingRequest>,
     ) -> Result<(), BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         let key = request.key();
         let _ = self.check_pending_request_admitted(request)?;
         self.publish_request_key(key, NativeRequestPresentation::Update, None)

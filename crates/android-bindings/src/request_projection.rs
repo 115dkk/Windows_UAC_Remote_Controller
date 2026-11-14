@@ -6,7 +6,7 @@ use crate::{
 };
 use android_controller::{AssociatedPendingRequest, DurableInbox, NativePeerLease};
 use approval_protocol::RequestContent;
-use notification_policy::{AlertMode, NotificationPolicy, RequestKey, RequestOutcome};
+use notification_policy::{AlertMode, NotificationPolicy, RequestKey, RequestOutcome, Schedule};
 use phone_request_core::PhoneBootId;
 use service_protocol::MappedRequestWindow;
 use std::{
@@ -223,7 +223,7 @@ impl NativePendingRequest {
         Ok(NativeRequestPreview {
             selection: self.selection(),
             deadline_nanos: self.deadline,
-            valid_until_nanos: self.deadline.min(sample.minute_cutoff),
+            valid_until_nanos: display_until(&self.policy, sample.minute_cutoff, self.deadline),
             time_epoch: sample.time_epoch,
             has_details: !body.details().is_empty() || program_elided || path_elided,
             program,
@@ -340,6 +340,28 @@ impl NativePendingRequest {
         Ok(sample)
     }
 }
+/// How long this preview may stay on screen.
+///
+/// It used to end with the current wall minute for every policy, so every
+/// request left the screen at each minute boundary for as long as the next
+/// read took, and one that arrived at :58 was on screen for two seconds. The
+/// minute matters because the schedule is evaluated per local minute. A policy
+/// with no schedule allows every local minute, so nothing can change at the
+/// boundary and the preview holds until the request's own deadline.
+///
+/// A weekly schedule keeps the minute. Walking its windows forward would have
+/// to assume the next local minute is the next wall minute, and a daylight
+/// saving change inside the same zone breaks that without moving `time_epoch`.
+///
+/// Display only. Approval and denial are checked again by their own owners,
+/// and a changed policy withdraws the request through the inbox.
+fn display_until(policy: &NotificationPolicy, minute_cutoff: u64, deadline: u64) -> u64 {
+    match policy.schedule() {
+        Schedule::Always => deadline,
+        Schedule::Never | Schedule::Weekly(_) => deadline.min(minute_cutoff),
+    }
+}
+
 fn elide(value: &str, max_units: usize) -> (String, bool) {
     let mut units = 0;
     let mut end = value.len();
@@ -516,5 +538,46 @@ impl ProjectionRegistry {
 impl Drop for ProjectionRegistry {
     fn drop(&mut self) {
         let _ = self.revoke_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notification_policy::{DayMask, LocalTime, TimeWindow, Weekday, WeeklySchedule};
+
+    const SECOND: u64 = 1_000_000_000;
+
+    #[test]
+    fn a_policy_with_no_schedule_keeps_the_preview_until_the_request_deadline() {
+        let policy = NotificationPolicy::default();
+        assert_eq!(policy.schedule(), &Schedule::Always);
+        // Two seconds of the minute are left and the request has ninety.
+        let cutoff = 102 * SECOND;
+        let deadline = 190 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, deadline), deadline);
+        // A deadline inside the minute is still the end.
+        assert_eq!(display_until(&policy, cutoff, 101 * SECOND), 101 * SECOND);
+    }
+
+    #[test]
+    fn a_weekly_schedule_keeps_the_minute_even_when_it_allows_the_next_one() {
+        let window = TimeWindow::new(DayMask::ALL, 0, 1440).unwrap();
+        let policy = NotificationPolicy::new(
+            Some(Schedule::Weekly(WeeklySchedule::new([window]).unwrap())),
+            AlertMode::Silent,
+        );
+        let next = LocalTime::new(Weekday::Monday, 601).unwrap();
+        assert!(policy.allows(next));
+        let cutoff = 102 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, 190 * SECOND), cutoff);
+        assert_eq!(display_until(&policy, cutoff, 101 * SECOND), 101 * SECOND);
+    }
+
+    #[test]
+    fn a_disabled_schedule_never_outlives_the_minute() {
+        let policy = NotificationPolicy::new(Some(Schedule::Never), AlertMode::Silent);
+        let cutoff = 102 * SECOND;
+        assert_eq!(display_until(&policy, cutoff, 190 * SECOND), cutoff);
     }
 }

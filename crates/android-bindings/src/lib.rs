@@ -61,12 +61,25 @@ use phone_state_store::{NativePrivateDirectory, SnapshotStore, StoreError};
 use std::{
     fmt,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 uniffi::setup_scaffolding!();
+
+/// How long a decision-path call waits for the owner another thread is using.
+///
+/// The I/O reactor holds the owner for one message or one maintenance pass at
+/// a time, which is a storage write and a notification post at most. A phone
+/// approval is a person's fingerprint and a hardware signature, and an
+/// immediate Busy threw one away for a collision that short. The bound is for
+/// a holder that is stuck, not for the ordinary case.
+const ADMISSION_WAIT: Duration = Duration::from_millis(750);
+/// The longest single sleep inside that wait. The release wakes a waiter, so
+/// this only bounds how late a waiter notices when it does not.
+const ADMISSION_WAIT_SLICE: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error, uniffi::Error)]
 pub enum BridgeError {
@@ -266,7 +279,38 @@ impl Drop for Admission<'_> {
             self.0.drop_owner();
         }
         self.0.active.store(false, Ordering::Release);
+        self.0.admission_gate.released();
         self.0.intake.admission_released();
+    }
+}
+
+/// Where `enter_waiting` sleeps until the owner is released. It holds no owner
+/// state and admits nobody: `MobileController::active` alone decides that.
+#[derive(Default)]
+struct AdmissionGate {
+    held: Mutex<()>,
+    freed: Condvar,
+}
+impl AdmissionGate {
+    /// Called after `active` is cleared. Taking the mutex first means a waiter
+    /// that saw the owner held and has not slept yet cannot miss the wake. The
+    /// mutex guards no data, so a poisoned one is still a gate.
+    fn released(&self) {
+        drop(self.held.lock().unwrap_or_else(|error| error.into_inner()));
+        self.freed.notify_all();
+    }
+    /// Sleeps until a release or `at_most`, whichever is first, and not at all
+    /// when the owner was released before the mutex was taken.
+    fn sleep_while_held(&self, active: &AtomicBool, at_most: Duration) {
+        let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        if !active.load(Ordering::Acquire) {
+            return;
+        }
+        drop(
+            self.freed
+                .wait_timeout(held, at_most)
+                .unwrap_or_else(|error| error.into_inner()),
+        );
     }
 }
 
@@ -302,6 +346,7 @@ pub struct MobileController {
     connectivity: Arc<connectivity::ConnectivityOwner>,
     approval_alive: Arc<AtomicBool>,
     active: AtomicBool,
+    admission_gate: AdmissionGate,
     cleanup_pending: AtomicBool,
     notification_cleanup_failed: AtomicBool,
     key_cleanup_pending: AtomicBool,
@@ -719,6 +764,7 @@ impl MobileController {
                     connectivity: Arc::new(connectivity::ConnectivityOwner::default()),
                     approval_alive: Arc::new(AtomicBool::new(true)),
                     active: AtomicBool::new(false),
+                    admission_gate: AdmissionGate::default(),
                     cleanup_pending: AtomicBool::new(false),
                     notification_cleanup_failed: AtomicBool::new(false),
                     key_cleanup_pending: AtomicBool::new(key_cleanup_needed),
@@ -756,6 +802,40 @@ impl MobileController {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .map(|_| Admission(self))
             .map_err(|_| BridgeError::Busy)
+    }
+    /// `enter` for the calls a person's approval or denial passes through.
+    ///
+    /// `enter` answers Busy the instant another thread holds the owner, and for
+    /// these calls that answer discarded real work: a tap that was never
+    /// admitted, or an approval already authenticated and signed. The holder is
+    /// the I/O reactor finishing one message, so the caller waits for it
+    /// instead, up to `ADMISSION_WAIT`.
+    ///
+    /// Nothing else changes. One caller is admitted at a time, the wait admits
+    /// nothing the immediate answer would have refused for another reason, and
+    /// a call made from inside a native callback is still Busy at once, because
+    /// the thread it would wait for is itself. Only the native worker calls
+    /// these; the reactor keeps `enter` and its own wake.
+    fn enter_waiting(&self) -> Result<Admission<'_>, BridgeError> {
+        if native_clock::callback_active() {
+            return Err(BridgeError::Busy);
+        }
+        let deadline = Instant::now() + ADMISSION_WAIT;
+        loop {
+            if self
+                .active
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(Admission(self));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(BridgeError::Busy);
+            }
+            let slice = remaining.min(ADMISSION_WAIT_SLICE);
+            self.admission_gate.sleep_while_held(&self.active, slice);
+        }
     }
     fn read_policy_while_admitted(&self) -> Result<String, BridgeError> {
         let state = match self.state.lock() {
@@ -1155,6 +1235,7 @@ mod tests {
             state: Mutex::new(Some(owner)),
             creation_slot: Mutex::new(std::sync::Weak::<pairing::CreationState>::new()),
             active: AtomicBool::new(false),
+            admission_gate: Default::default(),
             cleanup_pending: AtomicBool::new(false),
             notification_cleanup_failed: AtomicBool::new(false),
             key_cleanup_pending: AtomicBool::new(false),
@@ -1722,6 +1803,39 @@ mod tests {
                 json
             );
             assert!(platform.saw_busy.load(Ordering::Acquire));
+        });
+    }
+    #[test]
+    fn a_decision_path_call_waits_for_the_owner_and_is_admitted_when_it_is_released() {
+        with_model(|controller, _platform| {
+            let held = controller.enter().unwrap();
+            std::thread::scope(|scope| {
+                let waiter = scope.spawn(|| controller.enter_waiting().map(drop));
+                // Not admitted beside the holder, and not answered Busy either.
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(!waiter.is_finished());
+                drop(held);
+                assert_eq!(waiter.join().unwrap(), Ok(()));
+            });
+            // The waiter's own admission was released with it.
+            drop(controller.enter().unwrap());
+        });
+    }
+    #[test]
+    fn the_wait_for_the_owner_is_bounded_and_a_callback_never_waits_for_itself() {
+        with_model(|controller, _platform| {
+            let held = controller.enter().unwrap();
+            let started = Instant::now();
+            let refused = controller.enter_waiting().map(drop);
+            assert_eq!(refused, Err(BridgeError::Busy));
+            assert!(started.elapsed() >= ADMISSION_WAIT);
+            // The thread a callback would wait for is the one running it.
+            let started = Instant::now();
+            let inside = native_clock::native_callback(|| controller.enter_waiting().map(drop));
+            assert_eq!(inside, Err(BridgeError::Busy));
+            assert!(started.elapsed() < ADMISSION_WAIT);
+            drop(held);
+            assert_eq!(controller.enter_waiting().map(drop), Ok(()));
         });
     }
     #[test]

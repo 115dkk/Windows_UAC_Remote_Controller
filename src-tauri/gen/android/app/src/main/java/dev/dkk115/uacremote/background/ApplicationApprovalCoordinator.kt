@@ -298,10 +298,19 @@ internal class ApplicationApprovalCoordinator(
             session.move(Phase.FINISHING, Phase.SIGNED); post(session) { advance(session) }; return
         }
         val der = session.der.getAndSet(null) ?: throw IllegalStateException("Native result unavailable")
+        var retained = false
         try {
             val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
             val attempt = session.attempt ?: throw IllegalStateException("Native claim unavailable")
-            val submission = controller.finishApproval(attempt, der)
+            val submission = try { controller.finishApproval(attempt, der) }
+            catch (busy: BridgeException.Busy) {
+                // The owner was held and never saw this signature. Put it back
+                // for the same job to hand over again; cancellation still finds
+                // and clears it there, and a cancelled session takes it back now.
+                session.der.set(der); retained = true
+                if (session.cancelled.get() && session.der.compareAndSet(der, null)) retained = false
+                throw busy
+            }
             if (session.cancelled.get() || !session.lease.isCurrent(session.host) || submission.isCancelled()) {
                 submission.close(); cancel(session, NativeApprovalReply.Cancelled); return
             }
@@ -313,7 +322,7 @@ internal class ApplicationApprovalCoordinator(
                 }
                 else -> { submission.close(); cancel(session, NativeApprovalReply.Unavailable) }
             }
-        } finally { der.fill(0) }
+        } finally { if (!retained) der.fill(0) }
     }
 
     private fun work(session: Session, action: () -> Unit): Boolean {
@@ -322,15 +331,20 @@ internal class ApplicationApprovalCoordinator(
             try { if (!session.cancelled.get()) action() }
             catch (failure: Throwable) {
                 rethrowFatal(failure)
-                val reply = when {
-                    failure is BridgeException.Busy -> NativeApprovalReply.Busy
-                    RequestActionFailurePolicy.requestLocal(failure) -> NativeApprovalReply.Cancelled
-                    else -> NativeApprovalReply.Unavailable
+                // A busy owner did not start this job's call. Run the job again
+                // with what it already holds rather than discard an identity
+                // check the person has passed and the signature it produced.
+                if (!(failure is BridgeException.Busy && retryAfterBusy(session, action))) {
+                    val reply = when {
+                        failure is BridgeException.Busy -> NativeApprovalReply.Busy
+                        RequestActionFailurePolicy.requestLocal(failure) -> NativeApprovalReply.Cancelled
+                        else -> NativeApprovalReply.Unavailable
+                    }
+                    // Reject this attempt without retrying authentication/signing.
+                    // Its exact session/handles still own all cancellation cleanup.
+                    cancel(session, reply)
+                    if (RequestActionFailurePolicy.approvalRetiresOwner(failure)) ownerFailed(failure)
                 }
-                // Reject this attempt without retrying authentication/signing.
-                // Its exact session/handles still own all cancellation cleanup.
-                cancel(session, reply)
-                if (RequestActionFailurePolicy.approvalRetiresOwner(failure)) ownerFailed(failure)
             }
             finally { session.jobs.decrementAndGet(); cleanup(session) }
         }) {
@@ -339,6 +353,16 @@ internal class ApplicationApprovalCoordinator(
             return false
         }
         return true
+    }
+
+    /** True when the same job was scheduled to run again. The prompt is never
+     * shown again and nothing is signed again: the job repeats one owner call
+     * that was not admitted, inside this session's deadline and budget. */
+    private fun retryAfterBusy(session: Session, action: () -> Unit): Boolean {
+        if (stopped.get() || session.cancelled.get() || current.get() !== session) return false
+        val delay = session.busyRetry.next() ?: return false
+        if (session.busyRetry.waits() == 1) NativeThrowTrace.measurement("APPROVAL_WORK_BUSY", "waits", 1)
+        return main.postDelayed({ if (!session.cancelled.get() && current.get() === session) work(session, action) }, delay)
     }
 
     private fun cancel(session: Session, reply: NativeApprovalReply, explicitRetry: Boolean = false) {
@@ -506,6 +530,7 @@ internal class ApplicationApprovalCoordinator(
         val cleanupFailed = AtomicBoolean(false)
         val cleanupAdmissionWaiting = AtomicBoolean(false)
         val cleanupAdmission = ApprovalCleanupAdmission()
+        val busyRetry = ApprovalBusyRetry()
         val cleanupFailureTraced = AtomicBoolean(false)
         val cleanupWake = Runnable {
             if (current.get() === this && cleanupAdmissionWaiting.compareAndSet(true, false)) cleanup(this)

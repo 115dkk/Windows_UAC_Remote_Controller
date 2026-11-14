@@ -420,12 +420,27 @@ impl RequestReviewReply {
     }
 }
 
+/// The decision itself was refused before the native owner admitted it.
+///
+/// Its own code, apart from `app_busy`, because the snapshot that carries it
+/// is built from reads made after the decision, and a busy read says nothing
+/// about the decision. Only this code says the same decision was not taken and
+/// may be offered again. The text is the same; the screen shows it the same.
+#[cfg(any(target_os = "android", test))]
+const fn request_action_busy_issue() -> AppIssue {
+    AppIssue {
+        code: "request_action_busy",
+        message: "앱이 다른 작업을 처리하는 중입니다.",
+        next_action: Some("잠시 후 다시 시도하십시오."),
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 impl RequestActionReply {
     fn accepted(self) -> Result<(), AppIssue> {
         match self {
             Self::Queued {} => Ok(()),
-            Self::Busy {} => Err(crate::commands::busy_issue()),
+            Self::Busy {} => Err(request_action_busy_issue()),
             Self::Unavailable {} | Self::Stale {} => Err(controller_runtime::phone_request_issue()),
         }
     }
@@ -1140,6 +1155,17 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"status":status})).unwrap();
             assert_eq!(reply.accepted().is_ok(), status == "queued");
         }
+        // A refused decision is told apart from a busy read made after it: the
+        // screen offers the decision again for this code and for no other.
+        let refused = RequestActionReply::Busy {}.accepted().unwrap_err();
+        assert_eq!(refused.code, "request_action_busy");
+        assert_ne!(refused.code, crate::commands::busy_issue().code);
+        assert_eq!(refused.message, crate::commands::busy_issue().message);
+        let unread = RequestsReply::Busy {}.requests().err();
+        assert_eq!(
+            unread.map(|issue| issue.code),
+            Some(crate::commands::busy_issue().code)
+        );
         for status in ["busy", "unavailable"] {
             let reply: RequestsReply =
                 serde_json::from_value(serde_json::json!({"status":status})).unwrap();

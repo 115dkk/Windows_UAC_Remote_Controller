@@ -130,7 +130,7 @@ contract. The Windows intent is not claimed power-loss persistent. Other
 platforms return `UnsupportedPlatform`.
 
 Source inspection found Rust 1.97's standard `File::try_lock` does not implement
-Android. ROOT approved Android-only `rustix` 1.1.4 with `std`/`fs` features. The
+Android. ROOT approved Android-only `rustix` 1.1.6 with `std`/`fs` features. The
 store uses safe `flock(&File, NonBlockingLockExclusive)` there and the lifetime
 standard OS lock on Windows/Linux. Contention and OS failure are separate fixed
 errors; no unlocked fallback exists. Android cross-build/device gates remain.
@@ -193,6 +193,6 @@ Primary implementation references, read 2026-09-09:
 - [Rust 1.97 Windows file implementation](https://github.com/rust-lang/rust/blob/1.97.0/library/std/src/sys/fs/windows.rs)
 - [Linux fsync directory requirement](https://man7.org/linux/man-pages/man2/fsync.2.html)
 - [Microsoft FlushFileBuffers contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
-- [Rustix 1.1.4 safe flock API](https://docs.rs/rustix/1.1.4/rustix/fs/fn.flock.html)
+- [Rustix 1.1.6 safe flock API](https://docs.rs/rustix/1.1.6/rustix/fs/fn.flock.html)
 
 Original project code is GPL-2.0-or-later. Dependency licenses remain their own.

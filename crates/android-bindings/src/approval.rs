@@ -192,7 +192,7 @@ impl MobileController {
         request: NativeRequestSelection,
     ) -> Result<Arc<NativeApprovalPlan>, BridgeError> {
         let key = request.key()?;
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_positive_approval(key)?;
         let plan = self.run_approval(|plans, inbox, clock| plans.begin(inbox, key, clock))?;
         if let Err(error) =
@@ -234,7 +234,7 @@ impl MobileController {
         &self,
         plan: Arc<NativeApprovalPlan>,
     ) -> Result<Arc<NativeApprovalAttempt>, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_own_plan(&plan)?;
         let key = phone_request_core::request_key(plan.core.binding());
         self.require_positive_approval(key)?;
@@ -257,7 +257,7 @@ impl MobileController {
         attempt: Arc<NativeApprovalAttempt>,
         der: Vec<u8>,
     ) -> Result<Arc<NativeApprovalSubmission>, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_own_plan(&attempt.plan)?;
         let key = phone_request_core::request_key(attempt.plan.core.binding());
         self.require_positive_approval(key)?;

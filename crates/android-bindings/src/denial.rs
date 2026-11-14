@@ -271,7 +271,7 @@ impl MobileController {
         request: NativeRequestSelection,
     ) -> Result<Arc<NativeDenialScope>, BridgeError> {
         let key = request.key()?;
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_live_denial_owner()?;
         {
             let mut state = self.denial_state.lock().map_err(|_| BridgeError::Closed)?;
@@ -339,7 +339,7 @@ impl MobileController {
         &self,
         scope: Arc<NativeDenialScope>,
     ) -> Result<NativeDenialAdvance, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_scope(&scope)?;
         if scope.signal.released.load(Ordering::Acquire) {
             return Ok(NativeDenialAdvance::Released);
@@ -457,7 +457,7 @@ impl MobileController {
         attempt: Arc<NativeDenialAttempt>,
         der: Vec<u8>,
     ) -> Result<NativeDenialAdvance, BridgeError> {
-        let _admission = self.enter()?;
+        let _admission = self.enter_waiting()?;
         self.require_live_denial_owner()?;
         let signal = attempt
             .control
