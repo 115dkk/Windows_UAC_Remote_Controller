@@ -409,6 +409,51 @@ impl Candidate {
     }
 }
 
+pub(super) fn parked_candidate_for(
+    hwnd: HWND,
+    session: u32,
+    expected_image: &[u16],
+    cleanup: &CleanupLog,
+) -> Result<bool, ProbeError> {
+    // The caller has already matched the parked window's exact class. Unlike the
+    // secure-dialog matcher below, this matcher must not impose dialog-specific
+    // owner or extended-style rules that are absent from the parked-window contract.
+    // SAFETY: read-only visibility query on an OS-enumerated top-level window.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return Ok(false);
+    }
+    let (thread, pid) = window_owner(hwnd)?;
+    // SAFETY: only limited query/synchronize rights for an OS-enumerated PID.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    }
+    .map_err(|error| native_error(NativeOperation::OpenProcess, error))?;
+    let process = OwnedHandle::acquired(raw, NativeOperation::CloseProcess, cleanup)?;
+    if !image_matches(process.raw(), expected_image)? {
+        return Ok(false);
+    }
+    security::native64(process.raw())?;
+    security::process_identity(process.raw(), pid, Some(session), cleanup)?;
+    alive(process.raw())?;
+    let candidate = Candidate {
+        hwnd,
+        pid,
+        thread,
+        creation: process_creation(process.raw())?,
+        process,
+    };
+    candidate.recheck(session, expected_image, cleanup)?;
+    // Visibility may have changed while process identity was checked.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return Err(ProbeError::new(ProbeFailure::ObservationChanged));
+    }
+    Ok(true)
+}
+
 pub(super) fn candidate_for(
     hwnd: HWND,
     session: u32,

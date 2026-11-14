@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">Alertas de solicitação · Vibração</string>
     <string name="request_channel_silent">Alertas de solicitação · Silencioso</string>
     <string name="request_channel_description">Notifica sobre solicitações de permissão de administrador do PC.</string>
+    <string name="parked_prompt_channel">UAC aguardando na barra de tarefas</string>
+    <string name="parked_prompt_channel_description">Notifica quando uma janela do UAC está aguardando na barra de tarefas do PC.</string>
+    <string name="parked_prompt_notification_title">Uma janela do UAC está aguardando na barra de tarefas do PC</string>
+    <string name="parked_prompt_notification_body">Ainda não é possível aprovar pelo celular. No PC, clique no botão do escudo que pisca na barra de tarefas.</string>
     <string name="request_notification_title">Solicitação de aprovação de permissão de administrador</string>
     <string name="request_computer_context">PC pareado</string>
     <string name="request_notification_public_body">Abra o app para ver os detalhes.</string>

@@ -13,6 +13,7 @@ mod codec;
 mod frame;
 mod lan;
 mod message;
+mod notice;
 mod pairing;
 
 pub use address::{
@@ -34,6 +35,11 @@ pub use lan::{
 pub use message::{
     ClockProbeNonce, MAX_PC_EVENT_BYTES, MAX_REQUEST_LIFETIME_NANOS, PcEvent, PcEventError,
     PcPublicKey, RequestResolution, ServiceTick, SignedPcEvent, UnsignedPcEvent, VerifiedPcEvent,
+};
+pub use notice::{
+    MAX_NOTICE_BYTES, MAX_PARKED_PROMPTS, NoticeError, NoticeKind, ParkedPromptsNotice,
+    SignedParkedPromptsNotice, UnsignedParkedPromptsNotice, notice_kind,
+    verify_parked_prompts_notice,
 };
 pub use pairing::{
     EnrollmentAcceptanceFields, MAX_ENROLLMENT_ACCEPTANCE_BYTES, PairingChallenge, PairingError,

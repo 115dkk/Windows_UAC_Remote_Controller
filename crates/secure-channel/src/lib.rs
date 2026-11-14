@@ -44,12 +44,14 @@ pub use key::{CertificateVerifySignature, KeyError, SignatureError, TlsPublicKey
 
 pub const ALPN: &[u8] = b"wuac-control/1";
 pub const ALPN_V2: &[u8] = b"wuac-control/2";
+pub const ALPN_V3: &[u8] = b"wuac-control/3";
 
 /// Authenticated application capability; not authorization or enrollment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlProtocol {
     V1,
     V2,
+    V3,
 }
 
 impl ControlProtocol {
@@ -57,6 +59,7 @@ impl ControlProtocol {
         match value {
             Some(ALPN) => Some(Self::V1),
             Some(ALPN_V2) => Some(Self::V2),
+            Some(ALPN_V3) => Some(Self::V3),
             _ => None,
         }
     }

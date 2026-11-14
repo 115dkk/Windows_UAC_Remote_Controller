@@ -163,6 +163,7 @@ impl MobileController {
         let (attached_peers, _) = self.intake.counts();
         let connected_peers = u8::try_from(peers.iter().filter(|peer| peer.connected).count())
             .map_err(|_| BridgeError::OwnerFaulted)?;
+        let parked_prompts = self.intake.parked_prompts();
         Ok(NativeRequestCatalogStatus {
             state,
             revision: projections.revision,
@@ -171,6 +172,7 @@ impl MobileController {
             configured_peers: u8::try_from(peers.len()).map_err(|_| BridgeError::OwnerFaulted)?,
             attached_peers,
             connected_peers,
+            parked_prompts,
             peers,
             outcome_receipts: projections.outcome_receipts(),
             connection,

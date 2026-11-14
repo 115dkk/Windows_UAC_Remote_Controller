@@ -29,7 +29,7 @@ use phone_state_store::NativePrivateDirectory;
 use secure_channel::{
     CertificateVerifyInput, CertificateVerifySignature, OwnedCertificateVerifyInput, SignerError,
 };
-use service_protocol::{ClockProbe, VerifiedPcEvent};
+use service_protocol::{ClockProbe, VerifiedPcEvent, verify_parked_prompts_notice};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -618,6 +618,36 @@ fn try_verified_event(client: &Client, pc: PcIdentity, key: &Identity) -> Option
     }
 }
 
+fn next_parked_notice(
+    client: &Client,
+    session: &mut ServiceSession<'_>,
+    key: &Identity,
+) -> ParkedPromptsNotice {
+    let end = Instant::now() + TEST_LIMIT;
+    loop {
+        let _ = session.process_one();
+        match client.notices.try_recv() {
+            Ok(Notice::Frame(bytes)) => {
+                return verify_parked_prompts_notice(
+                    &bytes,
+                    &session.engine.pc_identity(),
+                    &PcPublicKey::from_spki_der(key.public.as_spki_der()).unwrap(),
+                )
+                .unwrap();
+            }
+            Ok(_) | Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("peer closed before parked prompt notice")
+            }
+        }
+        assert!(
+            Instant::now() < end,
+            "parked prompt notice was not delivered"
+        );
+        thread::yield_now();
+    }
+}
+
 fn drive_until(
     session: &mut ServiceSession<'_>,
     mut accepted: impl FnMut(SessionProgress) -> bool,
@@ -681,6 +711,52 @@ fn exercise(
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[test]
+fn parked_notice_is_v3_only_edge_triggered_and_sent_to_a_new_ready_peer() {
+    exercise(|session, key, _, clients| {
+        let now = session.now().unwrap();
+        session.set_parked_prompts(2, now).unwrap();
+        assert_eq!(session.notice_sequence, 1);
+
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 5, Vec::new()));
+        drive_until(session, |progress| progress == SessionProgress::PeerReady);
+        let first = next_parked_notice(&clients[0], session, key);
+        assert_eq!(first.count, 2);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.boot_epoch, session.engine.boot_epoch());
+
+        let now = session.now().unwrap();
+        session.set_parked_prompts(2, now).unwrap();
+        assert_eq!(session.notice_sequence, 1);
+
+        let now = session.now().unwrap();
+        session.set_parked_prompts(0, now).unwrap();
+        let cleared = next_parked_notice(&clients[0], session, key);
+        assert_eq!(cleared.count, 0);
+        assert_eq!(cleared.sequence, 2);
+
+        session.peers[0].protocol = Some(secure_channel::ControlProtocol::V2);
+        let now = session.now().unwrap();
+        session.set_parked_prompts(1, now).unwrap();
+        assert_eq!(session.notice_sequence, 3);
+        for _ in 0..16 {
+            let _ = session.process_one();
+            thread::yield_now();
+        }
+        assert!(!matches!(
+            clients[0].notices.try_recv(),
+            Ok(Notice::Frame(_))
+        ));
+    });
 }
 
 #[test]

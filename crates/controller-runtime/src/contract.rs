@@ -614,6 +614,8 @@ pub enum ActivityKind {
     Failure,
     PcCompleted,
     DeliveryFailed,
+    ParkedOnTaskbar,
+    ParkedCleared,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize)]

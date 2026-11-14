@@ -39,9 +39,9 @@ use framed_transport::{
 use secure_channel::{EndpointRole, PlatformTlsSigner, TlsIdentity, TlsPublicKey};
 use service_protocol::{
     CLOCK_REQUEST_BYTES, ClockProbeRequest, EnrollmentAcceptanceFields, MAX_CLOCK_PROBE_RTT_NANOS,
-    PcEvent, PcPublicKey, ServiceTick, SignedEnrollmentAcceptance, SignedFrozenCandidate,
-    SignedPcEvent, UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate, UnsignedPcEvent,
-    encode_frame,
+    ParkedPromptsNotice, PcEvent, PcPublicKey, ServiceTick, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate, SignedPcEvent, UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate,
+    UnsignedParkedPromptsNotice, UnsignedPcEvent, encode_frame,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc as async_mpsc;
@@ -200,6 +200,7 @@ enum ResponseKind {
     Clock,
     Prompt,
     Addresses,
+    Notice,
 }
 struct Response {
     source: Arc<PeerState>,
@@ -567,6 +568,8 @@ pub struct ServiceSession<'key> {
     closing: bool,
     io_failed: bool,
     prompt: prompt::PromptState,
+    parked_prompts: u8,
+    notice_sequence: u64,
 }
 impl fmt::Debug for ServiceSession<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -691,6 +694,8 @@ impl<'key> ServiceSession<'key> {
             closing: false,
             io_failed: false,
             prompt: prompt::PromptState::default(),
+            parked_prompts: 0,
+            notice_sequence: 0,
         })
     }
 
@@ -739,6 +744,117 @@ impl<'key> ServiceSession<'key> {
     /// management clients. It grants no prompt or helper authority.
     pub(crate) fn set_watcher_health(&mut self, health: crate::management_protocol::WatcherHealth) {
         self.watcher_health = health;
+    }
+
+    pub(crate) fn set_parked_prompts(
+        &mut self,
+        count: u8,
+        now: Instant,
+    ) -> Result<(), PeerRuntimeError> {
+        if self.closing {
+            return Err(PeerRuntimeError::Closed);
+        }
+        self.observe_external_now(now)?;
+        if count > service_protocol::MAX_PARKED_PROMPTS {
+            return Err(PeerRuntimeError::Protocol);
+        }
+        if count == self.parked_prompts {
+            return Ok(());
+        }
+        let sequence = self
+            .notice_sequence
+            .checked_add(1)
+            .ok_or(PeerRuntimeError::Capacity)?;
+        let bytes = self.signed_parked_notice_bytes(sequence, count)?;
+        let deadline = now
+            .checked_add(EVENT_LIFETIME)
+            .ok_or(PeerRuntimeError::Clock)?;
+        self.revalidate_peers()?;
+        self.parked_prompts = count;
+        self.notice_sequence = sequence;
+        for index in 0..self.peers.len() {
+            if self.peers[index].protocol == Some(secure_channel::ControlProtocol::V3) {
+                self.queue_signed_notice(index, &bytes, deadline, now)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn signed_parked_notice_bytes(
+        &self,
+        sequence: u64,
+        count: u8,
+    ) -> Result<Vec<u8>, PeerRuntimeError> {
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        let notice = ParkedPromptsNotice::new(
+            self.engine.pc_identity(),
+            self.engine.boot_epoch(),
+            sequence,
+            count,
+        )
+        .map_err(|_| PeerRuntimeError::Protocol)?;
+        let unsigned =
+            UnsignedParkedPromptsNotice::new(notice).map_err(|_| PeerRuntimeError::Protocol)?;
+        let signature = self.key.sign_protocol(&unsigned.signing_bytes())?;
+        let signed = unsigned
+            .with_der_signature(&signature)
+            .map_err(|_| PeerRuntimeError::Identity)?;
+        if self.key.public()? != self.pc_key {
+            return Err(PeerRuntimeError::Identity);
+        }
+        signed
+            .verify(
+                &self.engine.pc_identity(),
+                &PcPublicKey::from_spki_der(self.pc_key.as_spki_der())
+                    .map_err(|_| PeerRuntimeError::Identity)?,
+            )
+            .map_err(|_| PeerRuntimeError::Identity)?;
+        encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)
+    }
+
+    fn queue_signed_notice(
+        &mut self,
+        index: usize,
+        bytes: &[u8],
+        deadline: Instant,
+        now: Instant,
+    ) -> Result<bool, PeerRuntimeError> {
+        let state = Arc::clone(&self.peers[index].state);
+        if !self.peers[index].ready
+            || self.peers[index].protocol != Some(secure_channel::ControlProtocol::V3)
+            || !state.live()
+        {
+            return Ok(false);
+        }
+        if self.check_peer(&state).is_err()
+            || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
+            || now >= deadline
+        {
+            state.retire();
+            return Ok(false);
+        }
+        let id = self.next_response;
+        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
+        if self.peers[index]
+            .responses
+            .try_send(Response {
+                source: Arc::clone(&state),
+                id,
+                bytes: bytes.to_vec(),
+                deadline,
+                kind: ResponseKind::Notice,
+            })
+            .is_err()
+        {
+            state.retire();
+            return Ok(false);
+        }
+        self.peers[index]
+            .responses_in_flight
+            .push_back((id, deadline, ResponseKind::Notice));
+        Ok(true)
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -995,6 +1111,7 @@ impl<'key> ServiceSession<'key> {
                 self.resolve_live_prompt(result, now)?;
                 Ok(prompt::PromptProgress::resolved(result))
             }
+            crate::WatchEvent::ParkedChanged { .. } => Ok(prompt::PromptProgress::default()),
             crate::WatchEvent::HelperRestarted { .. } | crate::WatchEvent::HelperUnavailable => {
                 let result = self.cancel_live_prompt(prompt::PromptResult::Cancelled, now)?;
                 Ok(
@@ -1864,6 +1981,15 @@ impl<'key> ServiceSession<'key> {
             PeerEvent::Ready(protocol) => {
                 self.peers[index].ready = true;
                 self.peers[index].protocol = Some(protocol);
+                if protocol == secure_channel::ControlProtocol::V3 && self.parked_prompts > 0 {
+                    let now = self.now()?;
+                    let deadline = now
+                        .checked_add(EVENT_LIFETIME)
+                        .ok_or(PeerRuntimeError::Clock)?;
+                    let bytes =
+                        self.signed_parked_notice_bytes(self.notice_sequence, self.parked_prompts)?;
+                    self.queue_signed_notice(index, &bytes, deadline, now)?;
+                }
                 Ok(SessionProgress::PeerReady)
             }
             PeerEvent::Drained { id, kind } => {
@@ -1889,7 +2015,9 @@ impl<'key> ServiceSession<'key> {
                         self.resend_live_opened(index, now)?;
                         SessionProgress::ClockDrained
                     }
-                    ResponseKind::Prompt | ResponseKind::Addresses => SessionProgress::Idle,
+                    ResponseKind::Prompt | ResponseKind::Addresses | ResponseKind::Notice => {
+                        SessionProgress::Idle
+                    }
                 })
             }
             PeerEvent::Frame(frame) => {

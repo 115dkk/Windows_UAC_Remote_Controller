@@ -18,6 +18,7 @@ pub const REPORT_HEADER_BYTES: usize = 80;
 pub const MAX_REPORT_BYTES: usize = 512 * 1024;
 pub const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 pub const MAX_WATCH_MESSAGE_BYTES: usize = PIPE_BUFFER_BYTES as usize;
+pub const MAX_PARKED_PROMPTS: u8 = 16;
 const CHALLENGE_MAGIC: &[u8; 8] = b"WPRBC003";
 const REPORT_MAGIC: &[u8; 8] = b"WPRBR003";
 const HELPER_MESSAGE_MAGIC: &[u8; 8] = b"WPHM0002";
@@ -121,6 +122,9 @@ pub enum HelperMessage {
     Heartbeat {
         sequence: u32,
     },
+    Parked {
+        count: u8,
+    },
 }
 impl fmt::Debug for HelperMessage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -143,6 +147,10 @@ impl fmt::Debug for HelperMessage {
             Self::Heartbeat { sequence } => formatter
                 .debug_struct("Heartbeat")
                 .field("sequence", sequence)
+                .finish(),
+            Self::Parked { count } => formatter
+                .debug_struct("Parked")
+                .field("count", count)
                 .finish(),
         }
     }
@@ -195,6 +203,13 @@ impl HelperMessage {
                 payload.extend_from_slice(&sequence.to_be_bytes());
                 4
             }
+            Self::Parked { count } => {
+                if *count > MAX_PARKED_PROMPTS {
+                    return Err(ReportProtocolError);
+                }
+                payload.push(*count);
+                5
+            }
         };
         frame(HELPER_MESSAGE_MAGIC, tag, &payload)
     }
@@ -230,6 +245,9 @@ impl HelperMessage {
             4 if payload.len() == 4 => Ok(Self::Heartbeat {
                 sequence: u32::from_be_bytes(payload.try_into().map_err(|_| ReportProtocolError)?),
             }),
+            5 if payload.len() == 1 && payload[0] <= MAX_PARKED_PROMPTS => {
+                Ok(Self::Parked { count: payload[0] })
+            }
             _ => Err(ReportProtocolError),
         }
     }
@@ -1180,6 +1198,7 @@ mod tests {
                 outcome: ApplyOutcome::Refused(RefusalReason::ContentChanged),
             },
             HelperMessage::Heartbeat { sequence: 9 },
+            HelperMessage::Parked { count: 2 },
         ];
         for message in messages {
             let wire = message.to_wire().unwrap();
@@ -1219,6 +1238,28 @@ mod tests {
         );
         assert!(!debug.contains("feed"));
         assert!(!debug.contains("170"));
+    }
+
+    #[test]
+    fn parked_message_rejects_counts_above_the_bound() {
+        assert!(
+            HelperMessage::Parked {
+                count: MAX_PARKED_PROMPTS + 1,
+            }
+            .to_wire()
+            .is_err()
+        );
+        let mut wire = HelperMessage::Parked {
+            count: MAX_PARKED_PROMPTS,
+        }
+        .to_wire()
+        .unwrap();
+        wire[WATCH_HEADER_BYTES] = MAX_PARKED_PROMPTS + 1;
+        assert!(HelperMessage::from_wire(&wire).is_err());
+        let mut extended = HelperMessage::Parked { count: 1 }.to_wire().unwrap();
+        extended[12..16].copy_from_slice(&2u32.to_be_bytes());
+        extended.push(0);
+        assert!(HelperMessage::from_wire(&extended).is_err());
     }
 
     #[test]

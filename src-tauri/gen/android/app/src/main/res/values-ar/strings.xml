@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">تنبيهات الطلبات · اهتزاز</string>
     <string name="request_channel_silent">تنبيهات الطلبات · صامت</string>
     <string name="request_channel_description">يُعلمك بطلبات صلاحيات المسؤول الواردة من PC.</string>
+    <string name="parked_prompt_channel">UAC في انتظار النقر في شريط المهام</string>
+    <string name="parked_prompt_channel_description">يُعلمك عندما تنتظر نافذة UAC في شريط مهام الكمبيوتر.</string>
+    <string name="parked_prompt_notification_title">نافذة UAC تنتظر في شريط مهام الكمبيوتر</string>
+    <string name="parked_prompt_notification_body">لا يمكنك الموافقة من الهاتف بعد. انتقل إلى الكمبيوتر وانقر على زر الدرع الوامض في شريط المهام.</string>
     <string name="request_notification_title">طلب موافقة على صلاحيات المسؤول</string>
     <string name="request_computer_context">PC المقترن</string>
     <string name="request_notification_public_body">افتح التطبيق لعرض التفاصيل.</string>

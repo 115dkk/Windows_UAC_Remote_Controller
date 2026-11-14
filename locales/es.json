@@ -1,4 +1,9 @@
 {
+  "PC의 UAC 창이 작업 표시줄에서 기다리고 있습니다": "Hay una ventana de UAC en espera en la barra de tareas del PC",
+  "PC의 UAC 창 {count}개가 작업 표시줄에서 기다리고 있습니다": "Hay {count} ventanas de UAC en espera en la barra de tareas del PC",
+  "이 창은 아직 휴대폰으로 승인할 수 없습니다. PC 앞에서 작업 표시줄의 깜박이는 방패 버튼을 누르면 이 휴대폰에 승인 요청이 옵니다.": "Aún no puedes aprobar esta solicitud desde el teléfono. Ve al PC y haz clic en el botón del escudo que parpadea en la barra de tareas para recibir la solicitud de aprobación en este teléfono.",
+  "UAC 창이 작업 표시줄에서 대기함": "Ventana de UAC en espera en la barra de tareas",
+  "작업 표시줄의 UAC 대기가 끝남": "Finalizó la espera de UAC en la barra de tareas",
   "휴대폰 승인 프로그램 파일 일부가 손상되었습니다. [수리하기]를 누르면 이 PC에 보관된 원본으로 되돌립니다. Windows 관리자 승인이 필요합니다.": "Algunos archivos del programa de aprobación desde el teléfono están dañados. Pulsa [Reparar] para restaurarlos desde las copias guardadas en este PC. Se requiere la aprobación del administrador de Windows.",
   "프로그램 파일과 이 PC에 보관된 원본이 모두 손상되어 여기서는 수리할 수 없습니다. 같은 버전을 다시 설치하십시오.": "Los archivos del programa y las copias guardadas en este PC están dañados, por lo que no se pueden reparar aquí. Vuelve a instalar la misma versión.",
   "수리하기": "Reparar",

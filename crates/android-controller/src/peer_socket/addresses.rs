@@ -47,7 +47,10 @@ impl AssociatedPcSocket {
         {
             return Err(PeerSocketError::AddressContext);
         }
-        if self.driver.negotiated_protocol() != Some(ControlProtocol::V2) {
+        if !matches!(
+            self.driver.negotiated_protocol(),
+            Some(ControlProtocol::V2 | ControlProtocol::V3)
+        ) {
             return Ok(());
         }
         let Some(correlation) = self
@@ -123,8 +126,10 @@ impl AssociatedPcSocket {
         bytes: &[u8],
     ) -> Result<PcSocketEvent, PeerSocketError> {
         let result = (|| {
-            if self.driver.negotiated_protocol() != Some(ControlProtocol::V2)
-                || self.addresses.pending.is_none()
+            if !matches!(
+                self.driver.negotiated_protocol(),
+                Some(ControlProtocol::V2 | ControlProtocol::V3)
+            ) || self.addresses.pending.is_none()
             {
                 return Err(PeerSocketError::AddressContext);
             }

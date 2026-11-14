@@ -324,6 +324,16 @@ request authorization and lease renewal are unchanged, and the value never
 gates any of them. No theorem, rule, canary, proof budget or expected verdict
 changes; CI must still run the current-source proofs.
 
+### Parked prompt notice source binding review (2026-11-15)
+
+`watch.rs` detects a visible parked `consent.exe` window while the input desktop
+is not Winlogon, and `peer_runtime.rs` sends the resulting bounded count only to
+protocol-v3 peers. The notice is unsigned for authorization purposes: its PC
+signature establishes origin only. It carries no request binding and cannot
+approve or deny. It is outside the modelled request and lease protocol. ALPN v3
+selects only whether this notice may be sent; v1 and v2 behavior remains
+compatible. No theorem, rule, canary or expected verdict changed.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |

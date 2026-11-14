@@ -17,6 +17,10 @@
     <string name="request_channel_vibration">Request alerts · Vibration</string>
     <string name="request_channel_silent">Request alerts · Silent</string>
     <string name="request_channel_description">Notifies you of administrator permission requests from your PC.</string>
+    <string name="parked_prompt_channel">UAC prompts waiting on the taskbar</string>
+    <string name="parked_prompt_channel_description">Notifies you when a UAC prompt is waiting on the PC taskbar.</string>
+    <string name="parked_prompt_notification_title">A UAC prompt is waiting on the PC taskbar</string>
+    <string name="parked_prompt_notification_body">You cannot approve it from your phone yet. At the PC, click the flashing shield button on the taskbar.</string>
     <string name="request_notification_title">Administrator permission request</string>
     <string name="request_computer_context">Paired PC</string>
     <string name="request_notification_public_body">Open the app for details.</string>

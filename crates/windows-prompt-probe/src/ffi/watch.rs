@@ -4,7 +4,7 @@
 //! The authenticated pipe peer and absolute lifetime are fixed before this runs.
 
 use super::{
-    Candidate, candidate_for, enumerate_without_budget, object_name,
+    Candidate, candidate_for, enumerate_without_budget, object_name, parked_candidate_for,
     pipe_client::{WatchChannel, WatchRead},
     resources::{CleanupLog, OwnedDesktop},
     security, system_consent_path, uia, verify_input_desktop, verify_window_station,
@@ -13,7 +13,8 @@ use crate::{
     NativeOperation, ProbeCounts, ProbeFailure, ProbeReport,
     settle::{SettleGate, Settled},
     supervision::{
-        ApplyOutcome, GoneReason, HelperMessage, RefusalReason, ServiceMessage, TargetIdentity,
+        ApplyOutcome, GoneReason, HelperMessage, MAX_PARKED_PROMPTS, RefusalReason, ServiceMessage,
+        TargetIdentity,
     },
 };
 use std::{
@@ -29,9 +30,12 @@ use windows::Win32::{
         },
         Threading::{GetCurrentProcess, GetCurrentProcessId},
     },
+    UI::WindowsAndMessaging::GetClassNameW,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const PARKED_CENSUS_INTERVAL: Duration = Duration::from_secs(1);
+const PARKED_WINDOW_CLASS: &str = "$$$Secure UAP Dummy Window Class For Interim Dialog";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const OUTCOME_INTERVAL: Duration = Duration::from_millis(100);
@@ -78,6 +82,8 @@ pub(super) fn run(
     let mut sequence = 0u32;
     let mut last_output = Instant::now();
     let mut last_desktop = String::new();
+    let mut last_parked = 0u8;
+    let mut last_parked_census: Option<Instant> = None;
 
     while began.elapsed() < MAX_LIFETIME {
         recheck_peer()?;
@@ -140,6 +146,24 @@ pub(super) fn run(
                     reason: GoneReason::DesktopChanged,
                 })?;
                 last_output = Instant::now();
+            }
+            let census_due =
+                last_parked_census.is_none_or(|at| at.elapsed() >= PARKED_CENSUS_INTERVAL);
+            if census_due {
+                last_parked_census = Some(Instant::now());
+                match scoped_parked_census(desktop.raw(), session, &image, cleanup) {
+                    Ok(count) if count != last_parked => {
+                        channel.write(&HelperMessage::Parked { count })?;
+                        last_parked = count;
+                        last_output = Instant::now();
+                    }
+                    Ok(_) => {}
+                    Err(()) => {
+                        // This optional census must not terminate or perturb the
+                        // secure-desktop approval path. Retain the last count.
+                        lab_note!("parked prompt census failed; retaining count={last_parked}");
+                    }
+                }
             }
         } else {
             verify_input_desktop(desktop.raw()).map_err(|_| ())?;
@@ -258,6 +282,71 @@ fn open_input_desktop(cleanup: &CleanupLog) -> Result<OwnedDesktop> {
     let raw = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) }
         .map_err(|_| ())?;
     OwnedDesktop::acquired(raw, cleanup).map_err(|_| ())
+}
+
+fn scoped_parked_census(
+    desktop: HDESK,
+    session: u32,
+    image: &[u16],
+    cleanup: &CleanupLog,
+) -> Result<u8> {
+    let token = desktop.0 as usize;
+    let cleanup = Arc::clone(cleanup);
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || worker_parked_census(token, session, image, &cleanup))
+            .join()
+            .map_err(|_| ())?
+    })
+}
+
+fn worker_parked_census(
+    token: usize,
+    session: u32,
+    image: &[u16],
+    cleanup: &CleanupLog,
+) -> Result<u8> {
+    security::reject_impersonation(cleanup).map_err(|_| ())?;
+    // SAFETY: private token is a parent-owned HDESK retained through this scoped join.
+    let desktop = HDESK(token as *mut c_void);
+    // SAFETY: this fresh worker has created no USER or COM objects. The input
+    // desktop handle remains owned by the parent until this worker joins.
+    unsafe { SetThreadDesktop(desktop) }.map_err(|_| ())?;
+    let windows = enumerate_without_budget(desktop).map_err(|_| ())?;
+    let mut count = 0u8;
+    for hwnd in windows {
+        if !parked_class_matches(hwnd)? {
+            continue;
+        }
+        if parked_candidate_for(hwnd, session, image, cleanup).map_err(|_| ())? {
+            count = count.saturating_add(1).min(MAX_PARKED_PROMPTS);
+            if count == MAX_PARKED_PROMPTS {
+                break;
+            }
+        }
+    }
+    lab_note!("parked prompt candidates: {count}");
+    Ok(count)
+}
+
+/// Any other window on the desktop is simply not a match: a long class name
+/// (WPF's `HwndWrapper[...;;<guid>]` exceeds 63 units) or a window that closed
+/// mid-enumeration must not fail the census for every parked prompt.
+fn parked_class_matches(hwnd: windows::Win32::Foundation::HWND) -> Result<bool> {
+    // Window class names are at most 256 characters; one more unit shows truncation.
+    let mut units = [0u16; 258];
+    // SAFETY: read-only class query into an initialized bounded buffer for a
+    // handle returned by this desktop's synchronous enumeration.
+    let length = unsafe { GetClassNameW(hwnd, &mut units) };
+    let Some(length) = usize::try_from(length)
+        .ok()
+        .filter(|length| *length > 0 && *length < units.len() - 1)
+    else {
+        return Ok(false);
+    };
+    Ok(PARKED_WINDOW_CLASS
+        .encode_utf16()
+        .eq(units[..length].iter().copied()))
 }
 
 fn scoped_census(

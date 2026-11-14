@@ -245,6 +245,8 @@ pub enum RequestOutcome {
     WindowsApplied { decision: Decision },
     WindowsRejected,
     WindowsOutcomeUnknown,
+    ParkedOnTaskbar { count: u8 },
+    ParkedCleared,
     Expired,
     Cancelled,
 }

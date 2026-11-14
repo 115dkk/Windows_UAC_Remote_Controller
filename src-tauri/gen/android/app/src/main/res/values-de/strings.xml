@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">Anfragehinweise · Vibration</string>
     <string name="request_channel_silent">Anfragehinweise · Lautlos</string>
     <string name="request_channel_description">Benachrichtigt Sie über Anfragen zu Administratorrechten von Ihrem PC.</string>
+    <string name="parked_prompt_channel">Wartende UAC-Fenster in der Taskleiste</string>
+    <string name="parked_prompt_channel_description">Benachrichtigt Sie, wenn ein UAC-Fenster in der Taskleiste des PCs wartet.</string>
+    <string name="parked_prompt_notification_title">Ein UAC-Fenster wartet in der Taskleiste des PCs</string>
+    <string name="parked_prompt_notification_body">Sie können die Anfrage noch nicht auf dem Smartphone genehmigen. Klicken Sie am PC auf das blinkende Schildsymbol in der Taskleiste.</string>
     <string name="request_notification_title">Anfrage zur Freigabe von Administratorrechten</string>
     <string name="request_computer_context">Gekoppelter PC</string>
     <string name="request_notification_public_body">Öffnen Sie die App für Details.</string>

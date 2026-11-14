@@ -67,6 +67,9 @@ pub struct NativeRequestCatalogStatus {
     pub configured_peers: u8,
     pub attached_peers: u8,
     pub connected_peers: u8,
+    /// Sum reported by currently connected peers, saturated at 16. Display only,
+    /// never approvable.
+    pub parked_prompts: u8,
     pub peers: Vec<NativePairedPc>,
     pub outcome_receipts: Vec<NativeOutcomeReceipt>,
     /// None when no PC is paired. Display only, like `peers`.

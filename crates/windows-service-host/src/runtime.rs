@@ -354,6 +354,20 @@ fn run(
                     None => Vec::new(),
                 };
                 for event in events {
+                    if let crate::WatchEvent::ParkedChanged { count } = &event {
+                        append(
+                            &mut journal,
+                            ActivityEvent::Request(if *count > 0 {
+                                RequestOutcome::ParkedOnTaskbar { count: *count }
+                            } else {
+                                RequestOutcome::ParkedCleared
+                            }),
+                        )?;
+                        session
+                            .set_parked_prompts(*count, iteration_now)
+                            .map_err(session_error)?;
+                        continue;
+                    }
                     // Fixed lifecycle kinds only: the events carry no prompt content here.
                     match &event {
                         crate::WatchEvent::HelperRestarted { .. } => {

@@ -12,7 +12,9 @@ use crate::{
 use android_controller::{
     AssociatedPcSocket, NativePeerLease, PcSocketEvent, PcSocketInputs, PeerAssociationRef,
 };
+use approval_protocol::BootEpoch;
 use framed_transport::{ConnectionBudget, SocketLimits};
+use service_protocol::{MAX_PARKED_PROMPTS, ParkedPromptsNotice};
 use std::{
     collections::VecDeque,
     fmt,
@@ -44,10 +46,53 @@ impl fmt::Debug for IntakePeerId {
         f.write_str("IntakePeerId([redacted])")
     }
 }
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ParkedPromptsSnapshot {
+    boot_epoch: BootEpoch,
+    sequence: u64,
+    count: u8,
+}
+
+#[derive(Default)]
+pub(super) struct ParkedPromptsState {
+    latest: Option<ParkedPromptsSnapshot>,
+}
+
+impl ParkedPromptsState {
+    pub(super) fn observe(&mut self, notice: ParkedPromptsNotice) -> bool {
+        let latest = ParkedPromptsSnapshot {
+            boot_epoch: notice.boot_epoch,
+            sequence: notice.sequence,
+            count: notice.count,
+        };
+        if self.latest.is_some_and(|current| {
+            current.boot_epoch == latest.boot_epoch && latest.sequence <= current.sequence
+        }) {
+            return false;
+        }
+        self.latest = Some(latest);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.latest = None;
+    }
+
+    pub(super) fn count(&self) -> u8 {
+        self.latest.map_or(0, |notice| notice.count)
+    }
+}
+
+#[derive(Default)]
+struct PeerConnectionState {
+    connected: bool,
+    parked_prompts: ParkedPromptsState,
+}
+
 struct PeerControl {
     reference: PeerAssociationRef,
     active: AtomicBool,
-    connected: AtomicBool,
+    connection: Mutex<PeerConnectionState>,
     correlated: AtomicBool,
     stop: CancellationToken,
     sender: mpsc::Sender<PeerCommand>,
@@ -57,6 +102,58 @@ struct PeerControl {
     probe_enqueued: AtomicBool,
     probe_pending: AtomicBool,
     probe_retry_blocked: AtomicBool,
+}
+
+impl PeerControl {
+    fn is_connected(&self) -> bool {
+        self.connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .connected
+    }
+
+    fn connect(&self) {
+        self.connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .connected = true;
+    }
+
+    fn disconnect(&self) {
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        connection.connected = false;
+        connection.parked_prompts.clear();
+    }
+
+    fn observe_parked_prompts(&self, notice: ParkedPromptsNotice) -> bool {
+        self.connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .parked_prompts
+            .observe(notice)
+    }
+
+    fn parked_prompts(&self) -> u8 {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if connection.connected {
+            connection.parked_prompts.count()
+        } else {
+            0
+        }
+    }
+}
+
+pub(super) fn saturated_parked_prompts(counts: impl IntoIterator<Item = u8>) -> u8 {
+    counts
+        .into_iter()
+        .fold(0, u8::saturating_add)
+        .min(MAX_PARKED_PROMPTS)
 }
 enum PeerCommand {
     Decision(DeliveryCommand),
@@ -159,10 +256,18 @@ impl IntakeOwner {
             inner
                 .peers
                 .iter()
-                .filter(|peer| {
-                    peer.active.load(Ordering::Acquire) && peer.connected.load(Ordering::Acquire)
-                })
+                .filter(|peer| peer.active.load(Ordering::Acquire) && peer.is_connected())
                 .count() as u8,
+        )
+    }
+    pub(crate) fn parked_prompts(&self) -> u8 {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        saturated_parked_prompts(
+            inner
+                .peers
+                .iter()
+                .filter(|peer| peer.active.load(Ordering::Acquire) && !peer.stop.is_cancelled())
+                .map(|peer| peer.parked_prompts()),
         )
     }
     pub(crate) fn has_live_peer(&self, reference: PeerAssociationRef) -> bool {
@@ -186,7 +291,7 @@ impl IntakeOwner {
             .any(|peer| {
                 peer.reference == reference
                     && peer.active.load(Ordering::Acquire)
-                    && peer.connected.load(Ordering::Acquire)
+                    && peer.is_connected()
                     && !peer.stop.is_cancelled()
             })
     }
@@ -195,7 +300,7 @@ impl IntakeOwner {
         for peer in &inner.peers {
             if peer.reference == reference {
                 peer.active.store(false, Ordering::Release);
-                peer.connected.store(false, Ordering::Release);
+                peer.disconnect();
                 peer.stop.cancel();
             }
         }
@@ -243,6 +348,7 @@ impl IntakeOwner {
         self.stop.cancel();
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for peer in &inner.peers {
+            peer.disconnect();
             peer.stop.cancel();
         }
         for pending in inner.pending.drain(..) {
@@ -408,7 +514,7 @@ impl IntakeOwner {
     }
     fn peer_closed(&self, peer: &PeerControl) {
         peer.active.store(false, Ordering::Release);
-        peer.connected.store(false, Ordering::Release);
+        peer.disconnect();
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for pending in &inner.pending {
             if pending.reference() == peer.reference {
@@ -549,7 +655,7 @@ impl MobileController {
         let control = Arc::new(PeerControl {
             reference: association,
             active: AtomicBool::new(true),
-            connected: AtomicBool::new(false),
+            connection: Mutex::new(PeerConnectionState::default()),
             correlated: AtomicBool::new(false),
             stop: self.intake.stop.child_token(),
             sender: tx,
@@ -1064,16 +1170,20 @@ fn process_parked(
                     owner
                         .intake
                         .unblock_peer(owned.completion.control.reference);
-                    owned
-                        .completion
-                        .control
-                        .connected
-                        .store(true, Ordering::Release);
+                    owned.completion.control.connect();
                     note(Step::ReadyProbe, queue_probe(owner, &mut owned))?;
                     owner
                         .intake
                         .native_progress_pending
                         .store(true, Ordering::Release);
+                }
+                PeerWork::Event(Ok(PcSocketEvent::ParkedPrompts(notice))) => {
+                    if owned.completion.control.observe_parked_prompts(notice) {
+                        owner
+                            .intake
+                            .native_progress_pending
+                            .store(true, Ordering::Release);
+                    }
                 }
                 PeerWork::Event(Ok(PcSocketEvent::Message(message))) => {
                     owner
@@ -1247,7 +1357,10 @@ pub(crate) fn process_parked_message_for_test(
     let control = Arc::new(PeerControl {
         reference,
         active: AtomicBool::new(true),
-        connected: AtomicBool::new(true),
+        connection: Mutex::new(PeerConnectionState {
+            connected: true,
+            parked_prompts: ParkedPromptsState::default(),
+        }),
         correlated: AtomicBool::new(true),
         stop: owner.intake.stop.child_token(),
         sender,

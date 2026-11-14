@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">Alertes de demande · Vibration</string>
     <string name="request_channel_silent">Alertes de demande · Silencieux</string>
     <string name="request_channel_description">Vous avertit des demandes de droits d’administrateur de votre PC.</string>
+    <string name="parked_prompt_channel">UAC en attente dans la barre des tâches</string>
+    <string name="parked_prompt_channel_description">Vous avertit lorsqu’une fenêtre UAC attend dans la barre des tâches du PC.</string>
+    <string name="parked_prompt_notification_title">Une fenêtre UAC attend dans la barre des tâches du PC</string>
+    <string name="parked_prompt_notification_body">Vous ne pouvez pas encore approuver cette demande depuis votre téléphone. Sur le PC, cliquez sur le bouton au bouclier clignotant dans la barre des tâches.</string>
     <string name="request_notification_title">Demande d’approbation des droits d’administrateur</string>
     <string name="request_computer_context">PC associé</string>
     <string name="request_notification_public_body">Ouvrez l’application pour voir les détails.</string>
