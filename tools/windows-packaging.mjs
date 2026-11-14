@@ -51,7 +51,8 @@ export function buildPlan(repository, env = process.env) {
 }
 
 export function validateFileMetadata(info, limit, cargoSource = false) {
-  // Cargo ordinarily hardlinks known build outputs to deps/. Copies in the
+  // Cargo ordinarily hardlinks known build outputs to its own copy inside the
+  // build directory (ADR 0050 says where since 1.100). Copies in the
   // generated staging/output namespace must remain independent single links.
   if (!info.isFile() || info.isSymbolicLink() || (!cargoSource && info.nlink !== 1) || info.size < 1 || info.size > limit) fail('Package input is not a bounded regular file with the required link policy.');
 }
