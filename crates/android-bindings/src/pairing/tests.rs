@@ -255,6 +255,7 @@ impl NativePlatform for Platform {
             minute: 600,
             millis_within_minute: 0,
             time_epoch: 1,
+            offset_change_nanos: u64::MAX,
         })
     }
     fn publish_pending_request(

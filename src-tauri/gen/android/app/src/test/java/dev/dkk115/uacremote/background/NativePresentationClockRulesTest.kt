@@ -40,6 +40,33 @@ class NativePresentationClockRulesTest {
     @Test fun ExtremeWallDeltaRejectsBeforeNanosecondMultiplication() {
         assertFalse(PresentationClockRules.valid(0, 1, 0, Long.MAX_VALUE))
     }
+    @Test fun offsetChangeIsCountedFromTheFirstElapsedReadingOfTheSample() {
+        // The zone changes offset 90 s of wall time after this sample.
+        assertEquals(95_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_090_000))
+        // One millisecond away is one millisecond away, never rounded to zero.
+        assertEquals(5_001_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_000_001))
+    }
+    @Test fun aZoneWithNoFurtherChangeNeverEndsAPreview() {
+        assertEquals(ULong.MAX_VALUE, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, null))
+    }
+    @Test fun aChangeAtOrBehindTheSampleLeavesNoTimeAfterIt() {
+        assertEquals(5_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_000_000))
+        assertEquals(5_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 999_000))
+        assertEquals(0uL, PresentationClockRules.offsetChange(-1, 1_000_000, 1_090_000))
+    }
+    @Test fun aChangeTooFarAwayToCountDoesNotOverflowIntoAnEarlyOne() {
+        assertEquals(ULong.MAX_VALUE, PresentationClockRules.offsetChange(5_000_000_000, 0, Long.MAX_VALUE))
+    }
+    @Test fun aRealZoneReportsItsNextDaylightSavingChange() {
+        val zone = java.time.ZoneId.of("America/New_York")
+        // 2026-03-08 06:59:00Z, one minute before clocks go from 01:59 to 03:00.
+        val sample = java.time.Instant.parse("2026-03-08T06:59:00Z")
+        val next = zone.rules.nextTransition(sample)?.instant?.toEpochMilli()
+        assertEquals(java.time.Instant.parse("2026-03-08T07:00:00Z").toEpochMilli(), next)
+        assertEquals(65_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, sample.toEpochMilli(), next))
+        // A zone without daylight saving has nothing to report.
+        assertEquals(null, java.time.ZoneId.of("Asia/Seoul").rules.nextTransition(sample))
+    }
     @Test fun PreviousObservationRejectsDiscontinuityAndAllowsRounding() {
         assertTrue(PresentationClockRules.consistentPrevious(5_000_000_000, 6000, 4_000_000_000, 5000))
         assertTrue(PresentationClockRules.consistentPrevious(5_000_000_000, 6002, 4_000_000_000, 5000))

@@ -90,12 +90,18 @@ a decision the person has made.
   through for a request no longer on screen.
 - **A background read that found the owner busy reads again** after 150, 300
   and 600 ms instead of leaving a withdrawn request for the periodic read.
-- **A policy with no schedule keeps a preview until the request deadline.**
-  The schedule is evaluated per local minute, which is why display validity
-  ended with the minute. With no schedule every local minute is allowed, so
-  nothing can change at the boundary. A weekly schedule keeps the minute.
-  The screen asks early once per lease, not repeatedly for a lease that ends
-  with the request.
+- **A preview is valid for as long as the schedule allows it.** The schedule
+  is evaluated per local minute, which is why display validity ended with the
+  minute. With no schedule every local minute is allowed, so the preview holds
+  until the request deadline. A weekly schedule is walked forward one local
+  minute at a time while the same policy snapshot allows the next one, up to
+  the deadline and never more than five minutes. The walk takes the next wall
+  minute to be the next local minute, so it also stops at the zone's next UTC
+  offset change: the native time observation now carries that instant
+  (`offset_change_nanos`, from the zone rules), because a daylight-saving
+  change keeps the zone and the UTC clock and so moves no time epoch. The
+  screen asks early once per lease, not repeatedly for a lease that ends with
+  the request.
 
 ## What does not change
 
@@ -117,17 +123,17 @@ findings, all corrected above:
 2. Display validity was extended minute by minute through a weekly schedule's
    windows. That assumes the next local minute is the next wall minute, and a
    daylight-saving change inside one zone breaks it without moving the time
-   epoch, so a preview could outlive a window that had just ended.
+   epoch, so a preview could outlive a window that had just ended. 1.11.3
+   shipped without the extension for weekly schedules; it came back once the
+   observation carried the next offset change to stop at.
 3. A refused decision whose answer read nothing published that empty answer
    and took the request off the screen.
 4. A denial kept behind a read was sent after the app had been left.
 
 ## Not covered
 
-- With a weekly schedule a request is still read again at each minute
-  boundary and leaves the screen for as long as that read takes. Lifting this
-  needs the zone's next offset change in the native time observation, so the
-  lease can stop there.
+- At a daylight-saving change a request shown under a weekly schedule is read
+  again once, and leaves the screen for as long as that read takes.
 
 - The PC renews a live prompt's lease in its last 30 s (80 s in). An identity
   check that is open at that moment is cancelled with the old lease, and the

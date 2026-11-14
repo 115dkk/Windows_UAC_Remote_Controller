@@ -181,6 +181,7 @@ impl NativePlatform for Platform {
             minute: 600,
             millis_within_minute: (clock.monotonic_nanos / 1_000_000 % 60_000) as u16,
             time_epoch: self.time_epoch.load(Ordering::Acquire),
+            offset_change_nanos: u64::MAX,
         })
     }
     fn publish_pending_request(
