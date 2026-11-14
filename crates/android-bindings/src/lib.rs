@@ -1075,6 +1075,7 @@ mod tests {
                 minute: clock.minute,
                 millis_within_minute: 0,
                 time_epoch: 1,
+                offset_change_nanos: u64::MAX,
             })
         }
         fn publish_pending_request(

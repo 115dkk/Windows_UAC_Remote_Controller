@@ -44,6 +44,28 @@ try {
       }
     }
   }
+  // An app that stopped answering reaches the instrumentation as one line, and
+  // this process runs after the lifecycle driver that reads failure evidence.
+  // On a failure only, keep what the disposable AVD recorded: the same closed
+  // log tags the lifecycle driver reads, and the system's own ANR entries with
+  // the thread that was not answering. Neither changes the result below.
+  if (saveOutput === undefined || !/OK \(1 test\)/u.test(saveOutput)) {
+    const evidence = [
+      ['failure-logcat', ['shell', 'logcat', '-d', '-v', 'threadtime', 'AndroidRuntime:E', 'System.err:W', 'RustStdoutStderr:I',
+        'UacNative:I', 'ActivityManager:I', 'ActivityTaskManager:I', 'InputDispatcher:W', '*:S']],
+      ['failure-anr', ['shell', 'dumpsys', 'dropbox', '--print', 'data_app_anr']],
+    ];
+    for (const [name, args] of evidence) {
+      try {
+        const text = execFileSync(resolve(sdk, 'platform-tools/adb'), ['-s', 'emulator-5554', ...args],
+          { encoding: 'utf8', timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
+        // The failure is the newest thing in either; keep the end.
+        writeFileSync(resolve('target/android-lifecycle-ci', 'diagnostic-save-' + name + '.txt'), text.slice(-2 * 1024 * 1024));
+      } catch {
+        process.stderr.write('Optional failure evidence unavailable: ' + name + '\n');
+      }
+    }
+  }
 }
 writeFileSync('target/android-lifecycle-ci/diagnostic-save-tests.txt',saveOutput);
 assert.match(saveOutput,/OK \(1 test\)/u);

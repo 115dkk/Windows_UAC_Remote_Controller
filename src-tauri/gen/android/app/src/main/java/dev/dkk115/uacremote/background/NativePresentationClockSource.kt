@@ -33,6 +33,26 @@ internal object PresentationClockRules {
         val wallMillis = wall - previousWall
         return if (wallMillis >= elapsedMillis) wallMillis - elapsedMillis <= 2L else elapsedMillis - wallMillis <= 2L
     }
+    /**
+     * Elapsed-realtime nanos at which the zone's UTC offset next changes, as
+     * seen from one sample, or MAX when its rules have no further change.
+     *
+     * A daylight-saving change keeps the zone and the UTC wall clock, so it
+     * moves no epoch here, yet the local minute after it is not the next wall
+     * minute. Rust ends anything it derived for a later local minute at this
+     * value. It is counted from the sample's first elapsed reading, and the
+     * wall reading is a whole millisecond whose real time lies anywhere inside
+     * it, so that millisecond is counted as already spent. Both keep the value
+     * from being later than the change itself.
+     */
+    fun offsetChange(elapsedBefore: Long, wallAfter: Long, nextTransitionMillis: Long?): ULong {
+        if (nextTransitionMillis == null) return ULong.MAX_VALUE
+        if (elapsedBefore < 0 || wallAfter < 0) return 0uL
+        if (nextTransitionMillis <= wallAfter) return elapsedBefore.toULong()
+        val millis = nextTransitionMillis - wallAfter - 1
+        if (millis > (Long.MAX_VALUE - elapsedBefore) / 1_000_000L) return ULong.MAX_VALUE
+        return (elapsedBefore + millis * 1_000_000L).toULong()
+    }
 }
 
 /** Worker warms zone rules and binds the already-observed boot. Reads use only
@@ -55,6 +75,7 @@ internal class NativePresentationClockSource(private val changed: () -> Unit) {
         val now = System.currentTimeMillis()
         if (now < 0) throw BridgeException.InvalidObservation()
         currentZone.rules.getOffset(Instant.ofEpochMilli(now)) // May initialize provider data ONLY here.
+        currentZone.rules.nextTransition(Instant.ofEpochMilli(now)) // Same rules, read by every later sample.
         Instant.ofEpochMilli(now).atZone(currentZone).dayOfWeek.value
         val notify = synchronized(lock) {
             if (closed || faulted || (boot != null && boot != bootCount)) throw BridgeException.InvalidObservation()
@@ -114,13 +135,16 @@ internal class NativePresentationClockSource(private val changed: () -> Unit) {
                 warm = false; lastWall = null; notify = true; refreshNeeded = !faulted
                 null
             } else {
-                val local = Instant.ofEpochMilli(wallAfter).atZone(currentZone)
+                val instant = Instant.ofEpochMilli(wallAfter)
+                val local = instant.atZone(currentZone)
+                val nextTransition = currentZone.rules.nextTransition(instant)?.instant?.toEpochMilli()
                 lastElapsed = elapsedAfter; lastWall = wallAfter
                 NativePresentationClock(
                     bootCount = currentBoot.toUInt(), elapsedBeforeNanos = elapsedBefore.toULong(), elapsedAfterNanos = elapsedAfter.toULong(),
                     wallBeforeMillis = wallBefore.toULong(), wallAfterMillis = wallAfter.toULong(),
                     weekday = (local.dayOfWeek.value - 1).toUByte(), minute = (local.hour * 60 + local.minute).toUShort(),
                     millisWithinMinute = (local.second * 1000 + local.nano / 1_000_000).toUShort(), timeEpoch = epoch.toULong(),
+                    offsetChangeNanos = PresentationClockRules.offsetChange(elapsedBefore, wallAfter, nextTransition),
                 )
             }
         }

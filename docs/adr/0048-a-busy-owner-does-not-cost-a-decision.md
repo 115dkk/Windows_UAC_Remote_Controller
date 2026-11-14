@@ -90,12 +90,21 @@ a decision the person has made.
   through for a request no longer on screen.
 - **A background read that found the owner busy reads again** after 150, 300
   and 600 ms instead of leaving a withdrawn request for the periodic read.
-- **A policy with no schedule keeps a preview until the request deadline.**
-  The schedule is evaluated per local minute, which is why display validity
-  ended with the minute. With no schedule every local minute is allowed, so
-  nothing can change at the boundary. A weekly schedule keeps the minute.
-  The screen asks early once per lease, not repeatedly for a lease that ends
-  with the request.
+- **A preview is valid for as long as the schedule allows it.** The schedule
+  is evaluated per local minute, which is why display validity ended with the
+  minute. With no schedule every local minute is allowed, so the preview holds
+  until the request deadline. A weekly schedule is walked forward one local
+  minute at a time while the same policy snapshot allows the next one, up to
+  the deadline and never more than five minutes past the end of the current
+  minute. The walk takes the next wall minute to be the next local minute, so
+  it also stops at the zone's next UTC offset change: the native time
+  observation now carries that instant (`offset_change_nanos`, from the zone
+  rules), because a daylight-saving change keeps the zone and the UTC clock
+  and so moves no time epoch. That instant is counted from the first elapsed
+  reading of the sample and gives up the millisecond the wall reading was
+  rounded down within, as the minute's own end already does, so it is never
+  later than the change. The screen asks early once per lease, not repeatedly
+  for a lease that ends with the request.
 
 ## What does not change
 
@@ -103,9 +112,10 @@ No decision is authorized by any of this. The tap carries the locator of the
 card that was tapped, and the native registry and the Rust owner check it
 again; an approval still needs the phone's identity check for that exact
 request lease, and a renewed lease still cannot be answered by an old
-signature. A wall-clock or zone change moves the time epoch and invalidates
-previews at once; a changed policy withdraws the request through the inbox.
-Display validity is display only.
+signature. A wall-clock or zone change moves the time epoch, and from then on
+the native registry and the Rust owner refuse anything issued under the old
+one; a changed policy withdraws the request through the inbox. What is already
+drawn follows after that, see 'Not covered'. Display validity is display only.
 
 ## Review
 
@@ -117,17 +127,33 @@ findings, all corrected above:
 2. Display validity was extended minute by minute through a weekly schedule's
    windows. That assumes the next local minute is the next wall minute, and a
    daylight-saving change inside one zone breaks it without moving the time
-   epoch, so a preview could outlive a window that had just ended.
+   epoch, so a preview could outlive a window that had just ended. 1.11.3
+   shipped without the extension for weekly schedules; it came back once the
+   observation carried the next offset change to stop at.
 3. A refused decision whose answer read nothing published that empty answer
    and took the request off the screen.
 4. A denial kept behind a read was sent after the app had been left.
 
+The weekly walk was audited again when it came back. One finding, corrected
+above: the next offset change was converted from whole wall milliseconds
+without giving up the millisecond the reading was rounded down within, so the
+bound could be up to a millisecond later than the change.
+
 ## Not covered
 
-- With a weekly schedule a request is still read again at each minute
-  boundary and leaves the screen for as long as that read takes. Lifting this
-  needs the zone's next offset change in the native time observation, so the
-  lease can stop there.
+- At a daylight-saving change a request shown under a weekly schedule is read
+  again, and leaves the screen for as long as that read takes.
+- A card already on the screen is not taken off the moment the clock, the
+  zone or the policy changes under it. The change wakes the screen to read
+  again, and the card stays, with its buttons, until a read answers or the
+  lease the screen holds ends; a read that finds the owner busy leaves it
+  there, as it did before this change. A tap on it is checked again natively
+  and refused. The lease the screen holds used to end with the minute and now
+  ends up to 60 s after the read, the most one read is ever given.
+- The system notification of a request is given the request's expiry as its
+  timeout, not its display validity. It is withdrawn at a schedule boundary
+  by the maintenance pass that sees the new minute, not by the system timer.
+  Its actions are checked again natively as well. This is unchanged.
 
 - The PC renews a live prompt's lease in its last 30 s (80 s in). An identity
   check that is open at that moment is cancelled with the old lease, and the

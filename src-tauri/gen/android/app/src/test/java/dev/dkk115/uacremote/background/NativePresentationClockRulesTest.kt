@@ -40,6 +40,46 @@ class NativePresentationClockRulesTest {
     @Test fun ExtremeWallDeltaRejectsBeforeNanosecondMultiplication() {
         assertFalse(PresentationClockRules.valid(0, 1, 0, Long.MAX_VALUE))
     }
+    @Test fun offsetChangeIsCountedFromTheFirstElapsedReadingOfTheSample() {
+        // The zone changes offset 90 s of wall time after this sample's whole
+        // millisecond, so at least 89.999 s after its first elapsed reading.
+        assertEquals(94_999_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_090_000))
+        assertEquals(5_001_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_000_002))
+    }
+    @Test fun theBoundIsNeverLaterThanAChangeInsideTheSampledMillisecond() {
+        // Elapsed 100 s was read when the wall clock really said ...30.0008 s,
+        // and the wall reading that followed returned the whole millisecond
+        // ...30.000 s. The change is 30 s after that whole millisecond, so it
+        // really comes at elapsed 129.9992 s, not at 130 s.
+        val wall = 1_772_953_170_000L
+        val bound = PresentationClockRules.offsetChange(100_000_000_000, wall, wall + 30_000)
+        assertEquals(129_999_000_000uL, bound)
+        assertTrue(bound <= 129_999_200_000uL)
+        // A change in the very next millisecond may already be due.
+        assertEquals(5_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_000_001))
+    }
+    @Test fun aZoneWithNoFurtherChangeNeverEndsAPreview() {
+        assertEquals(ULong.MAX_VALUE, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, null))
+    }
+    @Test fun aChangeAtOrBehindTheSampleLeavesNoTimeAfterIt() {
+        assertEquals(5_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 1_000_000))
+        assertEquals(5_000_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, 1_000_000, 999_000))
+        assertEquals(0uL, PresentationClockRules.offsetChange(-1, 1_000_000, 1_090_000))
+        assertEquals(0uL, PresentationClockRules.offsetChange(5_000_000_000, -1, 1_090_000))
+    }
+    @Test fun aChangeTooFarAwayToCountDoesNotOverflowIntoAnEarlyOne() {
+        assertEquals(ULong.MAX_VALUE, PresentationClockRules.offsetChange(5_000_000_000, 0, Long.MAX_VALUE))
+    }
+    @Test fun aRealZoneReportsItsNextDaylightSavingChange() {
+        val zone = java.time.ZoneId.of("America/New_York")
+        // 2026-03-08 06:59:00Z, one minute before clocks go from 01:59 to 03:00.
+        val sample = java.time.Instant.parse("2026-03-08T06:59:00Z")
+        val next = zone.rules.nextTransition(sample)?.instant?.toEpochMilli()
+        assertEquals(java.time.Instant.parse("2026-03-08T07:00:00Z").toEpochMilli(), next)
+        assertEquals(64_999_000_000uL, PresentationClockRules.offsetChange(5_000_000_000, sample.toEpochMilli(), next))
+        // A zone without daylight saving has nothing to report.
+        assertEquals(null, java.time.ZoneId.of("Asia/Seoul").rules.nextTransition(sample))
+    }
     @Test fun PreviousObservationRejectsDiscontinuityAndAllowsRounding() {
         assertTrue(PresentationClockRules.consistentPrevious(5_000_000_000, 6000, 4_000_000_000, 5000))
         assertTrue(PresentationClockRules.consistentPrevious(5_000_000_000, 6002, 4_000_000_000, 5000))

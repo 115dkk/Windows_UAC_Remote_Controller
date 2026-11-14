@@ -56,6 +56,12 @@ pub struct NativePresentationClock {
     pub minute: u16,
     pub millis_within_minute: u16,
     pub time_epoch: u64,
+    /// Elapsed-realtime nanoseconds at which this zone's UTC offset next
+    /// changes, or `u64::MAX` when its rules have no further change. Until then
+    /// one wall minute is one local minute. A daylight-saving change does not
+    /// move `time_epoch`, so this is what bounds anything derived from the
+    /// local fields above for a later minute.
+    pub offset_change_nanos: u64,
 }
 impl fmt::Debug for NativePresentationClock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -68,6 +74,7 @@ pub(crate) struct PresentationTime {
     pub clock: InboxClock,
     pub time_epoch: u64,
     pub minute_cutoff: u64,
+    pub offset_change: u64,
 }
 pub(crate) fn validate(observed: NativePresentationClock) -> Result<PresentationTime, BridgeError> {
     let span = observed
@@ -103,6 +110,7 @@ pub(crate) fn validate(observed: NativePresentationClock) -> Result<Presentation
         clock,
         time_epoch: observed.time_epoch,
         minute_cutoff,
+        offset_change: observed.offset_change_nanos,
     })
 }
 
@@ -191,6 +199,7 @@ mod tests {
             minute: 600,
             millis_within_minute: 59_950,
             time_epoch: 1,
+            offset_change_nanos: u64::MAX,
         }
     }
     #[test]
