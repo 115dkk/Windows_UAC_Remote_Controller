@@ -13,7 +13,7 @@ command, process launch failure, timeout or signal. It runs:
 - Clippy on every workspace target/feature, with `-D warnings`.
 - Cargo tests and separate documentation tests using the lockfile.
 - Actual Rust Analyzer diagnostics: all errors/warnings and all non-configuration
-  hints fail. Only the exact `inactive-code` cfg-shading hint is informational;
+  hints fail. Only the exact `inactive_code` cfg-shading hint is informational;
   native/Android target checks and host tests cover the different configurations.
 - Tests of the analyzer output/exit gate.
 - Real analyzer clean/error/warning canaries on both host operating systems.

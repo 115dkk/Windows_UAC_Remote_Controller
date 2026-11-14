@@ -11,7 +11,10 @@ const fixtureRoot = mkdtempSync(join(temporaryRoot, 'uac-analyzer-gate-'));
 const fixtures = [
   { name: 'clean', source: 'pub fn answer() -> u32 { 42 }\n', expected: true },
   { name: 'error', source: 'pub fn answer() -> u32 { "not a number" }\n', expected: false },
-  { name: 'warning', source: 'pub fn answer() -> u32 { let unused_value = 42; 42 }\n', expected: false },
+  // The analyzer pinned at 1.100 no longer has an unused-variable diagnostic
+  // (1.97 did), so that fixture would pass as clean. An ignored `#[must_use]`
+  // result is a warning it reports itself, and it still exits 0 for it.
+  { name: 'warning', source: '#[must_use]\npub fn answer() -> u32 { 42 }\npub fn caller() { answer(); }\n', expected: false, analyzerExit: 0 },
 ];
 
 try {
@@ -29,6 +32,8 @@ try {
     // Negative tests must fail because the real analyzer emitted a diagnostic,
     // not merely because a compiler, process or network dependency was missing.
     if (!fixture.expected) assert.ok(result.diagnostics.length > 0, 'missing real analyzer diagnostic');
+    // The warning fixture must fail on the classified diagnostic alone.
+    if (fixture.analyzerExit !== undefined) assert.equal(result.processStatus, fixture.analyzerExit, `${fixture.name}: analyzer exit`);
   }
   process.stdout.write('Actual Rust Analyzer clean/error/warning gate fixtures passed.\n');
 } finally {

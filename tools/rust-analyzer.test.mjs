@@ -111,12 +111,17 @@ test('a Windows progress bar cannot hide the first diagnostic', () => {
 });
 
 test('only the exact inactive-cfg LSP hint is classified as configuration information', () => {
-  const line = 'at crate example, file /example.rs: WeakWarning Ra("inactive-code", WeakWarning) from LineCol { line: 1, col: 0 } to LineCol { line: 2, col: 1 }: code is inactive due to #[cfg] directives: windows is enabled';
+  const line = 'at crate example, file /example.rs: WeakWarning RaLint("inactive_code", WeakWarning) from LineCol { line: 1, col: 0 } to LineCol { line: 2, col: 1 }: code is inactive due to #[cfg] directives: windows is enabled';
   const result = classifyDiagnostics({ ...clean, stdout: `${line}\n${complete}` });
   assert.equal(result.ok, true);
   assert.equal(result.configurationHints.length, 1);
   assert.equal(result.diagnostics.length, 0);
-  for (const changed of [line.replace('WeakWarning Ra', 'Warning Ra'), line.replace('inactive-code', 'other-code'), line.replace('code is inactive', 'a problem is present')]) {
+  for (const changed of [
+    line.replace('WeakWarning RaLint', 'Warning RaLint'), line.replace('inactive_code', 'other_code'),
+    line.replace('code is inactive', 'a problem is present'),
+    // What the analyzer pinned before 1.100 printed for the same hint.
+    line.replace('RaLint("inactive_code"', 'Ra("inactive-code"'),
+  ]) {
     assert.equal(classifyDiagnostics({ ...clean, stdout: `${changed}\n${complete}` }).ok, false);
   }
 });

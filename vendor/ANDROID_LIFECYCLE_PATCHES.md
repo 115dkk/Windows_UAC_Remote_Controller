@@ -76,3 +76,17 @@ statements use feature-gated blocks. Native Xlib pointer types are explicit and
 divergent branches are flattened without changing event dispatch. These changes
 address concrete Linux/Windows diagnostics without disabling diagnostic classes
 or excluding third-party paths. ROOT runs a fresh scan after changes.
+
+Added for the analyzer pinned at Rust 1.100.0 (ADR 0050): in
+`tauri-2.11.5/src/lib.rs`, `Manager::path` calls `State::inner` by path,
+`State::inner(&self.state::<PathResolver<R>>())`, where upstream writes the
+method call `self.state::<PathResolver<R>>().inner()`. It is the same function
+on the same value, with the same lifetime. That analyzer reported E0599, "no
+method `inner` on type `State<'_, PathResolver<R>>`, but an associated function
+with a similar name exists", for this call alone on Linux and on Windows
+(Quality run 43612913222), while rustc, Clippy and the tests accepted it. The
+two neighbouring calls with a concrete type argument, `Env` and `Scopes`, were
+not reported. The 1.97 analyzer did not report any of the three. Why the 1.100
+analyzer rejects the method form was not established. With the path form the
+whole-workspace scan ends with no error and no warning. Return to the upstream
+line when a later pinned analyzer accepts it.
