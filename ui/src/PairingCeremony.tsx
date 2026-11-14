@@ -215,7 +215,9 @@ function Comparison({ width, height, boot }: { width: number; height: number; bo
       : <p style={{ position: 'absolute', insetInline: 36, top: 104, margin: 0, font: `${pt(16)} var(--font-ui)`, color: MUTED_INK }}>
         {tr('휴대폰에 표시된 숫자와 같은지 확인해 주세요.')}
       </p>}
-    <p style={{ position: 'absolute', insetInline: 36, top: 196, height: 90, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: `700 ${pt(40)} 'UAC Sans', var(--font-ui)`, color: INK }}>123 456</p>
+    {/* The renderer draws the digits without DT_RTLREADING, so they read left
+        to right in every locale, as they do on the phone. */}
+    <p dir="ltr" style={{ position: 'absolute', insetInline: 36, top: 196, height: 90, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: `700 ${pt(40)} 'UAC Sans', var(--font-ui)`, color: INK }}>123 456</p>
     {notice === null ? null : <>
       <p ref={body} aria-hidden style={measuring(16)}>{notice}</p>
       <p ref={hint} aria-hidden style={measuring(13)}>{notice}</p>

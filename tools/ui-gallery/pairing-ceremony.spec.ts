@@ -69,7 +69,7 @@ for (const selected of pairingCeremonyCases) {
       expect(rowBox!.y + rowBox!.height, 'decision row stays on the card').toBeLessThanOrEqual(cardBox!.y + cardBox!.height);
       const place = await notice.getAttribute('data-boot-notice');
       // The short display is the one case declared to have no room under the digits.
-      expect(place, 'where the notice went').toBe(selected.viewport.height < 600 ? 'instruction' : 'under-digits');
+      expect(place, 'where the notice went').toBe(selected.viewport.height < 500 ? 'instruction' : 'under-digits');
       if (place === 'instruction') {
         // It took the instruction's place, above the digits; the row did not move.
         await expect(instruction).toHaveCount(0);
