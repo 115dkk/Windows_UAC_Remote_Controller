@@ -412,3 +412,39 @@ fn locator_and_details_accept_no_renderer_authentication_claim() {
         );
     }
 }
+
+#[test]
+fn parked_prompts_are_optional_bounded_and_only_from_a_connected_pc() {
+    let decode =
+        |document: &Value| decode_phone_requests_json(&serde_json::to_vec(document).unwrap());
+    assert_eq!(decode(&catalog()).unwrap().catalog.parked_prompts, 0);
+    for count in [0, 1, 16] {
+        let mut document = catalog();
+        document["parkedPrompts"] = json!(count);
+        assert_eq!(decode(&document).unwrap().catalog.parked_prompts, count);
+    }
+    for bad in [
+        json!(17),
+        json!(-1),
+        json!(1.5),
+        json!("1"),
+        json!(null),
+        json!(256),
+    ] {
+        let mut document = catalog();
+        document["parkedPrompts"] = bad;
+        assert!(decode(&document).is_err());
+    }
+    let mut disconnected = catalog();
+    disconnected["connectedPeerCount"] = json!(0);
+    disconnected["peers"][0]["connected"] = json!(false);
+    disconnected["parkedPrompts"] = json!(0);
+    assert_eq!(decode(&disconnected).unwrap().catalog.parked_prompts, 0);
+    disconnected["parkedPrompts"] = json!(1);
+    assert!(decode(&disconnected).is_err());
+    let mut unavailable = catalog();
+    unavailable["status"] = json!("unavailable");
+    unavailable["requests"] = json!([]);
+    unavailable["parkedPrompts"] = json!(2);
+    assert_eq!(decode(&unavailable).unwrap().catalog.parked_prompts, 0);
+}

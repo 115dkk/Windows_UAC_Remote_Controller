@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">请求通知 · 振动</string>
     <string name="request_channel_silent">请求通知 · 静音</string>
     <string name="request_channel_description">通知您 PC 发来的管理员权限请求。</string>
+    <string name="parked_prompt_channel">任务栏中的 UAC 等待通知</string>
+    <string name="parked_prompt_channel_description">在 UAC 窗口于电脑任务栏中等待时通知您。</string>
+    <string name="parked_prompt_notification_title">UAC 窗口正在电脑任务栏中等待</string>
+    <string name="parked_prompt_notification_body">目前还不能在手机上批准此请求。请到电脑前点击任务栏中闪烁的盾牌按钮。</string>
     <string name="request_notification_title">管理员权限批准请求</string>
     <string name="request_computer_context">已配对的 PC</string>
     <string name="request_notification_public_body">请打开应用查看详情。</string>

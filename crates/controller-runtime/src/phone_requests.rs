@@ -33,6 +33,9 @@ pub struct RequestCatalogView {
     pub decisions: Vec<DecisionFeedbackView>,
     /// None: no paired PC, no current observation, or an older native side.
     pub connection: Option<PcConnectionView>,
+    /// UAC prompts connected PCs report as parked on their taskbar. Display
+    /// only: never a request and never approvable. 0 from an older native side.
+    pub parked_prompts: u8,
 }
 
 #[derive(Debug)]
@@ -55,6 +58,9 @@ impl std::fmt::Debug for RequestReviewView {
     }
 }
 
+/// Same bound as the PC's parked-prompt notice.
+const MAX_PARKED_PROMPTS: u8 = 16;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CatalogDocument {
@@ -69,6 +75,8 @@ struct CatalogDocument {
     decisions: Vec<DecisionFeedbackView>,
     #[serde(default)]
     connection: Option<PcConnectionView>,
+    #[serde(default)]
+    parked_prompts: u8,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +157,9 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
         || document.requests.len() > MAX_REQUESTS
         || document.decisions.len() > MAX_REQUESTS
         || document.peer_count == 0 && !document.requests.is_empty()
+        // A parked notice only ever comes from a connected PC.
+        || document.parked_prompts > MAX_PARKED_PROMPTS
+        || document.parked_prompts > 0 && document.connected_peer_count == 0
         // Dialing and failures describe unconnected paired PCs only.
         || document.connection.is_some_and(|connection| {
             document.peer_count == 0
@@ -273,6 +284,11 @@ pub fn decode_phone_requests_json(bytes: &[u8]) -> Result<PhoneRequestCatalog, A
             connection: document
                 .connection
                 .filter(|_| document.status != RequestCatalogState::Unavailable),
+            parked_prompts: if document.status == RequestCatalogState::Unavailable {
+                0
+            } else {
+                document.parked_prompts
+            },
         },
     })
 }

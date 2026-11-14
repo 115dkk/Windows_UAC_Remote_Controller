@@ -142,7 +142,8 @@ export interface ActivityView {
   readonly id: string;
   readonly timestampMillis: number;
   readonly kind: 'connected' | 'disconnected' | 'service_started' | 'service_stopped'
-    | 'expired' | 'cancelled' | 'approved' | 'denied' | 'failure' | 'pc_completed' | 'delivery_failed';
+    | 'expired' | 'cancelled' | 'approved' | 'denied' | 'failure' | 'pc_completed' | 'delivery_failed'
+    | 'parked_on_taskbar' | 'parked_cleared';
 }
 export interface AppIssue { readonly code: string; readonly message: string; readonly nextAction: string | null }
 export interface PairingView {
@@ -172,6 +173,9 @@ export interface AppSnapshot {
     readonly decisions?: readonly DecisionFeedbackView[];
     /** Absent until the native owner reports it; absent never claims a state. */
     readonly connection?: PcConnectionView | null;
+    /** UAC prompts a connected PC reports as parked on its taskbar (never
+     *  approvable from here). Absent or 0: none reported. */
+    readonly parkedPrompts?: number;
   } | null;
   readonly requestReview: { readonly locator: string; readonly revision: string } | null;
   readonly activity: readonly ActivityView[];

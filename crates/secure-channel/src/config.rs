@@ -17,7 +17,7 @@ use rustls::{
 };
 
 use crate::{
-    ALPN, ALPN_V2, CertificateVerifySignature, ChannelError, EndpointRole, TlsIdentity,
+    ALPN, ALPN_V2, ALPN_V3, CertificateVerifySignature, ChannelError, EndpointRole, TlsIdentity,
     TlsPublicKey,
     identity::{BoundSigningKey, CertificateVerifyInput},
 };
@@ -73,7 +73,7 @@ fn client_config(identity: TlsIdentity, peer: TlsPublicKey) -> Result<ClientConf
         .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(
             certified_key(identity),
         )));
-    config.alpn_protocols = vec![ALPN_V2.to_vec(), ALPN.to_vec()];
+    config.alpn_protocols = vec![ALPN_V3.to_vec(), ALPN_V2.to_vec(), ALPN.to_vec()];
     config.check_selected_alpn = true;
     config.enable_sni = false;
     config.enable_early_data = false;
@@ -102,7 +102,7 @@ fn server_config(identity: TlsIdentity, peer: TlsPublicKey) -> Result<ServerConf
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(
             certified_key(identity),
         )));
-    config.alpn_protocols = vec![ALPN_V2.to_vec(), ALPN.to_vec()];
+    config.alpn_protocols = vec![ALPN_V3.to_vec(), ALPN_V2.to_vec(), ALPN.to_vec()];
     config.session_storage = Arc::new(NoServerSessionStorage {});
     config.ticketer = Arc::new(NoTickets);
     config.send_tls13_tickets = 0;

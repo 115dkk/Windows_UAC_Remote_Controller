@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">要求通知 · 震動</string>
     <string name="request_channel_silent">要求通知 · 靜音</string>
     <string name="request_channel_description">通知您 PC 傳來的系統管理員權限要求。</string>
+    <string name="parked_prompt_channel">工作列中的 UAC 等候通知</string>
+    <string name="parked_prompt_channel_description">在 UAC 視窗於電腦工作列中等候時通知您。</string>
+    <string name="parked_prompt_notification_title">UAC 視窗正在電腦工作列中等候</string>
+    <string name="parked_prompt_notification_body">目前還無法在手機上核准此要求。請到電腦前按一下工作列中閃爍的盾牌按鈕。</string>
     <string name="request_notification_title">系統管理員權限核准要求</string>
     <string name="request_computer_context">已配對的 PC</string>
     <string name="request_notification_public_body">請開啟應用程式查看詳細資料。</string>

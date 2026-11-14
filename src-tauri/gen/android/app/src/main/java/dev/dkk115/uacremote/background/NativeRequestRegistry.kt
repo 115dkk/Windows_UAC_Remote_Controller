@@ -87,6 +87,8 @@ internal object NativeRequestRules {
      * says otherwise is dropped from the display, never shown. */
     fun connectionConsistent(configured: UByte, connected: UByte, value: NativePcConnection): Boolean =
         configured != 0.toUByte() && (connected < configured || (!value.dialing && value.lastFailure == null))
+    fun parkedConsistent(count: UByte, connected: UByte): Boolean =
+        count <= 16u && (count == 0.toUByte() || connected != 0.toUByte())
     /** A PC connected at the previous catalogue and not at this one: its session ended. */
     fun sessionEnded(previous: Set<String>, current: Set<String>): Boolean = previous.any { it !in current }
 }
@@ -151,6 +153,7 @@ internal class NativeRequestRegistry(
     private val temporary = DenialCloseCursor()
     private val deferredClose = ArrayList<AutoCloseable>()
     private val renderer = RequestNotificationRenderer(application)
+    private val parkedRenderer = ParkedPromptNotificationRenderer(application)
     private val random = SecureRandom()
     private val decisions = NativeDecisionMeasurements()
     private var generation = 1L
@@ -409,6 +412,7 @@ internal class NativeRequestRegistry(
             NativeRequestCatalogState.READY -> if (omitted || rows.length() != catalog.requestCount.toInt() || synchronized(lock) { temporalInvalid }) "reconciling" else "ready"
         }
         if (catalog.configuredPeers > 32u || catalog.connectedPeers > catalog.configuredPeers || rows.length() > NativeRequestRules.MAX_REQUESTS ||
+            !NativeRequestRules.parkedConsistent(catalog.parkedPrompts, catalog.connectedPeers) ||
             (catalog.configuredPeers == 0.toUByte() && rows.length() != 0)) throw BridgeException.NativeUnavailable()
         val peers = JSONArray()
         for (peer in catalog.peers) {
@@ -421,6 +425,7 @@ internal class NativeRequestRegistry(
                 .put("lastFailure", it.lastFailure?.let(NativeRequestRules::connectionFailure) ?: JSONObject.NULL) }
         val root = JSONObject().put("version", 2).put("status", status).put("revision", catalog.revision.toString()).put("peers", peers)
             .put("peerCount", catalog.configuredPeers.toInt()).put("connectedPeerCount", catalog.connectedPeers.toInt()).put("requests", rows)
+            .put("parkedPrompts", catalog.parkedPrompts.toInt())
             .put("decisions", decisions.snapshot(observed.elapsedAfterNanos.toLong()))
             .put("connection", connection ?: JSONObject.NULL)
         return payload(root, NativeRequestRules.MAX_LIST_JSON, observed, until, originalGeneration)
@@ -470,8 +475,12 @@ internal class NativeRequestRegistry(
     fun invalidateTime() { synchronized(lock) { temporalInvalid = true; bump() }; changed() }
     /** True when a PC connected at the previous catalogue no longer is. */
     fun catalogMaintained(catalog: NativeRequestCatalogStatus): Boolean {
+        if (!NativeRequestRules.parkedConsistent(catalog.parkedPrompts, catalog.connectedPeers)) {
+            parkedRenderer.clear()
+            throw BridgeException.NativeUnavailable()
+        }
         val receiptChanged = decisions.observe(catalog.outcomeReceipts)
-        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}:${catalog.connection}"
+        val identity = "${catalog.state}:${catalog.revision}:${catalog.requestCount}:${catalog.configuredPeers}:${catalog.attachedPeers}:${catalog.connectedPeers}:${catalog.peers}:${catalog.connection}:${catalog.parkedPrompts}"
         val connected = catalog.peers.filter { it.connected }.mapTo(HashSet()) { it.id }
         var ended = false
         val modified = synchronized(lock) {
@@ -483,6 +492,15 @@ internal class NativeRequestRegistry(
             connectedPeers = connected
             if (result) bump()
             result
+        }
+        parkedRenderer.update(catalog.parkedPrompts.toInt(), catalog.connectedPeers != 0.toUByte()) {
+            synchronized(lock) {
+                if (failed || stopping) false
+                else {
+                    if (catalog.parkedPrompts != 0.toUByte()) allNotificationsCleared = false
+                    true
+                }
+            }
         }
         if (modified) changed()
         return ended
@@ -506,6 +524,7 @@ internal class NativeRequestRegistry(
         if (Looper.myLooper() == Looper.getMainLooper()) { cleanupProgress(); return false }
         val clear = synchronized(lock) { clearRequested && (!clearFailed || explicit) }
         if (clear) try {
+            parkedRenderer.clear()
             renderer.clearOwned()
             synchronized(lock) { clearRequested = false; clearFailed = false; allNotificationsCleared = true }
         } catch (_: Exception) { synchronized(lock) { clearFailed = true } }

@@ -113,6 +113,9 @@ pub enum WatchEvent {
     StillPresent {
         target: TargetIdentity,
     },
+    ParkedChanged {
+        count: u8,
+    },
     HelperRestarted {
         attempt: u32,
     },
@@ -122,6 +125,10 @@ impl fmt::Debug for WatchEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StillPresent { .. } => formatter.write_str("StillPresent([redacted])"),
+            Self::ParkedChanged { count } => formatter
+                .debug_struct("ParkedChanged")
+                .field("count", count)
+                .finish(),
             Self::Appeared {
                 report, session, ..
             } => formatter

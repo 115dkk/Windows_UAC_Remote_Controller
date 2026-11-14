@@ -24,10 +24,11 @@ use framed_transport::{
     SocketLimits, SocketPending, TransportError,
 };
 use phone_request_core::{InboxClock, InboxIssue, ReceivingGeneration};
-use secure_channel::{EndpointRole, TlsIdentity};
+use secure_channel::{ControlProtocol, EndpointRole, TlsIdentity};
 use service_protocol::{
-    ClockCorrelation, ClockError, ClockProbe, PcEvent, PcEventError, PcPublicKey, VerifiedPcEvent,
-    encode_frame,
+    ClockCorrelation, ClockError, ClockProbe, NoticeError, ParkedPromptsNotice, PcEvent,
+    PcEventError, PcPublicKey, VerifiedPcEvent, encode_frame, notice_kind,
+    verify_parked_prompts_notice,
 };
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -145,6 +146,7 @@ pub enum PcSocketEvent {
     Ready,
     Message(Box<ReceivedPcEvent>),
     Addresses(Box<ReceivedAddressAdvertisement>),
+    ParkedPrompts(ParkedPromptsNotice),
     OutboundDrained,
     PeerClosed,
     LocallyClosed,
@@ -268,6 +270,25 @@ impl AssociatedPcSocket {
             SocketEvent::Ready => Ok(PcSocketEvent::Ready),
             SocketEvent::Frame(frame) => {
                 let bytes = frame.into_bytes();
+                if notice_kind(&bytes).is_some() {
+                    if self.driver.negotiated_protocol() != Some(ControlProtocol::V3) {
+                        self.abort();
+                        return Err(PeerSocketError::NoticeContext);
+                    }
+                    let notice = match verify_parked_prompts_notice(
+                        &bytes,
+                        &self.context.association.descriptor().pc(),
+                        &self.context.verification_key,
+                    ) {
+                        Ok(notice) => notice,
+                        Err(error) => {
+                            self.abort();
+                            return Err(PeerSocketError::Notice(error));
+                        }
+                    };
+                    self.ensure_open()?;
+                    return Ok(PcSocketEvent::ParkedPrompts(notice));
+                }
                 if service_protocol::address_control_kind(&bytes).is_some() {
                     return self.receive_addresses(&bytes);
                 }
@@ -501,6 +522,10 @@ fn receiving_error(error: crate::RequestSourceFailure) -> PeerSocketError {
 pub enum PeerSocketError {
     #[error("the address exchange failed its current connection context check")]
     AddressContext,
+    #[error("a parked-prompt notice arrived outside protocol v3")]
+    NoticeContext,
+    #[error("parked-prompt notice verification failed")]
+    Notice(NoticeError),
     #[error("the message does not match the request's original receiving source")]
     ReceivingSource(InboxIssue),
     #[error("the originating connection was cancelled, closed or failed")]

@@ -26,7 +26,8 @@ use secure_channel::{
     SignerError, TlsIdentity, TlsPublicKey,
 };
 use service_protocol::{
-    ClockProbeRequest, PcEvent, RequestResolution, ServiceTick, UnsignedPcEvent, encode_frame,
+    ClockProbeRequest, ParkedPromptsNotice, PcEvent, RequestResolution, ServiceTick,
+    UnsignedParkedPromptsNotice, UnsignedPcEvent, encode_frame,
 };
 use std::{
     sync::{Weak, atomic::AtomicUsize, mpsc as sync_mpsc},
@@ -56,6 +57,20 @@ fn epoch() -> BootEpoch {
 }
 fn frame(event: PcEvent, seed: u8) -> Vec<u8> {
     let unsigned = UnsignedPcEvent::new(event).unwrap();
+    let signature: Signature = key(seed).sign(&unsigned.signing_bytes());
+    encode_frame(
+        &unsigned
+            .with_der_signature(signature.to_der().as_bytes())
+            .unwrap()
+            .to_wire(),
+    )
+    .unwrap()
+}
+fn parked_notice(boot_epoch: BootEpoch, sequence: u64, count: u8) -> ParkedPromptsNotice {
+    ParkedPromptsNotice::new(pc(), boot_epoch, sequence, count).unwrap()
+}
+fn parked_notice_frame(notice: ParkedPromptsNotice, seed: u8) -> Vec<u8> {
+    let unsigned = UnsignedParkedPromptsNotice::new(notice).unwrap();
     let signature: Signature = key(seed).sign(&unsigned.signing_bytes());
     encode_frame(
         &unsigned
@@ -336,8 +351,12 @@ enum PcNotice {
     Decision(Vec<u8>),
     Closed,
 }
+enum PcCommand {
+    Event(Box<PcEvent>, u8),
+    ParkedPrompts(ParkedPromptsNotice, u8),
+}
 struct PcPeer {
-    commands: mpsc::Sender<(PcEvent, u8)>,
+    commands: mpsc::Sender<PcCommand>,
     notices: sync_mpsc::Receiver<PcNotice>,
     stop: CancellationToken,
     service_tick: Arc<AtomicU64>,
@@ -368,8 +387,14 @@ impl PcPeer {
                         biased;
                         _ = stopped.cancelled() => break,
                         command = receiver.recv() => {
-                            let Some((event, seed)) = command else { break; };
-                            driver.queue_frame(frame(event, seed)).unwrap();
+                            let Some(command) = command else { break; };
+                            let frame = match command {
+                                PcCommand::Event(event, seed) => frame(*event, seed),
+                                PcCommand::ParkedPrompts(notice, seed) => {
+                                    parked_notice_frame(notice, seed)
+                                }
+                            };
+                            driver.queue_frame(frame).unwrap();
                         }
                         event = driver.next_event() => match event {
                             Ok(SocketEvent::Ready) => (),
@@ -399,7 +424,12 @@ impl PcPeer {
     }
     fn send(&self, event: PcEvent) {
         self.commands
-            .try_send((event, APP_PC_KEY))
+            .try_send(PcCommand::Event(Box::new(event), APP_PC_KEY))
+            .unwrap_or_else(|_| panic!("bounded PC command"));
+    }
+    fn send_parked_prompts(&self, notice: ParkedPromptsNotice) {
+        self.commands
+            .try_send(PcCommand::ParkedPrompts(notice, APP_PC_KEY))
             .unwrap_or_else(|_| panic!("bounded PC command"));
     }
     fn wait(&self, want_decision: bool) -> Option<SignedDecision> {
@@ -632,6 +662,18 @@ impl Fixture {
                 .expect("bounded actual accepted correlation");
         }
         panic!("bounded accepted-correlation notice count")
+    }
+    fn wait_for_parked_prompts(&self, expected: u8) -> NativeRequestCatalogStatus {
+        let end = Instant::now() + LIMIT;
+        loop {
+            let status = admitted_call(|| self.controller.request_catalog_status());
+            if status.parked_prompts == expected {
+                return status;
+            }
+            self.notices
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .expect("bounded parked-prompt progress");
+        }
     }
     fn projection(&self) -> Arc<NativePendingRequest> {
         self.projection_with(NativeRequestPresentation::Fresh, true)
@@ -881,6 +923,46 @@ fn denial_reaches_same_peer_and_keeps_fence_until_committed_terminal_evidence() 
 }
 
 #[test]
+fn parked_prompt_state_ignores_stale_sequences_accepts_new_boots_and_saturates_peer_sum() {
+    let mut state = crate::intake::ParkedPromptsState::default();
+    assert!(state.observe(parked_notice(epoch(), 7, 3)));
+    assert!(!state.observe(parked_notice(epoch(), 7, 9)));
+    assert!(!state.observe(parked_notice(epoch(), 6, 8)));
+    assert_eq!(state.count(), 3);
+
+    let restarted = BootEpoch::from_bytes([3; 32]).unwrap();
+    assert!(state.observe(parked_notice(restarted, 1, 8)));
+    assert_eq!(state.count(), 8);
+
+    assert_eq!(crate::intake::saturated_parked_prompts([7, 8]), 15);
+    assert_eq!(crate::intake::saturated_parked_prompts([9, 8]), 16);
+}
+
+#[test]
+fn verified_parked_prompt_status_is_display_only_and_disconnect_clears_it() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let peer = fixture.connect();
+    assert_eq!(fixture.wait_for_parked_prompts(0).request_count, 0);
+
+    peer.send_parked_prompts(parked_notice(epoch(), 1, 6));
+    let status = fixture.wait_for_parked_prompts(6);
+    assert_eq!(status.parked_prompts, 6);
+    assert_eq!(status.connected_peers, 1);
+    assert_eq!(status.request_count, 0);
+    assert!(status.outcome_receipts.is_empty());
+    assert_eq!(fixture.platform.published.load(Ordering::Acquire), 0);
+
+    drop(peer);
+    let disconnected = fixture.wait_for_parked_prompts(0);
+    assert_eq!(disconnected.connected_peers, 0);
+    assert_eq!(disconnected.request_count, 0);
+    fixture.cleanup();
+}
+
+#[test]
 fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_body() {
     let _serial = crate::tests::SERIAL
         .lock()
@@ -889,6 +971,7 @@ fn no_peers_is_truthfully_unprovisioned_transport_and_policy_withdraw_clears_bod
     let status = fixture.controller.request_catalog_status().unwrap();
     assert_eq!(status.attached_peers, 0);
     assert_eq!(status.connected_peers, 0);
+    assert_eq!(status.parked_prompts, 0);
     assert_eq!(status.configured_peers, 1); // Synthetic persisted metadata, not a live connection.
     assert_eq!(status.peers.len(), 1);
     assert!(!status.peers[0].connected);

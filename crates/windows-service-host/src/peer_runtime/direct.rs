@@ -99,7 +99,10 @@ impl ServiceSession<'_> {
         let slot = &self.peers[index];
         if !slot.ready
             || !slot.clock_served
-            || slot.protocol != Some(secure_channel::ControlProtocol::V2)
+            || !matches!(
+                slot.protocol,
+                Some(secure_channel::ControlProtocol::V2 | secure_channel::ControlProtocol::V3)
+            )
             || !Arc::ptr_eq(&slot.state, &state)
             || slot.responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
             || slot.address_query_after.is_some_and(|after| now < after)
@@ -359,7 +362,13 @@ impl ServiceSession<'_> {
             .filter(|&index| {
                 let peer = &self.peers[index];
                 peer.ready
-                    && peer.protocol == Some(secure_channel::ControlProtocol::V2)
+                    && matches!(
+                        peer.protocol,
+                        Some(
+                            secure_channel::ControlProtocol::V2
+                                | secure_channel::ControlProtocol::V3
+                        )
+                    )
                     && peer.state.live()
                     && peer.clock_since.is_some_and(|since| {
                         now.saturating_duration_since(since) >= HINT_REFRESH_GRACE

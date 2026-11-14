@@ -10,7 +10,9 @@ use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
-use windows_prompt_probe::supervision::{ApplyOutcome, HelperMessage, TargetIdentity};
+use windows_prompt_probe::supervision::{
+    ApplyOutcome, HelperMessage, MAX_PARKED_PROMPTS, TargetIdentity,
+};
 
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_EVENTS: usize = 64;
@@ -141,6 +143,12 @@ impl WatchMachine {
                 } else {
                     Ok(())
                 }
+            }
+            HelperMessage::Parked { count } => {
+                if count > MAX_PARKED_PROMPTS {
+                    return Err(MessageError::Protocol);
+                }
+                self.enqueue(WatchEvent::ParkedChanged { count })
             }
         }?;
         self.last_message = now;
@@ -325,6 +333,34 @@ mod tests {
             .ingest(HelperMessage::Heartbeat { sequence: 1 }, 4, now)
             .unwrap();
         assert!(machine.drain().is_empty());
+    }
+
+    #[test]
+    fn parked_changes_enqueue_without_touching_prompt_tracking_and_refresh_liveness() {
+        let began = Instant::now();
+        let now = began + Duration::from_secs(14);
+        let mut machine = WatchMachine::new(began);
+        machine
+            .ingest(HelperMessage::Parked { count: 3 }, 4, now)
+            .unwrap();
+        assert_eq!(
+            machine.drain(),
+            vec![WatchEvent::ParkedChanged { count: 3 }]
+        );
+        assert!(!machine.heartbeat_expired(now + Duration::from_secs(14)));
+        assert_eq!(
+            machine.ingest(
+                HelperMessage::Parked {
+                    count: MAX_PARKED_PROMPTS + 1,
+                },
+                4,
+                now + Duration::from_secs(14),
+            ),
+            Err(MessageError::Protocol)
+        );
+        assert!(machine.heartbeat_expired(now + Duration::from_secs(15)));
+        assert_eq!(machine.last_sequence, 0);
+        assert!(machine.tracked.is_none());
     }
 
     #[test]

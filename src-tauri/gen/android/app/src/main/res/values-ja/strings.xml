@@ -14,6 +14,10 @@
     <string name="request_channel_vibration">リクエスト通知・振動</string>
     <string name="request_channel_silent">リクエスト通知・サイレント</string>
     <string name="request_channel_description">PC からの管理者権限のリクエストを通知します。</string>
+    <string name="parked_prompt_channel">タスクバーで待機中の UAC</string>
+    <string name="parked_prompt_channel_description">PC のタスクバーで UAC の確認画面が待機しているときに通知します。</string>
+    <string name="parked_prompt_notification_title">PC のタスクバーで UAC の確認画面が待機しています</string>
+    <string name="parked_prompt_notification_body">まだスマートフォンから承認できません。PC のタスクバーで点滅している盾のボタンをクリックしてください。</string>
     <string name="request_notification_title">管理者権限の承認リクエスト</string>
     <string name="request_computer_context">接続済みの PC</string>
     <string name="request_notification_public_body">詳細はアプリで確認してください。</string>

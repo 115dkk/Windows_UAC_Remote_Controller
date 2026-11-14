@@ -244,6 +244,8 @@ export const activityText: Record<ActivityView['kind'], string> = {
   approved: '요청 승인됨', denied: '요청 거부됨', failure: '요청 처리 실패',
   pc_completed: 'PC에서 요청 종료됨',
   delivery_failed: '요청 전송 실패',
+  parked_on_taskbar: 'UAC 창이 작업 표시줄에서 대기함',
+  parked_cleared: '작업 표시줄의 UAC 대기가 끝남',
 };
 export const weekdayOptions = [
   { bit: 1, short: '월', label: '월요일' }, { bit: 2, short: '화', label: '화요일' },

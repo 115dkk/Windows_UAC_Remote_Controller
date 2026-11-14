@@ -137,6 +137,8 @@ fn every_fixed_event_fits_the_minimum_line_budget_at_the_largest_timestamp() {
         ActivityEvent::Request(RequestOutcome::NotificationSent),
         ActivityEvent::Request(RequestOutcome::WindowsRejected),
         ActivityEvent::Request(RequestOutcome::WindowsOutcomeUnknown),
+        ActivityEvent::Request(RequestOutcome::ParkedOnTaskbar { count: 16 }),
+        ActivityEvent::Request(RequestOutcome::ParkedCleared),
         ActivityEvent::Request(RequestOutcome::Expired),
         ActivityEvent::Request(RequestOutcome::Cancelled),
     ];
@@ -160,6 +162,25 @@ fn every_fixed_event_fits_the_minimum_line_budget_at_the_largest_timestamp() {
         stored_bytes(directory.path())
             .split(|byte| *byte == b'\n')
             .all(|line| line.len() <= MIN_LINE_BYTES)
+    );
+}
+
+#[test]
+fn parked_prompt_states_have_exact_bounded_json_shapes() {
+    assert_eq!(
+        serde_json::to_value(RequestOutcome::ParkedOnTaskbar { count: 4 }).unwrap(),
+        json!({"state": "parked_on_taskbar", "detail": {"count": 4}})
+    );
+    assert_eq!(
+        serde_json::to_value(RequestOutcome::ParkedCleared).unwrap(),
+        json!({"state": "parked_cleared"})
+    );
+    assert_eq!(
+        serde_json::from_value::<RequestOutcome>(
+            json!({"state": "parked_on_taskbar", "detail": {"count": 4}})
+        )
+        .unwrap(),
+        RequestOutcome::ParkedOnTaskbar { count: 4 }
     );
 }
 

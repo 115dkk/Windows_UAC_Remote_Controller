@@ -117,6 +117,16 @@ class NativeRequestRulesTest {
         assertFalse(NativeRequestRules.connectionConsistent(1u, 1u, dialing))
         assertFalse(NativeRequestRules.connectionConsistent(1u, 1u, failed))
     }
+    @Test fun ParkedPromptsAreBoundedAndRequireAConnectedPc() {
+        assertTrue(NativeRequestRules.parkedConsistent(0u, 0u))
+        assertTrue(NativeRequestRules.parkedConsistent(0u, 1u))
+        assertTrue(NativeRequestRules.parkedConsistent(1u, 1u))
+        assertTrue(NativeRequestRules.parkedConsistent(16u, 32u))
+        assertFalse(NativeRequestRules.parkedConsistent(1u, 0u))
+        assertFalse(NativeRequestRules.parkedConsistent(16u, 0u))
+        assertFalse(NativeRequestRules.parkedConsistent(17u, 1u))
+        assertFalse(NativeRequestRules.parkedConsistent(255u, 1u))
+    }
     @Test fun OnlyAPreviouslyConnectedPcThatIsNoLongerConnectedEndsASession() {
         val first = "1".repeat(64); val second = "2".repeat(64)
         assertFalse(NativeRequestRules.sessionEnded(emptySet(), setOf(first)))

@@ -94,6 +94,15 @@
   assumptions, executable honest traces and broken-protocol negative controls.
   Missing, falsified or inconclusive required proofs fail CI. A symbolic proof is
   not evidence of native isolation, hardware authentication or implementation refinement.
+- An agent that raises an elevation for the phone to approve (an installer
+  update, a lab step) must not start it from a windowless shell such as the
+  Claude app's child PowerShell. Windows then parks consent.exe as a flashing
+  taskbar button instead of switching to the secure desktop, and nothing but a
+  real click at the PC wakes it: injected input, SetForegroundWindow and
+  UI Automation all failed on 2026-11-15 (ADR 0051). From 1.13.0 the phone says
+  a prompt is parked, but it still cannot approve it. No foreground launch
+  method has been verified yet; until one is, ask the user to be at the PC or
+  to start the elevation themselves.
 
 ## Conditional Claude handoff and cleanup
 

@@ -33,6 +33,12 @@ pub(crate) fn project(records: Vec<ActivityRecord>) -> Vec<ActivityView> {
                 ) => ActivityKind::Failure,
                 ActivityEvent::Request(RequestOutcome::Expired) => ActivityKind::Expired,
                 ActivityEvent::Request(RequestOutcome::Cancelled) => ActivityKind::Cancelled,
+                ActivityEvent::Request(RequestOutcome::ParkedOnTaskbar { .. }) => {
+                    ActivityKind::ParkedOnTaskbar
+                }
+                ActivityEvent::Request(RequestOutcome::ParkedCleared) => {
+                    ActivityKind::ParkedCleared
+                }
                 _ => return None,
             };
             Some(ActivityView {
@@ -86,6 +92,20 @@ mod tests {
             ]
         );
         assert!(rows.windows(2).all(|pair| pair[0].id != pair[1].id));
+    }
+
+    #[test]
+    fn parked_prompt_changes_have_distinct_non_approval_rows() {
+        let rows = project(vec![
+            record(ActivityEvent::Request(RequestOutcome::ParkedOnTaskbar {
+                count: 3,
+            })),
+            record(ActivityEvent::Request(RequestOutcome::ParkedCleared)),
+        ]);
+        assert_eq!(
+            rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            vec![ActivityKind::ParkedOnTaskbar, ActivityKind::ParkedCleared]
+        );
     }
 
     #[test]

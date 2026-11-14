@@ -24,11 +24,11 @@ fn real_mutual_handshake_and_encrypted_bidirectional_application_bytes() {
     handshake(&mut client, &mut server, now, MAX_DRAIN_BYTES).unwrap();
     assert_eq!(
         client.negotiated_protocol(),
-        Some(crate::ControlProtocol::V2)
+        Some(crate::ControlProtocol::V3)
     );
     assert_eq!(
         server.negotiated_protocol(),
-        Some(crate::ControlProtocol::V2)
+        Some(crate::ControlProtocol::V3)
     );
     let payload = b"synthetic phone application payload";
     assert_eq!(client.write_plaintext(payload, now), Ok(payload.len()));

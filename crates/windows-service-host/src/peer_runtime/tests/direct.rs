@@ -100,7 +100,7 @@ fn ready(
     });
     assert_eq!(
         session.peers[0].protocol,
-        Some(secure_channel::ControlProtocol::V2)
+        Some(secure_channel::ControlProtocol::V3)
     );
     commands
 }

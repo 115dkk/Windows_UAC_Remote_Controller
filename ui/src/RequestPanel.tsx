@@ -16,6 +16,7 @@ import { DecisionPhaseLine, DecisionReceipts } from './DecisionReceipt';
 import { initialConnectionClock, knownDisconnected, pcConnectionPresentation } from './pcConnection';
 import type { PcConnectionClock } from './pcConnection';
 import { PcConnectionStatus } from './PcConnectionStatus';
+import { ParkedPromptNotice } from './ParkedPromptNotice';
 
 type Decide = (requestId: string, decision: DecisionAction) => void;
 /** The tap that is waiting for its bridge reply, shown on the next frame. */
@@ -95,6 +96,7 @@ export function RequestPanel({ snapshot, disabled, readDetails, onDecision, onOp
       connectionClock.everConnected, snapshot.requestCatalog?.connection) : null;
   return <>
     <DecisionReceipts receipts={receipts} onDismiss={decisions?.dismiss ?? (() => undefined)} />
+    <ParkedPromptNotice count={snapshot.requestCatalog?.parkedPrompts ?? 0} />
     <RequestContents snapshot={snapshot} disabled={disabled} readDetails={readDetails} onDecision={onDecision} byId={byId} pendingDecision={pendingDecision} />
     <div className="connection-status" role="status">{connection && <PcConnectionStatus presentation={connection} />}</div>
     {snapshot.platform === 'android' && !hasPairedPc(snapshot) && <PairingEntry snapshot={snapshot} disabled={disabled} onOpenScanner={onOpenScanner} {...(onOpenUsb ? { onOpenUsb } : {})} scannerButtonRef={scannerButtonRef} />}
