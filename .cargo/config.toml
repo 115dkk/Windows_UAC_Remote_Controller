@@ -1,0 +1,9 @@
+# Cargo 1.100 (dependency cooldown). When cargo resolves or updates versions it
+# skips any release published less than three days ago; most malicious releases
+# are caught within that time. A fix that is needed sooner is taken on purpose:
+#
+#   CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update <crate> --precise <version>
+#
+# Builds with --locked use the committed Cargo.lock and are not affected.
+[registry]
+global-min-publish-age = "3 days"
