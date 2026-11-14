@@ -62,12 +62,12 @@ announcement:
 
 ## Decision
 
-The toolchain is 1.100.0 in `rust-toolchain.toml` and in the workspace
-`rust-version`. The two cargo-deny steps in `quality.yml` still name 1.97.0
-for the action's own cargo: the token this change was pushed with has no
-`workflow` scope and may not modify workflow files. Those steps read the
-lockfile and the manifests and compile nothing; raising the two lines is left
-for a push that is allowed to.
+The toolchain is 1.100.0 in `rust-toolchain.toml`, in the workspace
+`rust-version`, and in the two cargo-deny steps of `quality.yml`, which name
+a version for the action's own cargo. Those two lines are a later commit of
+this change than the rest: the first push was made with a token that had no
+`workflow` scope and may not modify workflow files, and the user widened the
+token on 2026-11-14.
 
 Applied, because each replaces something this repository wrote for want of it:
 
