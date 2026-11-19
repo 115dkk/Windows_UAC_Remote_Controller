@@ -334,6 +334,43 @@ approve or deny. It is outside the modelled request and lease protocol. ALPN v3
 selects only whether this notice may be sent; v1 and v2 behavior remains
 compatible. No theorem, rule, canary or expected verdict changed.
 
+### Parked prompt census enumeration binding review (2026-11-19)
+
+`watch.rs` now collects only windows of the parked-prompt class when it counts
+parked prompts on the user's desktop, instead of enumerating every top-level
+window under the 128-window limit that suits the Winlogon desktop. A user's
+desktop held 447 windows on the PC where the census was found failing, so the
+count stayed 0 and no notice was sent. The change touches only how the bounded
+count is obtained. The Winlogon census, its limit, the helper messages, the
+notice and every request, decision and lease path are unchanged. No theorem,
+rule, canary or expected verdict changed.
+
+### Failure-handling source binding review (2026-11-20)
+
+`peer_runtime.rs` and `watch.rs` changed for ADR 0052 and ADR 0054. In
+`peer_runtime.rs`, "this peer's connection ended" is now tested apart from
+"the registry, keys, revision or boot epoch no longer match this peer": the
+first retires that peer and the session continues, the second still ends the
+session. A verified decision is handed to the platform only while its sender is
+still connected, tested once more immediately before the hand-over; otherwise
+the consumed request is settled as failed and nothing is applied. A pairing
+that cannot proceed ends as a failed ceremony, and a device committed to the
+registry is revoked again unless its acceptance was delivered. The session also
+writes the embedded relay's counters to public diagnostics. In `watch.rs` the
+helper skips a census cycle, instead of exiting, when the input desktop cannot
+be opened or named or a window disappears mid-census; it never publishes or
+keeps a prompt it could not verify, every check before a button press is
+unchanged, and an outcome it could not observe is reported as still present,
+not as gone.
+
+None of this changes a message, a signature domain, peer admission, the
+decision checks, request authorization or lease renewal. The changes only
+decide which failures end a peer, a ceremony or a helper cycle, and they make
+application strictly rarer (one more refusal condition), never more frequent.
+Pairing remains the trusted `TrustedEnrollment` premise; its new
+commitment-and-reveal exchange (ADR 0053) is in no bound file and is not
+modelled. No theorem, rule, canary, proof budget or expected verdict changed.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |

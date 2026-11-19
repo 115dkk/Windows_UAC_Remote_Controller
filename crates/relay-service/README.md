@@ -53,12 +53,26 @@ and begin their actual inner TLS deadline. The marker is not encrypted,
 authenticated or a substitute for that handshake.
 
 A live duplicate role never overwrites or kicks the first waiting participant.
-A fresh registration on an active route evicts that pair (both sockets close)
-and becomes the route's waiting participant, so an endpoint whose old path died
-without a FIN is not locked out until the inactivity timeout; `evicted_pairs`
-counts these. Different routes never cross-connect. Routes disappear when their
-owned participant/pair finishes; stale completion IDs cannot remove a newer
-owner of the same route.
+A fresh registration on an active route normally evicts that pair (both sockets
+close) and becomes the route's waiting participant, so an endpoint whose old path
+died without a FIN is not locked out until the inactivity timeout. Before allowing
+an eviction, the relay accounts for the outgoing active pair. If that pair was
+formed by the previous evictor and has lived no longer than ten seconds, the route
+receives a strike immediately. The first consecutive strike records the event but
+starts no cooldown, so the incoming registration still evicts the pair. The second
+strike starts a 30-second cooldown and rejects that registration while leaving the
+pair alone. Further consecutive strikes double the cooldown. Strikes one through
+six and later therefore use 0, 30, 60, 120, 240, and 300 seconds, with 300 seconds
+remaining the cap. The pair's later completion cannot add the same strike again.
+An evictor that never pairs, or whose pair otherwise closes within ten seconds,
+also receives a strike. A pair that survives longer than ten seconds clears the
+strikes. During cooldown, registrations may still wait or pair on an idle route,
+but one that would evict an active pair is rejected. The cooldown bounds how often
+an unauthenticated registration can evict; it is not a bound on total outage under
+sustained attack. The bookkeeping is bounded and drops the oldest records when it
+is full. `evicted_pairs` and `rejected_evictions` count both outcomes. Different
+routes never cross-connect. Routes disappear when their owned participant/pair
+finishes; stale completion IDs cannot remove a newer owner of the same route.
 
 Correct endpoints should wait for the marker before TLS. A cancel-safe one-byte
 read detects a waiting EOF, using the same read path as active copying. If a peer
@@ -76,6 +90,12 @@ TCP buffering/TIME_WAIT implementation.
 ```text
 run(TcpListener, RelayLimits, CancellationToken)
   -> async Result<RelayReport, RelayError>
+run_with_policy(TcpListener, RelayLimits, RelayPolicy, CancellationToken)
+  -> async Result<RelayReport, RelayError>
+
+RelayPolicy::new(PcRoleSource) -> RelayPolicy
+PcRoleSource::{Any, LoopbackOnly}
+HostedRelay::abuse_counters() -> RelayAbuseCounters
 
 connect_rendezvous(SocketAddr, Registration, CancellationToken)
   -> async Result<RendezvousCarrier, RendezvousError>
@@ -90,8 +110,13 @@ Registration::{to_wire, from_wire, role, route}
 ```
 
 `CancellationToken` is re-exported for callers. The listener is already bound by
-the caller, which owns the interface-selection decision. Tests use ephemeral
-loopback only. Limits have read-only getters and cannot exceed these ceilings:
+the caller, which owns the interface-selection decision. `run` and the
+standalone binary use `PcRoleSource::Any`, preserving remote-PC relay service.
+The embedded `HostedRelay` uses `LoopbackOnly`: phone registrations remain
+remote, while a PC registration must come from 127.0.0.0/8, `::1`, or an
+IPv4-mapped address in 127.0.0.0/8 before it may wait, pair, or evict. Tests use
+ephemeral loopback only. Limits have read-only getters and cannot exceed these
+ceilings:
 
 The endpoint connector has a five-second connection deadline and a separate
 30-second registration/marker deadline. Both are cancelable; partial marker
@@ -115,6 +140,7 @@ test failure.
 | Explicit server shutdown | 5 seconds total |
 | Copy buffer | Fixed 16 KiB per direction; at most one early byte per waiting peer |
 | Registration control mailbox | Exactly configured accepted-connection limit |
+| Eviction cooldown records | 32 per configured waiting room, at most 1,024 |
 
 Configuration may tighten deadlines (positive values only). Connection count is
 2–64 and waiting rooms are 1–32, additionally bounded by the connection limit.
@@ -145,8 +171,12 @@ required; isolated passing runs are not treated as proof that a race is solved.
 
 `RelayReport` contains aggregate counts only. `paired` counts routing matches,
 not authenticated peers, delivered application messages or successful decisions.
-Socket/task/route errors expose only fixed categories. Debug output never includes
-route bytes, socket addresses or payloads.
+The standalone exit summary includes `evicted_pairs`, `rejected_duplicates`,
+`rejected_pc_sources`, and `rejected_evictions`. An embedded owner can read those
+same four live indicators through `HostedRelay::abuse_counters()` without stopping
+the worker; shared relaxed atomics make the read nonblocking. Socket/task/route
+errors expose only fixed categories. Debug output never includes route bytes,
+socket addresses or payloads.
 
 ## Shutdown ownership
 

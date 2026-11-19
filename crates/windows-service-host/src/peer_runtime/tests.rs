@@ -870,6 +870,434 @@ fn management_remove_updates_registry_and_engine_on_the_session_thread() {
     });
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn management_remove_unknown_device_is_refused_without_closing_session() {
+    exercise(|session, _, _, _| {
+        let response = session
+            .handle_management(
+                crate::ffi::ManagementClientClass::CliElevated,
+                crate::management_protocol::ManagementRequest::RemoveDevice { device: device(99) },
+            )
+            .unwrap();
+        assert!(matches!(
+            response,
+            Some(crate::management_protocol::ManagementResponse::Refused(_))
+        ));
+        assert!(!session.closing);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn stale_proof_enrollment_commit_is_pairing_failed_without_closing_session() {
+    exercise(|session, _, registry, _| {
+        let candidate = android_attestation::SyntheticRkp::new();
+        let chains = candidate
+            .chains
+            .each_ref()
+            .map(|chain| chain.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let evidence =
+            android_attestation::CandidateEvidence::new(&chains[0], &chains[1], &chains[2])
+                .unwrap();
+        let verified_status =
+            android_attestation::TrustedStatusSnapshot::from_test_response(br#"{"entries":{}}"#)
+                .unwrap();
+        let proof = android_attestation::verify_key_bundle_with_test_anchors(
+            &evidence,
+            &candidate.expected,
+            &candidate.policy,
+            &verified_status,
+            std::slice::from_ref(&candidate.anchor),
+        )
+        .unwrap();
+        // Equal content from a new status fetch is deliberately not the status
+        // snapshot against which this proof was verified.
+        let current_status =
+            android_attestation::TrustedStatusSnapshot::from_test_response(br#"{"entries":{}}"#)
+                .unwrap();
+        let enrollment = session.registry.as_mut().unwrap().enroll(
+            device(99),
+            proof,
+            &candidate.policy,
+            &current_status,
+            relay_service::RouteId::new([99; 32]).unwrap(),
+            "192.0.2.99:7443".parse().unwrap(),
+        );
+        assert!(matches!(&enrollment, Err(PeerRuntimeError::Registry)));
+        let result = session.enrollment_step(enrollment.map_err(|_| pairing::Failure::Enrollment));
+        assert!(matches!(result, Err(SessionProgress::PairingFailed)));
+        assert!(
+            registry
+                .borrow()
+                .checkpoint
+                .entries()
+                .iter()
+                .all(|entry| entry.device_id() != device(99))
+        );
+        assert!(!session.closing);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn frozen_candidate_closed_channel_is_pairing_failed_without_closing_session() {
+    exercise(|session, _, _, _| {
+        let result = session.enrollment_step::<()>(Err(pairing::Failure::Enrollment));
+        assert!(matches!(result, Err(SessionProgress::PairingFailed)));
+        assert!(!session.closing);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn acceptance_delivery_failure_revokes_committed_device_before_pairing_failed() {
+    exercise(|session, _, registry, _| {
+        assert_eq!(
+            session.reject_committed_enrollment(device(1), pairing::Failure::Enrollment),
+            Ok(Some(SessionProgress::PairingFailed))
+        );
+        let fixture = registry.borrow();
+        assert!(
+            fixture
+                .checkpoint
+                .entries()
+                .iter()
+                .all(|entry| entry.device_id() != device(1))
+        );
+        assert!(!fixture.transport.contains_key(&device(1)));
+        assert!(!fixture.routes.contains_key(&device(1)));
+        drop(fixture);
+        assert!(
+            session
+                .engine
+                .registry_checkpoint_for_privileged_host()
+                .entries()
+                .iter()
+                .all(|entry| entry.device_id() != device(1))
+        );
+        assert!(!session.closing);
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+struct EnrollmentLoopback {
+    carrier: enrollment::EnrollmentCarrier,
+    phone: JoinHandle<enrollment::tests::PhoneResult>,
+    close: Arc<std::sync::Barrier>,
+    device: DeviceId,
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn enrollment_loopback(session: &mut ServiceSession<'_>, confirm: bool) -> EnrollmentLoopback {
+    use enrollment::{EnrollmentCarrier, EnrollmentProgress, TestVerification};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut candidate = android_attestation::SyntheticRkp::new();
+    let checkpoint = session.current_registry_checkpoint().unwrap();
+    let mut inputs = session.pairing.prepare_enrollment_fixture(
+        session.engine.boot_epoch(),
+        session.engine.pc_identity(),
+        session.pc_key.clone(),
+        &checkpoint,
+        listener.local_addr().unwrap(),
+        Arc::clone(&session.signer),
+        candidate.policy.clone(),
+    );
+    candidate
+        .reissue_for_challenge(*inputs.expected.challenge.as_bytes())
+        .unwrap();
+    inputs.verification = Some(TestVerification {
+        status: android_attestation::TrustedStatusSnapshot::from_test_response(
+            br#"{"entries":{}}"#,
+        )
+        .unwrap(),
+        anchors: vec![candidate.anchor.clone()],
+    });
+    let device = inputs.expected.recipient;
+    let close = Arc::new(std::sync::Barrier::new(2));
+    let phone = enrollment::tests::spawn_phone(
+        listener,
+        inputs.invitation.clone(),
+        inputs.route,
+        candidate,
+        true,
+        Arc::clone(&close),
+    );
+    let mut carrier = EnrollmentCarrier::start(inputs).unwrap();
+    // Keep the carrier waiting independently of the acceptance receive timeout.
+    // The caller releases this test-only worker gate or cancels the real carrier.
+    carrier
+        .delivery_control
+        .before
+        .store(true, Ordering::Release);
+    enrollment::tests::wait_progress(&mut carrier, &mut session.signing_worker, |_, carrier| {
+        carrier.ready_for_frozen()
+    });
+    if confirm {
+        let frozen = session
+            .key
+            .sign_frozen(carrier.unsigned_frozen().unwrap())
+            .unwrap();
+        carrier.send_frozen(frozen).unwrap();
+        enrollment::tests::wait_progress(
+            &mut carrier,
+            &mut session.signing_worker,
+            |progress, _| matches!(progress, EnrollmentProgress::PhoneConfirmed),
+        );
+        carrier.pc_decision(true).unwrap();
+        enrollment::tests::wait_progress(
+            &mut carrier,
+            &mut session.signing_worker,
+            |_, carrier| carrier.ready_to_commit(),
+        );
+    }
+    EnrollmentLoopback {
+        carrier,
+        phone,
+        close,
+        device,
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn assert_enrollment_present(
+    session: &ServiceSession<'_>,
+    registry: &Rc<RefCell<RegistryFixture>>,
+    device: DeviceId,
+    present: bool,
+) {
+    let registry = registry.borrow();
+    assert_eq!(
+        registry
+            .checkpoint
+            .entries()
+            .iter()
+            .any(|entry| entry.device_id() == device),
+        present
+    );
+    assert_eq!(registry.transport.contains_key(&device), present);
+    assert_eq!(registry.routes.contains_key(&device), present);
+    assert_eq!(
+        session
+            .engine
+            .registry_checkpoint_for_privileged_host()
+            .entries()
+            .iter()
+            .any(|entry| entry.device_id() == device),
+        present
+    );
+    assert!(!session.closing);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn enrollment_terminal(session: &mut ServiceSession<'_>) -> SessionProgress {
+    let until = Instant::now() + TEST_LIMIT;
+    loop {
+        if let Some(progress) = session.process_enrollment(Instant::now()).unwrap() {
+            return progress;
+        }
+        assert!(Instant::now() < until);
+        thread::yield_now();
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn process_enrollment_rejects_actually_expired_proof_at_commit() {
+    let _serial = enrollment::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    exercise(|session, _, registry, _| {
+        let fixture = enrollment_loopback(session, true);
+        // VerifiedKeyBundle has a real 30-second lifetime. Do not substitute a
+        // different status snapshot or a manufactured registry error for expiry.
+        thread::sleep(Duration::from_secs(31));
+        session.pairing.install_enrollment_fixture(fixture.carrier);
+        assert_eq!(
+            session.process_enrollment(Instant::now()).unwrap(),
+            Some(SessionProgress::PairingFailed)
+        );
+        assert_enrollment_present(session, &registry, fixture.device, false);
+        fixture.phone.join().unwrap();
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn process_enrollment_frozen_receiver_drops_during_signing() {
+    let _serial = enrollment::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    exercise(|session, key, registry, _| {
+        let fixture = enrollment_loopback(session, false);
+        *key.after_protocol.borrow_mut() = Some(fixture.carrier.close_command_receiver());
+        session.pairing.install_enrollment_fixture(fixture.carrier);
+        assert_eq!(
+            session.process_enrollment(Instant::now()).unwrap(),
+            Some(SessionProgress::PairingFailed)
+        );
+        key.after_protocol.borrow_mut().take();
+        assert_enrollment_present(session, &registry, fixture.device, false);
+        fixture.phone.join().unwrap();
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn process_enrollment_acceptance_queue_failure_rolls_back_both_owners() {
+    let _serial = enrollment::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    exercise(|session, key, registry, _| {
+        let fixture = enrollment_loopback(session, true);
+        *key.after_protocol.borrow_mut() = Some(fixture.carrier.close_command_receiver());
+        session.pairing.install_enrollment_fixture(fixture.carrier);
+        assert_eq!(
+            session.process_enrollment(Instant::now()).unwrap(),
+            Some(SessionProgress::PairingFailed)
+        );
+        key.after_protocol.borrow_mut().take();
+        assert_enrollment_present(session, &registry, fixture.device, false);
+        fixture.phone.join().unwrap();
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn process_enrollment_cancel_at_delivery(after_drain: bool) {
+    let _serial = enrollment::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    exercise(|session, _, registry, _| {
+        let fixture = enrollment_loopback(session, true);
+        let control = Arc::clone(&fixture.carrier.delivery_control);
+        let mut cancel = fixture.carrier.close_command_receiver();
+        let (pause, reached) = if after_drain {
+            (&control.after, &control.reached_after)
+        } else {
+            (&control.before, &control.reached_before)
+        };
+        pause.store(true, Ordering::Release);
+        if after_drain {
+            control.before.store(false, Ordering::Release);
+        }
+        session.pairing.install_enrollment_fixture(fixture.carrier);
+        // This call commits, signs, and queues Acceptance successfully.
+        assert_eq!(session.process_enrollment(Instant::now()).unwrap(), None);
+        assert_enrollment_present(session, &registry, fixture.device, true);
+        let until = Instant::now() + TEST_LIMIT;
+        while !reached.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            thread::yield_now();
+        }
+        cancel(); // The real carrier exits and releases its command receiver.
+        if after_drain {
+            fixture.close.wait();
+        }
+        let expected = if after_drain {
+            SessionProgress::Enrolled(fixture.device)
+        } else {
+            SessionProgress::PairingFailed
+        };
+        assert_eq!(enrollment_terminal(session), expected);
+        assert_enrollment_present(session, &registry, fixture.device, after_drain);
+        fixture.phone.join().unwrap();
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn process_enrollment_carrier_failure_after_queue_before_drain_rolls_back() {
+    process_enrollment_cancel_at_delivery(false);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn process_enrollment_failure_after_drain_keeps_enrolled_outcome() {
+    process_enrollment_cancel_at_delivery(true);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn shutdown_at_acceptance_delivery(after_drain: bool) {
+    let _serial = enrollment::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    exercise(|session, _, registry, _| {
+        let fixture = enrollment_loopback(session, true);
+        let control = Arc::clone(&fixture.carrier.delivery_control);
+        let reached = if after_drain {
+            control.after.store(true, Ordering::Release);
+            control.before.store(false, Ordering::Release);
+            &control.reached_after
+        } else {
+            &control.reached_before
+        };
+        session.pairing.install_enrollment_fixture(fixture.carrier);
+        // Commit both owners and queue Acceptance while its delivery gate is held.
+        assert_eq!(session.process_enrollment(Instant::now()).unwrap(), None);
+        assert_enrollment_present(session, &registry, fixture.device, true);
+        let until = Instant::now() + TEST_LIMIT;
+        while !reached.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            thread::yield_now();
+        }
+        if after_drain {
+            fixture.close.wait();
+        }
+
+        session.begin_shutdown();
+        let cleanup = loop {
+            let cleanup = session.poll_shutdown();
+            if matches!(cleanup, SessionCleanup::Quiescent { .. }) {
+                break cleanup;
+            }
+            assert!(
+                Instant::now() < until,
+                "service shutdown did not reach quiescence"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(cleanup, SessionCleanup::Quiescent { io_failed: false });
+
+        let registry = registry.borrow();
+        assert_eq!(
+            registry
+                .checkpoint
+                .entries()
+                .iter()
+                .any(|entry| entry.device_id() == fixture.device),
+            after_drain
+        );
+        assert_eq!(
+            registry.transport.contains_key(&fixture.device),
+            after_drain
+        );
+        assert_eq!(registry.routes.contains_key(&fixture.device), after_drain);
+        drop(registry);
+        assert_eq!(
+            session
+                .engine
+                .registry_checkpoint_for_privileged_host()
+                .entries()
+                .iter()
+                .any(|entry| entry.device_id() == fixture.device),
+            after_drain
+        );
+        fixture.phone.join().unwrap();
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn shutdown_before_acceptance_delivery_rolls_back_the_committed_device() {
+    shutdown_at_acceptance_delivery(false);
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn shutdown_after_acceptance_delivery_keeps_the_device() {
+    shutdown_at_acceptance_delivery(true);
+}
+
 #[test]
 fn real_android_clock_probe_roundtrips_through_worker_key_and_same_engine_epoch() {
     exercise(|session, key, _, clients| {
@@ -1653,6 +2081,46 @@ fn genuine_decision_is_consumed_in_same_engine_but_never_applied_or_resolved_as_
 }
 
 #[test]
+fn connection_end_after_verified_decision_settles_failed_without_closing_session() {
+    exercise(|session, key, _, clients| {
+        let now = session.now().unwrap();
+        session
+            .handle_watch_event(
+                crate::WatchEvent::Appeared {
+                    target: target(21),
+                    report: prompt_report("Consent", "C:\\App\\tool.exe"),
+                    session: 21,
+                },
+                now,
+            )
+            .unwrap();
+        let binding = session.prompt.live().unwrap().binding();
+        let wire = decision_for(binding, device(1), DecisionPurpose::Deny, 4);
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        let state = Arc::clone(&session.peers[0].state);
+        session.retire_peer_after_decision_verified = true;
+        clients.push(raw_client(client, key.public.clone(), 5, vec![wire]));
+
+        drive_until(session, |progress| {
+            progress
+                == SessionProgress::AuthorizedButNotApplied(
+                    NotAppliedReason::PeerChangedAfterVerification,
+                )
+        });
+        assert!(!state.live());
+        assert_eq!(session.engine.pending_count(), 0);
+        assert!(session.prompt.live().is_none());
+        assert!(!session.closing);
+    });
+}
+
+#[test]
 fn different_enrolled_device_signature_cannot_be_transplanted_onto_this_transport() {
     exercise(|session, key, _, clients| {
         let challenge = open_fixture_request(session);
@@ -1669,6 +2137,38 @@ fn different_enrolled_device_signature_cannot_be_transplanted_onto_this_transpor
             progress == SessionProgress::PeerRejected
         });
         assert_eq!(session.engine.pending_count(), 1);
+    });
+}
+
+#[test]
+fn peer_retired_during_clock_signature_is_rejected_without_closing_session() {
+    exercise(|session, key, _, clients| {
+        let probe = ClockProbe::start(session.engine.pc_identity(), 0).unwrap();
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        let state = Arc::clone(&session.peers[0].state);
+        let retire_during_signature = Arc::clone(&state);
+        *key.after_clock.borrow_mut() = Some(Box::new(move || {
+            retire_during_signature.retire();
+        }));
+        clients.push(raw_client(
+            client,
+            key.public.clone(),
+            5,
+            vec![probe.request().to_wire().to_vec()],
+        ));
+
+        drive_until(session, |progress| {
+            progress == SessionProgress::PeerRejected
+        });
+        assert!(!state.live());
+        assert!(!session.closing);
+        assert!(session.peers[0].responses_in_flight.is_empty());
     });
 }
 

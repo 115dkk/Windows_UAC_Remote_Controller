@@ -537,6 +537,16 @@ impl IntakeOwner {
 struct PeerCompletion {
     control: Arc<PeerControl>,
     intake: Arc<IntakeOwner>,
+    /// Present only for scheduler-created carriers. Dropping this before Ready
+    /// reports a failed dial; sending it reports pinned secure-channel Ready.
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl PeerCompletion {
+    fn ready(&mut self) {
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(());
+        }
+    }
 }
 impl Drop for PeerCompletion {
     fn drop(&mut self) {
@@ -587,7 +597,7 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
     ) -> Result<IntakePeerId, BridgeError> {
-        self.attach_stream(association, stream, None)
+        self.attach_stream(association, stream, None, None)
     }
 
     pub(crate) fn attach_network_stream(
@@ -595,8 +605,9 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
         network_stop: &CancellationToken,
+        ready: tokio::sync::oneshot::Sender<()>,
     ) -> Result<IntakePeerId, BridgeError> {
-        self.attach_stream(association, stream, Some(network_stop))
+        self.attach_stream(association, stream, Some(network_stop), Some(ready))
     }
 
     fn attach_stream(
@@ -604,6 +615,7 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
         network_stop: Option<&CancellationToken>,
+        ready: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<IntakePeerId, BridgeError> {
         struct Carrier {
             socket: Option<std::net::TcpStream>,
@@ -675,6 +687,7 @@ impl MobileController {
             completion: PeerCompletion {
                 control,
                 intake: Arc::clone(&self.intake),
+                ready,
             },
         };
         if sender.try_send(input).is_err() {
@@ -1167,10 +1180,11 @@ fn process_parked(
                     return Ok(None);
                 }
                 PeerWork::Event(Ok(PcSocketEvent::Ready)) => {
-                    owner
-                        .intake
-                        .unblock_peer(owned.completion.control.reference);
+                    let reference = owned.completion.control.reference;
+                    owner.connectivity.secure_channel_ready(reference)?;
+                    owner.intake.unblock_peer(reference);
                     owned.completion.control.connect();
+                    owned.completion.ready();
                     note(Step::ReadyProbe, queue_probe(owner, &mut owned))?;
                     owner
                         .intake
@@ -1378,6 +1392,7 @@ pub(crate) fn process_parked_message_for_test(
         completion: PeerCompletion {
             control,
             intake: Arc::clone(&owner.intake),
+            ready: None,
         },
     };
     let _ = process_parked(

@@ -331,6 +331,10 @@ fn ceremony_inner_message_magic_is_classified_without_parsing() {
         Some(CeremonyMessageKind::FrozenCandidate)
     );
     assert_eq!(
+        ceremony_message_kind(b"WUACRVL\0"),
+        Some(CeremonyMessageKind::Reveal)
+    );
+    assert_eq!(
         ceremony_message_kind(b"WUACCFM\0"),
         Some(CeremonyMessageKind::Confirmation)
     );

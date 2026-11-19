@@ -50,6 +50,7 @@ impl MobileController {
         let Some(reference) = removed else {
             return Ok(false);
         };
+        self.connectivity.forget_association(reference);
         self.intake.retire_association(reference);
         // The committed removal revoked old leases. Prune presentations and
         // cancel their approval/denial operations before returning success.

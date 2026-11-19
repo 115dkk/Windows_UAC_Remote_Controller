@@ -21,8 +21,8 @@ use framed_transport::SocketClock;
 use secure_channel::TlsPublicKey;
 use service_protocol::{
     FrozenCandidateContext, InvitationContextDigest, MatchedFrozenCandidate, PairingChallenge,
-    PairingComparisonCode, PairingNonce, PhoneKeyDigest, SignedEnrollmentAcceptance,
-    SignedFrozenCandidate,
+    PairingComparisonCode, PairingNonce, PhoneKeyDigest, PhoneReveal, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate, sas_commitment,
 };
 
 use crate::{BridgeError, MobileController, native_clock::native_callback};
@@ -316,8 +316,25 @@ pub struct CreatedPairingKeys {
     local_keys: LocalKeySetDescriptor,
     evidence: NativeCreatedKeyEvidence,
     pending: PendingPairingAcceptance,
+    phone_reveal: PhoneReveal,
 }
 impl CreatedPairingKeys {
+    fn sas_commitment(&self) -> Result<[u8; 32], BridgeError> {
+        let original = &self.state.original;
+        let keys = PhoneKeyDigest::from_keys(
+            self.local_keys.approval_key(),
+            self.local_keys.denial_key(),
+            self.local_keys.transport_key(),
+        )
+        .map_err(|_| BridgeError::InvalidObservation)?;
+        Ok(sas_commitment(
+            original.ceremony_nonce,
+            original.invitation_context,
+            keys,
+            &self.phone_reveal,
+        ))
+    }
+
     pub fn local_keys(&self) -> &LocalKeySetDescriptor {
         &self.local_keys
     }
@@ -372,7 +389,10 @@ impl FrozenCreatedPairing {
                 .ok_or(BridgeError::Closed)?;
         let _admission = MobileController::enter(Arc::as_ref(&controller))?;
         self.created.state.check_owner(&controller)?;
-        let code = self.matched.comparison_code();
+        let code = self
+            .matched
+            .comparison_code(&self.created.phone_reveal)
+            .map_err(|_| BridgeError::InvalidObservation)?;
         self.created.state.check_current()?;
         Ok(code)
     }
@@ -529,11 +549,14 @@ impl MobileController {
             // checked mutation point. Retain actual committed metadata, but do
             // not publish live ceremony state after original liveness expires.
             intent.state.check_current()?;
+            let mut phone_reveal = [0; 32];
+            getrandom::fill(&mut phone_reveal).map_err(|_| BridgeError::NativeUnavailable)?;
             Ok(CreatedPairingKeys {
                 state: Arc::clone(&intent.state),
                 local_keys: descriptor,
                 evidence,
                 pending,
+                phone_reveal: PhoneReveal::from_bytes(phone_reveal),
             })
         });
         if prepared && let Err(error) = result {
@@ -581,6 +604,7 @@ impl MobileController {
                 pc_signing_key: original.pc_signing_key.clone(),
                 pc_transport_key: original.pc_transport_key.clone(),
                 invitation_context: original.invitation_context,
+                sas_commitment: created.sas_commitment()?,
             };
             let matched = SignedFrozenCandidate::from_wire(wire)
                 .and_then(|signed| signed.verify(&original.pc_signing_key))

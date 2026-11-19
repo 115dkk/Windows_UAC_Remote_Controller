@@ -14,13 +14,17 @@ pub use client::{
     connect_rendezvous, connect_rendezvous_any,
 };
 pub use config::{
-    MAX_ACCEPTED_CONNECTIONS, MAX_WAITING_ROOMS, RelayError, RelayLimits, RelayLimitsError,
-    RelayReport,
+    MAX_ACCEPTED_CONNECTIONS, MAX_WAITING_ROOMS, PcRoleSource, RelayAbuseCounters, RelayError,
+    RelayLimits, RelayLimitsError, RelayPolicy, RelayReport,
 };
 // Resilience policy, not tunable configuration: an operator cannot widen these.
-pub(crate) use config::{ACCEPT_BACKOFF, MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES};
+pub(crate) use config::{
+    ACCEPT_BACKOFF, EVICTION_COOLDOWN_INITIAL, EVICTION_COOLDOWN_MAX,
+    EVICTION_RECORDS_PER_WAITING_ROOM, MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES,
+    SHORT_LIVED,
+};
 pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay};
-pub use relay::run;
+pub use relay::{run, run_with_policy};
 pub use tokio_util::sync::CancellationToken;
 pub use wire::{
     HEADER_BYTES, HEADER_MAGIC, READY_MARKER, Registration, RegistrationError, Role, RouteId,

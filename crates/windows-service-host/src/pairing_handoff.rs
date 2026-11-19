@@ -543,18 +543,20 @@ impl Frame {
         Ok(bytes)
     }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, HandoffError> {
-        if ![
+        // An invitation's text has any length between the shortest v1 and the
+        // longest v2 form (ADR 0043 adds up to three direct candidates), so its
+        // frame is a range; PairingInvitation::from_qr_text decides the rest.
+        if !([
             SHORT_FRAME,
             LAUNCH_FRAME,
             80,
             100,
             96,
-            INVITATION_MIN_FRAME,
-            INVITATION_MAX_FRAME,
             COMPARISON_FRAME,
             BOOLEAN_FRAME,
         ]
         .contains(&bytes.len())
+            || (INVITATION_MIN_FRAME..=INVITATION_MAX_FRAME).contains(&bytes.len()))
             || !bytes.starts_with(HEADER)
             || bytes[4] != VERSION
             || bytes[6..8] != [0, 0]
@@ -631,16 +633,14 @@ impl Frame {
                         _ => Err(HandoffError::Frame),
                     };
                 }
-                (13 | 18 | 19, INVITATION_MIN_FRAME | INVITATION_MAX_FRAME) => {
+                (13 | 18 | 19, INVITATION_MIN_FRAME..=INVITATION_MAX_FRAME) => {
                     let length = usize::from(u16::from_be_bytes(
                         bytes[72..74].try_into().map_err(|_| HandoffError::Frame)?,
                     ));
                     if length + 74 != bytes.len()
-                        || ![
-                            MIN_PAIRING_INVITATION_QR_TEXT_BYTES,
-                            MAX_PAIRING_INVITATION_QR_TEXT_BYTES,
-                        ]
-                        .contains(&length)
+                        || !(MIN_PAIRING_INVITATION_QR_TEXT_BYTES
+                            ..=MAX_PAIRING_INVITATION_QR_TEXT_BYTES)
+                            .contains(&length)
                     {
                         return Err(HandoffError::Frame);
                     }
@@ -936,6 +936,9 @@ mod tests {
         InvitationText::new(invitation().to_qr_text()).unwrap()
     }
     fn invitation() -> PairingInvitation {
+        invitation_at(SocketAddr::from(([192, 0, 2, 42], 7443)))
+    }
+    fn invitation_at(relay_address: SocketAddr) -> PairingInvitation {
         let public = |seed: u8| {
             let signing = SigningKey::from_slice(&[seed; 32]).unwrap();
             let public = p256::PublicKey::from_sec1_bytes(
@@ -954,7 +957,7 @@ mod tests {
             recipient_device: DeviceId::from_bytes([4; 16]).unwrap(),
             pc_signing_key: public(5),
             pc_transport_key: public(6),
-            relay_address: SocketAddr::from(([192, 0, 2, 42], 7443)),
+            relay_address,
             route: [7; 32],
         })
         .unwrap()
@@ -1036,6 +1039,62 @@ mod tests {
             frame.extend_from_slice(&(length as u16).to_be_bytes());
             frame.resize(9 + length, 0);
             assert!(crate::usb_bootstrap_frame::decode(&frame).is_err());
+        }
+    }
+
+    #[test]
+    fn invitation_frames_of_every_admitted_length_survive_the_pipe() {
+        // v1 with an IPv6 relay and v2 with one to three direct candidates all
+        // lie strictly between the two v1 sizes the decoder used to admit.
+        let v6_relay = invitation_at(SocketAddr::from(([0x2001, 0xdb8, 0, 0, 0, 0, 0, 9], 7443)));
+        let mut invitations = vec![invitation(), v6_relay];
+        for count in 1..=3u16 {
+            invitations.push(
+                invitation()
+                    .with_alternatives(
+                        (1..=count)
+                            .map(|n| SocketAddr::from(([203, 0, 113, n as u8], 41327)))
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
+        }
+        let invocation = RendererInvocation::new(id(1), id(2)).unwrap();
+        let mut lengths = std::collections::BTreeSet::new();
+        for invitation in invitations {
+            let text = InvitationText::new(invitation.to_qr_text()).unwrap();
+            lengths.insert(text.as_str().len());
+            for frame in [
+                Frame::RendererInvitation {
+                    invocation,
+                    text: text.clone(),
+                },
+                Frame::RendererUsbInvitation {
+                    invocation,
+                    text: text.clone(),
+                },
+                Frame::StarterUsbInvitation {
+                    invocation,
+                    text: text.clone(),
+                },
+            ] {
+                let bytes = frame.encode().unwrap();
+                assert_eq!(Frame::decode(&bytes).unwrap().encode().unwrap(), bytes);
+            }
+        }
+        assert!(
+            lengths.len() > 2,
+            "the cases must cover more than the two v1 sizes"
+        );
+        for length in [INVITATION_MIN_FRAME - 1, INVITATION_MAX_FRAME + 1] {
+            let mut bytes = Frame::RendererInvitation {
+                invocation,
+                text: invitation_text(),
+            }
+            .encode()
+            .unwrap();
+            bytes.resize(length, b'A');
+            assert!(Frame::decode(&bytes).is_err());
         }
     }
 

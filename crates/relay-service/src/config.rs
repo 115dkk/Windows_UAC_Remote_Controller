@@ -11,6 +11,15 @@ const MAX_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Ten seconds distinguishes a failed replacement handshake from a pair that had time to settle.
+pub(crate) const SHORT_LIVED: Duration = Duration::from_secs(10);
+/// Thirty seconds starts the cooldown at the second consecutive eviction strike.
+pub(crate) const EVICTION_COOLDOWN_INITIAL: Duration = Duration::from_secs(30);
+/// Five minutes caps the cooldown from the sixth consecutive strike onward.
+pub(crate) const EVICTION_COOLDOWN_MAX: Duration = Duration::from_secs(5 * 60);
+/// At most thirty-two cooldown records are retained for each configured waiting room.
+pub(crate) const EVICTION_RECORDS_PER_WAITING_ROOM: usize = MAX_WAITING_ROOMS;
+
 /// A listener refuses one connection for reasons that pass: a descriptor
 /// shortage, a client that resets while the kernel is still completing its
 /// handshake. Such a refusal must cost that one connection and never the
@@ -31,6 +40,41 @@ pub(crate) const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 /// shutdown clears the map. One route per panic is a bounded leak, so a few are
 /// tolerated and then the run stops.
 pub(crate) const MAX_TASK_FAILURES: u64 = 8;
+
+/// Which network sources may claim the unauthenticated PC routing role.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PcRoleSource {
+    /// Preserve the standalone relay's support for remote PCs.
+    #[default]
+    Any,
+    /// Admit PC registrations only from IPv4 or IPv6 loopback addresses.
+    LoopbackOnly,
+}
+
+/// Source-admission policy applied before a registration can occupy or evict a route.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RelayPolicy {
+    pc_role_source: PcRoleSource,
+}
+
+impl RelayPolicy {
+    pub const fn new(pc_role_source: PcRoleSource) -> Self {
+        Self { pc_role_source }
+    }
+
+    pub const fn pc_role_source(self) -> PcRoleSource {
+        self.pc_role_source
+    }
+}
+
+/// Live aggregate abuse indicators exposed by an embedded relay owner.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RelayAbuseCounters {
+    pub evicted_pairs: u64,
+    pub rejected_duplicates: u64,
+    pub rejected_pc_sources: u64,
+    pub rejected_evictions: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayLimits {
@@ -157,6 +201,10 @@ pub struct RelayReport {
     pub rejected_duplicates: u64,
     /// Active pairs closed because a fresh registration arrived on their route.
     pub evicted_pairs: u64,
+    /// PC registrations refused because embedded policy requires a loopback source.
+    pub rejected_pc_sources: u64,
+    /// Registrations refused instead of evicting an active pair during cooldown.
+    pub rejected_evictions: u64,
     pub paired: u64,
     pub invalid_registrations: u64,
     pub header_timeouts: u64,

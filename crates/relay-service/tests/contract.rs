@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use relay_service::{
-    COPY_BUFFER_BYTES, HEADER_BYTES, HEADER_MAGIC, READY_MARKER, Registration, RelayLimits, Role,
-    RouteId,
+    COPY_BUFFER_BYTES, HEADER_BYTES, HEADER_MAGIC, PcRoleSource, READY_MARKER, Registration,
+    RelayLimits, RelayPolicy, Role, RouteId,
 };
 
 #[test]
@@ -38,6 +38,15 @@ fn registration_and_ready_marker_have_exact_bounded_v1_encodings() {
 
 #[test]
 fn limits_cannot_disable_timeouts_or_exceed_resource_and_deadline_ceilings() {
+    assert_eq!(
+        RelayPolicy::default().pc_role_source(),
+        PcRoleSource::Any,
+        "standalone callers retain remote-PC admission by default"
+    );
+    assert_eq!(
+        RelayPolicy::new(PcRoleSource::LoopbackOnly).pc_role_source(),
+        PcRoleSource::LoopbackOnly
+    );
     let limits = RelayLimits::default();
     assert_eq!(limits.max_connections(), 64);
     assert_eq!(limits.max_waiting_rooms(), 32);

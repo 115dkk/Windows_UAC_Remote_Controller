@@ -595,7 +595,6 @@ impl ActiveRun {
         self.preflight.recheck()?;
         launch::child(self, true)?;
         launch::assign_and_authenticate(self)?;
-        self.pipe = Some(launch::pipe(&self.preflight, self.pid)?);
         self.operation = Some(PendingIo::start_watch(
             self.pipe()?,
             Kind::Connect,
@@ -712,7 +711,6 @@ impl ActiveRun {
         launch::child(self, false)?;
         self.budget()?;
         launch::assign_and_authenticate(self)?;
-        self.pipe = Some(launch::pipe(&self.preflight, self.pid)?);
         self.operation = Some(PendingIo::start(
             self.pipe()?,
             Kind::Connect,

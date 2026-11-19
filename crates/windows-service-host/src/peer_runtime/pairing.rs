@@ -4,8 +4,9 @@
 //! private preparation, NOT a consent receipt or QR/enrollment/signing grant.
 #![forbid(unsafe_code)]
 
-use super::enrollment::{
-    EnrollmentCarrier, EnrollmentInputs, EnrollmentProgress, ExpectedOriginal,
+use super::{
+    enrollment::{EnrollmentCarrier, EnrollmentInputs, EnrollmentProgress, ExpectedOriginal},
+    management::REARM_INTERVAL,
 };
 use crate::{
     PairingPeerError, PairingPipe, PairingPipeProgress, PairingServerEndpoints, PendingElevationId,
@@ -43,6 +44,7 @@ enum State {
     Listening,
     Active,
     Draining,
+    Rearming { at: Instant },
     Unavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +121,7 @@ pub(super) enum CeremonyAction {
         route: RouteId,
     },
     Enrolled(DeviceId),
+    Rollback(DeviceId),
     Failed,
 }
 pub(super) struct RendererRun {
@@ -433,7 +436,7 @@ impl RendererRun {
         if self.io == RendererIo::Acknowledged {
             // Normal identities were checked while all three clients remained
             // alive. This cleanup EOF allows renderer exit; parents stay owned.
-            if !self.pipe.drain()? {
+            if !self.pipe.complete_exchange()? {
                 return Err(Failure::Protocol);
             }
             self.io = RendererIo::TransportClosed;
@@ -566,12 +569,20 @@ pub(super) struct ServicePairing {
     /// new ceremony clears it, because a durable row cannot become unwritten.
     commit_authorized: bool,
     committed_device: Option<DeviceId>,
+    acceptance_pending: bool,
     renderer_attempted: bool,
     usb: bool,
     next_side: ServiceSide,
     first_failure: Option<Failure>,
     cleanup_failed: bool,
     rearm: bool,
+    delay_next_arm: bool,
+    #[cfg(test)]
+    arm_results: Option<std::collections::VecDeque<Result<(), PairingPeerError>>>,
+    #[cfg(test)]
+    failure_reports: usize,
+    #[cfg(test)]
+    fixture_policy: Option<VerificationPolicy>,
 }
 impl fmt::Debug for ServicePairing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -606,12 +617,20 @@ impl ServicePairing {
             commit_requested: false,
             commit_authorized: false,
             committed_device: None,
+            acceptance_pending: false,
             renderer_attempted: false,
             usb: false,
             next_side: ServiceSide::Starter,
             first_failure: None,
             cleanup_failed: false,
             rearm: false,
+            delay_next_arm: false,
+            #[cfg(test)]
+            arm_results: None,
+            #[cfg(test)]
+            failure_reports: 0,
+            #[cfg(test)]
+            fixture_policy: None,
         }
     }
     pub(super) fn activate(
@@ -628,13 +647,27 @@ impl ServicePairing {
             self.shutdown();
             return Ok(());
         }
-        if let Err(error) = self.arm() {
-            self.retire(Some(error), false);
+        self.arm_or_rearm();
+        if self.state == State::Draining {
+            self.drain_step(Instant::now());
         }
         if crate::entry::stop_requested() {
             self.shutdown();
         }
         Ok(())
+    }
+    fn arm_or_rearm(&mut self) {
+        if let Err(error) = self.arm() {
+            // Native creation/I/O failures and a still-held reservation can
+            // recover. Policy refusals, invalid state and uncertain cleanup must
+            // not be turned into permission to replace the original owners.
+            let retry = matches!(
+                error,
+                Failure::Native(PairingPeerError::Native { .. } | PairingPeerError::Busy)
+            );
+            self.delay_next_arm = retry;
+            self.retire(Some(error), retry);
+        }
     }
     fn arm(&mut self) -> Result<(), Failure> {
         self.ensure_running()?;
@@ -645,8 +678,10 @@ impl ServicePairing {
         {
             return Err(Failure::Cancelled);
         }
-        if !matches!(self.state, State::Dormant | State::Draining)
-            || self.starter.is_some()
+        if !matches!(
+            self.state,
+            State::Dormant | State::Draining | State::Rearming { .. }
+        ) || self.starter.is_some()
             || self.helper.is_some()
             || self.admission.is_some()
             || self.window.is_some()
@@ -666,6 +701,30 @@ impl ServicePairing {
         {
             return Err(Failure::Protocol);
         }
+        self.arm_listeners()?;
+        self.ensure_running()?;
+        self.state = State::Listening;
+        self.delay_next_arm = false;
+        self.first_failure = None;
+        self.ensure_running()
+    }
+    fn arm_listeners(&mut self) -> Result<(), Failure> {
+        // Synthetic transport outcomes only; the production factory and native
+        // connect operations below are never replaced outside unit tests.
+        #[cfg(test)]
+        if let Some(results) = &mut self.arm_results {
+            results.pop_front().expect("unexpected arming attempt")?;
+            for slot in [&mut self.starter, &mut self.helper] {
+                *slot = Some(Channel::Fixture(FixtureChannel {
+                    polls_left: 0,
+                    drained: false,
+                    cancelled: false,
+                    fail: false,
+                    idle: false,
+                }));
+            }
+            return Ok(());
+        }
         let pair = PairingServerEndpoints::create_for_running_service()?;
         let (starter, helper) = pair.into_servers();
         self.starter = Some(Channel::Listener(starter.into_unbound_listener()?));
@@ -681,10 +740,7 @@ impl ServicePairing {
             .ok_or(Failure::Protocol)?
             .listener()?
             .begin_connect()?;
-        self.ensure_running()?;
-        self.state = State::Listening;
-        self.first_failure = None;
-        self.ensure_running()
+        Ok(())
     }
     pub(super) fn poll(&mut self, epoch: BootEpoch, now: Instant) {
         if matches!(self.state, State::Dormant | State::Unavailable) {
@@ -697,7 +753,16 @@ impl ServicePairing {
             self.retire(Some(Failure::Epoch), false);
         }
         if self.state == State::Draining {
-            self.drain_step();
+            self.drain_step(now);
+            return;
+        }
+        if let State::Rearming { at } = self.state {
+            if now >= at {
+                self.arm_or_rearm();
+                if self.state == State::Draining {
+                    self.drain_step(now);
+                }
+            }
             return;
         }
         let result = match self.state {
@@ -992,6 +1057,11 @@ impl ServicePairing {
             }
             // BOTH normal post-read native fences have completed while clients
             // remain live. Only now may either original pipe be closed.
+            for channel in [&mut self.starter, &mut self.helper].into_iter().flatten() {
+                if !channel.pipe()?.0.complete_exchange()? {
+                    return Err(Failure::Protocol);
+                }
+            }
             self.retire(None, true);
             return Ok(());
         }
@@ -1221,8 +1291,24 @@ impl ServicePairing {
     }
 
     pub(super) fn enrollment_action(&mut self, now: Instant) -> Option<CeremonyAction> {
+        self.observe_acceptance_delivery();
         if self.enrollment_terminal {
-            if self.enrollment_failed
+            if self.acceptance_pending {
+                // A cancelled worker may finish its write before observing Stop.
+                // Only a joined worker can establish that delivery never happened.
+                if self
+                    .enrollment
+                    .as_mut()
+                    .is_some_and(|carrier| !carrier.drain())
+                {
+                    return None;
+                }
+                self.observe_acceptance_delivery();
+                if self.acceptance_pending {
+                    return self.committed_device.map(CeremonyAction::Rollback);
+                }
+            }
+            if self.state == State::Active
                 && self
                     .renderer
                     .as_ref()
@@ -1231,7 +1317,7 @@ impl ServicePairing {
                 if self
                     .renderer
                     .as_mut()
-                    .is_none_or(|renderer| renderer.send_outcome(false).is_err())
+                    .is_none_or(|renderer| renderer.send_outcome(!self.enrollment_failed).is_err())
                 {
                     self.retire(Some(Failure::Enrollment), true);
                 }
@@ -1240,7 +1326,8 @@ impl ServicePairing {
             let outcome_drained = self
                 .renderer
                 .as_ref()
-                .is_some_and(|renderer| renderer.outcome_sent && renderer.ready_idle());
+                .is_none_or(|renderer| renderer.outcome_sent && renderer.ready_idle())
+                || self.state == State::Draining;
             if outcome_drained && !self.enrollment_reported {
                 self.enrollment_reported = true;
                 return if self.enrollment_failed {
@@ -1250,6 +1337,8 @@ impl ServicePairing {
                 };
             }
             if outcome_drained
+                && self.state == State::Active
+                && self.renderer.is_some()
                 && self.enrollment_reported
                 && let Err(error) = self.finish_enrollment_terminal()
             {
@@ -1281,12 +1370,7 @@ impl ServicePairing {
                     }
                 }
                 EnrollmentProgress::PhoneConfirmed | EnrollmentProgress::AwaitingPcDecision => {
-                    if let Some(decision) = self
-                        .renderer
-                        .as_mut()
-                        .ok_or(Failure::Protocol)?
-                        .take_decision()
-                    {
+                    if let Some(decision) = self.renderer_decision()? {
                         self.enrollment
                             .as_mut()
                             .ok_or(Failure::Protocol)?
@@ -1312,8 +1396,10 @@ impl ServicePairing {
                     }
                 }
                 EnrollmentProgress::Accepted => {
-                    let renderer = self.renderer.as_mut().ok_or(Failure::Protocol)?;
-                    if !renderer.outcome_sent {
+                    self.observe_acceptance_delivery();
+                    if let Some(renderer) = self.renderer.as_mut()
+                        && !renderer.outcome_sent
+                    {
                         renderer.send_outcome(true)?;
                     }
                 }
@@ -1323,10 +1409,15 @@ impl ServicePairing {
                         .as_ref()
                         .and_then(EnrollmentCarrier::candidate_device)
                         .ok_or(Failure::Protocol)?;
-                    self.committed_device = Some(device);
+                    self.observe_acceptance_delivery();
+                    if self.committed_device != Some(device) || self.acceptance_pending {
+                        return Err(Failure::Protocol);
+                    }
                     self.enrollment_terminal = true;
                 }
-                EnrollmentProgress::Connecting | EnrollmentProgress::AwaitingSubmission => {}
+                EnrollmentProgress::Connecting
+                | EnrollmentProgress::AwaitingSubmission
+                | EnrollmentProgress::AwaitingReveal => {}
             }
             Ok(None)
         })();
@@ -1339,17 +1430,105 @@ impl ServicePairing {
         }
     }
 
+    fn renderer_decision(&mut self) -> Result<Option<bool>, Failure> {
+        #[cfg(test)]
+        if self.fixture_policy.is_some() {
+            return Ok(None); // Software carrier fixture already supplied its PC decision.
+        }
+        Ok(self
+            .renderer
+            .as_mut()
+            .ok_or(Failure::Protocol)?
+            .take_decision())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_policy(&self) -> Option<VerificationPolicy> {
+        self.fixture_policy.clone()
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_enrollment_fixture(
+        &mut self,
+        epoch: BootEpoch,
+        pc: PcIdentity,
+        key: TlsPublicKey,
+        checkpoint: &RegistryCheckpoint,
+        relay: std::net::SocketAddr,
+        signer: std::sync::Arc<crate::tls_signer::ServiceTlsSigner>,
+        policy: VerificationPolicy,
+    ) -> EnrollmentInputs {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(300);
+        let mut preparation = OriginalCeremony::new();
+        preparation
+            .maintain(
+                CeremonyContext {
+                    origin: Origin {
+                        epoch,
+                        generation: 1,
+                        pending_id: PendingElevationId::from_bytes([91; 32]).unwrap(),
+                        started,
+                        deadline,
+                    },
+                    pc,
+                    pc_key: &key,
+                    checkpoint,
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let original = preparation.prepared().unwrap();
+        let invitation = PairingInvitation::new(PairingInvitationFields {
+            ceremony_nonce: original.nonce,
+            attestation_challenge: original.challenge,
+            pc,
+            recipient_device: original.recipient,
+            pc_signing_key: key.clone(),
+            pc_transport_key: key.clone(),
+            relay_address: relay,
+            route: *original.route.as_bytes(),
+        })
+        .unwrap();
+        let expected = ExpectedOriginal {
+            nonce: original.nonce,
+            challenge: original.challenge,
+            pc,
+            recipient: original.recipient,
+            invitation_context: invitation.context_digest(),
+            intended_revision: original.intended_revision,
+            policy: policy.clone(),
+        };
+        self.state = State::Active;
+        self.preparation = Some(preparation);
+        self.enrollment_route = Some((relay, original.route));
+        self.fixture_policy = Some(policy);
+        EnrollmentInputs {
+            relay,
+            embedded_loopback: false,
+            route: original.route,
+            invitation,
+            expected,
+            deadline,
+            signer,
+            pc_signing_key: key.clone(),
+            pc_transport_key: key,
+            verification: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_enrollment_fixture(&mut self, carrier: EnrollmentCarrier) {
+        self.enrollment = Some(carrier);
+    }
+
     pub(super) fn frozen_signed(&mut self, frozen: SignedFrozenCandidate) -> Result<(), Failure> {
-        let (code, boot) = self
-            .enrollment
+        self.enrollment
             .as_mut()
             .ok_or(Failure::Protocol)?
             .send_frozen(frozen)
-            .map_err(|_| Failure::Enrollment)?;
-        self.renderer
-            .as_mut()
-            .ok_or(Failure::Protocol)?
-            .send_comparison(&code, boot)
+            .map_err(|_| Failure::Enrollment)
     }
 
     pub(super) fn original_nonce(
@@ -1419,6 +1598,29 @@ impl ServicePairing {
             .map_err(|_| Failure::Enrollment)
     }
 
+    pub(super) fn record_committed(&mut self, device: DeviceId) {
+        self.committed_device = Some(device);
+        self.acceptance_pending = true;
+    }
+
+    pub(super) fn enrollment_rolled_back(&mut self) {
+        self.committed_device = None;
+        self.acceptance_pending = false;
+        self.enrollment_reported = true;
+    }
+
+    fn observe_acceptance_delivery(&mut self) {
+        if self.committed_device.is_some()
+            && self
+                .enrollment
+                .as_ref()
+                .is_some_and(EnrollmentCarrier::acceptance_delivered)
+        {
+            self.acceptance_pending = false;
+            self.enrollment_failed = false;
+        }
+    }
+
     pub(super) fn reject_enrollment_start(&mut self, error: Failure) {
         self.fail_enrollment(error);
     }
@@ -1430,6 +1632,7 @@ impl ServicePairing {
         }
         self.commit_requested = false;
         self.enrollment_failed = true;
+        self.observe_acceptance_delivery();
         self.enrollment_terminal = true;
     }
 
@@ -1619,6 +1822,9 @@ impl ServicePairing {
         self.check_policy()
     }
     fn retire(&mut self, failure: Option<Failure>, rearm: bool) {
+        if self.committed_device.is_some() && !self.enrollment_reported {
+            self.fail_enrollment(failure.unwrap_or(Failure::Cancelled));
+        }
         let diagnostic = failure.filter(|_| self.first_failure.is_none());
         if let Some(error) = failure {
             self.first_failure.get_or_insert(error);
@@ -1648,6 +1854,10 @@ impl ServicePairing {
         self.rearm = rearm && self.enabled && !crate::entry::stop_requested();
         // Log only after admission is invalidated and cleanup has been requested.
         if let Some(error) = diagnostic {
+            #[cfg(test)]
+            {
+                self.failure_reports += 1;
+            }
             #[cfg(all(windows, feature = "lab-software-identity"))]
             crate::lab::record_note(&format!("pairing retire: {error:?}"));
             match error {
@@ -1673,63 +1883,78 @@ impl ServicePairing {
         self.enabled = false;
         self.retire(Some(Failure::Cancelled), false);
     }
-    fn drain_step(&mut self) {
-        for channel in [&mut self.starter, &mut self.helper].into_iter().flatten() {
-            if channel.drain().is_err() || channel.cleanup_failed() {
+    fn drain_step(&mut self, now: Instant) {
+        loop {
+            for channel in [&mut self.starter, &mut self.helper].into_iter().flatten() {
+                if channel.drain().is_err() || channel.cleanup_failed() {
+                    self.cleanup_failed = true;
+                }
+            }
+            if let Some(admission) = self.admission.as_mut()
+                && admission.drain().is_err()
+            {
                 self.cleanup_failed = true;
             }
-        }
-        if let Some(admission) = self.admission.as_mut()
-            && admission.drain().is_err()
-        {
-            self.cleanup_failed = true;
-        }
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.drain();
-            self.cleanup_failed |= renderer.cleanup_failed;
-        }
-        if let Some(enrollment) = self.enrollment.as_mut() {
-            enrollment.drain();
-        }
-        if self.remaining_owners() != 0 {
-            return;
-        }
-        drop(self.starter.take());
-        drop(self.helper.take());
-        drop(self.admission.take());
-        self.window = None;
-        self.protocol = None;
-        self.pending_id = None;
-        self.preparation = None;
-        self.renderer = None;
-        self.enrollment = None;
-        self.enrollment_route = None;
-        self.enrollment_failed = false;
-        self.enrollment_terminal = false;
-        self.enrollment_reported = false;
-        self.commit_requested = false;
-        self.commit_authorized = false;
-        self.committed_device = None;
-        self.renderer_attempted = false;
-        self.usb = false;
-        self.generation = None;
-        if self.rearm
-            && !self.cleanup_failed
-            && self.enabled
-            && !crate::entry::stop_requested()
-            && self.next_generation.is_some()
-        {
-            self.rearm = false;
-            if let Err(error) = self.arm() {
-                self.retire(Some(error), false);
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.drain();
+                self.cleanup_failed |= renderer.cleanup_failed;
             }
-        } else {
-            self.state = State::Unavailable;
+            if let Some(enrollment) = self.enrollment.as_mut() {
+                enrollment.drain();
+            }
+            if self.remaining_owners() != 0
+                || (self.committed_device.is_some() && !self.enrollment_reported)
+            {
+                return;
+            }
+            drop(self.starter.take());
+            drop(self.helper.take());
+            drop(self.admission.take());
+            self.window = None;
+            self.protocol = None;
+            self.pending_id = None;
+            self.preparation = None;
+            self.renderer = None;
+            self.enrollment = None;
+            self.enrollment_route = None;
+            self.enrollment_failed = false;
+            self.enrollment_terminal = false;
+            self.enrollment_reported = false;
+            self.commit_requested = false;
+            self.commit_authorized = false;
+            self.committed_device = None;
+            self.acceptance_pending = false;
+            self.renderer_attempted = false;
+            self.usb = false;
+            self.generation = None;
+            if self.rearm
+                && !self.cleanup_failed
+                && self.enabled
+                && !crate::entry::stop_requested()
+                && self.next_generation.is_some()
+            {
+                self.rearm = false;
+                // Normal retirement has no retry gap. Only a failed creation may
+                // delay the next attempt, after all of that attempt's owners drain.
+                if self.delay_next_arm {
+                    self.state = State::Rearming {
+                        at: now + REARM_INTERVAL,
+                    };
+                } else {
+                    self.arm_or_rearm();
+                    if self.state == State::Draining {
+                        continue;
+                    }
+                }
+            } else {
+                self.state = State::Unavailable;
+            }
+            return;
         }
     }
     pub(super) fn poll_shutdown(&mut self) {
         self.shutdown();
-        self.drain_step();
+        self.drain_step(Instant::now());
     }
     pub(super) fn renderer(&self) -> Option<&RendererRun> {
         self.renderer.as_ref()
@@ -1773,6 +1998,166 @@ mod tests {
             idle: false,
         })
     }
+    fn creation_failure() -> PairingPeerError {
+        PairingPeerError::Native {
+            stage: crate::PairingPeerStage::CreateEndpoint,
+            hresult: 0x8007_0005_u32 as i32,
+        }
+    }
+
+    fn activate_fixture(results: Vec<Result<(), PairingPeerError>>) -> (ServicePairing, BootEpoch) {
+        let began = Instant::now();
+        let (request, gate) = crate::startup_phase::ready_handshake();
+        request
+            .complete_after_report(began, || false, || Ok(()), || ())
+            .unwrap();
+        let ready = gate.wait(began, || false).unwrap();
+        let epoch = BootEpoch::from_bytes([1; 32]).unwrap();
+        let mut owner = ServicePairing::dormant();
+        owner.arm_results = Some(results.into());
+        owner.activate(ready, epoch).unwrap();
+        (owner, epoch)
+    }
+
+    fn rearm_at(owner: &ServicePairing) -> Instant {
+        let State::Rearming { at } = owner.state else {
+            panic!("expected rearming, got {:?}", owner.state);
+        };
+        at
+    }
+
+    #[test]
+    fn creation_failures_retry_at_intervals_and_report_once_per_episode() {
+        let first = creation_failure();
+        let mut results = vec![Err(first)];
+        results.extend([Err(PairingPeerError::Busy); 8]);
+        results.push(Ok(()));
+        let before = Instant::now();
+        let (mut owner, epoch) = activate_fixture(results);
+        let mut at = rearm_at(&owner);
+        assert!(at >= before + REARM_INTERVAL);
+        assert!(at <= Instant::now() + REARM_INTERVAL);
+        assert_eq!(owner.remaining_owners(), 0);
+        assert_eq!(owner.failure_reports, 1);
+
+        for _ in 0..8 {
+            let remaining = owner.arm_results.as_ref().unwrap().len();
+            for _ in 0..20 {
+                owner.poll(epoch, at - Duration::from_nanos(1));
+            }
+            assert_eq!(owner.arm_results.as_ref().unwrap().len(), remaining);
+            assert_eq!(rearm_at(&owner), at);
+            owner.poll(epoch, at);
+            assert_eq!(owner.arm_results.as_ref().unwrap().len(), remaining - 1);
+            assert_eq!(rearm_at(&owner), at + REARM_INTERVAL);
+            assert_eq!(owner.first_failure, Some(Failure::Native(first)));
+            assert_eq!(owner.failure_reports, 1);
+            // Repeated polling at the failed attempt's time cannot spin.
+            owner.poll(epoch, at);
+            assert_eq!(owner.arm_results.as_ref().unwrap().len(), remaining - 1);
+            at += REARM_INTERVAL;
+        }
+        owner.poll(epoch, at);
+        assert_eq!(owner.state, State::Listening);
+        assert_eq!(owner.remaining_owners(), 2);
+        assert_eq!(owner.first_failure, None);
+        assert_eq!(owner.failure_reports, 1);
+
+        // A new listening failure drains its original pair, then creation may
+        // fail again without disabling the endpoint or repeating the diagnostic.
+        owner.arm_results = Some([Err(first), Ok(())].into());
+        owner.retire(Some(Failure::Native(PairingPeerError::Closed)), true);
+        owner.poll(epoch, at);
+        assert_eq!(owner.remaining_owners(), 0);
+        assert_eq!(owner.failure_reports, 2);
+        at = rearm_at(&owner);
+        owner.poll(epoch, at);
+        assert_eq!(owner.failure_reports, 2);
+        assert_eq!(owner.state, State::Listening);
+        assert_eq!(owner.first_failure, None);
+        owner.poll_shutdown();
+        assert_eq!(owner.remaining_owners(), 0);
+    }
+
+    #[test]
+    fn single_creation_failure_recovers_and_shutdown_cancels_pending_retry() {
+        let (mut owner, epoch) = activate_fixture(vec![Err(creation_failure()), Ok(())]);
+        owner.poll(epoch, rearm_at(&owner));
+        assert_eq!(owner.state, State::Listening);
+        owner.poll_shutdown();
+
+        let (mut owner, epoch) = activate_fixture(vec![Err(creation_failure()), Ok(())]);
+        let at = rearm_at(&owner);
+        owner.shutdown();
+        owner.poll(epoch, at);
+        assert_eq!(owner.state, State::Unavailable);
+        assert_eq!(owner.arm_results.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn arming_policy_refusal_and_epoch_change_do_not_retry() {
+        for error in [
+            PairingPeerError::Rejected,
+            PairingPeerError::CleanupUnconfirmed,
+        ] {
+            let (mut owner, epoch) = activate_fixture(vec![Err(error), Ok(())]);
+            assert_eq!(owner.state, State::Unavailable);
+            owner.poll(epoch, Instant::now() + REARM_INTERVAL);
+            assert_eq!(owner.arm_results.as_ref().unwrap().len(), 1);
+        }
+        let (mut owner, _) = activate_fixture(vec![Err(creation_failure()), Ok(())]);
+        owner.poll(BootEpoch::from_bytes([2; 32]).unwrap(), rearm_at(&owner));
+        assert_eq!(owner.state, State::Unavailable);
+        assert_eq!(owner.arm_results.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_waits_for_original_owners_and_refuses_exhausted_generation() {
+        let mut owner = ServicePairing::dormant();
+        owner.enabled = true;
+        owner.starter = Some(fixture(1, false));
+        owner.arm_results = Some([Ok(())].into());
+        owner.retire(Some(Failure::Native(creation_failure())), true);
+        let now = Instant::now();
+        owner.drain_step(now);
+        assert_eq!(owner.state, State::Draining);
+        assert_eq!(owner.remaining_owners(), 1);
+        owner.drain_step(now);
+        assert_eq!(owner.state, State::Listening);
+        assert_eq!(owner.remaining_owners(), 2);
+        assert!(owner.arm_results.as_ref().unwrap().is_empty());
+        owner.next_generation = None;
+        owner.retire(None, true);
+        owner.drain_step(now);
+        assert_eq!(owner.state, State::Unavailable);
+    }
+
+    #[test]
+    fn normal_retirement_rearms_in_the_same_poll() {
+        let (mut owner, epoch) = activate_fixture(vec![Ok(()), Ok(())]);
+        owner.retire(None, true);
+        owner.poll(epoch, Instant::now());
+        assert_eq!(owner.state, State::Listening);
+        assert_eq!(owner.remaining_owners(), 2);
+        assert!(owner.arm_results.as_ref().unwrap().is_empty());
+        owner.poll_shutdown();
+    }
+
+    #[test]
+    fn failed_immediate_rearm_waits_before_successful_retry() {
+        let (mut owner, epoch) = activate_fixture(vec![Ok(()), Err(creation_failure()), Ok(())]);
+        let now = Instant::now();
+        owner.retire(None, true);
+        owner.poll(epoch, now);
+        assert_eq!(rearm_at(&owner), now + REARM_INTERVAL);
+        assert_eq!(owner.remaining_owners(), 0);
+        owner.poll(epoch, now + REARM_INTERVAL - Duration::from_nanos(1));
+        assert_eq!(owner.arm_results.as_ref().unwrap().len(), 1);
+        owner.poll(epoch, now + REARM_INTERVAL);
+        assert_eq!(owner.state, State::Listening);
+        owner.poll_shutdown();
+    }
+
     #[test]
     fn renderer_content_order_rejects_comparison_first_and_duplicate_invitation() {
         assert!(!RendererRun::content_state_allows(

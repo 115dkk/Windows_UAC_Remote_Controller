@@ -7,8 +7,8 @@ use serde_json::json;
 use service_protocol::{
     CandidateSubmission, CandidateSubmissionFields, EnrollmentAcceptanceFields,
     FrozenCandidateContext, PairingConfirmation, PairingConfirmationFields, PairingInvitation,
-    SignedEnrollmentAcceptance, SignedFrozenCandidate, candidate_digest,
-    frame_plaintext_submission,
+    PairingReveal, PairingRevealFields, PhoneKeyDigest, PhoneReveal, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate, candidate_digest, frame_plaintext_submission, sas_commitment,
 };
 use tokio::io::{AsyncBufRead, AsyncWriteExt};
 use zeroize::Zeroizing;
@@ -24,6 +24,16 @@ pub(super) async fn enroll(
 ) -> Result<()> {
     let fields = invitation.fields();
     let [approval_key, denial_key, transport_key] = candidate.public_keys();
+    let mut reveal = [0; 32];
+    getrandom::fill(&mut reveal).map_err(|_| "random_unavailable")?;
+    let reveal = PhoneReveal::from_bytes(reveal);
+    let commitment = sas_commitment(
+        fields.ceremony_nonce,
+        invitation.context_digest(),
+        PhoneKeyDigest::from_keys(&approval_key, &denial_key, &transport_key)
+            .map_err(|_| "submission_rejected")?,
+        &reveal,
+    );
     let submission = CandidateSubmission::new(
         CandidateSubmissionFields {
             ceremony_nonce: fields.ceremony_nonce,
@@ -31,6 +41,7 @@ pub(super) async fn enroll(
             pc: fields.pc,
             recipient_device: fields.recipient_device,
             invitation_context: invitation.context_digest(),
+            sas_commitment: commitment,
             approval_key,
             denial_key,
             transport_key,
@@ -49,6 +60,7 @@ pub(super) async fn enroll(
         pc_signing_key: fields.pc_signing_key.clone(),
         pc_transport_key: fields.pc_transport_key.clone(),
         invitation_context: invitation.context_digest(),
+        sas_commitment: commitment,
     };
     let mut stream = connect(invitation).await?;
     tokio::time::timeout(
@@ -64,6 +76,25 @@ pub(super) async fn enroll(
         .and_then(|value| value.verify(&fields.pc_signing_key))
         .and_then(|value| value.match_original(&context))
         .map_err(|_| "frozen_candidate_mismatch")?;
+    let opening = PairingReveal::new(PairingRevealFields {
+        ceremony_nonce: fields.ceremony_nonce,
+        phone_keys: submission.phone_keys(),
+        candidate_digest: candidate_digest(&wire),
+        phone_reveal: reveal.clone(),
+    })
+    .map_err(|_| "reveal_rejected")?;
+    queue(&mut socket, &opening.to_wire())?;
+    tokio::time::timeout(STEP_LIMIT, async {
+        match socket.next_event().await.map_err(|_| "reveal_failed")? {
+            framed_transport::SocketEvent::OutboundDrained => Ok(()),
+            _ => Err("reveal_failed"),
+        }
+    })
+    .await
+    .map_err(|_| "reveal_timeout")??;
+    let comparison = matched
+        .comparison_code(&reveal)
+        .map_err(|_| "commitment_mismatch")?;
     let revision = matched.fields().intended_registry_revision;
     emit(json!({"state":"awaiting_comparison","identity":"software_ci_fixture"}))?;
     let Command::ConfirmComparison { code } = command(input).await? else {
@@ -72,7 +103,7 @@ pub(super) async fn enroll(
     let code = Zeroizing::new(code);
     if code.len() != 6
         || !code.bytes().all(|byte| byte.is_ascii_digit())
-        || code.as_str() != matched.comparison_code().as_str()
+        || code.as_str() != comparison.as_str()
     {
         return Err("comparison_mismatch");
     }

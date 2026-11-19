@@ -40,7 +40,8 @@
 //!
 //! Retention uses a persisted nondecreasing trusted-clock high-water mark.
 //! Records exactly `max_age_ms` old are retained. A backwards clock never moves
-//! the cutoff backwards; append rejects timestamps below that high-water mark.
+//! the cutoff backwards; append clamps a timestamp below the high-water mark to
+//! that mark so insertion order is retained without dropping the record.
 //! Open/read/purge still enforce record and byte caps and retain the time floor.
 //! Elapsed age cannot be inferred while a supplied clock is stalled/rolled back;
 //! byte/count bounds still hold, and historical records never reappear. Explicit
@@ -108,17 +109,15 @@ impl Journal {
 
     /// Appends one trusted diagnostic outcome. The newest records fitting all
     /// age/count/byte bounds survive. Returns the successful retention changes.
-    /// A clock earlier than any previously persisted observation is rejected.
+    /// A clock earlier than the persisted high-water mark is stored at that mark.
     pub fn append(
         &mut self,
         now: UnixMillis,
         event: ActivityEvent,
     ) -> Result<PurgeReport, JournalError> {
         let mut state = self.load()?;
-        if now < state.last_observed() {
-            return Err(JournalError::ClockRollback);
-        }
-        state.records.push(ActivityRecord::new(now, event));
+        let record_time = now.max(state.last_observed());
+        state.records.push(ActivityRecord::new(record_time, event));
         let prepared = state.prepare(now, self.limits)?;
         self.storage.replace(&prepared.bytes)?;
         Ok(prepared.report)

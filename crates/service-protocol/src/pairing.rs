@@ -7,6 +7,10 @@
 pub mod confirm;
 mod frozen;
 mod invitation;
+mod reveal;
+pub use reveal::{
+    PAIRING_REVEAL_BYTES, PairingReveal, PairingRevealFields, PhoneReveal, sas_commitment,
+};
 pub mod submission;
 pub use confirm::{
     PAIRING_CONFIRMATION_BYTES, PairingConfirmation, PairingConfirmationFields, candidate_digest,
@@ -323,6 +327,7 @@ fn signing_bytes(fields: &EnrollmentAcceptanceFields) -> Vec<u8> {
 pub enum CeremonyMessageKind {
     FrozenCandidate,
     Confirmation,
+    Reveal,
     EnrollmentAcceptance,
 }
 
@@ -330,6 +335,7 @@ pub enum CeremonyMessageKind {
 pub fn ceremony_message_kind(bytes: &[u8]) -> Option<CeremonyMessageKind> {
     match bytes.get(..8)? {
         b"WUACFRZ\0" => Some(CeremonyMessageKind::FrozenCandidate),
+        b"WUACRVL\0" => Some(CeremonyMessageKind::Reveal),
         b"WUACCFM\0" => Some(CeremonyMessageKind::Confirmation),
         b"WUACENR\0" => Some(CeremonyMessageKind::EnrollmentAcceptance),
         _ => None,

@@ -392,6 +392,13 @@ impl Command {
         if third.is_some() {
             return Err(ServiceError::InvalidArguments);
         }
+        if first.as_ref().to_str() == Some("pair-inspector") {
+            windows_prompt_probe::SupervisionPipeToken::parse(
+                second.ok_or(ServiceError::InvalidArguments)?.as_ref(),
+            )
+            .map_err(|_| ServiceError::InvalidArguments)?;
+            return Ok(Self::PairInspector);
+        }
         if first.as_ref().to_str() == Some("pair") {
             return second
                 .ok_or(ServiceError::InvalidArguments)
@@ -402,7 +409,6 @@ impl Command {
             return Err(ServiceError::InvalidArguments);
         }
         match first.as_ref().to_str() {
-            Some("pair-inspector") => Ok(Self::PairInspector),
             Some("usb-bootstrap") => Ok(Self::UsbBootstrap),
             Some("relay-auto") => Ok(Self::EmbeddedRelay),
             Some("status") => Ok(Self::Status),
@@ -855,15 +861,20 @@ mod tests {
     }
 
     #[test]
-    fn inspector_command_has_no_target_or_operation_arguments() {
+    fn inspector_command_requires_only_a_canonical_pipe_token() {
+        let token = "0123456789abcdef0123456789abcdef";
         assert_eq!(
-            super::Command::parse(["pair-inspector"]),
+            super::Command::parse(["pair-inspector", token]),
             Ok(super::Command::PairInspector)
         );
         for arguments in [
+            vec!["pair-inspector"],
             vec!["pair-inspector", "42"],
             vec!["pair-inspector", "check"],
             vec!["pair-inspector", "1", "2"],
+            vec!["pair-inspector", token, "extra"],
+            vec!["pair-inspector", "0123456789ABCDEF0123456789ABCDEF"],
+            vec!["pair-inspector", "g123456789abcdef0123456789abcdef"],
         ] {
             assert!(super::Command::parse(arguments).is_err());
         }

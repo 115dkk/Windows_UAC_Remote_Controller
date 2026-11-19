@@ -4,8 +4,8 @@
 use std::{net::SocketAddr, time::Duration};
 
 use relay_service::{
-    CancellationToken, READY_MARKER, Registration, RelayError, RelayLimits, RelayReport, Role,
-    RouteId, run,
+    CancellationToken, PcRoleSource, READY_MARKER, Registration, RelayError, RelayLimits,
+    RelayPolicy, RelayReport, Role, RouteId, run, run_with_policy,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -28,6 +28,25 @@ impl Server {
         let address = listener.local_addr().expect("local test address");
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(run(listener, limits, cancellation.clone()));
+        Self {
+            address,
+            cancellation,
+            task: Some(task),
+        }
+    }
+
+    async fn start_with_policy(limits: RelayLimits, policy: RelayPolicy) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("ephemeral loopback listener");
+        let address = listener.local_addr().expect("local test address");
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(run_with_policy(
+            listener,
+            limits,
+            policy,
+            cancellation.clone(),
+        ));
         Self {
             address,
             cancellation,
@@ -100,6 +119,22 @@ async fn remains_waiting(socket: &mut TcpStream) {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn loopback_only_policy_accepts_a_pc_from_ipv4_loopback() {
+    let server = Server::start_with_policy(
+        RelayLimits::default(),
+        RelayPolicy::new(PcRoleSource::LoopbackOnly),
+    )
+    .await;
+    let mut pc = server.register(Role::Pc, 1).await;
+    let mut phone = server.register(Role::Phone, 1).await;
+    ready(&mut pc).await;
+    ready(&mut phone).await;
+    let report = server.shutdown().await;
+    assert_eq!(report.paired, 1);
+    assert_eq!(report.rejected_pc_sources, 0);
 }
 
 #[tokio::test]
@@ -277,6 +312,48 @@ async fn fresh_pc_registration_evicts_a_silent_active_pair() {
 }
 
 #[tokio::test]
+async fn one_short_lived_replacement_is_free_but_the_next_starts_cooldown() {
+    let server = Server::start(RelayLimits::default()).await;
+    let mut old_pc = server.register(Role::Pc, 1).await;
+    let mut old_phone = server.register(Role::Phone, 1).await;
+    ready(&mut old_pc).await;
+    ready(&mut old_phone).await;
+
+    let mut first_evictor = server.register(Role::Pc, 1).await;
+    closed(&mut old_pc).await;
+    closed(&mut old_phone).await;
+    let mut first_counterpart = server.register(Role::Phone, 1).await;
+    ready(&mut first_evictor).await;
+    ready(&mut first_counterpart).await;
+
+    // Registration #2 charges strike one before admission. The first strike has
+    // no cooldown, so it evicts the first short-lived replacement and waits.
+    let mut second_evictor = server.register(Role::Phone, 1).await;
+    closed(&mut first_evictor).await;
+    closed(&mut first_counterpart).await;
+    remains_waiting(&mut second_evictor).await;
+    let mut second_counterpart = server.register(Role::Pc, 1).await;
+    ready(&mut second_evictor).await;
+    ready(&mut second_counterpart).await;
+
+    // Registration #3 charges strike two, starts the thirty-second cooldown,
+    // closes only the rejected socket, and leaves the replacement pair alone.
+    let mut rejected = server.register(Role::Phone, 1).await;
+    closed(&mut rejected).await;
+    exchange(
+        &mut second_evictor,
+        &mut second_counterpart,
+        b"second replacement survived cooldown rejection",
+    )
+    .await;
+
+    let report = server.shutdown().await;
+    assert_eq!(report.evicted_pairs, 2);
+    assert_eq!(report.rejected_evictions, 1);
+    assert_eq!(report.paired, 3);
+}
+
+#[tokio::test]
 async fn evicted_generations_never_disturb_the_pairs_that_replaced_them() {
     let server = Server::start(RelayLimits::default()).await;
     let mut pc = server.register(Role::Pc, 1).await;
@@ -285,6 +362,13 @@ async fn evicted_generations_never_disturb_the_pairs_that_replaced_them() {
     ready(&mut phone).await;
     let generations = 4;
     for generation in 0..generations {
+        // This test isolates stale-generation retirement from short-lived
+        // eviction mitigation. Advance only while no socket operation is
+        // pending, so every genuine pair survives the short-lived threshold.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::time::resume();
+
         // Both replacements dial at once, so the old tasks may exit before or
         // after the new pair forms. Either order must leave the new pair alone.
         let (first, second) = if generation % 2 == 0 {

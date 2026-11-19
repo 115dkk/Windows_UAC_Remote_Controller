@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Supervised consent-UI observation and exact-target watch support.
 //!
-//! The argument-free one-shot observation remains read-only. Watch mode accepts
+//! The one-shot observation remains read-only. Watch mode accepts
 //! actions only from the authenticated service channel and invokes one matching
 //! UIA button after target and content checks. Native/UIA calls may still block
 //! despite configured timeouts, so the service must supervise this process.
@@ -61,6 +61,32 @@ pub const MAX_UIA_DEPTH: u8 = 16;
 pub const SUPERVISOR_BUDGET_MILLIS: u64 = 5_000;
 pub const UIA_TIMEOUT_MILLIS: u32 = 1_000;
 
+/// A validated pipe-name suffix, not an authentication credential. Both peers
+/// still authenticate the connected process independently of this argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupervisionPipeToken(String);
+impl SupervisionPipeToken {
+    pub fn parse(value: &OsStr) -> Result<Self, CommandParseError> {
+        let value = value.to_str().ok_or(CommandParseError)?;
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CommandParseError);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn argument(&self) -> &str {
+        &self.0
+    }
+
+    pub fn pipe_name(&self) -> String {
+        format!(r"\\.\pipe\UacRemoteController.PromptProbe.v4.{}", self.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     ObserveOnce,
@@ -73,9 +99,15 @@ impl Command {
         S: AsRef<OsStr>,
     {
         let mut arguments = arguments.into_iter();
-        match (arguments.next(), arguments.next()) {
-            (None, None) => Ok(Self::ObserveOnce),
-            (Some(argument), None) if argument.as_ref() == OsStr::new("watch") => Ok(Self::Watch),
+        match (arguments.next(), arguments.next(), arguments.next()) {
+            (Some(token), None, None) => {
+                SupervisionPipeToken::parse(token.as_ref())?;
+                Ok(Self::ObserveOnce)
+            }
+            (Some(mode), Some(token), None) if mode.as_ref() == OsStr::new("watch") => {
+                SupervisionPipeToken::parse(token.as_ref())?;
+                Ok(Self::Watch)
+            }
             _ => Err(CommandParseError),
         }
     }
@@ -306,16 +338,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_parser_accepts_only_no_arguments_or_exact_watch() {
-        assert_eq!(Command::parse(Vec::<&str>::new()), Ok(Command::ObserveOnce));
-        assert_eq!(Command::parse(["watch"]), Ok(Command::Watch));
+    fn command_parser_requires_token_for_one_shot_and_exact_watch() {
+        let token = "0123456789abcdef0123456789abcdef";
+        assert_eq!(Command::parse([token]), Ok(Command::ObserveOnce));
+        assert_eq!(Command::parse(["watch", token]), Ok(Command::Watch));
         for arguments in [
-            vec!["WATCH"],
+            vec![],
+            vec!["watch"],
+            vec!["WATCH", token],
             vec!["watch", "extra"],
-            vec!["observe"],
+            vec!["observe", token],
             vec![""],
+            vec![token, "extra"],
+            vec!["watch", token, "extra"],
         ] {
             assert_eq!(Command::parse(arguments), Err(CommandParseError));
+        }
+    }
+
+    #[test]
+    fn supervision_pipe_token_round_trips_and_rejects_noncanonical_arguments() {
+        let text = "0123456789abcdef0123456789abcdef";
+        let token = SupervisionPipeToken::parse(OsStr::new(text)).unwrap();
+        assert_eq!(token.argument(), text);
+        assert_eq!(
+            SupervisionPipeToken::parse(OsStr::new(token.argument())),
+            Ok(token.clone())
+        );
+        assert_eq!(
+            token.pipe_name(),
+            format!(r"\\.\pipe\UacRemoteController.PromptProbe.v4.{text}")
+        );
+        for invalid in [
+            "".to_owned(),
+            text[..31].to_owned(),
+            format!("{text}0"),
+            text.to_uppercase(),
+            "g".repeat(32),
+            "é".repeat(16),
+            format!("{} ", &text[..31]),
+            format!("{}\0", &text[..31]),
+        ] {
+            assert_eq!(
+                SupervisionPipeToken::parse(OsStr::new(&invalid)),
+                Err(CommandParseError)
+            );
+            assert_eq!(Command::parse([invalid.as_str()]), Err(CommandParseError));
+            assert_eq!(
+                Command::parse(["watch", invalid.as_str()]),
+                Err(CommandParseError)
+            );
         }
     }
 

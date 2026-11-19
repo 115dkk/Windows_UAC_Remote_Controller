@@ -111,6 +111,14 @@ Diagnostics expose fixed categories, counts and public limits, never stored IDs,
 request bodies, timestamps, raw parser text or operating-system errors. Original
 code is GPL-2.0-or-later and the crate continues to forbid unsafe code.
 
+## Filesystem journal clock rollback
+
+`Journal` keeps a persisted, nondecreasing wall-clock high-water mark for age
+retention. When an append supplies an earlier timestamp, the record is retained
+at the high-water mark instead of being rejected. Records with the same clamped
+timestamp remain in insertion order, so newest-first reads preserve event order.
+The clock floor and every count, byte, format, lock and I/O error remain unchanged.
+
 ## Verification boundary
 
 Only ROOT runs validation. Public-interface tests use signed synthetic PC events

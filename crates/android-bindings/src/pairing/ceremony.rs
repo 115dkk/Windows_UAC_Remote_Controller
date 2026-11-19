@@ -17,8 +17,8 @@ use framed_transport::{
 use relay_service::RouteId;
 use service_protocol::{
     CandidateSubmission, CandidateSubmissionFields, CeremonyMessageKind, PairingChallenge,
-    PairingConfirmation, PairingConfirmationFields, candidate_digest, ceremony_message_kind,
-    frame_plaintext_submission,
+    PairingConfirmation, PairingConfirmationFields, PairingReveal, PairingRevealFields,
+    candidate_digest, ceremony_message_kind, frame_plaintext_submission,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -290,6 +290,19 @@ async fn run_ceremony(
     let frozen = controller
         .match_frozen_candidate(created, &frozen_wire)
         .map_err(|_| NativeCeremonyFailure::Mismatch)?;
+    let reveal = PairingReveal::new(PairingRevealFields {
+        ceremony_nonce: fields.ceremony_nonce,
+        phone_keys: submission.phone_keys(),
+        candidate_digest: digest,
+        phone_reveal: frozen.created.phone_reveal.clone(),
+    })
+    .map_err(|_| {
+        frozen.cancel();
+        NativeCeremonyFailure::Rejected
+    })?;
+    write_reveal(&mut driver, &reveal, &stop, deadline)
+        .await
+        .inspect_err(|_| frozen.cancel())?;
     let comparison_code = frozen
         .comparison_code()
         .map_err(|_| {
@@ -512,6 +525,7 @@ pub(super) fn make_submission(
             pc: fields.pc,
             recipient_device: fields.recipient_device,
             invitation_context: invitation.context_digest(),
+            sas_commitment: created.sas_commitment().map_err(map_bridge)?,
             approval_key: keys.approval_key().clone(),
             denial_key: keys.denial_key().clone(),
             transport_key: keys.transport_key().clone(),
@@ -521,6 +535,30 @@ pub(super) fn make_submission(
         evidence.transport.certificates.clone(),
     )
     .map_err(|_| NativeCeremonyFailure::Rejected)
+}
+
+async fn write_reveal(
+    driver: &mut SocketDriver,
+    reveal: &PairingReveal,
+    stop: &CancellationToken,
+    deadline: Instant,
+) -> Result<(), NativeCeremonyFailure> {
+    driver
+        .queue_frame(
+            service_protocol::encode_frame(&reveal.to_wire())
+                .map_err(|_| NativeCeremonyFailure::Rejected)?,
+        )
+        .map_err(map_socket)?;
+    match await_until(stop, deadline, deadline, driver.next_event())
+        .await?
+        .map_err(map_socket)?
+    {
+        SocketEvent::OutboundDrained => Ok(()),
+        _ => {
+            let _ = driver.reject_protocol_message();
+            Err(NativeCeremonyFailure::Rejected)
+        }
+    }
 }
 
 async fn next_frame(
@@ -584,7 +622,7 @@ async fn close_driver(driver: &mut SocketDriver, stop: &CancellationToken, deadl
                 return;
             }
             event = driver.next_event() => match event {
-                Ok(SocketEvent::LocallyClosed) => return,
+                Ok(SocketEvent::LocallyClosed | SocketEvent::PeerClosed) => return,
                 Ok(_) => continue,
                 Err(_) => {
                     driver.abort();

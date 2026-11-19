@@ -6,7 +6,11 @@
 use std::{
     fmt,
     net::SocketAddr,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -26,9 +30,9 @@ use secure_channel::{EndpointRole, TlsIdentity, TlsPublicKey};
 use service_protocol::{
     CandidateSubmission, FrozenCandidateContext, FrozenCandidateFields, InvitationContextDigest,
     MatchedFrozenCandidate, PairingChallenge, PairingComparisonCode, PairingConfirmation,
-    PairingInvitation, PairingNonce, SignedEnrollmentAcceptance, SignedFrozenCandidate,
-    UnsignedFrozenCandidate, candidate_digest, ceremony_message_kind, encode_frame,
-    plaintext_submission_length,
+    PairingInvitation, PairingNonce, PairingReveal, SignedEnrollmentAcceptance,
+    SignedFrozenCandidate, UnsignedFrozenCandidate, candidate_digest, ceremony_message_kind,
+    encode_frame, plaintext_submission_length,
 };
 use tokio::{io::AsyncReadExt, sync::mpsc as async_mpsc};
 
@@ -36,6 +40,7 @@ use super::ServiceClock;
 use crate::{RegistryError, tls_signer::ServiceTlsSigner};
 
 const SUBMISSION_TIMEOUT: Duration = Duration::from_secs(120);
+const REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(150);
 const ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -131,6 +136,7 @@ pub(super) enum EnrollmentProgress {
     Connecting,
     AwaitingSubmission,
     Verifying,
+    AwaitingReveal,
     CandidateSent {
         code: PairingComparisonCode,
         boot: BootAssurance,
@@ -146,6 +152,7 @@ impl Clone for EnrollmentProgress {
             Self::Connecting => Self::Connecting,
             Self::AwaitingSubmission => Self::AwaitingSubmission,
             Self::Verifying => Self::Verifying,
+            Self::AwaitingReveal => Self::AwaitingReveal,
             Self::CandidateSent { code, boot } => Self::CandidateSent {
                 code: code.clone(),
                 boot: *boot,
@@ -163,6 +170,7 @@ impl fmt::Debug for EnrollmentProgress {
             Self::Connecting => f.write_str("Connecting"),
             Self::AwaitingSubmission => f.write_str("AwaitingSubmission"),
             Self::Verifying => f.write_str("Verifying"),
+            Self::AwaitingReveal => f.write_str("AwaitingReveal"),
             Self::CandidateSent { .. } => f.write_str("CandidateSent([redacted])"),
             Self::PhoneConfirmed => f.write_str("PhoneConfirmed"),
             Self::AwaitingPcDecision => f.write_str("AwaitingPcDecision"),
@@ -201,6 +209,7 @@ pub(super) enum EnrollmentError {
 pub(super) struct CandidateSummary {
     pub(super) device: DeviceId,
     pub(super) phone_keys: service_protocol::PhoneKeyDigest,
+    pub(super) sas_commitment: [u8; 32],
     pub(super) approval_key: TlsPublicKey,
     pub(super) denial_key: TlsPublicKey,
     pub(super) transport_key: TlsPublicKey,
@@ -224,12 +233,40 @@ enum Event {
         material: Box<VerifiedMaterial>,
         summary: Box<CandidateSummary>,
     },
-    FrozenDrained,
+    Revealed(PairingComparisonCode),
     PhoneConfirmed,
     AwaitingPcDecision,
     Accepted,
     Closed,
     Failed(EnrollmentError),
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct DeliveryControl {
+    pub(super) before: AtomicBool,
+    pub(super) after: AtomicBool,
+    pub(super) reached_before: AtomicBool,
+    pub(super) reached_after: AtomicBool,
+}
+
+#[cfg(test)]
+impl DeliveryControl {
+    async fn wait(&self, before: bool, stop: &CancellationToken) -> Result<(), EnrollmentError> {
+        let (pause, reached) = if before {
+            (&self.before, &self.reached_before)
+        } else {
+            (&self.after, &self.reached_after)
+        };
+        reached.store(true, Ordering::Release);
+        while pause.load(Ordering::Acquire) {
+            if stop.is_cancelled() {
+                return Err(EnrollmentError::Cancelled);
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct EnrollmentCarrier {
@@ -246,6 +283,9 @@ pub(super) struct EnrollmentCarrier {
     deadline: Instant,
     decision: Option<bool>,
     frozen_sent: bool,
+    acceptance_delivered: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(super) delivery_control: Arc<DeliveryControl>,
 }
 impl fmt::Debug for EnrollmentCarrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -277,11 +317,18 @@ impl EnrollmentCarrier {
             pc_signing_key: inputs.pc_signing_key.clone(),
             pc_transport_key: inputs.pc_transport_key.clone(),
             invitation_context: inputs.expected.invitation_context,
+            sas_commitment: [0; 32],
         };
         let intended_revision = inputs.expected.intended_revision;
         let inputs_deadline = inputs.deadline;
         let stop = CancellationToken::new();
         let thread_stop = stop.clone();
+        let acceptance_delivered = Arc::new(AtomicBool::new(false));
+        let thread_delivered = Arc::clone(&acceptance_delivered);
+        #[cfg(test)]
+        let delivery_control = Arc::new(DeliveryControl::default());
+        #[cfg(test)]
+        let thread_control = Arc::clone(&delivery_control);
         let (command_sender, commands) = async_mpsc::channel(3);
         let (event_sender, events) = mpsc::sync_channel(8);
         let (startup_sender, startup) = mpsc::sync_channel(1);
@@ -296,7 +343,15 @@ impl EnrollmentCarrier {
                         if startup_sender.send(true).is_err() {
                             return;
                         }
-                        runtime.block_on(run(inputs, commands, event_sender.clone(), thread_stop))
+                        runtime.block_on(run(
+                            inputs,
+                            commands,
+                            event_sender.clone(),
+                            thread_stop,
+                            thread_delivered,
+                            #[cfg(test)]
+                            thread_control,
+                        ))
                     }
                     Err(_) => {
                         let _ = startup_sender.send(false);
@@ -327,6 +382,9 @@ impl EnrollmentCarrier {
             deadline: inputs_deadline,
             decision: None,
             frozen_sent: false,
+            acceptance_delivered,
+            #[cfg(test)]
+            delivery_control,
         })
     }
 
@@ -337,13 +395,22 @@ impl EnrollmentCarrier {
             Ok(Event::Verified { material, summary }) => {
                 let mut context = self.expected_context.clone();
                 context.phone_keys = summary.phone_keys;
+                context.sas_commitment = summary.sas_commitment;
                 self.expected_context = context;
                 self.candidate_device = Some(summary.device);
                 self.verified = Some(*material);
                 self.summary = Some(*summary);
                 EnrollmentProgress::Verifying
             }
-            Ok(Event::FrozenDrained) => self.progress.clone(),
+            Ok(Event::Revealed(code)) => EnrollmentProgress::CandidateSent {
+                code,
+                boot: self
+                    .verified
+                    .as_ref()
+                    .ok_or(EnrollmentError::Protocol)?
+                    .0
+                    .boot_assurance(),
+            },
             Ok(Event::PhoneConfirmed) => EnrollmentProgress::PhoneConfirmed,
             Ok(Event::AwaitingPcDecision) => EnrollmentProgress::AwaitingPcDecision,
             Ok(Event::Accepted) => EnrollmentProgress::Accepted,
@@ -386,6 +453,13 @@ impl EnrollmentCarrier {
             && matches!(self.progress, EnrollmentProgress::AwaitingPcDecision)
     }
 
+    /// Set only after the acceptance frame drains, before any fallible close or
+    /// event publication. Cancellation must join the worker before treating false
+    /// as final: the transport may have completed concurrently with cancellation.
+    pub(super) fn acceptance_delivered(&self) -> bool {
+        self.acceptance_delivered.load(Ordering::Acquire)
+    }
+
     pub(super) fn candidate_device(&self) -> Option<DeviceId> {
         self.candidate_device
     }
@@ -394,9 +468,14 @@ impl EnrollmentCarrier {
         if !self.ready_for_frozen() {
             return Err(EnrollmentError::Protocol);
         }
+        // The candidate commitment and attestation/possession have arrived before
+        // this independent PC contribution is drawn. Never prepare it with the invitation.
+        let mut pc_random = [0; 32];
+        getrandom::fill(&mut pc_random).map_err(|_| EnrollmentError::Protocol)?;
         UnsignedFrozenCandidate::new(FrozenCandidateFields {
             context: self.expected_context.clone(),
             intended_registry_revision: self.intended_revision,
+            pc_random,
         })
         .map_err(|_| EnrollmentError::Protocol)
     }
@@ -404,7 +483,7 @@ impl EnrollmentCarrier {
     pub(super) fn send_frozen(
         &mut self,
         frozen: SignedFrozenCandidate,
-    ) -> Result<(PairingComparisonCode, BootAssurance), EnrollmentError> {
+    ) -> Result<(), EnrollmentError> {
         if !self.ready_for_frozen() {
             return Err(EnrollmentError::Protocol);
         }
@@ -415,22 +494,12 @@ impl EnrollmentCarrier {
         if matched.fields().intended_registry_revision != self.intended_revision {
             return Err(EnrollmentError::Protocol);
         }
-        let code = matched.comparison_code();
         self.commands
             .try_send(Command::Frozen(frozen))
             .map_err(|_| EnrollmentError::Protocol)?;
-        let boot = self
-            .verified
-            .as_ref()
-            .ok_or(EnrollmentError::Protocol)?
-            .0
-            .boot_assurance();
         self.frozen_sent = true;
-        self.progress = EnrollmentProgress::CandidateSent {
-            code: code.clone(),
-            boot,
-        };
-        Ok((code, boot))
+        self.progress = EnrollmentProgress::AwaitingReveal;
+        Ok(())
     }
 
     pub(super) fn pc_decision(&mut self, confirmed: bool) -> Result<(), EnrollmentError> {
@@ -489,6 +558,23 @@ impl EnrollmentCarrier {
             .map_err(|_| EnrollmentError::Protocol)
     }
 
+    #[cfg(test)]
+    pub(super) fn close_command_receiver(&self) -> Box<dyn FnMut()> {
+        let stop = self.stop.clone();
+        let commands = self.commands.clone();
+        Box::new(move || {
+            stop.cancel();
+            let until = Instant::now() + Duration::from_secs(10);
+            while !commands.is_closed() {
+                assert!(
+                    Instant::now() < until,
+                    "carrier did not release command receiver"
+                );
+                thread::yield_now();
+            }
+        })
+    }
+
     pub(super) fn cancel(&mut self) {
         self.stop.cancel();
         let _ = self.commands.try_send(Command::Cancel);
@@ -520,6 +606,8 @@ async fn run(
     mut commands: async_mpsc::Receiver<Command>,
     events: mpsc::SyncSender<Event>,
     stop: CancellationToken,
+    acceptance_delivered: Arc<AtomicBool>,
+    #[cfg(test)] delivery_control: Arc<DeliveryControl>,
 ) -> Result<(), EnrollmentError> {
     let carrier = connect_rendezvous(
         inputs.dial_endpoint(),
@@ -618,6 +706,7 @@ async fn run(
     let summary = CandidateSummary {
         device: fields.recipient_device,
         phone_keys: submission.phone_keys(),
+        sas_commitment: fields.sas_commitment,
         approval_key: fields.approval_key.clone(),
         denial_key: fields.denial_key.clone(),
         transport_key: fields.transport_key.clone(),
@@ -651,6 +740,21 @@ async fn run(
         },
     )?;
     let frozen = await_frozen(&mut driver, &mut commands, inputs.deadline, &stop).await?;
+    let expected = FrozenCandidateContext {
+        ceremony_nonce: inputs.expected.nonce,
+        attestation_challenge: inputs.expected.challenge,
+        pc: inputs.expected.pc,
+        recipient_device: inputs.expected.recipient,
+        phone_keys: summary.phone_keys,
+        pc_signing_key: inputs.pc_signing_key.clone(),
+        pc_transport_key: inputs.pc_transport_key.clone(),
+        invitation_context: inputs.expected.invitation_context,
+        sas_commitment: summary.sas_commitment,
+    };
+    let matched = frozen
+        .verify(&inputs.pc_signing_key)
+        .and_then(|value| value.match_original(&expected))
+        .map_err(|_| EnrollmentError::Protocol)?;
     let frozen_wire = frozen.to_wire();
     driver
         .queue_frame(encode_frame(&frozen_wire).map_err(|_| EnrollmentError::Protocol)?)
@@ -661,7 +765,14 @@ async fn run(
         &stop,
     )
     .await?;
-    send_event(&events, Event::FrozenDrained)?;
+    let reveal = await_reveal(
+        &mut driver,
+        step_deadline(inputs.deadline, REVEAL_TIMEOUT)?,
+        &stop,
+    )
+    .await?;
+    let code = validate_reveal(&matched, &frozen_wire, &reveal)?;
+    send_event(&events, Event::Revealed(code))?;
     let confirmation_deadline = step_deadline(inputs.deadline, CONFIRMATION_TIMEOUT)?;
     let confirmation = await_confirmation(&mut driver, confirmation_deadline, &stop).await?;
     let fields = confirmation.fields();
@@ -683,6 +794,8 @@ async fn run(
         driver.abort();
         return Err(EnrollmentError::PcDeclined);
     }
+    #[cfg(test)]
+    delivery_control.wait(true, &stop).await?;
     let acceptance = await_acceptance(&mut driver, &mut commands, inputs.deadline, &stop).await?;
     driver
         .queue_frame(encode_frame(&acceptance.to_wire()).map_err(|_| EnrollmentError::Protocol)?)
@@ -693,7 +806,10 @@ async fn run(
         &stop,
     )
     .await?;
+    acceptance_delivered.store(true, Ordering::Release);
     send_event(&events, Event::Accepted)?;
+    #[cfg(test)]
+    delivery_control.wait(false, &stop).await?;
     driver
         .begin_close()
         .map_err(|_| EnrollmentError::Protocol)?;
@@ -784,6 +900,46 @@ async fn await_drain(
         SocketEvent::PeerClosed | SocketEvent::LocallyClosed => Err(EnrollmentError::Protocol),
     }
 }
+fn validate_reveal(
+    matched: &MatchedFrozenCandidate,
+    frozen_wire: &[u8],
+    reveal: &PairingReveal,
+) -> Result<PairingComparisonCode, EnrollmentError> {
+    let fields = reveal.fields();
+    let context = &matched.fields().context;
+    if fields.ceremony_nonce != context.ceremony_nonce
+        || fields.phone_keys != context.phone_keys
+        || fields.candidate_digest != candidate_digest(frozen_wire)
+    {
+        return Err(EnrollmentError::Protocol);
+    }
+    matched
+        .comparison_code(&fields.phone_reveal)
+        .map_err(|_| EnrollmentError::Protocol)
+}
+
+async fn await_reveal(
+    driver: &mut SocketDriver,
+    deadline: Instant,
+    stop: &CancellationToken,
+) -> Result<PairingReveal, EnrollmentError> {
+    match next_socket_event(driver, deadline, stop).await? {
+        SocketEvent::Frame(frame) => {
+            let bytes = frame.into_bytes();
+            if ceremony_message_kind(&bytes) != Some(service_protocol::CeremonyMessageKind::Reveal)
+            {
+                driver.abort();
+                return Err(EnrollmentError::Protocol);
+            }
+            PairingReveal::from_wire(&bytes).map_err(|_| EnrollmentError::Protocol)
+        }
+        _ => {
+            driver.abort();
+            Err(EnrollmentError::Protocol)
+        }
+    }
+}
+
 async fn await_confirmation(
     driver: &mut SocketDriver,
     deadline: Instant,
@@ -876,15 +1032,15 @@ async fn await_acceptance(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::peer_runtime::tests::Identity;
     use approval_core::{DeviceKeys, PrivilegedDeviceRegistry, RegistryCheckpoint};
     use approval_protocol::DecisionPublicKey;
     use service_protocol::{
         CandidateSubmissionFields, EnrollmentAcceptanceFields, PairingConfirmationFields,
-        PairingInvitationFields, PairingNonce, UnsignedEnrollmentAcceptance,
-        frame_plaintext_submission,
+        PairingInvitationFields, PairingNonce, PairingRevealFields, PhoneKeyDigest, PhoneReveal,
+        UnsignedEnrollmentAcceptance, frame_plaintext_submission, sas_commitment,
     };
     use std::{
         io::{Read, Write},
@@ -894,7 +1050,7 @@ mod tests {
 
     /// Loopback relay fixtures bind and drop ephemeral ports; running them one at
     /// a time keeps a freed port from being handed to a neighbouring test's PC.
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(in crate::peer_runtime) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -1014,7 +1170,7 @@ mod tests {
         assert_eq!(fixture.inputs.invitation.context_digest(), digest);
     }
 
-    fn drain(carrier: &mut EnrollmentCarrier) {
+    pub(in crate::peer_runtime) fn drain(carrier: &mut EnrollmentCarrier) {
         carrier.cancel();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !carrier.drain() {
@@ -1044,7 +1200,7 @@ mod tests {
         }
     }
 
-    fn wait_progress(
+    pub(in crate::peer_runtime) fn wait_progress(
         carrier: &mut EnrollmentCarrier,
         worker: &mut crate::tls_signer::ServiceTlsSigningWorker<'_>,
         accepts: impl Fn(&EnrollmentProgress, &EnrollmentCarrier) -> bool,
@@ -1061,7 +1217,7 @@ mod tests {
         }
     }
 
-    struct PhoneResult {
+    pub(in crate::peer_runtime) struct PhoneResult {
         frozen_wire: Vec<u8>,
         acceptance: Option<SignedEnrollmentAcceptance>,
     }
@@ -1078,6 +1234,12 @@ mod tests {
                 pc: invitation.fields().pc,
                 recipient_device: invitation.fields().recipient_device,
                 invitation_context: invitation.context_digest(),
+                sas_commitment: sas_commitment(
+                    invitation.fields().ceremony_nonce,
+                    invitation.context_digest(),
+                    PhoneKeyDigest::from_keys(&approval_key, &denial_key, &transport_key).unwrap(),
+                    &PhoneReveal::from_bytes([14; 32]),
+                ),
                 approval_key,
                 denial_key,
                 transport_key,
@@ -1121,13 +1283,46 @@ mod tests {
         }
     }
 
-    fn spawn_phone(
+    pub(in crate::peer_runtime) fn spawn_phone(
         listener: TcpListener,
         invitation: PairingInvitation,
         route: RouteId,
         candidate: android_attestation::SyntheticRkp,
         confirmed: bool,
         release_close: Arc<Barrier>,
+    ) -> JoinHandle<PhoneResult> {
+        spawn_phone_with_reveal(
+            listener,
+            invitation,
+            route,
+            candidate,
+            confirmed,
+            release_close,
+            RevealMode::Valid,
+        )
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RevealMode {
+        Valid,
+        WrongNonce,
+        WrongKeys,
+        WrongDigest,
+        WrongOpening,
+        ConfirmationFirst,
+        OtherFrame,
+        Missing,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_phone_with_reveal(
+        listener: TcpListener,
+        invitation: PairingInvitation,
+        route: RouteId,
+        candidate: android_attestation::SyntheticRkp,
+        confirmed: bool,
+        release_close: Arc<Barrier>,
+        mode: RevealMode,
     ) -> JoinHandle<PhoneResult> {
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1163,11 +1358,14 @@ mod tests {
                 )
                 .unwrap();
                 let frozen_wire = loop {
-                    match driver.next_event().await.unwrap() {
-                        SocketEvent::Frame(frame) => break frame.into_bytes(),
-                        SocketEvent::Ready | SocketEvent::OutboundDrained => (),
-                        SocketEvent::PeerClosed | SocketEvent::LocallyClosed => {
-                            panic!("PC closed before frozen candidate")
+                    match driver.next_event().await {
+                        Ok(SocketEvent::Frame(frame)) => break frame.into_bytes(),
+                        Ok(SocketEvent::Ready | SocketEvent::OutboundDrained) => (),
+                        Ok(SocketEvent::PeerClosed | SocketEvent::LocallyClosed) | Err(_) => {
+                            return PhoneResult {
+                                frozen_wire: Vec::new(),
+                                acceptance: None,
+                            };
                         }
                     }
                 };
@@ -1182,6 +1380,57 @@ mod tests {
                     confirmed,
                 })
                 .unwrap();
+                let mut reveal_fields = PairingRevealFields {
+                    ceremony_nonce: invitation.fields().ceremony_nonce,
+                    phone_keys: submission.phone_keys(),
+                    candidate_digest: candidate_digest(&frozen_wire),
+                    phone_reveal: PhoneReveal::from_bytes([14; 32]),
+                };
+                match mode {
+                    RevealMode::WrongNonce => {
+                        reveal_fields.ceremony_nonce = PairingNonce::from_bytes([99; 32]).unwrap()
+                    }
+                    RevealMode::WrongKeys => {
+                        reveal_fields.phone_keys = PhoneKeyDigest::from_bytes([99; 32])
+                    }
+                    RevealMode::WrongDigest => reveal_fields.candidate_digest = [99; 32],
+                    RevealMode::WrongOpening => {
+                        reveal_fields.phone_reveal = PhoneReveal::from_bytes([99; 32])
+                    }
+                    _ => (),
+                }
+                let reveal = PairingReveal::new(reveal_fields).unwrap();
+                let opening_wire = match mode {
+                    RevealMode::ConfirmationFirst => confirmation.to_wire().to_vec(),
+                    RevealMode::OtherFrame => frozen_wire.clone(),
+                    _ => reveal.to_wire().to_vec(),
+                };
+                if !matches!(mode, RevealMode::Missing) {
+                    driver
+                        .queue_frame(encode_frame(&opening_wire).unwrap())
+                        .unwrap();
+                    assert!(matches!(
+                        driver.next_event().await,
+                        Ok(SocketEvent::OutboundDrained)
+                    ));
+                }
+                if !matches!(mode, RevealMode::Valid) {
+                    loop {
+                        match driver.next_event().await {
+                            Ok(SocketEvent::PeerClosed | SocketEvent::LocallyClosed) | Err(_) => {
+                                break;
+                            }
+                            Ok(SocketEvent::Frame(_)) => {
+                                panic!("invalid reveal received a PC reply")
+                            }
+                            Ok(_) => (),
+                        }
+                    }
+                    return PhoneResult {
+                        frozen_wire,
+                        acceptance: None,
+                    };
+                }
                 driver
                     .queue_frame(encode_frame(&confirmation.to_wire()).unwrap())
                     .unwrap();
@@ -1257,11 +1506,20 @@ mod tests {
             .unwrap()
             .match_original(&carrier.expected_context)
             .unwrap()
-            .comparison_code();
-        assert_eq!(
-            carrier.send_frozen(frozen).unwrap(),
-            (expected_code, BootAssurance::Manufacturer)
-        );
+            .comparison_code(&PhoneReveal::from_bytes([14; 32]))
+            .unwrap();
+        carrier.send_frozen(frozen).unwrap();
+        assert!(matches!(
+            carrier.progress,
+            EnrollmentProgress::AwaitingReveal
+        ));
+        let progress = wait_progress(&mut carrier, &mut worker, |progress, _| {
+            matches!(progress, EnrollmentProgress::CandidateSent { .. })
+        });
+        let EnrollmentProgress::CandidateSent { code, boot } = progress else {
+            unreachable!()
+        };
+        assert_eq!((code, boot), (expected_code, BootAssurance::Manufacturer));
         wait_progress(&mut carrier, &mut worker, |progress, _carrier| {
             matches!(progress, EnrollmentProgress::PhoneConfirmed)
         });
@@ -1319,6 +1577,73 @@ mod tests {
             committed_revision
         );
         drain(&mut carrier);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn invalid_or_missing_reveal_never_displays_code_or_accepts_confirmation() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        for mode in [
+            RevealMode::WrongNonce,
+            RevealMode::WrongKeys,
+            RevealMode::WrongDigest,
+            RevealMode::WrongOpening,
+            RevealMode::ConfirmationFirst,
+            RevealMode::OtherFrame,
+            RevealMode::Missing,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let relay = listener.local_addr().unwrap();
+            let fixture = fixture(relay, Instant::now() + Duration::from_secs(20));
+            let phone = spawn_phone_with_reveal(
+                listener,
+                fixture.inputs.invitation.clone(),
+                fixture.inputs.route,
+                fixture.candidate,
+                true,
+                Arc::new(Barrier::new(1)),
+                mode,
+            );
+            let mut worker = fixture.worker;
+            let identity = fixture.identity;
+            let mut carrier = EnrollmentCarrier::start(fixture.inputs).unwrap();
+            assert!(carrier.unsigned_frozen().is_err());
+            wait_progress(&mut carrier, &mut worker, |_, carrier| {
+                carrier.ready_for_frozen()
+            });
+            let unsigned = carrier.unsigned_frozen().unwrap();
+            let signature = identity.sign_protocol(&unsigned.signing_bytes());
+            carrier
+                .send_frozen(unsigned.with_der_signature(&signature).unwrap())
+                .unwrap();
+            assert!(!carrier.ready_for_frozen());
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                pump_worker(&mut worker);
+                match carrier.poll(Instant::now()) {
+                    Ok(progress) => {
+                        assert!(
+                            matches!(progress, EnrollmentProgress::AwaitingReveal),
+                            "{mode:?}: {progress:?}"
+                        );
+                        assert!(Instant::now() < deadline);
+                    }
+                    Err(error) => {
+                        assert!(
+                            matches!(error, EnrollmentError::Protocol)
+                                || (matches!(mode, RevealMode::Missing)
+                                    && matches!(error, EnrollmentError::Timeout)),
+                            "{mode:?}: {error:?}"
+                        );
+                        break;
+                    }
+                }
+                thread::yield_now();
+            }
+            assert!(!carrier.ready_to_commit());
+            assert!(phone.join().unwrap().acceptance.is_none());
+            drain(&mut carrier);
+        }
     }
 
     #[test]

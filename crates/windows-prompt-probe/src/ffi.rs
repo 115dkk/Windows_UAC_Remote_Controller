@@ -593,6 +593,60 @@ fn enumerate_inner(desktop: HDESK, began: Option<Instant>) -> Result<Vec<HWND>, 
     Ok(collector.windows)
 }
 
+struct MatchingEnumeration {
+    windows: Vec<HWND>,
+    matches: fn(HWND) -> bool,
+    failure: Option<ProbeFailure>,
+}
+
+unsafe extern "system" fn enum_matching_window(hwnd: HWND, parameter: LPARAM) -> BOOL {
+    // SAFETY: EnumDesktopWindows synchronously returns this exact non-null
+    // pointer to the exclusive stack collector. It is not stored anywhere and
+    // no other thread accesses it until enumeration returns.
+    let collector = unsafe { &mut *(parameter.0 as *mut MatchingEnumeration) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if (collector.matches)(hwnd) && collector.windows.len() < MAX_TOP_LEVEL_WINDOWS {
+            collector.windows.push(hwnd);
+        }
+    }));
+    if result.is_err() {
+        collector.failure = Some(ProbeFailure::WorkerPanicked);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+/// Top-level windows of `desktop` accepted by `matches`, at most
+/// `MAX_TOP_LEVEL_WINDOWS` of them. Unlike [`enumerate_without_budget`] the
+/// desktop itself may hold any number of windows: a user's desktop routinely
+/// holds several hundred, while the Winlogon desktop holds a handful.
+pub(super) fn enumerate_matching_without_budget(
+    desktop: HDESK,
+    matches: fn(HWND) -> bool,
+) -> Result<Vec<HWND>, ProbeError> {
+    let mut collector = MatchingEnumeration {
+        windows: Vec::with_capacity(MAX_TOP_LEVEL_WINDOWS),
+        matches,
+        failure: None,
+    };
+    // SAFETY: parent's live READOBJECTS desktop and a synchronous callback with a
+    // stable exclusive collector address. Callback catches Rust unwinds, runs
+    // only the caller's read-only window predicate and never exceeds the
+    // preallocated capacity. No pointer escapes.
+    let result = unsafe {
+        EnumDesktopWindows(
+            Some(desktop),
+            Some(enum_matching_window),
+            LPARAM((&mut collector as *mut MatchingEnumeration) as isize),
+        )
+    };
+    if let Some(failure) = collector.failure {
+        return Err(ProbeError::new(failure));
+    }
+    result.map_err(|error| native_error(NativeOperation::EnumerateWindows, error))?;
+    Ok(collector.windows)
+}
+
 fn native_error(operation: NativeOperation, error: WinError) -> ProbeError {
     ProbeError::new(ProbeFailure::NativeCall {
         operation,
@@ -601,4 +655,53 @@ fn native_error(operation: NativeOperation, error: WinError) -> ProbeError {
 }
 fn malformed(operation: NativeOperation) -> ProbeError {
     ProbeError::new(ProbeFailure::MalformedNativeData(operation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_TOP_LEVEL_WINDOWS, enumerate_matching_without_budget, enumerate_without_budget,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use windows::Win32::{
+        Foundation::HWND,
+        System::{StationsAndDesktops::GetThreadDesktop, Threading::GetCurrentThreadId},
+    };
+
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_and_accept(_: HWND) -> bool {
+        SEEN.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn reject(_: HWND) -> bool {
+        false
+    }
+
+    // A user's desktop holds hundreds of top-level windows (443 on the PC where
+    // the parked-prompt census was found failing), far above the Winlogon limit.
+    #[test]
+    fn matching_enumeration_admits_a_desktop_with_any_number_of_windows() {
+        // SAFETY: the calling thread's own desktop handle; it is not closed.
+        let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.expect("thread desktop");
+        let accepted = enumerate_matching_without_budget(desktop, count_and_accept);
+        let seen = SEEN.load(Ordering::Relaxed);
+        if seen == 0 {
+            // A windowless service desktop: Windows reports an empty enumeration
+            // as a failure, and there is nothing to compare.
+            return;
+        }
+        let accepted = accepted.expect("matching enumeration");
+        assert_eq!(accepted.len(), seen.min(MAX_TOP_LEVEL_WINDOWS));
+        assert!(
+            enumerate_matching_without_budget(desktop, reject)
+                .expect("rejecting enumeration")
+                .is_empty()
+        );
+        if seen > MAX_TOP_LEVEL_WINDOWS {
+            assert!(enumerate_without_budget(desktop).is_err());
+        }
+        eprintln!("top-level windows seen: {seen}");
+    }
 }

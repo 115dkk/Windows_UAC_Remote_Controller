@@ -10,6 +10,22 @@ use std::{
 use windows_port_owner::ListenerOwner;
 
 const OWNER_LOOKUP_INTERVAL: Duration = Duration::from_secs(5);
+const RELAY_ABUSE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Whether the embedded relay's counters are due for a diagnostics row: they
+/// moved since the last row, and that row is at least a minute old.
+fn relay_abuse_due(
+    current: relay_service::RelayAbuseCounters,
+    reported: Option<(Instant, relay_service::RelayAbuseCounters)>,
+    now: Instant,
+) -> bool {
+    match reported {
+        None => current != relay_service::RelayAbuseCounters::default(),
+        Some((at, last)) => {
+            current != last && now.saturating_duration_since(at) >= RELAY_ABUSE_REPORT_INTERVAL
+        }
+    }
+}
 
 fn fault_for_failure(
     error: &io::Error,
@@ -62,6 +78,28 @@ impl ServiceSession<'_> {
         }
     }
 
+    /// Makes route abuse at the embedded relay visible in public diagnostics.
+    /// A restarted relay counts from zero again, which also reads as a change.
+    pub(super) fn observe_relay_abuse(&mut self, now: Instant) {
+        let Some(current) = self
+            .embedded_relay
+            .as_ref()
+            .map(relay_service::HostedRelay::abuse_counters)
+        else {
+            return;
+        };
+        if !relay_abuse_due(current, self.relay_abuse_reported, now) {
+            return;
+        }
+        crate::public_diagnostics::record(crate::public_diagnostics::Event::RelayAbuse {
+            evicted_pairs: current.evicted_pairs,
+            rejected_duplicates: current.rejected_duplicates,
+            rejected_pc_sources: current.rejected_pc_sources,
+            rejected_evictions: current.rejected_evictions,
+        });
+        self.relay_abuse_reported = Some((now, current));
+    }
+
     pub(super) fn clear_listener_fault(&mut self) {
         self.set_listener_fault(None);
         self.relay_owner_lookup = None;
@@ -82,6 +120,37 @@ impl ServiceSession<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_abuse_is_reported_on_change_and_at_most_once_a_minute() {
+        let now = Instant::now();
+        let none = relay_service::RelayAbuseCounters::default();
+        let one = relay_service::RelayAbuseCounters {
+            evicted_pairs: 1,
+            ..none
+        };
+        let two = relay_service::RelayAbuseCounters {
+            evicted_pairs: 2,
+            ..none
+        };
+        assert!(!relay_abuse_due(none, None, now));
+        assert!(relay_abuse_due(one, None, now));
+        assert!(!relay_abuse_due(
+            one,
+            Some((now, one)),
+            now + Duration::from_secs(600)
+        ));
+        assert!(!relay_abuse_due(
+            two,
+            Some((now, one)),
+            now + Duration::from_secs(59)
+        ));
+        assert!(relay_abuse_due(
+            two,
+            Some((now, one)),
+            now + Duration::from_secs(60)
+        ));
+    }
 
     #[test]
     fn owner_lookup_is_shared_across_retries_and_error_codes_for_five_seconds() {

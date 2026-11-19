@@ -170,6 +170,20 @@ impl fmt::Debug for WatchSession {
         formatter.write_str("WatchSession(owned_service_only)")
     }
 }
+
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
+fn relaunch_failure(
+    state: &mut crate::watch_session::WatchMachine,
+    error: ProbeSupervisorError,
+    now: std::time::Instant,
+) -> crate::watch_session::FailureDisposition {
+    if error == ProbeSupervisorError::NoInteractiveSession {
+        state.retry_without_failure(now)
+    } else {
+        state.failed(now)
+    }
+}
+
 #[cfg(any(windows, test))]
 impl crate::peer_runtime::prompt::PromptApply for WatchSession {
     fn apply_prompt(
@@ -245,8 +259,8 @@ impl WatchSession {
                         self.inner.begin_shutdown();
                         return Err(ProbeSupervisorError::CleanupUnconfirmed);
                     }
-                    Err(_) => {
-                        let disposition = self.state.failed(now);
+                    Err(error) => {
+                        let disposition = relaunch_failure(&mut self.state, error, now);
                         if matches!(
                             disposition,
                             crate::watch_session::FailureDisposition::Unavailable
@@ -578,7 +592,7 @@ pub(crate) fn unique_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn public_entry_has_no_launch_or_target_inputs_and_is_never_called() {
@@ -749,6 +763,34 @@ mod tests {
             Err(ProbeSupervisorError::AmbiguousSessions)
         );
     }
+    #[test]
+    fn no_interactive_session_relaunch_refusal_does_not_count_as_a_failure() {
+        let began = Instant::now();
+        let mut state = crate::watch_session::WatchMachine::new(began);
+        let first_retry = began + Duration::from_secs(5);
+        assert_eq!(
+            state.failed(began),
+            crate::watch_session::FailureDisposition::Retry { at: first_retry }
+        );
+
+        let deferred_retry = first_retry + Duration::from_secs(60);
+        assert_eq!(
+            relaunch_failure(
+                &mut state,
+                ProbeSupervisorError::NoInteractiveSession,
+                first_retry,
+            ),
+            crate::watch_session::FailureDisposition::Retry { at: deferred_retry }
+        );
+        assert!(!state.retry_due(deferred_retry - Duration::from_millis(1)));
+        assert!(state.retry_due(deferred_retry));
+        state.relaunched(deferred_retry).unwrap();
+        assert!(matches!(
+            state.drain().as_slice(),
+            [WatchEvent::HelperRestarted { attempt: 1 }]
+        ));
+    }
+
     #[cfg(not(all(windows, target_pointer_width = "64")))]
     #[test]
     fn unsupported_target_never_constructs_a_supervisor() {

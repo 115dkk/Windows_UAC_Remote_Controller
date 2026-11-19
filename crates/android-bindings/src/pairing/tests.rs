@@ -14,7 +14,7 @@ use phone_state_store::{
 use service_protocol::{
     CandidateSubmission, EnrollmentAcceptanceFields, FrozenCandidateFields,
     MAX_FROZEN_CANDIDATE_BYTES, PairingConfirmation, PairingInvitation, PairingInvitationFields,
-    UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate, candidate_digest,
+    PairingReveal, UnsignedEnrollmentAcceptance, UnsignedFrozenCandidate, candidate_digest,
     plaintext_submission_length,
 };
 use std::{
@@ -603,8 +603,10 @@ fn frozen_fields(created: &CreatedPairingKeys) -> FrozenCandidateFields {
             pc_signing_key: acceptance.pc_signing_key,
             pc_transport_key: acceptance.pc_transport_key,
             invitation_context: InvitationContextDigest::from_bytes([71; 32]),
+            sas_commitment: created.sas_commitment().unwrap(),
         },
         intended_registry_revision: acceptance.registry_revision,
+        pc_random: [13; 32],
     }
 }
 fn signed_frozen(fields: FrozenCandidateFields, signer: u8) -> Vec<u8> {
@@ -651,12 +653,17 @@ impl SocketClock for CeremonyPcClock {
 enum CeremonyPcMode {
     Complete,
     WrongFrozenContext,
+    WrongCommitment,
     EofBeforeCandidate,
     WaitAtCompare,
+    AbandonBeforeReveal,
 }
 
 fn wrong_frozen_mode(mode: CeremonyPcMode) -> bool {
-    matches!(mode, CeremonyPcMode::WrongFrozenContext)
+    matches!(
+        mode,
+        CeremonyPcMode::WrongFrozenContext | CeremonyPcMode::WrongCommitment
+    )
 }
 
 struct CeremonyPcResult {
@@ -814,37 +821,32 @@ fn start_ceremony_pc(
                 pc_signing_key: invitation_fields.pc_signing_key.clone(),
                 pc_transport_key: invitation_fields.pc_transport_key.clone(),
                 invitation_context: submission_fields.invitation_context,
+                sas_commitment: submission_fields.sas_commitment,
             };
             let original_context = context.clone();
-            if wrong_frozen_mode(mode) {
+            if matches!(mode, CeremonyPcMode::WrongCommitment) {
+                context.sas_commitment[0] ^= 1;
+            } else if wrong_frozen_mode(mode) {
                 context.recipient_device = DeviceId::from_bytes([99; 16]).unwrap();
             }
             let frozen_fields = FrozenCandidateFields {
                 context,
                 intended_registry_revision: 1,
+                pc_random: [13; 32],
             };
             let frozen_wire = signed_frozen(frozen_fields.clone(), 20);
-            let expected_code = if wrong_frozen_mode(mode) {
-                None
-            } else {
-                Some(
-                    SignedFrozenCandidate::from_wire(&frozen_wire)
-                        .unwrap()
-                        .verify(&invitation_fields.pc_signing_key)
-                        .unwrap()
-                        .match_original(&original_context)
-                        .unwrap()
-                        .comparison_code()
-                        .as_str()
-                        .to_owned(),
-                )
-            };
+            let expected_code: Option<String> = None;
             // Application frames are accepted only after the TLS handshake.
             loop {
                 match driver.next_event().await {
                     Ok(framed_transport::SocketEvent::Ready) => break,
                     Ok(_) => continue,
-                    Err(_) if matches!(mode, CeremonyPcMode::WrongFrozenContext) => {
+                    Err(_)
+                        if matches!(
+                            mode,
+                            CeremonyPcMode::WrongFrozenContext | CeremonyPcMode::WrongCommitment
+                        ) =>
+                    {
                         return CeremonyPcResult {
                             comparison_code: expected_code.clone(),
                             submission,
@@ -861,7 +863,12 @@ fn start_ceremony_pc(
                 match driver.next_event().await {
                     Ok(framed_transport::SocketEvent::OutboundDrained) => break,
                     Ok(_) => continue,
-                    Err(_) if matches!(mode, CeremonyPcMode::WrongFrozenContext) => {
+                    Err(_)
+                        if matches!(
+                            mode,
+                            CeremonyPcMode::WrongFrozenContext | CeremonyPcMode::WrongCommitment
+                        ) =>
+                    {
                         return CeremonyPcResult {
                             comparison_code: expected_code.clone(),
                             submission,
@@ -871,7 +878,7 @@ fn start_ceremony_pc(
                     Err(error) => panic!("candidate send failed: {error}"),
                 }
             }
-            if wrong_frozen_mode(mode) {
+            if wrong_frozen_mode(mode) || matches!(mode, CeremonyPcMode::AbandonBeforeReveal) {
                 loop {
                     match driver.next_event().await {
                         Ok(framed_transport::SocketEvent::PeerClosed)
@@ -890,6 +897,28 @@ fn start_ceremony_pc(
                     }
                 }
             }
+            let reveal = PairingReveal::from_wire(&next_ceremony_frame(&mut driver).await).unwrap();
+            assert_eq!(
+                reveal.fields().ceremony_nonce,
+                invitation_fields.ceremony_nonce
+            );
+            assert_eq!(reveal.fields().phone_keys, submission.phone_keys());
+            assert_eq!(
+                reveal.fields().candidate_digest,
+                candidate_digest(&frozen_wire)
+            );
+            let expected_code = Some(
+                SignedFrozenCandidate::from_wire(&frozen_wire)
+                    .unwrap()
+                    .verify(&invitation_fields.pc_signing_key)
+                    .unwrap()
+                    .match_original(&original_context)
+                    .unwrap()
+                    .comparison_code(&reveal.fields().phone_reveal)
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            );
             if matches!(mode, CeremonyPcMode::WaitAtCompare) {
                 compare_ready.wait();
                 loop {
@@ -943,10 +972,24 @@ fn start_ceremony_pc(
             driver
                 .queue_frame(service_protocol::encode_frame(&acceptance).unwrap())
                 .unwrap();
-            while !matches!(
-                driver.next_event().await,
-                Ok(framed_transport::SocketEvent::OutboundDrained)
-            ) {}
+            loop {
+                match driver.next_event().await {
+                    Ok(framed_transport::SocketEvent::OutboundDrained) => break,
+                    Ok(_) => (),
+                    Err(error) => panic!("acceptance send failed: {error}"),
+                }
+            }
+            driver.begin_close().unwrap();
+            loop {
+                match driver.next_event().await {
+                    Ok(
+                        framed_transport::SocketEvent::LocallyClosed
+                        | framed_transport::SocketEvent::PeerClosed,
+                    ) => break,
+                    Ok(_) => (),
+                    Err(_) => break,
+                }
+            }
             CeremonyPcResult {
                 comparison_code: expected_code,
                 submission,
@@ -1086,7 +1129,11 @@ fn wait_for_ceremony_phase(
 fn wait_for_ceremony_settled(ceremony: &NativePairingCeremony) -> NativeCeremonyStatus {
     let limit = Instant::now() + Duration::from_secs(5);
     while !ceremony.is_settled() {
-        assert!(Instant::now() < limit, "ceremony settlement wait timed out");
+        assert!(
+            Instant::now() < limit,
+            "ceremony settlement wait timed out in {:?}",
+            ceremony.status().phase
+        );
         thread::yield_now();
     }
     ceremony.status()
@@ -1182,7 +1229,7 @@ fn pairing_ready_impostor_falls_back_before_signing_and_signer_failure_never_ret
             Some(start_ceremony_pc(
                 alternate,
                 invitation.clone(),
-                CeremonyPcMode::WaitAtCompare,
+                CeremonyPcMode::AbandonBeforeReveal,
                 Arc::new(Barrier::new(1)),
             ))
         };
@@ -1281,6 +1328,15 @@ fn ceremony_consumes_a_read_scan_exactly_once() {
 
 #[test]
 fn ceremony_wrong_frozen_context_fails_without_committing() {
+    wrong_frozen_ceremony(CeremonyPcMode::WrongFrozenContext);
+}
+
+#[test]
+fn ceremony_wrong_commitment_fails_before_reveal_or_comparison() {
+    wrong_frozen_ceremony(CeremonyPcMode::WrongCommitment);
+}
+
+fn wrong_frozen_ceremony(mode: CeremonyPcMode) {
     let _serial = crate::tests::SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1291,7 +1347,7 @@ fn ceremony_wrong_frozen_context_fails_without_committing() {
     let pc = start_ceremony_pc(
         listener,
         invitation.clone(),
-        CeremonyPcMode::WrongFrozenContext,
+        mode,
         Arc::new(Barrier::new(1)),
     );
     let scan = fixture.controller.begin_pairing_scan().unwrap();
@@ -1303,6 +1359,7 @@ fn ceremony_wrong_frozen_context_fails_without_committing() {
     let terminal = wait_for_ceremony_settled(&ceremony);
     assert_eq!(terminal.phase, NativeCeremonyPhase::Failed);
     assert_eq!(terminal.failure, Some(NativeCeremonyFailure::Mismatch));
+    assert!(terminal.comparison_code.is_none());
     assert!(fixture.checkpoint().peer_associations().is_empty());
     assert_eq!(
         fixture.platform.transport_releases.load(Ordering::Acquire),
@@ -1310,6 +1367,7 @@ fn ceremony_wrong_frozen_context_fails_without_committing() {
     );
     let result = pc.join().unwrap();
     assert!(result.confirmation.is_none());
+    assert!(result.comparison_code.is_none());
 }
 
 #[test]
@@ -1494,6 +1552,8 @@ fn a_refused_dial_after_a_failure_backs_off_without_redialing() {
                 failures: 1,
                 candidate_cursor: 0,
                 retry_at: None,
+                hint_backoff_shortened: false,
+                prioritized_hint: None,
                 failure: None,
             },
         );
@@ -2121,9 +2181,11 @@ enum ContextMismatch {
     SigningPin,
     TransportPin,
     BothPins,
+    Commitment,
 }
 fn change_context(context: &mut FrozenCandidateContext, mismatch: ContextMismatch) -> u8 {
     match mismatch {
+        ContextMismatch::Commitment => context.sas_commitment[0] ^= 1,
         ContextMismatch::Invitation => {
             context.invitation_context = InvitationContextDigest::from_bytes([99; 32]);
         }
@@ -2204,6 +2266,7 @@ fn frozen_signature_never_supplies_its_own_original_context_or_role_tuple() {
         ContextMismatch::SigningPin,
         ContextMismatch::TransportPin,
         ContextMismatch::BothPins,
+        ContextMismatch::Commitment,
     ] {
         let f = Fixture::new();
         let created = f.controller.create_pairing_keys(f.intent()).unwrap();
@@ -2637,7 +2700,8 @@ fn original_nondefault_context_and_pc_selected_revision_are_retained_without_rea
         .unwrap()
         .match_original(&fields.context)
         .unwrap()
-        .comparison_code();
+        .comparison_code(&created.phone_reveal)
+        .unwrap();
     let before = f.bytes();
     let frozen = f.controller.match_frozen_candidate(created, &wire).unwrap();
     assert_eq!(frozen.comparison_code().unwrap(), expected_code);

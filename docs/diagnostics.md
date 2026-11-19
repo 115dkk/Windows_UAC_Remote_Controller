@@ -27,6 +27,14 @@ Explorer or relaunch the app without administrator elevation.
   A local-network announcement that Windows refused is recorded once per
   address and error code as `lan_announce_failed` with the Windows error code
   ([ADR0043](adr/0043-lan-rediscovery-by-dns-sd.md)).
+  After startup, an activity record or an hourly purge that the journal refused
+  is recorded as `journal_append_failed` or `journal_purge_failed` with the
+  fault name, at most once a minute per fault, and the service keeps running
+  ([ADR0052](adr/0052-one-peer-or-one-ceremony-does-not-stop-the-service.md)).
+  The embedded relay's cumulative counts of evicted pairs and refused
+  registrations are recorded as `relay_abuse` when a count has moved, at most
+  once a minute, without any address or route
+  ([ADR0054](adr/0054-the-embedded-relay-limits-what-a-known-route-can-do.md)).
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.
