@@ -3,10 +3,14 @@
 use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
-use crate::{CancellationToken, RelayLimits};
+use crate::{
+    CancellationToken, PcRoleSource, RelayAbuseCounters, RelayLimits, RelayPolicy,
+    relay::{RelayAbuseCounterStore, run_with_policy_and_counters},
+};
 
 pub const EMBEDDED_RELAY_PORT: u16 = 7443;
 
@@ -16,6 +20,7 @@ pub struct HostedRelay {
     stop: CancellationToken,
     worker: Option<JoinHandle<()>>,
     supports_ipv6: bool,
+    abuse: Arc<RelayAbuseCounterStore>,
 }
 
 impl HostedRelay {
@@ -68,6 +73,11 @@ impl HostedRelay {
         self.supports_ipv6
     }
 
+    /// Read live aggregate abuse counters without stopping or locking the relay.
+    pub fn abuse_counters(&self) -> RelayAbuseCounters {
+        self.abuse.snapshot()
+    }
+
     fn from_listener(listener: TcpListener, supports_ipv6: bool) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -81,15 +91,24 @@ impl HostedRelay {
         };
         let stop = CancellationToken::new();
         let worker_stop = stop.clone();
+        let abuse = Arc::new(RelayAbuseCounterStore::default());
+        let worker_abuse = Arc::clone(&abuse);
         let worker = thread::Builder::new()
             .name("embedded-relay".into())
             .spawn(move || {
-                let _ = runtime.block_on(crate::run(listener, RelayLimits::default(), worker_stop));
+                let _ = runtime.block_on(run_with_policy_and_counters(
+                    listener,
+                    RelayLimits::default(),
+                    RelayPolicy::new(PcRoleSource::LoopbackOnly),
+                    worker_stop,
+                    worker_abuse,
+                ));
             })?;
         Ok(Self {
             stop,
             worker: Some(worker),
             supports_ipv6,
+            abuse,
         })
     }
 
@@ -198,6 +217,30 @@ mod tests {
         drop(reserved);
         let _host = HostedRelay::start_embedded(port).unwrap();
         assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err());
+    }
+
+    #[test]
+    fn abuse_counters_reads_all_shared_atomic_indicators() {
+        let abuse = Arc::new(RelayAbuseCounterStore::default());
+        abuse.count_evicted_pair();
+        abuse.count_rejected_duplicate();
+        abuse.count_rejected_pc_source();
+        abuse.count_rejected_eviction();
+        let host = HostedRelay {
+            stop: CancellationToken::new(),
+            worker: None,
+            supports_ipv6: false,
+            abuse,
+        };
+        assert_eq!(
+            host.abuse_counters(),
+            RelayAbuseCounters {
+                evicted_pairs: 1,
+                rejected_duplicates: 1,
+                rejected_pc_sources: 1,
+                rejected_evictions: 1,
+            }
+        );
     }
 
     #[test]

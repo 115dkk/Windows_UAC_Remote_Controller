@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -11,9 +20,11 @@ use tokio::{
 };
 
 use crate::{
-    ACCEPT_BACKOFF, COPY_BUFFER_BYTES, CancellationToken, HEADER_BYTES,
-    MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES, READY_MARKER, Registration, RelayError,
-    RelayLimits, RelayReport, RouteId,
+    ACCEPT_BACKOFF, COPY_BUFFER_BYTES, CancellationToken, EVICTION_COOLDOWN_INITIAL,
+    EVICTION_COOLDOWN_MAX, EVICTION_RECORDS_PER_WAITING_ROOM, HEADER_BYTES,
+    MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES, PcRoleSource, READY_MARKER, Registration,
+    RelayAbuseCounters, RelayError, RelayLimits, RelayPolicy, RelayReport, Role, RouteId,
+    SHORT_LIVED,
 };
 
 struct Peer {
@@ -29,6 +40,7 @@ struct Peer {
 struct Register {
     id: u64,
     registration: Registration,
+    source: SocketAddr,
     deadline: Instant,
     assignment: oneshot::Sender<Assignment>,
 }
@@ -93,6 +105,298 @@ struct HeldPeers {
     second: Option<Peer>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct RelayAbuseCounterStore {
+    evicted_pairs: AtomicU64,
+    rejected_duplicates: AtomicU64,
+    rejected_pc_sources: AtomicU64,
+    rejected_evictions: AtomicU64,
+}
+
+impl RelayAbuseCounterStore {
+    pub(crate) fn snapshot(&self) -> RelayAbuseCounters {
+        RelayAbuseCounters {
+            evicted_pairs: self.evicted_pairs.load(Ordering::Relaxed),
+            rejected_duplicates: self.rejected_duplicates.load(Ordering::Relaxed),
+            rejected_pc_sources: self.rejected_pc_sources.load(Ordering::Relaxed),
+            rejected_evictions: self.rejected_evictions.load(Ordering::Relaxed),
+        }
+    }
+
+    fn increment(counter: &AtomicU64) {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+    }
+
+    pub(crate) fn count_evicted_pair(&self) {
+        Self::increment(&self.evicted_pairs);
+    }
+
+    pub(crate) fn count_rejected_duplicate(&self) {
+        Self::increment(&self.rejected_duplicates);
+    }
+
+    pub(crate) fn count_rejected_pc_source(&self) {
+        Self::increment(&self.rejected_pc_sources);
+    }
+
+    pub(crate) fn count_rejected_eviction(&self) {
+        Self::increment(&self.rejected_evictions);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvictionStage {
+    Idle,
+    WaitingEvictor {
+        id: u64,
+    },
+    ActivePair {
+        leader: u64,
+        paired_at: Instant,
+        strike_if_short: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EvictionRecord {
+    strikes: u8,
+    cooldown_until: Option<Instant>,
+    stage: EvictionStage,
+    touched_at: Instant,
+}
+
+struct EvictionTracker {
+    records: BTreeMap<RouteId, EvictionRecord>,
+    capacity: usize,
+}
+
+impl EvictionTracker {
+    fn new(limits: RelayLimits) -> Self {
+        Self {
+            records: BTreeMap::new(),
+            capacity: limits
+                .waiting_rooms
+                .saturating_mul(EVICTION_RECORDS_PER_WAITING_ROOM)
+                .max(1),
+        }
+    }
+
+    fn purge_untracked_idle_records(&mut self) {
+        self.records
+            .retain(|_, record| record.stage != EvictionStage::Idle || record.strikes > 0);
+    }
+
+    fn ensure_room(&mut self, route: RouteId) {
+        if self.records.contains_key(&route) {
+            return;
+        }
+        self.purge_untracked_idle_records();
+        if self.records.len() < self.capacity {
+            return;
+        }
+        let oldest_idle = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.stage == EvictionStage::Idle)
+            .min_by_key(|(_, record)| record.touched_at)
+            .map(|(route, _)| *route);
+        let oldest = oldest_idle.or_else(|| {
+            self.records
+                .iter()
+                .min_by_key(|(_, record)| record.touched_at)
+                .map(|(route, _)| *route)
+        });
+        if let Some(oldest) = oldest {
+            self.records.remove(&oldest);
+        }
+    }
+
+    fn start_evictor(&mut self, route: RouteId, id: u64, now: Instant) {
+        self.ensure_room(route);
+        let record = self.records.entry(route).or_insert(EvictionRecord {
+            strikes: 0,
+            cooldown_until: None,
+            stage: EvictionStage::Idle,
+            touched_at: now,
+        });
+        record.stage = EvictionStage::WaitingEvictor { id };
+        record.touched_at = now;
+    }
+
+    fn pair_formed(&mut self, route: RouteId, leader: u64, follower: u64, paired_at: Instant) {
+        let Some(record) = self.records.get_mut(&route) else {
+            return;
+        };
+        let strike_if_short = matches!(
+            record.stage,
+            EvictionStage::WaitingEvictor { id } if id == leader || id == follower
+        );
+        record.stage = EvictionStage::ActivePair {
+            leader,
+            paired_at,
+            strike_if_short,
+        };
+        record.touched_at = paired_at;
+    }
+
+    fn waiting_evictor_ended(&mut self, route: RouteId, id: u64, now: Instant) {
+        let matches = matches!(
+            self.records.get(&route).map(|record| record.stage),
+            Some(EvictionStage::WaitingEvictor { id: pending }) if pending == id
+        );
+        if matches {
+            self.strike(route, now);
+        }
+    }
+
+    fn account_pair_before_eviction(&mut self, route: RouteId, leader: u64, now: Instant) {
+        let survived = matches!(
+            self.records.get(&route).map(|record| record.stage),
+            Some(EvictionStage::ActivePair {
+                leader: recorded,
+                paired_at,
+                ..
+            }) if recorded == leader && now > paired_at + SHORT_LIVED
+        );
+        if survived {
+            self.records.remove(&route);
+            return;
+        }
+
+        let Some(record) = self.records.get_mut(&route) else {
+            return;
+        };
+        let EvictionStage::ActivePair {
+            leader: recorded,
+            strike_if_short,
+            ..
+        } = &mut record.stage
+        else {
+            return;
+        };
+        if *recorded != leader || !*strike_if_short {
+            return;
+        }
+
+        // The attempted replacement is charged against this still-live pair.
+        // Clear the marker before applying the strike so this generation's
+        // eventual completion cannot charge the same short lifetime twice.
+        *strike_if_short = false;
+        record.touched_at = now;
+        Self::apply_strike(record, now);
+    }
+
+    fn pair_ended(&mut self, route: RouteId, leader: u64, now: Instant) {
+        let Some(mut record) = self.records.remove(&route) else {
+            return;
+        };
+        let EvictionStage::ActivePair {
+            leader: recorded,
+            paired_at,
+            strike_if_short,
+        } = record.stage
+        else {
+            self.records.insert(route, record);
+            return;
+        };
+        if recorded != leader {
+            self.records.insert(route, record);
+            return;
+        }
+        if now > paired_at + SHORT_LIVED {
+            return;
+        }
+        record.stage = EvictionStage::Idle;
+        record.touched_at = now;
+        if strike_if_short {
+            Self::apply_strike(&mut record, now);
+        }
+        if record.strikes > 0 {
+            self.records.insert(route, record);
+        }
+    }
+
+    fn strike(&mut self, route: RouteId, now: Instant) {
+        let Some(record) = self.records.get_mut(&route) else {
+            return;
+        };
+        record.stage = EvictionStage::Idle;
+        record.touched_at = now;
+        Self::apply_strike(record, now);
+    }
+
+    fn apply_strike(record: &mut EvictionRecord, now: Instant) {
+        record.strikes = record.strikes.saturating_add(1).min(6);
+        let cooldown = cooldown_for_strikes(record.strikes);
+        record.cooldown_until = (!cooldown.is_zero()).then(|| now + cooldown);
+    }
+
+    fn is_cooling_down(&mut self, route: RouteId, now: Instant) -> bool {
+        let cooling = self
+            .records
+            .get(&route)
+            .and_then(|record| record.cooldown_until)
+            .is_some_and(|until| now < until);
+        if !cooling
+            && matches!(
+                self.records.get(&route),
+                Some(record) if record.stage == EvictionStage::Idle && record.strikes == 0
+            )
+        {
+            self.records.remove(&route);
+        }
+        cooling
+    }
+}
+
+fn cooldown_for_strikes(strikes: u8) -> Duration {
+    if strikes < 2 {
+        return Duration::ZERO;
+    }
+    let multiplier = 1_u32 << u32::from(strikes.saturating_sub(2).min(4));
+    EVICTION_COOLDOWN_INITIAL
+        .saturating_mul(multiplier)
+        .min(EVICTION_COOLDOWN_MAX)
+}
+
+struct AdmissionState {
+    policy: RelayPolicy,
+    evictions: EvictionTracker,
+    abuse: Arc<RelayAbuseCounterStore>,
+}
+
+impl AdmissionState {
+    fn new(limits: RelayLimits, policy: RelayPolicy, abuse: Arc<RelayAbuseCounterStore>) -> Self {
+        Self {
+            policy,
+            evictions: EvictionTracker::new(limits),
+            abuse,
+        }
+    }
+
+    fn count_eviction(&self, report: &mut RelayReport) {
+        report.evicted_pairs = report.evicted_pairs.saturating_add(1);
+        self.abuse.count_evicted_pair();
+    }
+
+    fn count_duplicate(&self, report: &mut RelayReport) {
+        report.rejected_duplicates = report.rejected_duplicates.saturating_add(1);
+        self.abuse.count_rejected_duplicate();
+    }
+
+    fn count_pc_source_rejection(&self, report: &mut RelayReport) {
+        report.rejected_pc_sources = report.rejected_pc_sources.saturating_add(1);
+        self.abuse.count_rejected_pc_source();
+    }
+
+    fn count_eviction_rejection(&self, report: &mut RelayReport) {
+        report.rejected_evictions = report.rejected_evictions.saturating_add(1);
+        self.abuse.count_rejected_eviction();
+    }
+}
+
 /// Run the byte rendezvous service on an already-bound caller-owned listener.
 ///
 /// No authentication or application decryption occurs. The caller chooses the
@@ -107,13 +411,41 @@ pub fn run(
     limits: RelayLimits,
     cancellation: CancellationToken,
 ) -> impl Future<Output = Result<RelayReport, RelayError>> + Send {
-    run_loop(listener, limits, cancellation)
+    run_with_policy(listener, limits, RelayPolicy::default(), cancellation)
+}
+
+/// Run with an explicit source-admission policy; the wire contract is unchanged.
+pub fn run_with_policy(
+    listener: TcpListener,
+    limits: RelayLimits,
+    policy: RelayPolicy,
+    cancellation: CancellationToken,
+) -> impl Future<Output = Result<RelayReport, RelayError>> + Send {
+    run_with_policy_and_counters(
+        listener,
+        limits,
+        policy,
+        cancellation,
+        Arc::new(RelayAbuseCounterStore::default()),
+    )
+}
+
+pub(crate) fn run_with_policy_and_counters(
+    listener: TcpListener,
+    limits: RelayLimits,
+    policy: RelayPolicy,
+    cancellation: CancellationToken,
+    abuse: Arc<RelayAbuseCounterStore>,
+) -> impl Future<Output = Result<RelayReport, RelayError>> + Send {
+    run_loop(listener, limits, policy, cancellation, abuse)
 }
 
 async fn run_loop(
     listener: TcpListener,
     limits: RelayLimits,
+    policy: RelayPolicy,
     cancellation: CancellationToken,
+    abuse: Arc<RelayAbuseCounterStore>,
 ) -> Result<RelayReport, RelayError> {
     let cancellation = cancellation.child_token();
     let _cancel_on_drop = cancellation.clone().drop_guard();
@@ -122,6 +454,7 @@ async fn run_loop(
     let mut tasks = JoinSet::new();
     let mut routes = BTreeMap::new();
     let mut report = RelayReport::default();
+    let mut admission = AdmissionState::new(limits, policy, abuse);
     let mut next_id = 0_u64;
     // Cleared by one accepted connection, so only an unbroken run of refusals
     // counts. `accept_backoff` disables the accept branch instead of awaiting
@@ -136,7 +469,9 @@ async fn run_loop(
             result = tasks.join_next(), if !tasks.is_empty() => {
                 match result {
                     Some(Ok(exit)) => {
-                        if let Err(error) = finish_task(exit, &mut routes, &mut report) {
+                        if let Err(error) =
+                            finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
+                        {
                             break Some(error);
                         }
                     }
@@ -160,11 +495,17 @@ async fn run_loop(
             }
             registration = receiver.recv() => {
                 if let Some(registration) = registration {
-                    register(registration, &mut routes, &mut report, limits);
+                    register_with_admission(
+                        registration,
+                        &mut routes,
+                        &mut report,
+                        limits,
+                        &mut admission,
+                    );
                 }
             }
             accepted = listener.accept(), if accept_backoff.is_none() => {
-                let (socket, _) = match accepted {
+                let (socket, source) = match accepted {
                     Ok(accepted) => {
                         accept_faults = 0;
                         accepted
@@ -209,8 +550,19 @@ async fn run_loop(
                     drop(permit);
                     continue;
                 }
-                tasks.spawn(connection(id, Peer { socket, early_byte: None, _permit: permit }, Instant::now(),
-                    mailbox.clone(), limits, cancellation.clone()));
+                tasks.spawn(connection(
+                    id,
+                    Peer {
+                        socket,
+                        early_byte: None,
+                        _permit: permit,
+                    },
+                    source,
+                    Instant::now(),
+                    mailbox.clone(),
+                    limits,
+                    cancellation.clone(),
+                ));
             }
             // Last, so a backoff that is already due still yields to
             // cancellation, retirement and registration first.
@@ -232,7 +584,9 @@ async fn run_loop(
     while !tasks.is_empty() {
         match timeout_at(graceful_deadline, tasks.join_next()).await {
             Ok(Some(Ok(exit))) => {
-                if let Err(error) = finish_task(exit, &mut routes, &mut report) {
+                if let Err(error) =
+                    finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
+                {
                     failure = Some(error);
                 }
             }
@@ -247,7 +601,9 @@ async fn run_loop(
     while !tasks.is_empty() {
         match timeout_at(final_deadline, tasks.join_next()).await {
             Ok(Some(Ok(exit))) => {
-                if let Err(error) = finish_task(exit, &mut routes, &mut report) {
+                if let Err(error) =
+                    finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
+                {
                     failure = Some(error);
                 }
             }
@@ -280,48 +636,98 @@ fn accept_setback(consecutive: u32, now: Instant) -> Result<Instant, RelayError>
     Ok(now + ACCEPT_BACKOFF)
 }
 
-fn register(
+fn pc_source_is_allowed(
+    policy: PcRoleSource,
+    registration: Registration,
+    source: SocketAddr,
+) -> bool {
+    registration.role() != Role::Pc || policy == PcRoleSource::Any || is_loopback_source(source)
+}
+
+fn is_loopback_source(source: SocketAddr) -> bool {
+    match source.ip() {
+        IpAddr::V4(address) => address.is_loopback(),
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
+    }
+}
+
+fn register_with_admission(
     incoming: Register,
     routes: &mut BTreeMap<RouteId, RouteState>,
     report: &mut RelayReport,
     limits: RelayLimits,
+    admission: &mut AdmissionState,
 ) {
     let now = Instant::now();
+    if !pc_source_is_allowed(
+        admission.policy.pc_role_source(),
+        incoming.registration,
+        incoming.source,
+    ) {
+        admission.count_pc_source_rejection(report);
+        let _ = incoming.assignment.send(Assignment::Reject);
+        return;
+    }
+
     // Only stale waiting assignments are removed here. A live duplicate never
     // overwrites or kicks a participant that is still waiting in its role.
-    routes.retain(|_, state| {
-        !matches!(state, RouteState::Waiting(waiter)
-        if waiter.deadline <= now || waiter.assignment.is_closed())
-    });
+    let stale_waiters: Vec<_> = routes
+        .iter()
+        .filter_map(|(route, state)| match state {
+            RouteState::Waiting(waiter)
+                if waiter.deadline <= now || waiter.assignment.is_closed() =>
+            {
+                Some((*route, waiter.id))
+            }
+            _ => None,
+        })
+        .collect();
+    for (route, id) in stale_waiters {
+        routes.remove(&route);
+        admission.evictions.waiting_evictor_ended(route, id, now);
+    }
     if incoming.deadline <= now || incoming.assignment.is_closed() {
         return;
     }
     let route = incoming.registration.route();
     match routes.get(&route) {
-        Some(RouteState::Active { .. }) => {
-            // A fresh registration on an active route evicts that pair and
-            // waits in its place. An endpoint dials only after it has retired
-            // its previous socket (network change, restart), so its fresh
-            // registration means the old pair is dead from that side even when
-            // the FIN never arrived; otherwise a dropped Wi-Fi path locks the
-            // phone out until the inactivity timeout. The route is a public
-            // routing name, not authentication (ADR 0020): a party that knows it
-            // could already occupy the idle route or drop the path, and every
-            // pair still has to pass the endpoints' pinned TLS. Eviction adds
-            // denial of service only. Admission is checked first: a
-            // registration that cannot wait here leaves the pair alone.
+        Some(RouteState::Active { leader, .. }) => {
+            let leader = *leader;
+            // A fresh registration still replaces a silent pair immediately so
+            // an endpoint that changed networks is not held until inactivity.
+            // Source and room admission happen first. Before eviction, charge a
+            // still-short-lived pair formed by the previous evictor. The first
+            // consecutive strike has no cooldown; the second starts at thirty
+            // seconds, then doubles to five minutes. A cooldown rejection leaves
+            // the active pair alone, and its later completion cannot charge it
+            // twice. A pair that survives ten seconds clears the history.
+            // Endpoint identity remains the pinned inner TLS peer.
             if waiting_rooms(routes) >= limits.waiting_rooms {
                 report.rejected_waiting_rooms = report.rejected_waiting_rooms.saturating_add(1);
                 let _ = incoming.assignment.send(Assignment::Reject);
                 return;
             }
+            admission
+                .evictions
+                .account_pair_before_eviction(route, leader, now);
+            if admission.evictions.is_cooling_down(route, now) {
+                admission.count_eviction_rejection(report);
+                let _ = incoming.assignment.send(Assignment::Reject);
+                return;
+            }
             evict(route, routes);
-            report.evicted_pairs = report.evicted_pairs.saturating_add(1);
+            admission.count_eviction(report);
+            admission.evictions.start_evictor(route, incoming.id, now);
         }
         Some(RouteState::Waiting(waiter))
             if waiter.registration.role() == incoming.registration.role() =>
         {
-            report.rejected_duplicates = report.rejected_duplicates.saturating_add(1);
+            admission.count_duplicate(report);
             let _ = incoming.assignment.send(Assignment::Reject);
             return;
         }
@@ -330,6 +736,7 @@ fn register(
     if let Some(RouteState::Waiting(waiter)) = routes.remove(&route) {
         let (handoff, counterpart) = oneshot::channel();
         let leader = waiter.id;
+        let follower = incoming.id;
         let eviction = CancellationToken::new();
         if waiter
             .assignment
@@ -344,7 +751,7 @@ fn register(
                 route,
                 RouteState::Active {
                     leader,
-                    follower: incoming.id,
+                    follower,
                     retired_follower: None,
                     eviction: eviction.clone(),
                 },
@@ -358,12 +765,22 @@ fn register(
                 })
                 .is_ok()
             {
+                admission
+                    .evictions
+                    .pair_formed(route, leader, follower, now);
                 report.paired = report.paired.saturating_add(1);
+            } else {
+                admission
+                    .evictions
+                    .waiting_evictor_ended(route, follower, now);
             }
             // A failed follower assignment drops the one-shot sender. The
             // leader then closes under its bounded rendezvous deadline.
             return;
         }
+        admission
+            .evictions
+            .waiting_evictor_ended(route, leader, now);
         // The previous waiter has actually gone away; retain the new arrival as
         // an ordinary waiter instead of pairing it with an abandoned socket.
     }
@@ -408,6 +825,7 @@ fn evict(route: RouteId, routes: &mut BTreeMap<RouteId, RouteState>) {
 async fn connection(
     id: u64,
     peer: Peer,
+    source: SocketAddr,
     accepted_at: Instant,
     mailbox: mpsc::Sender<Register>,
     limits: RelayLimits,
@@ -417,8 +835,16 @@ async fn connection(
         first: Some(peer),
         second: None,
     };
-    let (route, reason) =
-        connection_work(id, &mut retired, accepted_at, mailbox, limits, cancellation).await;
+    let (route, reason) = connection_work(
+        id,
+        &mut retired,
+        source,
+        accepted_at,
+        mailbox,
+        limits,
+        cancellation,
+    )
+    .await;
     TaskExit {
         id,
         route,
@@ -430,6 +856,7 @@ async fn connection(
 async fn connection_work(
     id: u64,
     held: &mut HeldPeers,
+    source: SocketAddr,
     accepted_at: Instant,
     mailbox: mpsc::Sender<Register>,
     limits: RelayLimits,
@@ -459,6 +886,7 @@ async fn connection_work(
     let registration = Register {
         id,
         registration,
+        source,
         deadline,
         assignment,
     };
@@ -713,12 +1141,17 @@ fn ended(route: Option<RouteId>, reason: EndReason) -> (Option<RouteId>, EndReas
     (route, reason)
 }
 
-fn finish_task(
+fn finish_task_with_admission(
     mut exit: TaskExit,
     routes: &mut BTreeMap<RouteId, RouteState>,
     report: &mut RelayReport,
+    admission: &mut AdmissionState,
 ) -> Result<(), RelayError> {
     if let Some(route) = exit.route {
+        let now = Instant::now();
+        admission
+            .evictions
+            .waiting_evictor_ended(route, exit.id, now);
         // Every task of an evicted generation lands in the last arm: the route
         // now holds nothing, or a replacement whose connection identifiers are
         // all different from its own, because identifiers are never reused.
@@ -765,10 +1198,14 @@ fn finish_task(
             report.task_failures = report.task_failures.saturating_add(1);
             return Err(RelayError::TaskFailed);
         }
-        let owns_route = matches!(routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == exit.id)
-            || matches!(routes.get(&route), Some(RouteState::Active { leader, .. }) if *leader == exit.id);
-        if owns_route {
+        let owns_waiting =
+            matches!(routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == exit.id);
+        let owns_active = matches!(routes.get(&route), Some(RouteState::Active { leader, .. }) if *leader == exit.id);
+        if owns_waiting || owns_active {
             routes.remove(&route);
+            if owns_active {
+                admission.evictions.pair_ended(route, exit.id, now);
+            }
         }
     }
     let counter = match exit.reason {
@@ -794,9 +1231,42 @@ fn finish_task(
 }
 
 #[cfg(test)]
+fn register(
+    incoming: Register,
+    routes: &mut BTreeMap<RouteId, RouteState>,
+    report: &mut RelayReport,
+    limits: RelayLimits,
+) {
+    let mut admission = AdmissionState::new(
+        limits,
+        RelayPolicy::default(),
+        Arc::new(RelayAbuseCounterStore::default()),
+    );
+    register_with_admission(incoming, routes, report, limits, &mut admission);
+}
+
+#[cfg(test)]
+fn finish_task(
+    exit: TaskExit,
+    routes: &mut BTreeMap<RouteId, RouteState>,
+    report: &mut RelayReport,
+) -> Result<(), RelayError> {
+    let mut admission = AdmissionState::new(
+        RelayLimits::default(),
+        RelayPolicy::default(),
+        Arc::new(RelayAbuseCounterStore::default()),
+    );
+    finish_task_with_admission(exit, routes, report, &mut admission)
+}
+
+#[cfg(test)]
+fn synthetic_source() -> SocketAddr {
+    "127.0.0.1:7443".parse().expect("fixed loopback source")
+}
+
+#[cfg(test)]
 mod assignment_ownership_tests {
     use super::*;
-    use crate::Role;
 
     async fn socket_owner(permits: &Arc<Semaphore>, early_byte: Option<u8>) -> (Peer, TcpStream) {
         // Socket ownership only: the regression never waits for or interprets
@@ -847,6 +1317,7 @@ mod assignment_ownership_tests {
         let work = connection(
             1,
             leader,
+            synthetic_source(),
             Instant::now(),
             mailbox,
             limits,
@@ -911,6 +1382,7 @@ mod assignment_ownership_tests {
                 Register {
                     id: 3,
                     registration: Registration::new(Role::Phone, route),
+                    source: synthetic_source(),
                     deadline: Instant::now() + limits.waiting_timeout,
                     assignment: replacement,
                 },
@@ -1003,6 +1475,7 @@ mod assignment_ownership_tests {
             Register {
                 id: 1,
                 registration: Registration::new(Role::Pc, route),
+                source: synthetic_source(),
                 deadline: Instant::now() + limits.waiting_timeout,
                 assignment: leader_assignment,
             },
@@ -1019,6 +1492,7 @@ mod assignment_ownership_tests {
         let work = connection(
             2,
             follower,
+            synthetic_source(),
             Instant::now(),
             mailbox,
             limits,
@@ -1107,6 +1581,7 @@ mod assignment_ownership_tests {
                 Register {
                     id,
                     registration: Registration::new(role, route),
+                    source: synthetic_source(),
                     deadline: Instant::now() + limits.waiting_timeout,
                     assignment,
                 },
@@ -1325,6 +1800,7 @@ mod assignment_ownership_tests {
             Register {
                 id,
                 registration: Registration::new(role, route),
+                source: synthetic_source(),
                 deadline: Instant::now() + limits.waiting_timeout,
                 assignment,
             },
@@ -1495,6 +1971,7 @@ mod assignment_ownership_tests {
         let work = connection(
             2,
             follower,
+            synthetic_source(),
             Instant::now(),
             mailbox,
             limits,
@@ -1567,6 +2044,842 @@ mod assignment_ownership_tests {
         ));
         assert_eq!(report.rejected_waiting_rooms, 1);
         assert_eq!(report.evicted_pairs, 0);
+    }
+}
+
+#[cfg(test)]
+mod mitigation_tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    fn state(
+        limits: RelayLimits,
+        policy: RelayPolicy,
+    ) -> (AdmissionState, Arc<RelayAbuseCounterStore>) {
+        let abuse = Arc::new(RelayAbuseCounterStore::default());
+        (
+            AdmissionState::new(limits, policy, Arc::clone(&abuse)),
+            abuse,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        id: u64,
+        role: Role,
+        route: RouteId,
+        source: SocketAddr,
+        limits: RelayLimits,
+        routes: &mut BTreeMap<RouteId, RouteState>,
+        report: &mut RelayReport,
+        admission: &mut AdmissionState,
+    ) -> oneshot::Receiver<Assignment> {
+        let (assignment, assigned) = oneshot::channel();
+        register_with_admission(
+            Register {
+                id,
+                registration: Registration::new(role, route),
+                source,
+                deadline: Instant::now() + limits.waiting_timeout,
+                assignment,
+            },
+            routes,
+            report,
+            limits,
+            admission,
+        );
+        assigned
+    }
+
+    fn form_pair(
+        route: RouteId,
+        leader: u64,
+        follower: u64,
+        limits: RelayLimits,
+        routes: &mut BTreeMap<RouteId, RouteState>,
+        report: &mut RelayReport,
+        admission: &mut AdmissionState,
+    ) {
+        let first = admit(
+            leader,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            routes,
+            report,
+            admission,
+        );
+        let second = admit(
+            follower,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            routes,
+            report,
+            admission,
+        );
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Active { .. })
+        ));
+        drop((first, second));
+    }
+
+    fn close_active(
+        route: RouteId,
+        routes: &mut BTreeMap<RouteId, RouteState>,
+        admission: &mut AdmissionState,
+    ) {
+        let Some(RouteState::Active { leader, .. }) = routes.remove(&route) else {
+            panic!("synthetic route was not active");
+        };
+        admission
+            .evictions
+            .pair_ended(route, leader, Instant::now());
+    }
+
+    #[test]
+    fn loopback_source_predicate_handles_native_and_mapped_addresses() {
+        for source in [
+            "127.0.0.1:1",
+            "127.255.255.254:1",
+            "[::1]:1",
+            "[::ffff:127.0.0.1]:1",
+        ] {
+            assert!(is_loopback_source(source.parse().unwrap()), "{source}");
+        }
+        for source in ["192.0.2.1:1", "[::ffff:192.0.2.1]:1", "[2001:db8::1]:1"] {
+            assert!(!is_loopback_source(source.parse().unwrap()), "{source}");
+        }
+        let route = RouteId::new([0x70; 32]).unwrap();
+        assert!(pc_source_is_allowed(
+            PcRoleSource::LoopbackOnly,
+            Registration::new(Role::Phone, route),
+            "192.0.2.1:1".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn refused_remote_pc_neither_evicts_nor_waits() {
+        let limits = RelayLimits::new(8, 4).unwrap();
+        let policy = RelayPolicy::new(PcRoleSource::LoopbackOnly);
+        let (mut admission, abuse) = state(limits, policy);
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x71; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let eviction = match routes.get(&route) {
+            Some(RouteState::Active { eviction, .. }) => eviction.clone(),
+            _ => panic!("synthetic pair missing"),
+        };
+        let mut rejected = admit(
+            3,
+            Role::Pc,
+            route,
+            "192.0.2.1:4000".parse().unwrap(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        assert!(!eviction.is_cancelled());
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Active { .. })
+        ));
+
+        let other = RouteId::new([0x72; 32]).unwrap();
+        let mut rejected = admit(
+            4,
+            Role::Pc,
+            other,
+            "[2001:db8::1]:4000".parse().unwrap(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        assert!(!routes.contains_key(&other));
+        assert_eq!(report.rejected_pc_sources, 2);
+        assert_eq!(report.evicted_pairs, 0);
+        assert_eq!(report.peak_waiting_rooms, 1);
+        assert_eq!(abuse.snapshot().rejected_pc_sources, 2);
+    }
+
+    #[test]
+    fn duplicate_rejection_updates_the_shared_abuse_counter() {
+        let limits = RelayLimits::new(4, 2).unwrap();
+        let (mut admission, abuse) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x73; 32]).unwrap();
+        let _waiting = admit(
+            1,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let mut rejected = admit(
+            2,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        assert_eq!(report.rejected_duplicates, 1);
+        assert_eq!(abuse.snapshot().rejected_duplicates, 1);
+    }
+
+    #[test]
+    fn any_policy_still_admits_a_remote_pc_source() {
+        let limits = RelayLimits::new(2, 1).unwrap();
+        let (mut admission, _) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x73; 32]).unwrap();
+        let _waiting = admit(
+            1,
+            Role::Pc,
+            route,
+            "192.0.2.1:4000".parse().unwrap(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(routes.get(&route), Some(RouteState::Waiting(_))));
+        assert_eq!(report.rejected_pc_sources, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_evictions_of_open_short_lived_pairs_double_cooldown_to_the_cap() {
+        let limits = RelayLimits::new(16, 4).unwrap();
+        let (mut admission, abuse) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x74; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let first_evictor = admit(
+            3,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_counterpart = admit(
+            4,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        // Registration #2 charges strike one before admission, but that first
+        // strike is free and therefore replaces the still-short-lived pair.
+        let second_evictor = admit(
+            5,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Waiting(waiter)) if waiter.id == 5
+        ));
+        let first_strike = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(first_strike.strikes, 1);
+        assert_eq!(first_strike.cooldown_until, None);
+        let second_counterpart = admit(
+            6,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        drop((first_evictor, first_counterpart));
+
+        let cooldowns = [30, 60, 120, 240, 300, 300];
+        let mut active_leader = 5_u64;
+        let mut active_follower = 6_u64;
+        let mut active_assignments = Some((second_evictor, second_counterpart));
+        let mut attack_id = 7_u64;
+        for (index, seconds) in cooldowns.into_iter().enumerate() {
+            // Registration #3 and its later equivalents charge the active pair
+            // before admission. Strike two starts at thirty seconds; subsequent
+            // consecutive strikes double until the five-minute plateau.
+            let mut rejected = admit(
+                attack_id,
+                Role::Phone,
+                route,
+                synthetic_source(),
+                limits,
+                &mut routes,
+                &mut report,
+                &mut admission,
+            );
+            assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+            assert!(matches!(
+                routes.get(&route),
+                Some(RouteState::Active {
+                    leader,
+                    follower,
+                    ..
+                }) if *leader == active_leader && *follower == active_follower
+            ));
+            let record = admission.evictions.records.get(&route).unwrap();
+            assert_eq!(record.strikes, (index as u8 + 2).min(6));
+            assert_eq!(
+                record.cooldown_until.unwrap() - Instant::now(),
+                Duration::from_secs(seconds)
+            );
+            assert!(matches!(
+                record.stage,
+                EvictionStage::ActivePair {
+                    leader,
+                    strike_if_short: false,
+                    ..
+                } if leader == active_leader
+            ));
+
+            drop(active_assignments.take());
+            close_active(route, &mut routes, &mut admission);
+            let record = admission.evictions.records.get(&route).unwrap();
+            assert_eq!(
+                record.strikes,
+                (index as u8 + 2).min(6),
+                "closing the accounted pair must not add a second strike"
+            );
+
+            if index + 1 < cooldowns.len() {
+                tokio::time::advance(Duration::from_secs(seconds) + Duration::from_millis(1)).await;
+                form_pair(
+                    route,
+                    attack_id + 1,
+                    attack_id + 2,
+                    limits,
+                    &mut routes,
+                    &mut report,
+                    &mut admission,
+                );
+                let evictor = admit(
+                    attack_id + 3,
+                    Role::Pc,
+                    route,
+                    synthetic_source(),
+                    limits,
+                    &mut routes,
+                    &mut report,
+                    &mut admission,
+                );
+                let counterpart = admit(
+                    attack_id + 4,
+                    Role::Phone,
+                    route,
+                    synthetic_source(),
+                    limits,
+                    &mut routes,
+                    &mut report,
+                    &mut admission,
+                );
+                active_leader = attack_id + 3;
+                active_follower = attack_id + 4;
+                active_assignments = Some((evictor, counterpart));
+                attack_id += 5;
+            }
+        }
+
+        assert_eq!(report.evicted_pairs, 7);
+        assert_eq!(report.rejected_evictions, cooldowns.len() as u64);
+        assert_eq!(abuse.snapshot().evicted_pairs, 7);
+        assert_eq!(abuse.snapshot().rejected_evictions, cooldowns.len() as u64);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_and_late_pair_completions_cannot_change_or_double_the_strike() {
+        let limits = RelayLimits::new(8, 2).unwrap();
+        let (mut admission, _) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x75; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_evictor = admit(
+            3,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_counterpart = admit(
+            4,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let current = *admission.evictions.records.get(&route).unwrap();
+        admission.evictions.pair_ended(route, 1, Instant::now());
+        let after_stale = *admission.evictions.records.get(&route).unwrap();
+        assert_eq!(after_stale.stage, current.stage);
+        assert_eq!(after_stale.strikes, current.strikes);
+
+        let second_evictor = admit(
+            5,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let free_strike = *admission.evictions.records.get(&route).unwrap();
+        assert_eq!(free_strike.strikes, 1);
+        assert_eq!(free_strike.cooldown_until, None);
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Waiting(waiter)) if waiter.id == 5
+        ));
+        let second_counterpart = admit(
+            6,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let mut rejected = admit(
+            7,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        let charged = *admission.evictions.records.get(&route).unwrap();
+        assert_eq!(charged.strikes, 2);
+        assert!(matches!(
+            charged.stage,
+            EvictionStage::ActivePair {
+                leader: 5,
+                strike_if_short: false,
+                ..
+            }
+        ));
+
+        admission.evictions.pair_ended(route, 3, Instant::now());
+        let after_stale = *admission.evictions.records.get(&route).unwrap();
+        assert_eq!(after_stale.stage, charged.stage);
+        assert_eq!(after_stale.strikes, charged.strikes);
+        drop((
+            first_evictor,
+            first_counterpart,
+            second_evictor,
+            second_counterpart,
+        ));
+        close_active(route, &mut routes, &mut admission);
+        admission.evictions.pair_ended(route, 5, Instant::now());
+        let after_late = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(after_late.strikes, 2);
+        assert_eq!(after_late.cooldown_until, charged.cooldown_until);
+        assert_eq!(report.evicted_pairs, 2);
+        assert_eq!(report.rejected_evictions, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_lived_genuine_handover_never_strikes_or_rejects() {
+        let limits = RelayLimits::new(8, 2).unwrap();
+        let (mut admission, _) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x76; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        tokio::time::advance(SHORT_LIVED + Duration::from_millis(1)).await;
+
+        let handover = admit(
+            3,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let counterpart = admit(
+            4,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Active {
+                leader: 3,
+                follower: 4,
+                ..
+            })
+        ));
+
+        tokio::time::advance(SHORT_LIVED + Duration::from_millis(1)).await;
+        drop((handover, counterpart));
+        close_active(route, &mut routes, &mut admission);
+        assert!(!admission.evictions.records.contains_key(&route));
+        assert_eq!(report.evicted_pairs, 1);
+        assert_eq!(report.rejected_evictions, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_short_lived_evictor_pair_starts_cooldown_then_expiry_allows_eviction() {
+        let limits = RelayLimits::new(16, 4).unwrap();
+        let (mut admission, abuse) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x74; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let first_evictor = admit(
+            3,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_counterpart = admit(
+            4,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let second_evictor = admit(
+            5,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_strike = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(first_strike.strikes, 1);
+        assert_eq!(first_strike.cooldown_until, None);
+        let second_counterpart = admit(
+            6,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let mut rejected = admit(
+            7,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Active {
+                leader: 5,
+                follower: 6,
+                ..
+            })
+        ));
+        let second_strike = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(second_strike.strikes, 2);
+        assert_eq!(
+            second_strike.cooldown_until.unwrap() - Instant::now(),
+            EVICTION_COOLDOWN_INITIAL
+        );
+        assert_eq!(report.rejected_evictions, 1);
+        assert_eq!(report.evicted_pairs, 2);
+
+        tokio::time::advance(EVICTION_COOLDOWN_INITIAL + Duration::from_millis(1)).await;
+        let _accepted = admit(
+            8,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == 8));
+        drop((
+            first_evictor,
+            first_counterpart,
+            second_evictor,
+            second_counterpart,
+        ));
+        assert_eq!(report.evicted_pairs, 3);
+        assert_eq!(abuse.snapshot().rejected_evictions, 1);
+        assert_eq!(abuse.snapshot().evicted_pairs, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pair_surviving_short_lived_clears_prior_strikes() {
+        let limits = RelayLimits::new(16, 4).unwrap();
+        let (mut admission, _) = state(limits, RelayPolicy::default());
+        let mut routes = BTreeMap::new();
+        let mut report = RelayReport::default();
+        let route = RouteId::new([0x75; 32]).unwrap();
+        form_pair(
+            route,
+            1,
+            2,
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_evictor = admit(
+            3,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let first_counterpart = admit(
+            4,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let second_evictor = admit(
+            5,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let second_counterpart = admit(
+            6,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let mut rejected = admit(
+            7,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
+        assert_eq!(admission.evictions.records.get(&route).unwrap().strikes, 2);
+
+        tokio::time::advance(EVICTION_COOLDOWN_INITIAL + Duration::from_millis(1)).await;
+        let third_evictor = admit(
+            8,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        let cleared = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(cleared.strikes, 0);
+        assert_eq!(cleared.cooldown_until, None);
+        let third_counterpart = admit(
+            9,
+            Role::Pc,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+
+        let _free_again = admit(
+            10,
+            Role::Phone,
+            route,
+            synthetic_source(),
+            limits,
+            &mut routes,
+            &mut report,
+            &mut admission,
+        );
+        assert!(matches!(
+            routes.get(&route),
+            Some(RouteState::Waiting(waiter)) if waiter.id == 10
+        ));
+        let restarted = admission.evictions.records.get(&route).unwrap();
+        assert_eq!(restarted.strikes, 1);
+        assert_eq!(restarted.cooldown_until, None);
+        drop((
+            first_evictor,
+            first_counterpart,
+            second_evictor,
+            second_counterpart,
+            third_evictor,
+            third_counterpart,
+        ));
+        assert_eq!(report.rejected_evictions, 1);
+        assert_eq!(report.evicted_pairs, 4);
+    }
+
+    #[test]
+    fn first_strike_is_free_then_consecutive_strikes_double_to_the_fixed_cap() {
+        let limits = RelayLimits::new(2, 1).unwrap();
+        let mut tracker = EvictionTracker::new(limits);
+        let route = RouteId::new([0x76; 32]).unwrap();
+        let now = Instant::now();
+        let cooldowns = [
+            None,
+            Some(30),
+            Some(60),
+            Some(120),
+            Some(240),
+            Some(300),
+            Some(300),
+        ];
+        for (index, expected) in cooldowns.into_iter().enumerate() {
+            let id = index as u64 + 1;
+            tracker.start_evictor(route, id, now);
+            tracker.waiting_evictor_ended(route, id, now);
+            let record = tracker.records.get(&route).unwrap();
+            assert_eq!(record.strikes, (index as u8 + 1).min(6));
+            assert_eq!(
+                record.cooldown_until.map(|until| until - now),
+                expected.map(Duration::from_secs)
+            );
+        }
+    }
+
+    #[test]
+    fn eviction_bookkeeping_drops_oldest_entries_at_its_limit() {
+        let limits = RelayLimits::new(64, 1).unwrap();
+        let mut tracker = EvictionTracker::new(limits);
+        let now = Instant::now();
+        for value in 1_u8..=100 {
+            tracker.start_evictor(RouteId::new([value; 32]).unwrap(), u64::from(value), now);
+        }
+        assert_eq!(tracker.records.len(), EVICTION_RECORDS_PER_WAITING_ROOM);
+        assert!(
+            tracker
+                .records
+                .contains_key(&RouteId::new([100; 32]).unwrap())
+        );
     }
 }
 
