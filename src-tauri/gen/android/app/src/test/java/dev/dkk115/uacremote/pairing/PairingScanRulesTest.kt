@@ -111,9 +111,12 @@ class PairingScanRulesTest {
     }
 
     @Test fun foreignTextBoundIsOnlyAsciiSizeNotCanonicalAcceptance() {
-        assertTrue(PairingScanRules.boundedText("A".repeat(474)))
-        assertTrue(PairingScanRules.boundedText("A".repeat(490)))
-        for (text in listOf("", "A".repeat(473), "A".repeat(475), "A".repeat(491), "가".repeat(474))) {
+        // 474 and 490 are the v1 forms; 485 is v2 with one IPv4 direct candidate
+        // and 568 is the longest v2 form. All of them reach the native parser.
+        for (length in listOf(474, 485, 490, 568)) {
+            assertTrue(PairingScanRules.boundedText("A".repeat(length)))
+        }
+        for (text in listOf("", "A".repeat(473), "A".repeat(569), "가".repeat(474))) {
             assertFalse(PairingScanRules.boundedText(text))
         }
     }
