@@ -63,7 +63,7 @@ pub use pairing::{
     CandidateSubmission, CandidateSubmissionFields, CeremonyMessageKind,
     MAX_CANDIDATE_SUBMISSION_BYTES, MAX_SUBMISSION_CERTIFICATE_BYTES, MAX_SUBMISSION_CERTIFICATES,
     MAX_SUBMISSION_CHAIN_BYTES, MIN_CANDIDATE_SUBMISSION_BYTES, PAIRING_CONFIRMATION_BYTES,
-    PLAINTEXT_LENGTH_PREFIX_BYTES, PairingConfirmation, PairingConfirmationFields,
-    candidate_digest, ceremony_message_kind, frame_plaintext_submission,
-    plaintext_submission_length,
+    PAIRING_REVEAL_BYTES, PLAINTEXT_LENGTH_PREFIX_BYTES, PairingConfirmation,
+    PairingConfirmationFields, PairingReveal, PairingRevealFields, PhoneReveal, candidate_digest,
+    ceremony_message_kind, frame_plaintext_submission, plaintext_submission_length, sas_commitment,
 };

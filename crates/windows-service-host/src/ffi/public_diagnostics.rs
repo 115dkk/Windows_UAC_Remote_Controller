@@ -15,16 +15,21 @@ use std::{
 };
 use windows::{
     Win32::{
+        Foundation::ERROR_DIRECTORY,
         Security::SECURITY_ATTRIBUTES,
         Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+            CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, OPEN_ALWAYS,
         },
         System::Com::{
             COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
         },
         UI::{
-            Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW},
+            Shell::{
+                Common::ITEMIDLIST, ILFree, SEE_MASK_FLAG_NO_UI, SEE_MASK_IDLIST, SEE_MASK_NOASYNC,
+                SHELLEXECUTEINFOW, SHParseDisplayName, ShellExecuteExW,
+            },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
     },
@@ -132,16 +137,57 @@ pub(crate) fn open_folder() -> Result<(), ServiceError> {
         }
     }
     let _apartment = Apartment;
+    // SAFETY: the already checked absolute directory and its ancestors remain
+    // pinned against deletion/replacement throughout parsing and shell dispatch.
+    let attributes = unsafe { GetFileAttributesW(path.ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(ServiceError::DiagnosticsFolderFailure {
+            stage: 2,
+            detail: windows::core::Error::from_thread().code().0 as u32,
+        });
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err(ServiceError::DiagnosticsFolderFailure {
+            stage: 2,
+            detail: windows::core::HRESULT::from_win32(ERROR_DIRECTORY.0).0 as u32,
+        });
+    }
+    struct ItemIdList(*mut ITEMIDLIST);
+    impl Drop for ItemIdList {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: exclusively owned absolute PIDL from SHParseDisplayName;
+                // all synchronous shell borrows have ended before release.
+                unsafe { ILFree(Some(self.0)) };
+            }
+        }
+    }
+    let mut item = ItemIdList(std::ptr::null_mut());
+    // SAFETY: fixed absolute path, no caller bind context, initialized owned
+    // output. The guard also releases any returned allocation on an error path.
+    unsafe { SHParseDisplayName(path.ptr(), None, &mut item.0, 0, None) }.map_err(|error| {
+        ServiceError::DiagnosticsFolderFailure {
+            stage: 6,
+            detail: error.code().0 as u32,
+        }
+    })?;
+    if item.0.is_null() {
+        return Err(ServiceError::DiagnosticsFolderFailure {
+            stage: 6,
+            detail: windows::core::HRESULT::from_win32(ERROR_DIRECTORY.0).0 as u32,
+        });
+    }
     let mut request = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_IDLIST,
         lpVerb: w!("open"),
-        lpFile: path.ptr(),
+        lpIDList: item.0.cast(),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
-    // SAFETY: fixed validated directory and static verb, no arguments/elevation.
-    // Pins, strings and apartment outlive synchronous shell acceptance. No process
+    // SAFETY: the validated directory's absolute PIDL and static verb, with no
+    // lpFile string for executable-extension probing, arguments or elevation.
+    // Pins, PIDL and apartment outlive synchronous shell acceptance. No process
     // handle is requested. Shell errors return to the existing UI error channel.
     unsafe { ShellExecuteExW(&mut request) }.map_err(|error| {
         ServiceError::DiagnosticsFolderFailure {

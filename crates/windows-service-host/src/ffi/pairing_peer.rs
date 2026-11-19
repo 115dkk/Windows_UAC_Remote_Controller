@@ -38,9 +38,9 @@ use windows::{
         },
         System::{
             Pipes::{
-                CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeClientSessionId,
-                NAMED_PIPE_MODE, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_TYPE_MESSAGE, PeekNamedPipe,
+                CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+                GetNamedPipeClientSessionId, NAMED_PIPE_MODE, PIPE_READMODE_MESSAGE,
+                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PeekNamedPipe,
             },
             RemoteDesktop::{
                 WTSActive, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
@@ -251,6 +251,36 @@ impl Drop for Handle {
         }
     }
 }
+/// Only server pipe handles use this owner. Pending I/O must be drained before
+/// Drop, just as for Handle. Normal close preserves buffered replies; failure
+/// disconnects even a client that keeps its handle open.
+struct ServerPipe {
+    handle: Handle,
+    disconnect_on_drop: bool,
+}
+impl ServerPipe {
+    fn new(value: HANDLE) -> Result<Self, PairingPeerError> {
+        Ok(Self {
+            handle: Handle::new(value, PairingPeerStage::CreateEndpoint)?,
+            disconnect_on_drop: false,
+        })
+    }
+    fn raw(&self) -> HANDLE {
+        self.handle.raw()
+    }
+}
+impl Drop for ServerPipe {
+    fn drop(&mut self) {
+        // SAFETY: uniquely owned server endpoint with no outstanding kernel
+        // borrow. Disconnect detaches even a client that retains its own handle.
+        // An unconnected/already disconnected pipe may reject this call; close
+        // still runs, with the existing uncertain-close quarantine unchanged.
+        if self.disconnect_on_drop {
+            let _ = unsafe { DisconnectNamedPipe(self.raw()) };
+        }
+    }
+}
+
 struct Reservation(bool);
 impl Reservation {
     fn acquire() -> Result<Self, PairingPeerError> {
@@ -347,9 +377,13 @@ impl PairingServerEndpoints {
         let sid = OwnServiceSid::lookup()
             .map_err(PairingPeerError::Service)?
             .bytes();
-        let starter = create_server(PairingPeerRole::Starter, &sid, Rc::clone(&context))?;
-        let helper = create_server(PairingPeerRole::Helper, &sid, Rc::clone(&context))?;
-        context.recheck()?;
+        let mut starter = create_server(PairingPeerRole::Starter, &sid, Rc::clone(&context))?;
+        let mut helper = create_server(PairingPeerRole::Helper, &sid, Rc::clone(&context))
+            .inspect_err(|_| starter.pipe.disconnect_on_drop = true)?;
+        context.recheck().inspect_err(|_| {
+            starter.pipe.disconnect_on_drop = true;
+            helper.pipe.disconnect_on_drop = true;
+        })?;
         Ok(Self { starter, helper })
     }
     /// Tuple order is fixed: starter, then helper. No endpoint can change roles.
@@ -365,7 +399,7 @@ impl PairingServerEndpoints {
 /// Private native I/O operates only on this exact owned server.
 /// No public raw-handle import/export, disconnect or reconnect operation exists.
 pub struct PairingServerEndpoint {
-    pipe: Handle,
+    pipe: ServerPipe,
     role: PairingPeerRole,
     context: Rc<ServiceContext>,
 }
@@ -380,7 +414,8 @@ impl PairingServerEndpoint {
     /// Consumes the sole original server after connection completion. An
     /// unconnected/failed observation destroys it instead of recycling a client.
     /// No caller-supplied PID/session/token participates in this operation.
-    pub fn authenticate_connected(self) -> Result<PairingPeer, PairingPeerError> {
+    pub fn authenticate_connected(mut self) -> Result<PairingPeer, PairingPeerError> {
+        self.pipe.disconnect_on_drop = true;
         self.context.recheck()?;
         let (pid, session) = pipe_identity(self.pipe.raw())?;
         let open_stage = match self.role {
@@ -418,6 +453,7 @@ impl PairingServerEndpoint {
         // Reobserve the same process and pipe before publication. This rejects
         // observed changes; it is not an atomic lease on the client's future use.
         peer.recheck()?;
+        peer.endpoint.pipe.disconnect_on_drop = false;
         Ok(peer)
     }
     pub fn close(self) -> Result<(), PairingPeerError> {
@@ -462,6 +498,7 @@ impl PairingPeer {
         })();
         if result.is_err() {
             self.live = false;
+            self.endpoint.pipe.disconnect_on_drop = true;
         }
         result
     }
@@ -561,7 +598,7 @@ redacted_debug!(PairingServerEndpoints, PairingServerEndpoint, PairingPeer);
 /// Independent management endpoint because the pairing role is hardwired to one
 /// image and one token policy. This endpoint admits exactly either fixed class.
 pub(crate) struct ManagementServerEndpoint {
-    pipe: Handle,
+    pipe: ServerPipe,
     context: Rc<ServiceContext>,
 }
 
@@ -602,8 +639,10 @@ impl ManagementServerEndpoint {
                 Some(ptr::from_ref(&security)),
             )
         };
-        let pipe = Handle::new(pipe, PairingPeerStage::CreateEndpoint)?;
-        context.recheck()?;
+        let mut pipe = ServerPipe::new(pipe)?;
+        context
+            .recheck()
+            .inspect_err(|_| pipe.disconnect_on_drop = true)?;
         Ok(Self { pipe, context })
     }
 
@@ -611,7 +650,8 @@ impl ManagementServerEndpoint {
         self.pipe.raw()
     }
 
-    pub(crate) fn authenticate_connected(self) -> Result<ManagementPeer, PairingPeerError> {
+    pub(crate) fn authenticate_connected(mut self) -> Result<ManagementPeer, PairingPeerError> {
+        self.pipe.disconnect_on_drop = true;
         self.context.recheck()?;
         let (pid, session) = pipe_identity(self.pipe.raw())?;
         // SAFETY: OS-observed PID only; query/synchronize cannot mutate the client.
@@ -640,6 +680,7 @@ impl ManagementServerEndpoint {
             live: true,
         };
         peer.recheck()?;
+        peer.endpoint.pipe.disconnect_on_drop = false;
         Ok(peer)
     }
 }
@@ -700,6 +741,7 @@ impl ManagementPeer {
         })();
         if result.is_err() {
             self.live = false;
+            self.endpoint.pipe.disconnect_on_drop = true;
         }
         result
     }
@@ -846,8 +888,10 @@ fn create_server_named(
             Some(ptr::from_ref(&security)),
         )
     };
-    let pipe = Handle::new(pipe, PairingPeerStage::CreateEndpoint)?;
-    context.recheck()?;
+    let mut pipe = ServerPipe::new(pipe)?;
+    context
+        .recheck()
+        .inspect_err(|_| pipe.disconnect_on_drop = true)?;
     Ok(PairingServerEndpoint {
         pipe,
         role,
@@ -1264,6 +1308,133 @@ mod tests {
     use windows::Win32::Storage::FileSystem::{
         DELETE, FILE_APPEND_DATA, FILE_READ_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
     };
+
+    #[test]
+    fn server_drop_releases_name_while_client_keeps_its_handle() {
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, OPEN_EXISTING,
+            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+        };
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let name = Wide::new(format!(
+            r"\\.\pipe\UacRemoteController.PairingTeardownTest.{:032x}",
+            u128::from_le_bytes(nonce)
+        ))
+        .unwrap();
+        let create = || {
+            let (open, mode) = pipe_modes();
+            // SAFETY: unique test-only local first-instance name, no inheritance
+            // or production service endpoint. Default DACL is confined to this test.
+            ServerPipe::new(unsafe {
+                CreateNamedPipeW(name.ptr(), open, mode, 1, 4096, 4096, 0, None)
+            })
+            .unwrap()
+        };
+        let mut server = create();
+        server.disconnect_on_drop = true; // Rejected or abandoned exchange.
+        // SAFETY: connect only to the unique owned test server; no impersonation.
+        let client = unsafe {
+            CreateFileW(
+                name.ptr(),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0),
+                None,
+                OPEN_EXISTING,
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                None,
+            )
+        }
+        .unwrap();
+        let client = Handle::new(client, PairingPeerStage::Connect).unwrap();
+        drop(server);
+        let replacement = create();
+        // Keep the old client alive until after FIRST_PIPE_INSTANCE succeeds.
+        drop(client);
+        drop(replacement);
+    }
+
+    #[test]
+    fn successful_server_drop_preserves_unread_reply() {
+        use super::super::overlapped_pipe::{BufferLimits, Completed, Kind, PendingOperation};
+        use windows::Win32::{
+            Storage::FileSystem::{
+                CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, OPEN_EXISTING,
+                ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+            },
+            System::Threading::CreateEventW,
+        };
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let name = Wide::new(format!(
+            r"\\.\pipe\UacRemoteController.BufferedReplyTest.{:032x}",
+            u128::from_le_bytes(nonce)
+        ))
+        .unwrap();
+        let (open, mode) = pipe_modes();
+        // SAFETY: unique test-only server, noninherited handles, no service name.
+        let server = ServerPipe::new(unsafe {
+            CreateNamedPipeW(name.ptr(), open, mode, 1, 4096, 4096, 0, None)
+        })
+        .unwrap();
+        // SAFETY: synchronous client of this test's unique local pipe only.
+        let client = Handle::new(
+            unsafe {
+                CreateFileW(
+                    name.ptr(),
+                    FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                    FILE_SHARE_MODE(0),
+                    None,
+                    OPEN_EXISTING,
+                    SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                    None,
+                )
+            }
+            .unwrap(),
+            PairingPeerStage::Connect,
+        )
+        .unwrap();
+        // SAFETY: private event retained with the original overlapped write.
+        let event = Handle::new(
+            unsafe { CreateEventW(None, true, false, windows::core::PCWSTR::null()) }.unwrap(),
+            PairingPeerStage::CreateEvent,
+        )
+        .unwrap();
+        let reply = b"complete management reply, not yet read";
+        let mut operation = PendingOperation::prepare(
+            Kind::Write(reply),
+            BufferLimits {
+                max_read: 4096,
+                max_write: 4096,
+            },
+            event,
+        )
+        .unwrap();
+        operation.issue(server.raw()).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match operation.poll(server.raw()).unwrap() {
+                Some(Completed::Count(count)) => {
+                    assert_eq!(count, reply.len());
+                    break;
+                }
+                None => {
+                    assert!(std::time::Instant::now() < until);
+                    std::thread::yield_now();
+                }
+                _ => panic!("unexpected write completion"),
+            }
+        }
+        drop(operation);
+        assert!(!server.disconnect_on_drop);
+        drop(server);
+        let mut bytes = [0; 128];
+        let mut count = 0;
+        // SAFETY: live synchronous client and bounded initialized output. The
+        // write completed above; no read occurred before server close.
+        unsafe { ReadFile(client.raw(), Some(&mut bytes), Some(&mut count), None) }.unwrap();
+        assert_eq!(&bytes[..count as usize], reply);
+    }
 
     #[test]
     fn immediate_stop_during_native_checks_prevents_the_next_issue() {

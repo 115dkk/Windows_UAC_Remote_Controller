@@ -5,8 +5,8 @@
 use super::{resources::CleanupLog, security};
 use crate::supervision::{
     CHALLENGE_BYTES, Challenge, HelperExit, HelperMessage, INSTALLATION_FOLDER,
-    MAX_WATCH_MESSAGE_BYTES, PIPE_PREFIX, PROBE_EXECUTABLE, SERVICE_EXECUTABLE, SERVICE_NAME,
-    ServiceMessage, encode_report,
+    MAX_WATCH_MESSAGE_BYTES, PROBE_EXECUTABLE, SERVICE_EXECUTABLE, SERVICE_NAME, ServiceMessage,
+    encode_report,
 };
 use std::{
     cell::{Cell, UnsafeCell},
@@ -51,6 +51,31 @@ use windows::{
 type Result<T> = std::result::Result<T, ()>;
 type CloseLog = Rc<Cell<bool>>;
 
+fn pipe_name_argument(mode: Option<&str>) -> Result<Vec<u16>> {
+    parse_pipe_name_argument(std::env::args_os().skip(1), mode)
+}
+
+fn parse_pipe_name_argument<I, S>(arguments: I, mode: Option<&str>) -> Result<Vec<u16>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut arguments = arguments.into_iter();
+    if let Some(mode) = mode
+        && arguments
+            .next()
+            .is_none_or(|argument| argument.as_ref() != std::ffi::OsStr::new(mode))
+    {
+        return Err(());
+    }
+    let argument = arguments.next().ok_or(())?;
+    let token = crate::SupervisionPipeToken::parse(argument.as_ref()).map_err(|_| ())?;
+    if arguments.next().is_some() {
+        return Err(());
+    }
+    Ok(token.pipe_name().encode_utf16().chain(Some(0)).collect())
+}
+
 pub(crate) fn run() -> HelperExit {
     let cleanup: CleanupLog = Arc::new(Mutex::new(None));
     let close = Rc::new(Cell::new(false));
@@ -87,6 +112,7 @@ pub(crate) fn run_watch() -> HelperExit {
 }
 
 fn scoped(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
+    let name = pipe_name_argument(None)?;
     security::reject_impersonation(cleanup).map_err(|_| ())?;
     // SAFETY: own borrowed process pseudo-handle and scalar PID, never closed.
     let (own, own_pid) = unsafe { (GetCurrentProcess(), GetCurrentProcessId()) };
@@ -97,9 +123,8 @@ fn scoped(cleanup: &CleanupLog, close: &CloseLog) -> Result<HelperExit> {
     let expected = expected_service()?;
     let service = Scm::open(close)?;
     let expected_pid = service.verify(&expected)?;
-    let name: Vec<u16> = format!("{PIPE_PREFIX}{own_pid}\0").encode_utf16().collect();
-    // SAFETY: one fixed local pipe derived only from our own PID. Parent creates
-    // it before resuming us; no wait/retry/alternate endpoint. Identification QoS
+    // SAFETY: one local pipe from the strictly validated random name token. The
+    // parent creates it before this process; no wait/retry/alternate endpoint. Identification QoS
     // prevents a server from impersonating this SYSTEM client. No handle inherit.
     let raw = unsafe {
         CreateFileW(
@@ -297,6 +322,11 @@ fn connect_authenticated_for(
     close: &CloseLog,
     executable: &str,
 ) -> Result<(Kernel, Peer)> {
+    let name = pipe_name_argument(Some(if executable == SERVICE_EXECUTABLE {
+        "pair-inspector"
+    } else {
+        "watch"
+    }))?;
     let cleanup = &cleanup;
     security::reject_impersonation(cleanup).map_err(|_| ())?;
     // SAFETY: borrowed current-process pseudo-handle and scalar ID, never closed.
@@ -308,9 +338,9 @@ fn connect_authenticated_for(
     let expected = expected_service_for(executable)?;
     let service = Scm::open(close)?;
     let expected_pid = service.verify(&expected)?;
-    let name: Vec<u16> = format!("{PIPE_PREFIX}{own_pid}\0").encode_utf16().collect();
-    // SAFETY: fixed local pipe from our PID, no wait or fallback. Identification
-    // QoS forbids service impersonation of this SYSTEM client.
+    // SAFETY: local pipe from the strictly validated random name token, created
+    // before this process. No wait or fallback. Identification QoS forbids service
+    // impersonation of this SYSTEM client; the token does not authenticate it.
     let raw = unsafe {
         CreateFileW(
             PCWSTR(name.as_ptr()),
@@ -871,4 +901,43 @@ fn service_sid() -> Result<Vec<u8>> {
         return Err(());
     }
     Ok(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_helper_mode_uses_the_same_strict_v4_token() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let expected: Vec<u16> = format!(r"\\.\pipe\UacRemoteController.PromptProbe.v4.{token}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        for mode in [None, Some("watch"), Some("pair-inspector")] {
+            let mut arguments = Vec::new();
+            arguments.extend(mode);
+            arguments.push(token);
+            assert_eq!(
+                parse_pipe_name_argument(arguments.clone(), mode),
+                Ok(expected.clone())
+            );
+            arguments.push("extra");
+            assert!(parse_pipe_name_argument(arguments, mode).is_err());
+            for invalid in [
+                "".to_owned(),
+                token[..31].to_owned(),
+                format!("{token}0"),
+                token.to_uppercase(),
+                "g".repeat(32),
+            ] {
+                let mut arguments = Vec::new();
+                arguments.extend(mode);
+                arguments.push(invalid.as_str());
+                assert!(parse_pipe_name_argument(arguments, mode).is_err());
+            }
+        }
+        assert!(parse_pipe_name_argument(["pair-inspector", token], Some("watch")).is_err());
+        assert!(parse_pipe_name_argument(["watch", token], Some("pair-inspector")).is_err());
+    }
 }

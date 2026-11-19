@@ -24,17 +24,20 @@ use secure_channel::TlsPublicKey;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{PairingChallenge, PairingError, PairingNonce, PhoneKeyDigest, SPKI_BYTES};
+use super::{
+    PairingChallenge, PairingError, PairingNonce, PhoneKeyDigest, PhoneReveal, SPKI_BYTES,
+    sas_commitment,
+};
 use crate::{PcPublicKey, codec::Reader};
 
 const MAGIC: &[u8; 8] = b"WUACFRZ\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const KIND: u8 = 1;
-const DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/candidate-frozen/v1\0";
-const SAS_DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pairing-sas/v1\0";
-const BODY_BYTES: usize = 12 + 32 + 32 + 32 + 16 + 8 + 32 + SPKI_BYTES * 2 + 32;
+const DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/candidate-frozen/v2\0";
+const SAS_DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/pairing-sas/v2\0";
+const BODY_BYTES: usize = 12 + 32 + 32 + 32 + 16 + 8 + 32 + SPKI_BYTES * 2 + 32 + 32 + 32;
 
-/// Exact fixed-v1 maximum: 378-byte header/body + 2-byte DER length + 72-byte DER.
+/// Exact fixed-v2 maximum: 442-byte header/body + 2-byte DER length + 72-byte DER.
 pub const MAX_FROZEN_CANDIDATE_BYTES: usize = BODY_BYTES + 2 + MAX_DER_SIGNATURE_BYTES;
 
 /// Width-only invitation-context digest. Arbitrary bytes (including zero) are
@@ -74,6 +77,7 @@ pub struct FrozenCandidateContext {
     pub pc_signing_key: TlsPublicKey,
     pub pc_transport_key: TlsPublicKey,
     pub invitation_context: InvitationContextDigest,
+    pub sas_commitment: [u8; 32],
 }
 
 impl fmt::Debug for FrozenCandidateContext {
@@ -91,6 +95,7 @@ pub struct FrozenCandidateFields {
     /// advances it. Supply that actual next_revision unchanged, not next+1 or
     /// max(active revisions)+1. Zero and the exhausted u64::MAX state reject.
     pub intended_registry_revision: u64,
+    pub pc_random: [u8; 32],
 }
 
 impl FrozenCandidateFields {
@@ -99,6 +104,9 @@ impl FrozenCandidateFields {
             || self.intended_registry_revision.checked_add(1).is_none()
         {
             return Err(FrozenCandidateError::InvalidRevision);
+        }
+        if self.pc_random == [0; 32] || self.context.sas_commitment == [0; 32] {
+            return Err(FrozenCandidateError::InvalidFields);
         }
         Ok(())
     }
@@ -153,9 +161,7 @@ pub struct SignedFrozenCandidate {
 
 impl SignedFrozenCandidate {
     pub fn from_wire(bytes: &[u8]) -> Result<Self, FrozenCandidateError> {
-        if !(BODY_BYTES + 2 + MIN_DER_SIGNATURE_BYTES..=MAX_FROZEN_CANDIDATE_BYTES)
-            .contains(&bytes.len())
-        {
+        if bytes.len() < 12 || bytes.len() > MAX_FROZEN_CANDIDATE_BYTES {
             return Err(FrozenCandidateError::InvalidLength);
         }
         let mut reader = Reader::new(bytes);
@@ -171,6 +177,9 @@ impl SignedFrozenCandidate {
         if array::<1>(&mut reader)? != [0] {
             return Err(FrozenCandidateError::InvalidEncoding);
         }
+        if bytes.len() < BODY_BYTES + 2 + MIN_DER_SIGNATURE_BYTES {
+            return Err(FrozenCandidateError::InvalidLength);
+        }
         let ceremony_nonce = PairingNonce::from_bytes(array(&mut reader)?)
             .map_err(FrozenCandidateError::from_pairing)?;
         let attestation_challenge = PairingChallenge::from_bytes(array(&mut reader)?)
@@ -185,6 +194,8 @@ impl SignedFrozenCandidate {
         let pc_transport_key =
             super::key(&mut reader).map_err(FrozenCandidateError::from_pairing)?;
         let invitation_context = InvitationContextDigest::from_bytes(array(&mut reader)?);
+        let pc_random = array(&mut reader)?;
+        let sas_commitment = array(&mut reader)?;
         let fields = FrozenCandidateFields {
             context: FrozenCandidateContext {
                 ceremony_nonce,
@@ -195,8 +206,10 @@ impl SignedFrozenCandidate {
                 pc_signing_key,
                 pc_transport_key,
                 invitation_context,
+                sas_commitment,
             },
             intended_registry_revision,
+            pc_random,
         };
         fields.validate()?;
         let signature_length = usize::from(u16::from_be_bytes(array(&mut reader)?));
@@ -309,13 +322,27 @@ impl MatchedFrozenCandidate {
     }
 
     /// Six ASCII decimal digits of the FULL big-endian SHA-256 integer modulo
-    /// 1,000,000 over SAS_DOMAIN || canonical frozen BODY (not the signature).
+    /// 1,000,000 over SAS_DOMAIN || canonical frozen BODY || phone reveal (not the signature).
     /// This is public comparison data, not authorization or a secret token.
-    pub fn comparison_code(&self) -> PairingComparisonCode {
+    pub fn comparison_code(
+        &self,
+        reveal: &PhoneReveal,
+    ) -> Result<PairingComparisonCode, FrozenCandidateError> {
+        let context = &self.fields.context;
+        if sas_commitment(
+            context.ceremony_nonce,
+            context.invitation_context,
+            context.phone_keys,
+            reveal,
+        ) != context.sas_commitment
+        {
+            return Err(FrozenCandidateError::CommitmentMismatch);
+        }
         let mut digest = Sha256::new();
         digest.update(SAS_DOMAIN);
         digest.update(body(&self.fields));
-        decimal_code(digest.finalize().into())
+        digest.update(reveal.as_bytes());
+        Ok(decimal_code(digest.finalize().into()))
     }
 }
 
@@ -372,6 +399,8 @@ fn body(fields: &FrozenCandidateFields) -> Vec<u8> {
     bytes.extend_from_slice(context.pc_signing_key.as_spki_der());
     bytes.extend_from_slice(context.pc_transport_key.as_spki_der());
     bytes.extend_from_slice(context.invitation_context.as_bytes());
+    bytes.extend_from_slice(&fields.pc_random);
+    bytes.extend_from_slice(&context.sas_commitment);
     bytes
 }
 
@@ -404,6 +433,8 @@ pub enum FrozenCandidateError {
     UntrustedPcKey,
     #[error("frozen candidate does not match the original context")]
     OriginalContextMismatch,
+    #[error("frozen candidate commitment does not match the reveal")]
+    CommitmentMismatch,
 }
 
 impl FrozenCandidateError {

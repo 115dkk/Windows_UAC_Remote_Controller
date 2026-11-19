@@ -3,8 +3,9 @@
 This crate is a **diagnostic probe, not a request identity or approval adapter**.
 The safe outward API is `probe_once() -> Result<ProbeReport, ProbeError>`, with no
 caller-selected process, HWND, path, session, desktop, property, input or action.
-The helper binary `uac-prompt-probe` accepts no arguments. Other arguments fail
-without echoing them. It now requires the authenticated private service pipe;
+The helper binary `uac-prompt-probe` accepts exactly one pipe token (32 lowercase
+hexadecimal characters), optionally preceded by `watch`. The token only names the
+service's pipe; it authorizes nothing. Other arguments fail without echoing them. It now requires the authenticated private service pipe;
 there is no unsupervised stdout fallback. No installation, elevation, SCM
 registration, token adjustment, policy change, network or user-input endpoint
 is implemented in this crate.
@@ -116,9 +117,10 @@ preserves both probe causes. The dedicated binary silences raw panic payloads;
 the library does not replace a host panic hook. Windows/API/worker failures return
 nonzero; argument rejection returns 2. Successful metadata is not authorization.
 
-`supervision::run_supervised_helper()` is argument-free. Before probing, it checks
+`supervision::run_supervised_helper()` takes no caller-selected target. Before probing, it checks
 the actual own SYSTEM/system-IL/session/restricted-service-SID token, opens only
-the fixed local PID-derived pipe, uses identification-only security QoS, and
+the local pipe named by its token (`PromptProbe.v4.<token>`, created by the service
+before the helper exists; ADR 0052), uses identification-only security QoS, and
 matches the pipe server to the running fixed SCM service. A retained server
 process handle, creation time, native64 architecture, Session0, service SID and
 fixed sibling image path are rechecked. No foreign token is duplicated and no

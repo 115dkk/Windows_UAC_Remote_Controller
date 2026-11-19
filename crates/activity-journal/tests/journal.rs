@@ -601,7 +601,7 @@ fn duplicate_header_metadata_is_rejected() {
 }
 
 #[test]
-fn rollback_never_rewinds_retention_or_allows_backdated_append() {
+fn rollback_never_rewinds_retention_and_clamps_backdated_append() {
     let directory = private_directory();
     let config = limits(16, 8_192, 100);
     {
@@ -624,21 +624,58 @@ fn rollback_never_rewinds_retention_or_allows_backdated_append() {
         retained_times(&journal.recent(timestamp(50), 10).expect("rollback read")),
         vec![150]
     );
-    assert!(matches!(
-        journal.append(timestamp(200), event()),
-        Err(JournalError::ClockRollback)
-    ));
-    assert_eq!(stored_bytes(directory.path()), before);
+    journal
+        .append(timestamp(200), event())
+        .expect("backdated append is retained");
+    assert_eq!(
+        retained_times(&journal.recent(timestamp(40), 10).expect("rollback read")),
+        vec![201, 150]
+    );
     assert_eq!(
         journal
             .purge(timestamp(40))
             .expect("rollback purge")
             .remaining_records,
-        1
+        2
     );
     journal
         .append(timestamp(201), event())
         .expect("clock catches up");
+}
+
+#[test]
+fn rollback_append_uses_the_persisted_mark_and_preserves_insertion_order() {
+    let directory = private_directory();
+    let first = ActivityEvent::Service(ServiceOutcome::Started);
+    let second = ActivityEvent::Service(ServiceOutcome::Stopping);
+    let after_rollback = ActivityEvent::Failure(FailureKind::TransportUnavailable);
+    {
+        let mut journal =
+            Journal::open(directory.path(), standard_limits(), timestamp(100)).expect("open");
+        journal.append(timestamp(100), first).expect("first");
+        journal.append(timestamp(150), second).expect("second");
+        journal
+            .recent(timestamp(200), 0)
+            .expect("persist high-water mark");
+        journal
+            .append(timestamp(120), after_rollback)
+            .expect("append after clock rollback");
+    }
+
+    let mut reopened = Journal::open(directory.path(), standard_limits(), timestamp(120))
+        .expect("reopen behind high-water mark");
+    let records = reopened
+        .recent(timestamp(120), usize::MAX)
+        .expect("read clamped records");
+    assert_eq!(retained_times(&records), vec![200, 150, 100]);
+    assert_eq!(
+        records
+            .iter()
+            .copied()
+            .map(ActivityRecord::event)
+            .collect::<Vec<_>>(),
+        vec![after_rollback, second, first]
+    );
 }
 
 #[test]
@@ -653,13 +690,16 @@ fn unused_newer_clock_observation_is_persisted() {
     }
     let mut journal =
         Journal::open(directory.path(), standard_limits(), timestamp(10)).expect("rollback reopen");
-    assert!(matches!(
-        journal.append(timestamp(19), event()),
-        Err(JournalError::ClockRollback)
-    ));
+    journal
+        .append(timestamp(19), event())
+        .expect("backdated append at high-water timestamp");
     journal
         .append(timestamp(20), event())
         .expect("equal high-water timestamp");
+    assert_eq!(
+        retained_times(&journal.recent(timestamp(10), 10).expect("rollback read")),
+        vec![20, 20]
+    );
 }
 
 #[test]

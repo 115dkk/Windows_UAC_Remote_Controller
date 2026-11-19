@@ -187,13 +187,29 @@ impl WatchMachine {
             return FailureDisposition::Unavailable;
         }
         self.failures = self.failures.saturating_add(1);
-        if self.failures > MAX_CONSECUTIVE_FAILURES {
-            self.make_unavailable();
-            return FailureDisposition::Unavailable;
+        if self.failures == MAX_CONSECUTIVE_FAILURES.saturating_add(1)
+            && self.events.len() < MAX_EVENTS
+        {
+            // Preserve the existing one-time exhaustion observation while the
+            // machine continues retrying at the capped interval.
+            self.events.push_back(WatchEvent::HelperUnavailable);
         }
         let shift = self.failures.saturating_sub(1).min(4);
         let seconds = 5_u64.checked_shl(shift).unwrap_or(60).min(60);
         let at = now.checked_add(Duration::from_secs(seconds)).unwrap_or(now);
+        self.retry_at = Some(at);
+        FailureDisposition::Retry { at }
+    }
+
+    pub(crate) fn retry_without_failure(&mut self, now: Instant) -> FailureDisposition {
+        self.running = false;
+        self.tracked = None;
+        self.last_sequence = 0;
+        self.retry_at = None;
+        if self.unavailable || self.shutting_down {
+            return FailureDisposition::Unavailable;
+        }
+        let at = now.checked_add(Duration::from_secs(60)).unwrap_or(now);
         self.retry_at = Some(at);
         FailureDisposition::Retry { at }
     }
@@ -461,27 +477,39 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_then_stays_at_sixty_seconds() {
+    fn backoff_doubles_then_stays_at_sixty_seconds_without_becoming_unavailable() {
         let began = Instant::now();
+        let mut failed_at = began;
         let mut machine = WatchMachine::new(began);
-        for (index, seconds) in [5, 10, 20, 40, 60, 60, 60, 60].into_iter().enumerate() {
-            let failed = began + Duration::from_secs(index as u64 * 100);
+        let mut exhaustion_rows = 0;
+        for attempt in 1_u32..=12 {
+            let seconds = match attempt {
+                1 => 5,
+                2 => 10,
+                3 => 20,
+                4 => 40,
+                _ => 60,
+            };
+            let retry_at = failed_at + Duration::from_secs(seconds);
             assert_eq!(
-                machine.failed(failed),
-                FailureDisposition::Retry {
-                    at: failed + Duration::from_secs(seconds),
-                }
+                machine.failed(failed_at),
+                FailureDisposition::Retry { at: retry_at }
             );
-            machine.running = true;
+            assert!(!machine.is_unavailable());
+            exhaustion_rows += machine
+                .drain()
+                .into_iter()
+                .filter(|event| matches!(event, WatchEvent::HelperUnavailable))
+                .count();
+            assert!(machine.retry_due(retry_at));
+            machine.relaunched(retry_at).unwrap();
+            assert!(matches!(
+                machine.drain().as_slice(),
+                [WatchEvent::HelperRestarted { attempt: actual }] if *actual == attempt
+            ));
+            failed_at = retry_at + Duration::from_secs(1);
         }
-        assert_eq!(
-            machine.failed(began + Duration::from_secs(900)),
-            FailureDisposition::Unavailable
-        );
-        assert!(matches!(
-            machine.drain().as_slice(),
-            [WatchEvent::HelperUnavailable]
-        ));
+        assert_eq!(exhaustion_rows, 1);
     }
 
     #[test]

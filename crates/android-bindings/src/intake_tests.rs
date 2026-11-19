@@ -729,6 +729,55 @@ impl Fixture {
 }
 
 #[test]
+fn network_change_and_pinned_ready_clear_distrusted_hint_addresses() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = fixture();
+    let label = service_protocol::lan_instance_label(&fixture.reference.pc());
+    let failed_hint = "192.168.1.20:7443".parse().unwrap();
+    fixture
+        .controller
+        .connectivity
+        .lan
+        .lock()
+        .unwrap()
+        .record_distrusted(&label, failed_hint);
+    fixture.controller.network_changed(true).unwrap();
+    assert!(
+        fixture
+            .controller
+            .connectivity
+            .lan
+            .lock()
+            .unwrap()
+            .distrusted_for(&label)
+            .is_empty()
+    );
+    fixture
+        .controller
+        .connectivity
+        .lan
+        .lock()
+        .unwrap()
+        .record_distrusted(&label, failed_hint);
+
+    let peer = fixture.connect();
+    assert!(
+        fixture
+            .controller
+            .connectivity
+            .lan
+            .lock()
+            .unwrap()
+            .distrusted_for(&label)
+            .is_empty()
+    );
+    fixture.cleanup();
+    drop(peer);
+}
+
+#[test]
 fn owned_carrier_signed_open_projection_approval_and_pc_terminal_history_use_one_owner() {
     let _serial = crate::tests::SERIAL
         .lock()
@@ -831,6 +880,13 @@ fn local_forget_removes_an_offline_pc_without_transport_or_signing() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let fixture = fixture(); // Deliberately never connect a carrier.
+    let label = service_protocol::lan_instance_label(&fixture.reference.pc());
+    let failed_hint = "192.168.1.20:7443".parse().unwrap();
+    {
+        let mut lan = fixture.controller.connectivity.lan.lock().unwrap();
+        assert!(lan.record(&label, [failed_hint], Instant::now()));
+        lan.record_distrusted(&label, failed_hint);
+    }
     for invalid in [String::new(), "GG".repeat(32), "00".repeat(32)] {
         assert!(!admitted_call(|| fixture
             .controller
@@ -839,6 +895,11 @@ fn local_forget_removes_an_offline_pc_without_transport_or_signing() {
     assert!(admitted_call(|| fixture
         .controller
         .forget_pc("07".repeat(32))));
+    {
+        let mut lan = fixture.controller.connectivity.lan.lock().unwrap();
+        assert!(lan.addresses_for(&label, Instant::now()).is_empty());
+        assert!(lan.distrusted_for(&label).is_empty());
+    }
     assert!(!admitted_call(|| fixture
         .controller
         .forget_pc("07".repeat(32))));

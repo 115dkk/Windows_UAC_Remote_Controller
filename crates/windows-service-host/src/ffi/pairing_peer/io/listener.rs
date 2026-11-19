@@ -212,12 +212,16 @@ impl UnboundPairingListener {
         let mut peer = endpoint.authenticate_connected()?;
         peer.recheck()?;
         if crate::entry::stop_requested() {
+            peer.endpoint.pipe.disconnect_on_drop = true;
             return Err(Error::Cancelled);
         }
         // THE only attempt-clock birth, after genuine native authentication.
-        let window = AttemptWindow::at_admission(Instant::now())?;
+        let window = AttemptWindow::at_admission(Instant::now())
+            .inspect_err(|_| peer.endpoint.pipe.disconnect_on_drop = true)?;
         let context = Rc::clone(&peer.endpoint.context);
-        let budget = window.budget()?;
+        let budget = window
+            .budget()
+            .inspect_err(|_| peer.endpoint.pipe.disconnect_on_drop = true)?;
         let mut starter = PairingPipe {
             inner: Some(Box::new(Inner {
                 operation: None,
@@ -372,6 +376,9 @@ impl ListenerInner {
         result.map_err(|error| self.fail(error))
     }
     fn fail(&mut self, error: Error) -> Error {
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.pipe.disconnect_on_drop = true;
+        }
         let first = *self.first_failure.get_or_insert(error);
         self.phase = ListenPhase::Closed;
         if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
@@ -579,6 +586,9 @@ impl ManagementListener {
     }
 
     pub(crate) fn cancel(&mut self) {
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.pipe.disconnect_on_drop = true;
+        }
         if let (Some(endpoint), Some(operation)) = (self.endpoint.as_ref(), self.operation.as_mut())
             && operation.in_flight()
             && !self.cancel_requested
@@ -746,7 +756,51 @@ impl ManagementPipe {
         }
     }
 
+    /// Cleanup-only read after the final reply. No further request or native
+    /// authority is accepted, and a normal client process exit must count as EOF.
+    pub(crate) fn begin_reply_drain(&mut self) -> Result<(), Error> {
+        if self.operation.is_some() {
+            return Err(Error::Busy);
+        }
+        // SAFETY: private, noninherited event owned until read completion.
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|error| native_error(Stage::CreateEvent, error))?;
+        let event = Handle::new(event, Stage::CreateEvent)?;
+        let operation = PendingOperation::prepare(Kind::Read(1), LIMITS, event)
+            .map_err(|error| io_error(Stage::Read, error))?;
+        self.operation = Some((operation, OperationKind::Read));
+        let pipe = self.peer.as_ref().ok_or(Error::Closed)?.raw();
+        self.operation
+            .as_mut()
+            .ok_or(Error::InvalidPhase)?
+            .0
+            .issue(pipe)
+            .map_err(|error| io_error(Stage::Read, error))
+    }
+
+    pub(crate) fn poll_reply_drain(&mut self) -> Result<bool, Error> {
+        let pipe = self.peer.as_ref().ok_or(Error::Closed)?.raw();
+        let operation = &mut self.operation.as_mut().ok_or(Error::InvalidPhase)?.0;
+        match operation
+            .poll(pipe)
+            .map_err(|error| io_error(Stage::Read, error))?
+        {
+            None => Ok(false),
+            Some(Completed::Eof) => {
+                drop(self.operation.take());
+                drop(self.peer.take());
+                self.window = None;
+                cleanup_state()?;
+                Ok(true)
+            }
+            Some(_) => Err(Error::InvalidMessage),
+        }
+    }
+
     pub(crate) fn cancel(&mut self) {
+        if let Some(peer) = self.peer.as_mut() {
+            peer.endpoint.pipe.disconnect_on_drop = true;
+        }
         if let (Some(peer), Some((operation, _))) = (self.peer.as_ref(), self.operation.as_mut())
             && operation.in_flight()
             && !self.cancel_requested

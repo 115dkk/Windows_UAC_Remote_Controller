@@ -175,8 +175,9 @@ fn context_digest_uses_independent_domain_and_full_original_body_oracle() {
         let text_hash: [u8; 32] = Sha256::digest(fixture_text(&body).as_bytes()).into();
         assert_ne!(expected, text_hash);
         for other_domain in [
-            b"Windows-UAC-Remote-Controller/candidate-frozen/v1\0".as_slice(),
-            b"Windows-UAC-Remote-Controller/pairing-sas/v1\0".as_slice(),
+            b"Windows-UAC-Remote-Controller/candidate-frozen/v2\0".as_slice(),
+            b"Windows-UAC-Remote-Controller/pairing-sas/v2\0".as_slice(),
+            b"Windows-UAC-Remote-Controller/pairing-sas-commitment/v1\0".as_slice(),
             b"Windows-UAC-Remote-Controller/enrollment-acceptance/v1\0".as_slice(),
             b"Windows-UAC-Remote-Controller/pairing-invitation/v1".as_slice(),
         ] {
@@ -692,10 +693,12 @@ fn signed_frozen_and_acceptance_wire_cannot_be_reinterpreted_as_an_invitation() 
         pc_signing_key: original.pc_signing_key,
         pc_transport_key: original.pc_transport_key,
         invitation_context: invitation.context_digest(),
+        sas_commitment: [14; 32],
     };
     let frozen = UnsignedFrozenCandidate::new(FrozenCandidateFields {
         context: context.clone(),
         intended_registry_revision: 17,
+        pc_random: [13; 32],
     })
     .unwrap();
     let signing = SigningKey::from_slice(&[5; 32]).unwrap();

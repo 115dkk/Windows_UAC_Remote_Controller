@@ -36,6 +36,16 @@ pub(crate) enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         io_step: Option<JournalIoStep>,
     },
+    // A post-Ready activity append failed. The service keeps running and rate
+    // limits this fixed fault category in the runtime owner.
+    JournalAppendFailed {
+        fault: JournalFault,
+    },
+    // An hourly activity purge failed. The service keeps running and rate
+    // limits this fixed fault category in the runtime owner.
+    JournalPurgeFailed {
+        fault: JournalFault,
+    },
     StartupGuard {
         phase: u8,
         policy: u8,
@@ -52,6 +62,15 @@ pub(crate) enum Event {
     // Only changes, including recovery. Names pass the listener codec's validator.
     RelayListenerChanged {
         fault: Option<crate::management_protocol::ListenerFault>,
+    },
+    // The embedded relay's cumulative counters of registrations that evicted a
+    // pair or were refused. Written only when a counter moved, at most once a
+    // minute. Counts only: no address and no route.
+    RelayAbuse {
+        evicted_pairs: u64,
+        rejected_duplicates: u64,
+        rejected_pc_sources: u64,
+        rejected_evictions: u64,
     },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
@@ -307,6 +326,12 @@ mod tests {
                 fault: JournalFault::Io,
                 io_step: Some(JournalIoStep::AcquireLock),
             },
+            Event::JournalAppendFailed {
+                fault: JournalFault::MissingStorage,
+            },
+            Event::JournalPurgeFailed {
+                fault: JournalFault::CorruptStorage,
+            },
             Event::StartupGuard {
                 phase: 2,
                 policy: 1,
@@ -323,6 +348,12 @@ mod tests {
                 }),
             },
             Event::RelayListenerChanged { fault: None },
+            Event::RelayAbuse {
+                evicted_pairs: 3,
+                rejected_duplicates: 2,
+                rejected_pc_sources: 1,
+                rejected_evictions: 4,
+            },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -367,6 +398,10 @@ mod tests {
                     "fault",
                     "action",
                     "io_step",
+                    "evicted_pairs",
+                    "rejected_duplicates",
+                    "rejected_pc_sources",
+                    "rejected_evictions",
                 ]
                 .contains(&key.as_str())
             }));
@@ -453,6 +488,34 @@ mod tests {
                 "pid": 7,
                 "kind": "journal_unusable",
                 "fault": "unexpected_lock_content"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalAppendFailed {
+                fault: JournalFault::MissingStorage,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_append_failed",
+                "fault": "missing_storage"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalPurgeFailed {
+                fault: JournalFault::CorruptStorage,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_purge_failed",
+                "fault": "corrupt_storage"
             })
         );
     }

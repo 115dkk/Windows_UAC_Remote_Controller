@@ -18,8 +18,8 @@ use crate::{
 };
 use crate::{ServiceError, ServiceRegistry, ffi};
 use activity_journal::{
-    ActivityEvent, Decision, FailureKind, Journal, Limits, RequestOutcome, ServiceOutcome,
-    UnixMillis,
+    ActivityEvent, Decision, FailureKind, Journal, JournalError, Limits, RequestOutcome,
+    ServiceOutcome, UnixMillis,
 };
 use std::{
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -112,11 +112,78 @@ fn now() -> Result<UnixMillis, ServiceError> {
         .map_err(|_| ServiceError::InvalidClock)
 }
 
-fn append(journal: &mut Journal, event: ActivityEvent) -> Result<(), ServiceError> {
-    journal
-        .append(now()?, event)
-        .map_err(|_| ServiceError::JournalUnavailable)?;
-    crate::public_diagnostics::record(crate::public_diagnostics::Event::Activity { event });
+const JOURNAL_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JournalOperation {
+    Append,
+    Purge,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct JournalFailureReport {
+    operation: JournalOperation,
+    fault: crate::public_diagnostics::JournalFault,
+    at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct JournalFailureReports {
+    rows: Vec<JournalFailureReport>,
+}
+
+impl JournalFailureReports {
+    fn record(&mut self, operation: JournalOperation, error: &JournalError, at: Instant) {
+        let fault = crate::public_diagnostics::JournalFault::from(error);
+        if let Some(previous) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.operation == operation && row.fault == fault)
+        {
+            if at.saturating_duration_since(previous.at) < JOURNAL_FAILURE_REPORT_INTERVAL {
+                return;
+            }
+            previous.at = at;
+        } else {
+            self.rows.push(JournalFailureReport {
+                operation,
+                fault,
+                at,
+            });
+        }
+        let event = match operation {
+            JournalOperation::Append => {
+                crate::public_diagnostics::Event::JournalAppendFailed { fault }
+            }
+            JournalOperation::Purge => {
+                crate::public_diagnostics::Event::JournalPurgeFailed { fault }
+            }
+        };
+        crate::public_diagnostics::record(event);
+    }
+}
+
+fn append(
+    journal: &mut Journal,
+    failures: &mut JournalFailureReports,
+    event: ActivityEvent,
+) -> Result<(), ServiceError> {
+    match journal.append(now()?, event) {
+        Ok(_) => {
+            crate::public_diagnostics::record(crate::public_diagnostics::Event::Activity { event });
+        }
+        Err(error) => failures.record(JournalOperation::Append, &error, Instant::now()),
+    }
+    Ok(())
+}
+
+fn purge_journal(
+    journal: &mut Journal,
+    failures: &mut JournalFailureReports,
+) -> Result<(), ServiceError> {
+    if let Err(error) = journal.purge(now()?) {
+        failures.record(JournalOperation::Purge, &error, Instant::now());
+    }
     Ok(())
 }
 
@@ -253,6 +320,7 @@ fn run(
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
     let mut watch = None;
+    let mut journal_failures = JournalFailureReports::default();
     // The fixed step a failure after Ready came from, for public diagnostics.
     let mut step = RuntimeStep::Ready;
     // Keep session OUTSIDE this unwind boundary: every returned error or unwind
@@ -281,6 +349,7 @@ fn run(
             }
             append(
                 &mut journal,
+                &mut journal_failures,
                 ActivityEvent::Service(ServiceOutcome::Started),
             )?;
             step = RuntimeStep::Pairing;
@@ -288,6 +357,7 @@ fn run(
                 // Fixed kind only; the reason itself stays out of the journal.
                 append(
                     &mut journal,
+                    &mut journal_failures,
                     ActivityEvent::Service(ServiceOutcome::ManagementUnavailable),
                 )?;
                 #[cfg(feature = "lab-software-identity")]
@@ -308,6 +378,7 @@ fn run(
             let mut watcher_health_heartbeats = 0;
             watch = start_watch(
                 &mut journal,
+                &mut journal_failures,
                 &mut watch_retry,
                 &mut session,
                 &mut watcher_health_heartbeats,
@@ -328,6 +399,7 @@ fn run(
                 if watch.is_none() && watch_retry.due(iteration_now) {
                     watch = start_watch(
                         &mut journal,
+                        &mut journal_failures,
                         &mut watch_retry,
                         &mut session,
                         &mut watcher_health_heartbeats,
@@ -357,6 +429,7 @@ fn run(
                     if let crate::WatchEvent::ParkedChanged { count } = &event {
                         append(
                             &mut journal,
+                            &mut journal_failures,
                             ActivityEvent::Request(if *count > 0 {
                                 RequestOutcome::ParkedOnTaskbar { count: *count }
                             } else {
@@ -377,18 +450,20 @@ fn run(
                             session.set_watcher_health(WatcherHealth::Starting);
                             append(
                                 &mut journal,
+                                &mut journal_failures,
                                 ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
                             )?;
                         }
                         crate::WatchEvent::HelperUnavailable => {
-                            // Pin the terminal count so stale earlier heartbeats do
-                            // not replace this refusal with Running below.
+                            // Pin the failed helper count so stale earlier heartbeats
+                            // do not replace this refusal while retries continue.
                             watcher_health_heartbeats = current_watch_heartbeats(&watch);
                             session.set_watcher_health(WatcherHealth::Unavailable(
                                 WatcherRefusal::HelperFailed,
                             ));
                             append(
                                 &mut journal,
+                                &mut journal_failures,
                                 ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
                             )?;
                         }
@@ -397,7 +472,7 @@ fn run(
                     let progress = session
                         .handle_watch_event(event, iteration_now)
                         .map_err(session_error)?;
-                    journal_prompt_progress(&mut journal, progress)?;
+                    journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
                 }
                 let current_heartbeats = current_watch_heartbeats(&watch);
                 if current_heartbeats > watcher_health_heartbeats {
@@ -408,6 +483,7 @@ fn run(
                     watcher_alive_journaled = true;
                     append(
                         &mut journal,
+                        &mut journal_failures,
                         ActivityEvent::Service(ServiceOutcome::WatcherAlive),
                     )?;
                 }
@@ -415,7 +491,7 @@ fn run(
                     .prompt_deadline_step(iteration_now)
                     .map_err(session_error)?
                 {
-                    journal_prompt_progress(&mut journal, progress)?;
+                    journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
                 }
                 let processed = match watch.as_mut() {
                     Some(watcher) => session.process_one_with_watch(watcher),
@@ -433,28 +509,35 @@ fn run(
                                 FailureKind::RequestValidationFailed
                             }
                         };
-                        append(&mut journal, ActivityEvent::Failure(failure))?;
+                        append(
+                            &mut journal,
+                            &mut journal_failures,
+                            ActivityEvent::Failure(failure),
+                        )?;
                     }
                     SessionProgress::ApplyRequested { purpose, .. } => {
                         let decision = journal_decision(purpose);
                         append(
                             &mut journal,
+                            &mut journal_failures,
                             ActivityEvent::Request(RequestOutcome::PhoneDecisionVerified {
                                 decision,
                             }),
                         )?;
                         append(
                             &mut journal,
+                            &mut journal_failures,
                             ActivityEvent::Request(RequestOutcome::DecisionSentToWindows {
                                 decision,
                             }),
                         )?;
                     }
                     SessionProgress::Prompt(progress) => {
-                        journal_prompt_progress(&mut journal, progress)?;
+                        journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
                     }
                     SessionProgress::PairingFailed => append(
                         &mut journal,
+                        &mut journal_failures,
                         ActivityEvent::Failure(FailureKind::TransportUnavailable),
                     )?,
                     SessionProgress::Enrolled(_device) => {
@@ -495,14 +578,13 @@ fn run(
                     }
                 }
                 if last_purge.elapsed() >= Duration::from_secs(3_600) {
-                    journal
-                        .purge(now()?)
-                        .map_err(|_| ServiceError::JournalUnavailable)?;
+                    purge_journal(&mut journal, &mut journal_failures)?;
                     last_purge = Instant::now();
                 }
             }
             append(
                 &mut journal,
+                &mut journal_failures,
                 ActivityEvent::Service(ServiceOutcome::Stopping),
             )?;
             Ok(())
@@ -581,6 +663,7 @@ fn journal_decision(purpose: approval_protocol::DecisionPurpose) -> Decision {
 
 fn journal_prompt_progress(
     journal: &mut Journal,
+    failures: &mut JournalFailureReports,
     progress: crate::peer_runtime::prompt::PromptProgress,
 ) -> Result<(), ServiceError> {
     if let Some(result) = progress.result() {
@@ -600,19 +683,28 @@ fn journal_prompt_progress(
                 RequestOutcome::WindowsOutcomeUnknown
             }
         };
-        append(journal, ActivityEvent::Request(outcome))?;
+        append(journal, failures, ActivityEvent::Request(outcome))?;
     }
     if progress.observed() {
-        append(journal, ActivityEvent::Request(RequestOutcome::Observed))?;
+        append(
+            journal,
+            failures,
+            ActivityEvent::Request(RequestOutcome::Observed),
+        )?;
         if progress.delivery_failed() {
             // This specific observed request reached no eligible connected
             // phone. Do not emit this on periodic clocks/renewals/idle polls.
-            append(journal, ActivityEvent::Failure(FailureKind::DeliveryFailed))?;
+            append(
+                journal,
+                failures,
+                ActivityEvent::Failure(FailureKind::DeliveryFailed),
+            )?;
         }
     }
     if progress.queued_opened() != 0 {
         append(
             journal,
+            failures,
             ActivityEvent::Request(RequestOutcome::NotificationSent),
         )?;
     }
@@ -785,10 +877,11 @@ impl WatchRetry {
     }
 }
 
-/// Starts the watcher once. A refusal is recorded and retried later; only a
-/// journal failure ends the worker.
+/// Starts the watcher once. A refusal is recorded and retried later; activity
+/// journal write failures are reported separately and do not stop the worker.
 fn start_watch(
     journal: &mut Journal,
+    failures: &mut JournalFailureReports,
     retry: &mut WatchRetry,
     session: &mut ServiceSession<'_>,
     health_heartbeats: &mut u32,
@@ -800,6 +893,7 @@ fn start_watch(
             session.set_watcher_health(WatcherHealth::Starting);
             append(
                 journal,
+                failures,
                 ActivityEvent::Service(ServiceOutcome::WatcherStarted),
             )?;
             Ok(Some(watch))
@@ -815,6 +909,7 @@ fn start_watch(
             if first {
                 append(
                     journal,
+                    failures,
                     ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
                 )?;
             }
@@ -913,5 +1008,71 @@ mod tests {
         assert!(retry.failed(ProbeSupervisorError::SessionChanged, now));
         assert!(!retry.failed(ProbeSupervisorError::SessionChanged, now));
         assert!(retry.failed(ProbeSupervisorError::NoInteractiveSession, now));
+    }
+
+    #[test]
+    fn journal_failure_rows_are_limited_by_operation_and_fault_for_sixty_seconds() {
+        let began = Instant::now();
+        let mut reports = JournalFailureReports::default();
+        reports.record(
+            JournalOperation::Append,
+            &JournalError::MissingStorage,
+            began,
+        );
+        reports.record(
+            JournalOperation::Append,
+            &JournalError::MissingStorage,
+            began + Duration::from_secs(59),
+        );
+        assert_eq!(reports.rows.len(), 1);
+        assert_eq!(reports.rows[0].at, began);
+
+        reports.record(
+            JournalOperation::Append,
+            &JournalError::CorruptStorage,
+            began + Duration::from_secs(59),
+        );
+        reports.record(
+            JournalOperation::Purge,
+            &JournalError::MissingStorage,
+            began + Duration::from_secs(59),
+        );
+        assert_eq!(reports.rows.len(), 3);
+
+        reports.record(
+            JournalOperation::Append,
+            &JournalError::MissingStorage,
+            began + Duration::from_secs(60),
+        );
+        assert_eq!(reports.rows.len(), 3);
+        assert_eq!(reports.rows[0].at, began + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn append_and_purge_storage_errors_do_not_escape_the_runtime_helpers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal =
+            Journal::open(directory.path(), Limits::default(), now().unwrap()).unwrap();
+        std::fs::remove_file(directory.path().join("activity.jsonl")).unwrap();
+        let mut reports = JournalFailureReports::default();
+
+        assert_eq!(
+            append(
+                &mut journal,
+                &mut reports,
+                ActivityEvent::Service(ServiceOutcome::Started),
+            ),
+            Ok(())
+        );
+        assert_eq!(purge_journal(&mut journal, &mut reports), Ok(()));
+        assert_eq!(reports.rows.len(), 2);
+        assert!(reports.rows.iter().any(|row| {
+            row.operation == JournalOperation::Append
+                && row.fault == crate::public_diagnostics::JournalFault::MissingStorage
+        }));
+        assert!(reports.rows.iter().any(|row| {
+            row.operation == JournalOperation::Purge
+                && row.fault == crate::public_diagnostics::JournalFault::MissingStorage
+        }));
     }
 }

@@ -9,6 +9,7 @@ publish = false
 description = "Non-shipping GitHub Windows CI software phone protocol fixture"
 
 [dependencies]
+getrandom.workspace = true
 android-attestation = { path = "../../crates/android-attestation", features = ["test-attestation-anchors"] }
 approval-protocol = { path = "../../crates/approval-protocol" }
 framed-transport = { path = "../../crates/framed-transport" }
@@ -25,7 +26,6 @@ tokio = { version = "=1.53.3", features = ["rt", "net", "io-util", "io-std", "ti
 zeroize = "1.8.2"
 
 [dev-dependencies]
-getrandom.workspace = true
 p256.workspace = true
 
 [lints]

@@ -315,11 +315,15 @@ impl RegistryOwner<'_> {
     fn revoke(
         &mut self,
         device: DeviceId,
-    ) -> Result<crate::CommittedRegistryChange, PeerRuntimeError> {
+    ) -> Result<Option<crate::CommittedRegistryChange>, PeerRuntimeError> {
         match self {
-            Self::Native(owner) => owner
-                .revoke_from_privileged_owner(device)
-                .map_err(|_| PeerRuntimeError::Registry),
+            Self::Native(owner) => match owner.revoke_from_privileged_owner(device) {
+                Ok(receipt) => Ok(Some(receipt)),
+                Err(crate::RegistryError::Enrollment(
+                    approval_core::EnrollmentError::NotEnrolled,
+                )) => Ok(None),
+                Err(_) => Err(PeerRuntimeError::Registry),
+            },
             #[cfg(test)]
             Self::Fixture(owner, _) => {
                 let mut fixture = owner.borrow_mut();
@@ -327,16 +331,18 @@ impl RegistryOwner<'_> {
                     fixture.checkpoint.clone(),
                 )
                 .map_err(|_| PeerRuntimeError::Registry)?;
-                registry
-                    .revoke_from_privileged_host(device)
-                    .map_err(|_| PeerRuntimeError::Registry)?;
+                match registry.revoke_from_privileged_host(device) {
+                    Ok(()) => {}
+                    Err(approval_core::EnrollmentError::NotEnrolled) => return Ok(None),
+                    Err(_) => return Err(PeerRuntimeError::Registry),
+                }
                 fixture.checkpoint = registry.checkpoint_for_privileged_host();
                 fixture.transport.remove(&device);
                 fixture.routes.remove(&device);
-                Ok(crate::CommittedRegistryChange::for_test(
+                Ok(Some(crate::CommittedRegistryChange::for_test(
                     device,
                     fixture.checkpoint.next_revision() - 1,
-                ))
+                )))
             }
         }
     }
@@ -540,6 +546,8 @@ pub struct ServiceSession<'key> {
     watcher_health: crate::management_protocol::WatcherHealth,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay_owner_lookup: Option<(Instant, Option<windows_port_owner::ListenerOwner>)>,
+    // The embedded relay's abuse counters as last written to diagnostics.
+    relay_abuse_reported: Option<(Instant, relay_service::RelayAbuseCounters)>,
     #[cfg(all(windows, target_pointer_width = "64"))]
     relay: Option<std::net::SocketAddr>,
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -570,6 +578,8 @@ pub struct ServiceSession<'key> {
     prompt: prompt::PromptState,
     parked_prompts: u8,
     notice_sequence: u64,
+    #[cfg(test)]
+    retire_peer_after_decision_verified: bool,
 }
 impl fmt::Debug for ServiceSession<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -667,6 +677,7 @@ impl<'key> ServiceSession<'key> {
             watcher_health: crate::management_protocol::WatcherHealth::Starting,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay_owner_lookup: None,
+            relay_abuse_reported: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
             relay: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
@@ -696,6 +707,8 @@ impl<'key> ServiceSession<'key> {
             prompt: prompt::PromptState::default(),
             parked_prompts: 0,
             notice_sequence: 0,
+            #[cfg(test)]
+            retire_peer_after_decision_verified: false,
         })
     }
 
@@ -828,13 +841,14 @@ impl<'key> ServiceSession<'key> {
         {
             return Ok(false);
         }
-        if self.check_peer(&state).is_err()
+        if !self.peer_live(&state)
             || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
             || now >= deadline
         {
             state.retire();
             return Ok(false);
         }
+        self.check_peer(&state)?;
         let id = self.next_response;
         self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
         if self.peers[index]
@@ -979,6 +993,7 @@ impl<'key> ServiceSession<'key> {
         self.poll_direct_gateway(endpoint);
         self.adopt_forward_origin(now);
         self.poll_lan_announcement(now);
+        self.observe_relay_abuse(now);
         Ok(())
     }
 
@@ -1337,13 +1352,14 @@ impl<'key> ServiceSession<'key> {
         if !self.peers[index].ready || !state.live() {
             return Ok(false);
         }
-        if self.check_peer(&state).is_err()
+        if !self.peer_live(&state)
             || self.peers[index].responses_in_flight.len() >= RESPONSE_QUEUE_CAPACITY
             || now >= deadline
         {
             state.retire();
             return Ok(false);
         }
+        self.check_peer(&state)?;
         let id = self.next_response;
         self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
         let response = Response {
@@ -1679,6 +1695,57 @@ impl<'key> ServiceSession<'key> {
         })
     }
     #[cfg(all(windows, target_pointer_width = "64"))]
+    fn enrollment_step<T>(
+        &mut self,
+        result: Result<T, pairing::Failure>,
+    ) -> Result<T, SessionProgress> {
+        result.map_err(|failure| {
+            self.pairing.reject_enrollment_start(failure);
+            SessionProgress::PairingFailed
+        })
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn enrollment_policy(
+        &self,
+    ) -> Result<android_attestation::VerificationPolicy, PeerRuntimeError> {
+        #[cfg(test)]
+        if let Some(policy) = self.pairing.fixture_policy() {
+            return Ok(policy);
+        }
+        trusted_android_policy()
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn rollback_enrollment(&mut self, device: DeviceId) -> Result<(), PeerRuntimeError> {
+        let receipt = self
+            .registry
+            .as_mut()
+            .ok_or(PeerRuntimeError::Closed)?
+            .revoke(device)?
+            .ok_or(PeerRuntimeError::Registry)?;
+        if receipt.affected_device() != device {
+            return Err(PeerRuntimeError::Registry);
+        }
+        self.engine
+            .revoke_device_from_privileged_host(device)
+            .map_err(|_| PeerRuntimeError::Registry)?;
+        self.current_registry_checkpoint().map(|_| ())
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    fn reject_committed_enrollment(
+        &mut self,
+        device: DeviceId,
+        failure: pairing::Failure,
+    ) -> Result<Option<SessionProgress>, PeerRuntimeError> {
+        self.pairing.reject_enrollment_start(failure);
+        self.rollback_enrollment(device)?;
+        self.pairing.enrollment_rolled_back();
+        Ok(Some(SessionProgress::PairingFailed))
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
     fn process_enrollment(
         &mut self,
         now: Instant,
@@ -1695,26 +1762,49 @@ impl<'key> ServiceSession<'key> {
                 if self.key.public()? != self.pc_key {
                     return Err(PeerRuntimeError::Identity);
                 }
-                self.pairing
-                    .frozen_signed(signed)
-                    .map_err(|_| PeerRuntimeError::Protocol)?;
+                let result = self.pairing.frozen_signed(signed);
+                if let Err(progress) = self.enrollment_step(result) {
+                    return Ok(Some(progress));
+                }
                 Ok(None)
             }
             pairing::CeremonyAction::Commit { relay, route } => {
-                let ((proof, status), summary) = self
-                    .pairing
-                    .take_verified()
-                    .map_err(|_| PeerRuntimeError::Protocol)?;
-                let approval = decision_from_tls(&summary.approval_key)?;
-                let denial = decision_from_tls(&summary.denial_key)?;
-                let keys =
-                    DeviceKeys::new(approval, denial).map_err(|_| PeerRuntimeError::Registry)?;
-                let policy = trusted_android_policy()?;
-                let receipt = self
+                let verified = self.pairing.take_verified();
+                let ((proof, status), summary) = match self.enrollment_step(verified) {
+                    Ok(verified) => verified,
+                    Err(progress) => return Ok(Some(progress)),
+                };
+                let approval = match self.enrollment_step(
+                    decision_from_tls(&summary.approval_key)
+                        .map_err(|_| pairing::Failure::Enrollment),
+                ) {
+                    Ok(key) => key,
+                    Err(progress) => return Ok(Some(progress)),
+                };
+                let denial = match self.enrollment_step(
+                    decision_from_tls(&summary.denial_key)
+                        .map_err(|_| pairing::Failure::Enrollment),
+                ) {
+                    Ok(key) => key,
+                    Err(progress) => return Ok(Some(progress)),
+                };
+                let keys = match self.enrollment_step(
+                    DeviceKeys::new(approval, denial).map_err(|_| pairing::Failure::Enrollment),
+                ) {
+                    Ok(keys) => keys,
+                    Err(progress) => return Ok(Some(progress)),
+                };
+                let policy = self.enrollment_policy()?;
+                let enrollment = self
                     .registry
                     .as_mut()
                     .ok_or(PeerRuntimeError::Closed)?
-                    .enroll(summary.device, proof, &policy, &status, route, relay)?;
+                    .enroll(summary.device, proof, &policy, &status, route, relay)
+                    .map_err(|_| pairing::Failure::Enrollment);
+                let receipt = match self.enrollment_step(enrollment) {
+                    Ok(receipt) => receipt,
+                    Err(progress) => return Ok(Some(progress)),
+                };
                 if receipt.affected_device() != summary.device {
                     return Err(PeerRuntimeError::Registry);
                 }
@@ -1722,6 +1812,7 @@ impl<'key> ServiceSession<'key> {
                     .enroll_device_from_privileged_host(summary.device, keys)
                     .map_err(|_| PeerRuntimeError::Registry)?;
                 self.current_registry_checkpoint()?;
+                self.pairing.record_committed(summary.device);
                 let pc_transport_key = self.pairing.original_pc_key()?;
                 let unsigned = UnsignedEnrollmentAcceptance::new(EnrollmentAcceptanceFields {
                     ceremony_nonce: self.pairing.original_nonce()?,
@@ -1735,13 +1826,16 @@ impl<'key> ServiceSession<'key> {
                 })
                 .map_err(|_| PeerRuntimeError::Protocol)?;
                 let acceptance = self.key.sign_acceptance(unsigned)?;
-                self.pairing
-                    .send_acceptance(acceptance)
-                    .map_err(|_| PeerRuntimeError::Protocol)?;
+                if let Err(failure) = self.pairing.send_acceptance(acceptance) {
+                    return self.reject_committed_enrollment(summary.device, failure);
+                }
                 Ok(None)
             }
             pairing::CeremonyAction::Enrolled(device) => {
                 Ok(Some(SessionProgress::Enrolled(device)))
+            }
+            pairing::CeremonyAction::Rollback(device) => {
+                self.reject_committed_enrollment(device, pairing::Failure::Enrollment)
             }
             pairing::CeremonyAction::Failed => Ok(Some(SessionProgress::PairingFailed)),
         }
@@ -1920,11 +2014,17 @@ impl<'key> ServiceSession<'key> {
                 }))
             }
             ManagementRequest::RemoveDevice { device } => {
-                let receipt = self
+                let Some(receipt) = self
                     .registry
                     .as_mut()
                     .ok_or(PeerRuntimeError::Closed)?
-                    .revoke(device)?;
+                    .revoke(device)?
+                else {
+                    return Ok(Some(ManagementResponse::Refused(
+                        "등록된 장치를 찾을 수 없습니다. 목록을 새로 고친 뒤 다시 시도하세요."
+                            .into(),
+                    )));
+                };
                 if receipt.affected_device() != device {
                     return Err(PeerRuntimeError::Registry);
                 }
@@ -1950,6 +2050,11 @@ impl<'key> ServiceSession<'key> {
                 if self.pending_relay.is_some() {
                     return Err(PeerRuntimeError::Protocol);
                 }
+                // The writer can replace the stored setting and then fail while
+                // reading it back, so a failure here does not show which relay
+                // the next start will use. Continuing on the old one would let
+                // the running service and the stored setting disagree; only an
+                // elevated client reaches this, so the session stops instead.
                 crate::native::configure_relay_for_running_service(address)
                     .map_err(|_| PeerRuntimeError::Registry)?;
                 self.withdraw_relay();
@@ -1973,10 +2078,11 @@ impl<'key> ServiceSession<'key> {
         watch: Option<&mut dyn prompt::PromptApply>,
     ) -> Result<SessionProgress, PeerRuntimeError> {
         let state = Arc::clone(&self.peers[index].state);
-        if self.check_peer(&state).is_err() {
+        if !self.peer_live(&state) {
             state.retire();
             return Ok(SessionProgress::PeerRejected);
         }
+        self.check_peer(&state)?;
         match event {
             PeerEvent::Ready(protocol) => {
                 self.peers[index].ready = true;
@@ -2001,6 +2107,10 @@ impl<'key> ServiceSession<'key> {
                     return Ok(SessionProgress::PeerRejected);
                 };
                 if expected != id || expected_kind != kind || now >= deadline {
+                    state.retire();
+                    return Ok(SessionProgress::PeerRejected);
+                }
+                if !self.peer_live(&state) {
                     state.retire();
                     return Ok(SessionProgress::PeerRejected);
                 }
@@ -2064,6 +2174,10 @@ impl<'key> ServiceSession<'key> {
                         state.retire();
                         return Ok(SessionProgress::PeerRejected);
                     }
+                    if !self.peer_live(&state) {
+                        state.retire();
+                        return Ok(SessionProgress::PeerRejected);
+                    }
                     self.check_peer(&state)?;
                     let now = self.now()?;
                     if now < frame.received || now >= deadline {
@@ -2097,6 +2211,32 @@ impl<'key> ServiceSession<'key> {
                             Ok(SessionProgress::DecisionRejected(error))
                         }
                         Ok(authorized) => {
+                            #[cfg(test)]
+                            if self.retire_peer_after_decision_verified {
+                                self.retire_peer_after_decision_verified = false;
+                                state.retire();
+                            }
+                            if !self.peer_live(&state) {
+                                drop(authorized);
+                                state.retire();
+                                let after = match self.now() {
+                                    Ok(now) => now,
+                                    Err(_) => {
+                                        self.begin_shutdown();
+                                        return Ok(SessionProgress::AuthorizedButNotApplied(
+                                            NotAppliedReason::ExpiredAfterVerification,
+                                        ));
+                                    }
+                                };
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::FailedUnknown,
+                                    after,
+                                )?;
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::PeerChangedAfterVerification,
+                                ));
+                            }
                             if self.check_peer(&state).is_err() {
                                 drop(authorized);
                                 self.begin_shutdown();
@@ -2162,6 +2302,21 @@ impl<'key> ServiceSession<'key> {
                                 DecisionPurpose::Approve => crate::PromptAction::Approve,
                                 DecisionPurpose::Deny => crate::PromptAction::Deny,
                             };
+                            // The phone's connection can end at any moment up to
+                            // here; a decision is handed to Windows only while
+                            // its sender is still connected.
+                            if !self.peer_live(&state) {
+                                drop(authorized);
+                                state.retire();
+                                self.settle_consumed(
+                                    request_id,
+                                    prompt::PromptResult::FailedUnknown,
+                                    after,
+                                )?;
+                                return Ok(SessionProgress::AuthorizedButNotApplied(
+                                    NotAppliedReason::PeerChangedAfterVerification,
+                                ));
+                            }
                             if watch.apply_prompt(target, action, digest).is_err() {
                                 drop(authorized);
                                 self.fail_consumed_live(after)?;
@@ -2225,6 +2380,10 @@ impl<'key> ServiceSession<'key> {
         request: ClockProbeRequest,
         deadline: Instant,
     ) -> Result<SessionProgress, PeerRuntimeError> {
+        if !self.peer_live(&state) {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
         self.check_peer(&state)?;
         if self.key.public()? != self.pc_key {
             return Err(PeerRuntimeError::Identity);
@@ -2251,6 +2410,10 @@ impl<'key> ServiceSession<'key> {
         if self.key.public()? != self.pc_key {
             return Err(PeerRuntimeError::Identity);
         }
+        if !self.peer_live(&state) {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
         self.check_peer(&state)?;
         signed
             .verify(
@@ -2262,6 +2425,10 @@ impl<'key> ServiceSession<'key> {
         let bytes = encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)?;
         // Last registry/revision/role-key check before response queue/drain.
         // The retained guard retires queued/partially written output on closure.
+        if !self.peer_live(&state) {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
         self.check_peer(&state)?;
         if self.now()? >= deadline {
             state.retire();
@@ -2269,16 +2436,20 @@ impl<'key> ServiceSession<'key> {
         }
         let id = self.next_response;
         self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        self.peers[index]
+        if self.peers[index]
             .responses
             .try_send(Response {
-                source: state,
+                source: Arc::clone(&state),
                 id,
                 bytes,
                 deadline,
                 kind: ResponseKind::Clock,
             })
-            .map_err(|_| PeerRuntimeError::Protocol)?;
+            .is_err()
+        {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
         self.peers[index]
             .responses_in_flight
             .push_back((id, deadline, ResponseKind::Clock));
@@ -2334,9 +2505,12 @@ impl<'key> ServiceSession<'key> {
                 .ok_or(PeerRuntimeError::PeerChanged)?,
         })
     }
+    fn peer_live(&self, state: &PeerState) -> bool {
+        state.live()
+    }
+
     fn check_peer(&mut self, state: &PeerState) -> Result<(), PeerRuntimeError> {
         if self.closing
-            || !state.live()
             || !Arc::ptr_eq(&state.owner, &self.identity)
             || state.epoch != self.engine.boot_epoch()
             || self.binding(state.binding.device)? != state.binding
@@ -2415,6 +2589,17 @@ impl<'key> ServiceSession<'key> {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             self.pairing.poll_shutdown();
+            // A device committed to the registry whose acceptance never reached
+            // the phone is not enrolled (ADR 0052). No ceremony step runs any
+            // more during shutdown, so the rollback happens here, while the
+            // registry is still open. A rollback that fails is a cleanup
+            // failure; the ceremony is released either way so shutdown ends.
+            if let Some(pairing::CeremonyAction::Rollback(device)) =
+                self.pairing.enrollment_action(Instant::now())
+            {
+                self.io_failed |= self.rollback_enrollment(device).is_err();
+                self.pairing.enrollment_rolled_back();
+            }
             self.io_failed |= self.pairing.cleanup_failed();
             self.management.drain();
             self.io_failed |= self.management.failed();

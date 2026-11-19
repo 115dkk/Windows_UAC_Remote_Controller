@@ -119,11 +119,12 @@ impl PairingPipe {
     /// Does not renew an existing ceremony: accepts only a still-live original
     /// interval in (0, 5min]. Connect is an explicit, single-use next operation.
     pub fn new(
-        endpoint: PairingServerEndpoint,
+        mut endpoint: PairingServerEndpoint,
         started_at: Instant,
         deadline: Instant,
     ) -> Result<Self, Error> {
-        let budget = OriginalBudget::new(started_at, deadline, Instant::now())?;
+        let budget = OriginalBudget::new(started_at, deadline, Instant::now())
+            .inspect_err(|_| endpoint.pipe.disconnect_on_drop = true)?;
         let mut inner = Box::new(Inner {
             connection: Some(Connection::Server(endpoint)),
             operation: None,
@@ -166,6 +167,16 @@ impl PairingPipe {
     /// It does not clear first_failure or indicate ceremony/transport success.
     pub fn drain(&mut self) -> Result<bool, Error> {
         self.inner_mut().drain()
+    }
+    /// Only the protocol owner that received the final CloseAck may use this.
+    pub(crate) fn complete_exchange(&mut self) -> Result<bool, Error> {
+        let inner = self.inner_mut();
+        if inner.first_failure.is_some() || inner.in_flight() || inner.phase != Phase::Connected {
+            return Err(inner.fail(Error::InvalidPhase));
+        }
+        inner.drain_completed().inspect_err(|&error| {
+            inner.fail(error);
+        })
     }
     pub fn is_closed(&self) -> bool {
         self.inner_ref().phase == Phase::Closed
@@ -412,6 +423,12 @@ impl Connection {
             Self::Peer(peer) => peer.endpoint.pipe.raw(),
         }
     }
+    fn disconnect_on_drop(&mut self) {
+        match self {
+            Self::Server(endpoint) => endpoint.pipe.disconnect_on_drop = true,
+            Self::Peer(peer) => peer.endpoint.pipe.disconnect_on_drop = true,
+        }
+    }
     fn recheck(&mut self) -> Result<(), Error> {
         match self {
             Self::Server(endpoint) => endpoint.context.recheck(),
@@ -490,6 +507,9 @@ impl Inner {
         result.map_err(|error| self.fail(error))
     }
     fn fail(&mut self, error: Error) -> Error {
+        if let Some(connection) = self.connection.as_mut() {
+            connection.disconnect_on_drop();
+        }
         let first = *self.first_failure.get_or_insert(error);
         self.phase = Phase::Closed;
         self.request_cancel_once();
@@ -633,15 +653,19 @@ impl Inner {
                 }
             }
         }
+        self.drain_completed().map_err(|_| first)
+    }
+    fn drain_completed(&mut self) -> Result<bool, Error> {
         // Prepared/unissued or confirmed terminal only; no outstanding borrow.
+        self.phase = Phase::Closed;
         drop(self.operation.take());
         // Retain the whole original peer/pipe if the watched key/event release
         // is uncertain. Closing the pipe alone must not free this reservation.
-        self.drain_uac_policy().map_err(|_| first)?;
+        self.drain_uac_policy()?;
         drop(self.connection.take());
         if let Err(error) = cleanup_state() {
             self.cleanup_failure.get_or_insert(error);
-            return Err(first);
+            return Err(error);
         }
         self.drained = true;
         Ok(true)

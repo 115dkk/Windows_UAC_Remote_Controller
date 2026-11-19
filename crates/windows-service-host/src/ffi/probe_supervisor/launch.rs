@@ -33,7 +33,7 @@ use windows::{
     },
     core::{PCWSTR, PWSTR},
 };
-use windows_prompt_probe::supervision::{PIPE_BUFFER_BYTES, PIPE_PREFIX};
+use windows_prompt_probe::{SupervisionPipeToken, supervision::PIPE_BUFFER_BYTES};
 
 const HELPER_COMMIT_LIMIT: usize = 256 * 1024 * 1024;
 
@@ -85,6 +85,15 @@ pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
 
 pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     run.inspection_budget()?;
+    if run.pipe.is_some() || run.child.is_some() {
+        return Err(Error::PeerMismatch);
+    }
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|_| Error::EntropyUnavailable)?;
+    let pipe_token = pipe_token_from_bytes(random)?;
+    // Reserve the unpredictable first-instance name BEFORE a process (and its
+    // command line) exists. Every launch mode, including the inspector, uses it.
+    run.pipe = Some(pipe(&run.preflight, &pipe_token)?);
     let token = if run.inspection.is_some() {
         run.preflight
             .token
@@ -107,16 +116,8 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
         run.preflight.pins.probe()
     };
     let image = wide(executable.as_os_str())?;
-    let mut command_line = if run.inspection.is_some() {
-        let mut line = crate::probe_supervisor::quoted_image_command_line(&image)?;
-        line.pop();
-        line.extend(" pair-inspector\0".encode_utf16());
-        line
-    } else if watch {
-        crate::probe_supervisor::quoted_watch_command_line(&image)?
-    } else {
-        crate::probe_supervisor::quoted_image_command_line(&image)?
-    };
+    let mut command_line =
+        helper_command_line(&image, watch, run.inspection.is_some(), &pipe_token)?;
     let directory = wide(
         executable
             .parent()
@@ -142,7 +143,8 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     }
     run.inspection_budget()?;
     // SAFETY: only our checked duplicate primary token and fixed pinned binary.
-    // Only quoted argv[0], fixed `watch`, or fixed `pair-inspector`. Inspector
+    // Quoted argv[0], optional fixed `watch`/`pair-inspector`, and a service-generated
+    // 32-lowercase-hex pipe token (no quoting metacharacters). Inspector
     // image/session/cutoff come from retained service ownership, not caller argv.
     // No caller argument or standard handle is accepted,
     // and bInheritHandles=false (Windows
@@ -240,20 +242,43 @@ pub(super) fn authenticate_child(run: &ActiveRun) -> Result<(), Error> {
         .verify_child(process, run.preflight.session.id, &run.preflight.sid_bytes)
 }
 
-pub(super) fn pipe(preflight: &Preflight, pid: u32) -> Result<Handle, Error> {
-    if pid == 0 {
-        return Err(Error::PeerMismatch);
-    }
+fn pipe_token_from_bytes(bytes: [u8; 16]) -> Result<SupervisionPipeToken, Error> {
+    let text = format!("{:032x}", u128::from_be_bytes(bytes));
+    SupervisionPipeToken::parse(std::ffi::OsStr::new(&text)).map_err(|_| Error::EntropyUnavailable)
+}
+
+fn helper_command_line(
+    image: &[u16],
+    watch: bool,
+    inspection: bool,
+    token: &SupervisionPipeToken,
+) -> Result<Vec<u16>, Error> {
+    let mut line = if inspection {
+        let mut line = crate::probe_supervisor::quoted_image_command_line(image)?;
+        line.pop();
+        line.extend(" pair-inspector\0".encode_utf16());
+        line
+    } else if watch {
+        crate::probe_supervisor::quoted_watch_command_line(image)?
+    } else {
+        crate::probe_supervisor::quoted_image_command_line(image)?
+    };
+    line.pop(); // Replace the final NUL, preserving the existing quoted image.
+    line.extend(format!(" {}\0", token.argument()).encode_utf16());
+    Ok(line)
+}
+
+fn pipe(preflight: &Preflight, token: &SupervisionPipeToken) -> Result<Handle, Error> {
     let descriptor = preflight
         .sid
         .probe_descriptor()
         .map_err(|_| Error::ServiceConfiguration)?;
     let attributes = attributes(descriptor.ptr().0);
-    let name: Vec<u16> = format!("{PIPE_PREFIX}{pid}\0").encode_utf16().collect();
-    // SAFETY: fixed local namespace + retained created PID, first instance only,
-    // one message-mode endpoint, remote clients rejected, SYSTEM/service-SID DACL.
-    // A collision is failure, never attachment to a preexisting pipe. The child
-    // is suspended until this endpoint and pending connect exist.
+    let name: Vec<u16> = token.pipe_name().encode_utf16().chain(Some(0)).collect();
+    // SAFETY: fixed local namespace + fresh 128-bit OS-random token, first instance
+    // only, one message-mode endpoint, remote clients rejected, SYSTEM/service-SID
+    // DACL. A collision is failure, never attachment to a preexisting pipe. This
+    // endpoint is created before the child, which remains suspended until connect.
     let raw = unsafe {
         CreateNamedPipeW(
             PCWSTR(name.as_ptr()),
@@ -334,6 +359,60 @@ fn environment() -> Result<Vec<u16>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_bytes_format_as_exact_lowercase_pipe_token() {
+        let bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ];
+        let token = pipe_token_from_bytes(bytes).unwrap();
+        assert_eq!(token.argument(), "0123456789abcdeffedcba9876543210");
+        assert_eq!(
+            SupervisionPipeToken::parse(std::ffi::OsStr::new(token.argument())),
+            Ok(token.clone())
+        );
+        assert_eq!(
+            token.pipe_name(),
+            r"\\.\pipe\UacRemoteController.PromptProbe.v4.0123456789abcdeffedcba9876543210"
+        );
+        assert_eq!(
+            pipe_token_from_bytes([0; 16]).unwrap().argument(),
+            "0".repeat(32)
+        );
+        assert_eq!(
+            pipe_token_from_bytes([0xff; 16]).unwrap().argument(),
+            "f".repeat(32)
+        );
+        for invalid in [
+            "".to_owned(),
+            token.argument()[..31].to_owned(),
+            format!("{}0", token.argument()),
+            token.argument().to_uppercase(),
+            "g".repeat(32),
+        ] {
+            assert!(SupervisionPipeToken::parse(std::ffi::OsStr::new(&invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn every_launch_mode_appends_one_token_after_the_quoted_image() {
+        let token = pipe_token_from_bytes([0xab; 16]).unwrap();
+        for (watch, inspection, mode, leaf) in [
+            (false, false, "", "uac-prompt-probe.exe"),
+            (true, false, " watch", "uac-prompt-probe.exe"),
+            (true, true, " pair-inspector", "uac-service.exe"),
+        ] {
+            let path = format!(r"C:\Program Files\UACRemoteController\{leaf}");
+            let image: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+            let line = helper_command_line(&image, watch, inspection, &token).unwrap();
+            assert_eq!(
+                String::from_utf16(&line).unwrap(),
+                format!("\"{path}\"{mode} {}\0", token.argument())
+            );
+            assert_eq!(line.iter().filter(|unit| **unit == 0).count(), 1);
+        }
+    }
 
     #[test]
     fn fixed_job_caps_one_process_and_committed_memory_without_breakaway() {

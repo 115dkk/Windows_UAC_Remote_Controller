@@ -12,7 +12,6 @@ pub const SERVICE_NAME: &str = "UacRemoteController";
 pub const INSTALLATION_FOLDER: &str = "휴대폰 승인";
 pub const SERVICE_EXECUTABLE: &str = "uac-service.exe";
 pub const PROBE_EXECUTABLE: &str = "uac-prompt-probe.exe";
-pub const PIPE_PREFIX: &str = r"\\.\pipe\UacRemoteController.PromptProbe.v3.";
 pub const CHALLENGE_BYTES: usize = 40;
 pub const REPORT_HEADER_BYTES: usize = 80;
 pub const MAX_REPORT_BYTES: usize = 512 * 1024;
@@ -180,6 +179,19 @@ impl fmt::Debug for ServiceMessage {
 }
 
 impl HelperMessage {
+    /// Whether this message's exact encoding fits the bounded watch frame.
+    /// `Appeared` is the only variant whose size depends on captured content.
+    pub(crate) fn fits_watch_frame(&self) -> bool {
+        match self {
+            Self::Appeared { report, .. } => WATCH_HEADER_BYTES
+                .checked_add(TARGET_BYTES)
+                .and_then(|length| length.checked_add(REPORT_HEADER_BYTES))
+                .and_then(|length| length.checked_add(report.content().encoded_len()))
+                .is_some_and(|length| length <= MAX_WATCH_MESSAGE_BYTES),
+            _ => true,
+        }
+    }
+
     pub fn to_wire(&self) -> Result<Vec<u8>, ReportProtocolError> {
         let mut payload = Vec::new();
         let tag = match self {
@@ -1201,6 +1213,7 @@ mod tests {
             HelperMessage::Parked { count: 2 },
         ];
         for message in messages {
+            assert!(message.fits_watch_frame());
             let wire = message.to_wire().unwrap();
             assert!(wire.len() <= MAX_WATCH_MESSAGE_BYTES);
             assert_eq!(HelperMessage::from_wire(&wire), Ok(message.clone()));
@@ -1348,11 +1361,9 @@ mod tests {
             content,
         )
         .unwrap();
-        assert!(
-            HelperMessage::Appeared { target, report }
-                .to_wire()
-                .is_err()
-        );
+        let oversized = HelperMessage::Appeared { target, report };
+        assert!(!oversized.fits_watch_frame());
+        assert!(oversized.to_wire().is_err());
     }
 
     #[test]

@@ -238,6 +238,27 @@ fn registry_route_change_after_signing_retires_before_address_queue() {
     });
 }
 
+#[test]
+fn peer_retired_during_address_signature_is_rejected_without_closing_session() {
+    exercise(|session, key, registry, clients| {
+        install_route(session, &registry);
+        let commands = ready(session, key, clients);
+        let state = Arc::clone(&session.peers[0].state);
+        let retire_during_signature = Arc::clone(&state);
+        *key.after_protocol.borrow_mut() = Some(Box::new(move || {
+            retire_during_signature.retire();
+        }));
+
+        commands.try_send(query(session).to_wire()).unwrap();
+        drive_until(session, |progress| {
+            progress == SessionProgress::PeerRejected
+        });
+        assert!(!state.live());
+        assert!(!session.closing);
+        assert!(session.peers[0].responses_in_flight.is_empty());
+    });
+}
+
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
 fn routing_mode_withdrawal_retires_output_guards_and_status_contains_no_coordinates() {
@@ -846,6 +867,30 @@ fn a_query_met_while_discovering_is_answered_once_the_owner_settles() {
         spin(session);
         assert!(state.live());
         assert!(session.hint_refreshes.is_empty());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn peer_retired_during_deferred_address_signature_is_skipped_without_closing_session() {
+    exercise_timed(|session, key, registry, clients, clock| {
+        embed(session, &registry, discovering());
+        let commands = ready(session, key, clients);
+        lapse(session, &commands);
+        let state = Arc::clone(&session.peers[0].state);
+        let retire_during_signature = Arc::clone(&state);
+        *key.after_protocol.borrow_mut() = Some(Box::new(move || {
+            retire_during_signature.retire();
+        }));
+
+        session.gateway_fixture = Some(mapped());
+        at(clock, 4);
+        let now = session.now().unwrap();
+        assert_eq!(session.answer_deferred_queries(now), Ok(()));
+        assert!(session.peers[0].deferred_query.is_none());
+        assert!(!state.live());
+        assert!(!session.closing);
+        assert!(session.peers[0].responses_in_flight.is_empty());
     });
 }
 

@@ -17,9 +17,9 @@ use super::{
 use crate::codec::Reader;
 
 const MAGIC: &[u8; 8] = b"WUACSUB\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const KIND: u8 = 1;
-const FIXED_BYTES: usize = 429;
+const FIXED_BYTES: usize = 461;
 const DOMAIN: &[u8] = b"Windows-UAC-Remote-Controller/candidate-submission/v1";
 
 pub const MAX_SUBMISSION_CERTIFICATES: usize = 8;
@@ -39,6 +39,7 @@ pub struct CandidateSubmissionFields {
     pub pc: PcIdentity,
     pub recipient_device: DeviceId,
     pub invitation_context: InvitationContextDigest,
+    pub sas_commitment: [u8; 32],
     pub approval_key: TlsPublicKey,
     pub denial_key: TlsPublicKey,
     pub transport_key: TlsPublicKey,
@@ -120,6 +121,7 @@ impl CandidateSubmission {
         bytes.extend_from_slice(self.fields.pc.as_bytes());
         bytes.extend_from_slice(self.fields.recipient_device.as_bytes());
         bytes.extend_from_slice(self.fields.invitation_context.as_bytes());
+        bytes.extend_from_slice(&self.fields.sas_commitment);
         bytes.extend_from_slice(self.fields.approval_key.as_spki_der());
         bytes.extend_from_slice(self.fields.denial_key.as_spki_der());
         bytes.extend_from_slice(self.fields.transport_key.as_spki_der());
@@ -130,8 +132,7 @@ impl CandidateSubmission {
     }
 
     pub fn from_wire(bytes: &[u8]) -> Result<Self, PairingError> {
-        if !(MIN_CANDIDATE_SUBMISSION_BYTES..=MAX_CANDIDATE_SUBMISSION_BYTES).contains(&bytes.len())
-        {
+        if bytes.len() < 12 || bytes.len() > MAX_CANDIDATE_SUBMISSION_BYTES {
             return Err(PairingError::InvalidLength);
         }
         let mut reader = Reader::new(bytes);
@@ -147,6 +148,9 @@ impl CandidateSubmission {
         if super::array::<1>(&mut reader)? != [0] {
             return Err(PairingError::InvalidEncoding);
         }
+        if bytes.len() < MIN_CANDIDATE_SUBMISSION_BYTES {
+            return Err(PairingError::InvalidLength);
+        }
         let ceremony_nonce = PairingNonce::from_bytes(super::array(&mut reader)?)?;
         let attestation_challenge = PairingChallenge::from_bytes(super::array(&mut reader)?)?;
         let pc = PcIdentity::from_bytes(super::array(&mut reader)?)
@@ -154,6 +158,8 @@ impl CandidateSubmission {
         let recipient_device = DeviceId::from_bytes(super::array(&mut reader)?)
             .map_err(|_| PairingError::InvalidFields)?;
         let invitation_context = InvitationContextDigest::from_bytes(super::array(&mut reader)?);
+
+        let sas_commitment = super::array(&mut reader)?;
 
         // The full body bound was checked before canonical key decoding.
         let approval_key = super::key(&mut reader)?;
@@ -171,6 +177,7 @@ impl CandidateSubmission {
                 pc,
                 recipient_device,
                 invitation_context,
+                sas_commitment,
                 approval_key,
                 denial_key,
                 transport_key,
@@ -338,6 +345,7 @@ mod tests {
             pc: PcIdentity::from_bytes([3; 32]).unwrap(),
             recipient_device: DeviceId::from_bytes([4; 16]).unwrap(),
             invitation_context: InvitationContextDigest::from_bytes([5; 32]),
+            sas_commitment: [9; 32],
             approval_key: public(6),
             denial_key: public(7),
             transport_key: public(8),
@@ -374,20 +382,21 @@ mod tests {
 
     #[test]
     fn one_and_eight_certificate_chains_roundtrip_with_exact_layout() {
-        assert_eq!(MIN_CANDIDATE_SUBMISSION_BYTES, 441);
-        assert_eq!(MAX_CANDIDATE_SUBMISSION_BYTES, 98_784);
+        assert_eq!(MIN_CANDIDATE_SUBMISSION_BYTES, 473);
+        assert_eq!(MAX_CANDIDATE_SUBMISSION_BYTES, 98_816);
         for count in [1, 8] {
             let original = submission(count);
             let wire = original.to_wire();
-            assert_eq!(&wire[..12], b"WUACSUB\0\x00\x01\x01\x00");
+            assert_eq!(&wire[..12], b"WUACSUB\0\x00\x02\x01\x00");
             assert_eq!(&wire[12..44], &[1; 32]);
             assert_eq!(&wire[44..76], &[2; 32]);
             assert_eq!(&wire[76..108], &[3; 32]);
             assert_eq!(&wire[108..124], &[4; 16]);
             assert_eq!(&wire[124..156], &[5; 32]);
-            assert_eq!(&wire[156..247], public(6).as_spki_der());
-            assert_eq!(&wire[247..338], public(7).as_spki_der());
-            assert_eq!(&wire[338..429], public(8).as_spki_der());
+            assert_eq!(&wire[156..188], &[9; 32]);
+            assert_eq!(&wire[188..279], public(6).as_spki_der());
+            assert_eq!(&wire[279..370], public(7).as_spki_der());
+            assert_eq!(&wire[370..461], public(8).as_spki_der());
             let decoded = CandidateSubmission::from_wire(&wire).unwrap();
             assert_eq!(decoded.fields(), original.fields());
             assert_eq!(decoded.approval_chain(), original.approval_chain());
@@ -433,14 +442,14 @@ mod tests {
         let wire = submission(1).to_wire();
         for count in [0, 9] {
             let mut bad = wire.clone();
-            bad[429] = count;
+            bad[461] = count;
             assert!(CandidateSubmission::from_wire(&bad).is_err());
         }
         let mut zero = wire.clone();
-        zero[430..432].fill(0);
+        zero[462..464].fill(0);
         assert!(CandidateSubmission::from_wire(&zero).is_err());
         let mut oversized = wire;
-        oversized[430..432].copy_from_slice(&8193u16.to_be_bytes());
+        oversized[462..464].copy_from_slice(&8193u16.to_be_bytes());
         assert!(CandidateSubmission::from_wire(&oversized).is_err());
 
         assert!(CandidateSubmission::new(fields(), vec![], chain(1), chain(1)).is_err());
@@ -491,8 +500,8 @@ mod tests {
         ));
 
         let mut wire = submission(1).to_wire();
-        let approval = wire[156..247].to_vec();
-        wire[247..338].copy_from_slice(&approval);
+        let approval = wire[188..279].to_vec();
+        wire[279..370].copy_from_slice(&approval);
         assert!(matches!(
             CandidateSubmission::from_wire(&wire),
             Err(PairingError::KeyReuse)
@@ -504,7 +513,7 @@ mod tests {
         let wire = submission(1).to_wire();
         for (offset, value, expected) in [
             (0, b'X', PairingError::InvalidEncoding),
-            (9, 2, PairingError::UnsupportedVersion),
+            (9, 1, PairingError::UnsupportedVersion),
             (10, 2, PairingError::UnsupportedKind),
             (11, 1, PairingError::InvalidEncoding),
         ] {
@@ -525,7 +534,7 @@ mod tests {
     #[test]
     fn malformed_keys_reject_after_whole_body_length_check() {
         let wire = submission(1).to_wire();
-        for offset in [156, 247, 338] {
+        for offset in [188, 279, 370] {
             let mut bad = wire.clone();
             bad[offset] = 0x31;
             assert_eq!(
@@ -571,6 +580,17 @@ mod tests {
                 PairingError::InvalidLength
             );
         }
+    }
+
+    #[test]
+    fn v1_original_layout_is_rejected_as_unsupported() {
+        let mut wire = submission(1).to_wire();
+        wire[8..10].copy_from_slice(&1u16.to_be_bytes());
+        wire.drain(156..188);
+        assert_eq!(
+            CandidateSubmission::from_wire(&wire).unwrap_err(),
+            PairingError::UnsupportedVersion
+        );
     }
 
     #[test]

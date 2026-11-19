@@ -3,7 +3,7 @@
 //! proves no reachability; all hints are memory-only and cleared on network change.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::{Duration, Instant},
 };
@@ -14,6 +14,9 @@ pub(crate) const LAN_HINT_ENTRY_CAPACITY: usize = 8;
 pub(crate) const LAN_HINT_ADDRESS_CAPACITY: usize = 2;
 /// Maximum number of address strings accepted from one native observation.
 pub(crate) const LAN_HINT_OBSERVATION_CAPACITY: usize = 8;
+/// Maximum number of hint addresses remembered after they fail before the
+/// pinned secure channel becomes ready, per PC instance.
+pub(crate) const LAN_HINT_DISTRUST_CAPACITY: usize = 8;
 /// Maximum age of a DNS-SD observation before it is ignored and removed.
 /// Android reports an instance again only when it changes, so a PC that keeps
 /// its address is not re-reported; the network change that clears every hint
@@ -23,6 +26,8 @@ pub(crate) const LAN_HINT_TTL: Duration = Duration::from_secs(60 * 60);
 #[derive(Default)]
 pub(crate) struct LanHints {
     entries: BTreeMap<String, LanHint>,
+    distrusted: BTreeMap<String, VecDeque<SocketAddr>>,
+    distrusted_labels: VecDeque<String>,
 }
 
 struct LanHint {
@@ -87,8 +92,50 @@ impl LanHints {
         self.entries.remove(label);
     }
 
+    /// Removes all memory-only routing state for a durably removed PC. A mere
+    /// DNS-SD loss uses [`Self::forget`] and keeps distrust across reannouncement.
+    pub(crate) fn forget_pc(&mut self, label: &str) {
+        self.entries.remove(label);
+        self.clear_distrusted(label);
+    }
+
+    /// A failed secure-channel attempt does not erase the observation. It only
+    /// changes this address's priority until this PC reaches Ready or the
+    /// network changes. Repeated failures retain the original insertion age.
+    pub(crate) fn record_distrusted(&mut self, label: &str, address: SocketAddr) {
+        if !service_protocol::is_lan_instance_label(label) || !lan_address(address) {
+            return;
+        }
+        if !self.distrusted.contains_key(label) {
+            while self.distrusted.len() >= LAN_HINT_ENTRY_CAPACITY {
+                let Some(oldest) = self.distrusted_labels.pop_front() else {
+                    self.distrusted.clear();
+                    break;
+                };
+                self.distrusted.remove(&oldest);
+            }
+            self.distrusted_labels.push_back(label.to_owned());
+        }
+        let addresses = self.distrusted.entry(label.to_owned()).or_default();
+        if addresses.contains(&address) {
+            return;
+        }
+        if addresses.len() == LAN_HINT_DISTRUST_CAPACITY {
+            addresses.pop_front();
+        }
+        addresses.push_back(address);
+    }
+
+    pub(crate) fn clear_distrusted(&mut self, label: &str) {
+        if self.distrusted.remove(label).is_some() {
+            self.distrusted_labels.retain(|stored| stored != label);
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.distrusted.clear();
+        self.distrusted_labels.clear();
     }
 
     pub(crate) fn addresses_for(&mut self, label: &str, now: Instant) -> Vec<SocketAddr> {
@@ -96,6 +143,13 @@ impl LanHints {
         self.entries
             .get(label)
             .map(|hint| hint.addresses.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn distrusted_for(&self, label: &str) -> Vec<SocketAddr> {
+        self.distrusted
+            .get(label)
+            .map(|addresses| addresses.iter().copied().collect())
             .unwrap_or_default()
     }
 
@@ -265,16 +319,80 @@ mod tests {
     }
 
     #[test]
-    fn clear_forgets_every_entry() {
+    fn network_clear_forgets_hints_and_distrusted_addresses() {
         let now = Instant::now();
         let mut hints = LanHints::default();
         let retained = address("10.0.0.7:7443");
         for seed in [6, 7] {
-            assert!(hints.record(&label(seed), [retained], now));
+            let instance = label(seed);
+            assert!(hints.record(&instance, [retained], now));
+            hints.record_distrusted(&instance, retained);
         }
         hints.clear();
         assert!(hints.entries.is_empty());
+        assert!(hints.distrusted.is_empty());
+        assert!(hints.distrusted_labels.is_empty());
         assert!(hints.addresses_for(&label(6), now).is_empty());
+        assert!(hints.distrusted_for(&label(6)).is_empty());
+    }
+
+    #[test]
+    fn distrusted_addresses_are_bounded_oldest_first_and_reannouncement_keeps_them() {
+        let start = Instant::now();
+        let mut hints = LanHints::default();
+        let instance = label(8);
+        let addresses: Vec<_> = (1..=LAN_HINT_DISTRUST_CAPACITY + 1)
+            .map(|last| address(&format!("10.0.0.{last}:7443")))
+            .collect();
+        for address in &addresses[..LAN_HINT_DISTRUST_CAPACITY] {
+            hints.record_distrusted(&instance, *address);
+        }
+        hints.record_distrusted(&instance, addresses[0]);
+        assert!(hints.record(&instance, [addresses[0]], start));
+        assert_eq!(
+            hints.distrusted_for(&instance),
+            addresses[..LAN_HINT_DISTRUST_CAPACITY]
+        );
+
+        hints.record_distrusted(&instance, addresses[LAN_HINT_DISTRUST_CAPACITY]);
+        assert_eq!(
+            hints.distrusted_for(&instance),
+            addresses[1..=LAN_HINT_DISTRUST_CAPACITY]
+        );
+    }
+
+    #[test]
+    fn distrusted_pc_labels_are_bounded_and_evict_the_oldest_label() {
+        let failed = address("10.0.0.8:7443");
+        let mut hints = LanHints::default();
+        for seed in 1..=LAN_HINT_ENTRY_CAPACITY as u8 {
+            hints.record_distrusted(&label(seed), failed);
+        }
+        hints.record_distrusted(&label(1), failed);
+        hints.record_distrusted(&label(9), failed);
+
+        assert_eq!(hints.distrusted.len(), LAN_HINT_ENTRY_CAPACITY);
+        assert_eq!(hints.distrusted_labels.len(), LAN_HINT_ENTRY_CAPACITY);
+        assert!(hints.distrusted_for(&label(1)).is_empty());
+        for seed in 2..=9 {
+            assert_eq!(hints.distrusted_for(&label(seed)), [failed]);
+        }
+    }
+
+    #[test]
+    fn forgetting_a_pc_clears_its_observation_and_distrust() {
+        let now = Instant::now();
+        let mut hints = LanHints::default();
+        let instance = label(10);
+        let failed = address("10.0.0.10:7443");
+        assert!(hints.record(&instance, [failed], now));
+        hints.record_distrusted(&instance, failed);
+
+        hints.forget_pc(&instance);
+
+        assert!(hints.addresses_for(&instance, now).is_empty());
+        assert!(hints.distrusted_for(&instance).is_empty());
+        assert!(!hints.distrusted_labels.contains(&instance));
     }
 
     #[test]

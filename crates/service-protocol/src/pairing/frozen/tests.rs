@@ -24,7 +24,7 @@ fn public(seed: u8) -> TlsPublicKey {
 }
 
 fn context() -> FrozenCandidateContext {
-    FrozenCandidateContext {
+    let mut context = FrozenCandidateContext {
         ceremony_nonce: PairingNonce::from_bytes([6; 32]).unwrap(),
         attestation_challenge: PairingChallenge::from_bytes([7; 32]).unwrap(),
         pc: PcIdentity::from_bytes([4; 32]).unwrap(),
@@ -33,13 +33,30 @@ fn context() -> FrozenCandidateContext {
         pc_signing_key: public(10),
         pc_transport_key: public(11),
         invitation_context: InvitationContextDigest::from_bytes([9; 32]),
-    }
+        sas_commitment: [0; 32],
+    };
+    context.sas_commitment = commitment(&context, &reveal());
+    context
+}
+
+fn reveal() -> PhoneReveal {
+    PhoneReveal::from_bytes([14; 32])
+}
+
+fn commitment(context: &FrozenCandidateContext, reveal: &PhoneReveal) -> [u8; 32] {
+    sas_commitment(
+        context.ceremony_nonce,
+        context.invitation_context,
+        context.phone_keys,
+        reveal,
+    )
 }
 
 fn fields() -> FrozenCandidateFields {
     FrozenCandidateFields {
         context: context(),
         intended_registry_revision: 17,
+        pc_random: [13; 32],
     }
 }
 
@@ -80,13 +97,16 @@ fn context_mutations(original: &FrozenCandidateContext) -> Vec<FrozenCandidateCo
     let mut value = original.clone();
     value.invitation_context = InvitationContextDigest::from_bytes([8; 32]);
     changed.push(value);
+    let mut value = original.clone();
+    value.sas_commitment[0] ^= 1;
+    changed.push(value);
     changed
 }
 
 fn fixture_body(value: &FrozenCandidateFields) -> Vec<u8> {
     // Independent fixed-layout oracle, deliberately not the production body().
     let original = &value.context;
-    let mut bytes = b"WUACFRZ\0\0\x01\x01\0".to_vec();
+    let mut bytes = b"WUACFRZ\0\0\x02\x01\0".to_vec();
     bytes.extend_from_slice(original.ceremony_nonce.as_bytes());
     bytes.extend_from_slice(original.attestation_challenge.as_bytes());
     bytes.extend_from_slice(original.pc.as_bytes());
@@ -96,6 +116,8 @@ fn fixture_body(value: &FrozenCandidateFields) -> Vec<u8> {
     bytes.extend_from_slice(original.pc_signing_key.as_spki_der());
     bytes.extend_from_slice(original.pc_transport_key.as_spki_der());
     bytes.extend_from_slice(original.invitation_context.as_bytes());
+    bytes.extend_from_slice(&value.pc_random);
+    bytes.extend_from_slice(&original.sas_commitment);
     bytes
 }
 
@@ -104,10 +126,10 @@ fn genuine_signature_roundtrip_uses_exact_fixed_body_and_independent_pc_pin() {
     let value = fields();
     let statement = signed(value.clone(), 10);
     let wire = statement.to_wire();
-    assert_eq!(BODY_BYTES, 378);
-    assert_eq!(MAX_FROZEN_CANDIDATE_BYTES, 452);
+    assert_eq!(BODY_BYTES, 442);
+    assert_eq!(MAX_FROZEN_CANDIDATE_BYTES, 516);
     assert_eq!(&wire[..BODY_BYTES], fixture_body(&value));
-    assert_eq!(&wire[..12], b"WUACFRZ\0\0\x01\x01\0");
+    assert_eq!(&wire[..12], b"WUACFRZ\0\0\x02\x01\0");
     assert_eq!(
         wire.len(),
         BODY_BYTES
@@ -123,7 +145,7 @@ fn genuine_signature_roundtrip_uses_exact_fixed_body_and_independent_pc_pin() {
     assert_eq!(verified.fields(), &value);
     let matched = verified.match_original(&value.context).unwrap();
     assert_eq!(matched.fields(), &value);
-    let mut expected_signing = b"Windows-UAC-Remote-Controller/candidate-frozen/v1\0".to_vec();
+    let mut expected_signing = b"Windows-UAC-Remote-Controller/candidate-frozen/v2\0".to_vec();
     expected_signing.extend_from_slice(&fixture_body(&value));
     assert_eq!(
         UnsignedFrozenCandidate::new(value).unwrap().signing_bytes(),
@@ -145,11 +167,15 @@ fn all_context_fields_and_intended_revision_are_covered_by_the_pc_signature() {
         .map(|context| FrozenCandidateFields {
             context,
             intended_registry_revision: original.intended_registry_revision,
+            pc_random: [13; 32],
         })
         .collect::<Vec<_>>();
     let mut revision = original.clone();
     revision.intended_registry_revision += 1;
     mutations.push(revision);
+    let mut random = original.clone();
+    random.pc_random[0] ^= 1;
+    mutations.push(random);
     for changed in mutations {
         let altered = UnsignedFrozenCandidate::new(changed)
             .unwrap()
@@ -180,6 +206,7 @@ fn every_original_context_field_must_match_even_after_a_genuine_signature_verifi
             FrozenCandidateFields {
                 context: changed.clone(),
                 intended_registry_revision: 17,
+                pc_random: [13; 32],
             },
             seed,
         );
@@ -294,12 +321,12 @@ fn intended_revision_matches_the_actual_allocator_and_rejects_exhaustion_without
 #[test]
 fn unknown_headers_zero_identifiers_bad_keys_and_exhausted_wire_revision_reject() {
     let wire = signed(fields(), 10).to_wire();
-    for (offset, replacement) in [(0, b'X'), (9, 2), (10, 2), (11, 1)] {
+    for (offset, replacement) in [(0, b'X'), (9, 1), (10, 2), (11, 1)] {
         let mut changed = wire.clone();
         changed[offset] = replacement;
         assert!(SignedFrozenCandidate::from_wire(&changed).is_err());
     }
-    for range in [12..44, 44..76, 76..108, 108..124] {
+    for range in [12..44, 44..76, 76..108, 108..124, 378..410, 410..442] {
         let mut changed = wire.clone();
         changed[range].fill(0);
         assert!(matches!(
@@ -342,7 +369,7 @@ fn exact_minimum_maximum_lengths_and_every_truncation_or_trailing_byte_are_check
     }
     let mut one = [0u8; 32];
     one[31] = 1;
-    for (r, s, expected) in [(one, one, 388), ([0x80; 32], [0x80; 32], 452)] {
+    for (r, s, expected) in [(one, one, 452), ([0x80; 32], [0x80; 32], 516)] {
         let der = Signature::from_scalars(r, s).unwrap().to_der();
         let structural = UnsignedFrozenCandidate::new(fields())
             .unwrap()
@@ -436,14 +463,16 @@ fn acceptance_wire_and_signatures_are_not_frozen_candidates_and_remain_unchanged
 
 #[test]
 fn comparison_code_uses_full_sha256_over_sas_domain_and_entire_canonical_body() {
-    for value in
+    for mut value in
         std::iter::once(fields()).chain(context_mutations(&context()).into_iter().map(|context| {
             FrozenCandidateFields {
                 context,
                 intended_registry_revision: 18,
+                pc_random: [13; 32],
             }
         }))
     {
+        value.context.sas_commitment = commitment(&value.context, &reveal());
         let seed = if value.context.pc_signing_key == public(12) {
             12
         } else {
@@ -454,12 +483,13 @@ fn comparison_code_uses_full_sha256_over_sas_domain_and_entire_canonical_body() 
             .unwrap()
             .match_original(&value.context)
             .unwrap();
-        let code = matched.comparison_code();
+        let code = matched.comparison_code(&reveal()).unwrap();
         assert_eq!(code.as_str().len(), 6);
         assert!(code.as_str().bytes().all(|byte| byte.is_ascii_digit()));
         let mut oracle = Sha256::new();
-        oracle.update(b"Windows-UAC-Remote-Controller/pairing-sas/v1\0");
+        oracle.update(b"Windows-UAC-Remote-Controller/pairing-sas/v2\0");
         oracle.update(fixture_body(&value));
+        oracle.update(reveal().as_bytes());
         let hash = oracle.finalize();
         // Independent bit-at-a-time remainder, not production's base-256 loop.
         let mut expected = 0u64;
@@ -490,6 +520,7 @@ fn signed_revision_is_retained_while_original_context_stays_independent_and_repl
             FrozenCandidateFields {
                 context: original.clone(),
                 intended_registry_revision: revision,
+                pc_random: [13; 32],
             },
             10,
         );
@@ -504,7 +535,10 @@ fn signed_revision_is_retained_while_original_context_stays_independent_and_repl
             .match_original(&original)
             .unwrap();
         assert_eq!(first.fields().intended_registry_revision, revision);
-        assert_eq!(first.comparison_code(), replayed.comparison_code());
+        assert_eq!(
+            first.comparison_code(&reveal()).unwrap(),
+            replayed.comparison_code(&reveal()).unwrap()
+        );
     }
 }
 
@@ -544,11 +578,71 @@ fn every_public_debug_view_is_redacted() {
         "MatchedFrozenCandidate([redacted], context_match_only)"
     );
     assert_eq!(
-        format!("{:?}", matched.comparison_code()),
+        format!("{:?}", matched.comparison_code(&reveal()).unwrap()),
         "PairingComparisonCode([redacted], public_comparison_only)"
     );
     assert_eq!(
         format!("{:?}", FrozenCandidateError::OriginalContextMismatch),
         "FrozenCandidateError([redacted])"
     );
+}
+
+#[test]
+fn v1_wire_is_rejected_even_with_its_original_shorter_length() {
+    let mut wire = signed(fields(), 10).to_wire();
+    wire[8..10].copy_from_slice(&1u16.to_be_bytes());
+    wire.drain(378..442);
+    assert!(matches!(
+        SignedFrozenCandidate::from_wire(&wire),
+        Err(FrozenCandidateError::UnsupportedVersion)
+    ));
+}
+
+#[test]
+fn random_commitment_and_reveal_are_bound_before_comparison() {
+    let original = fields();
+    let code = |value: FrozenCandidateFields, opening: &PhoneReveal| {
+        signed(value.clone(), 10)
+            .verify(&public(10))
+            .unwrap()
+            .match_original(&value.context)
+            .unwrap()
+            .comparison_code(opening)
+    };
+    let baseline = code(original.clone(), &reveal()).unwrap();
+    let mut random = original.clone();
+    random.pc_random[0] ^= 1;
+    assert_ne!(code(random, &reveal()).unwrap(), baseline);
+    let other_reveal = PhoneReveal::from_bytes([15; 32]);
+    assert_eq!(
+        code(original.clone(), &other_reveal).unwrap_err(),
+        FrozenCandidateError::CommitmentMismatch
+    );
+    let mut other = original.clone();
+    other.context.sas_commitment = commitment(&other.context, &other_reveal);
+    assert_ne!(code(other.clone(), &other_reveal).unwrap(), baseline);
+    assert_eq!(
+        code(other.clone(), &reveal()).unwrap_err(),
+        FrozenCandidateError::CommitmentMismatch
+    );
+    assert!(matches!(
+        signed(other, 10)
+            .verify(&public(10))
+            .unwrap()
+            .match_original(&original.context),
+        Err(FrozenCandidateError::OriginalContextMismatch)
+    ));
+    // Isolate each input in the hash oracle: an inconsistent opening must never
+    // produce a code through the public API, but both inputs affect the digest.
+    let oracle = |value: &FrozenCandidateFields, opening: &PhoneReveal| {
+        let mut hash = Sha256::new();
+        hash.update(SAS_DOMAIN);
+        hash.update(fixture_body(value));
+        hash.update(opening.as_bytes());
+        decimal_code(hash.finalize().into())
+    };
+    let mut altered = original.clone();
+    altered.context.sas_commitment[0] ^= 1;
+    assert_ne!(oracle(&altered, &reveal()), baseline);
+    assert_ne!(oracle(&original, &other_reveal), baseline);
 }

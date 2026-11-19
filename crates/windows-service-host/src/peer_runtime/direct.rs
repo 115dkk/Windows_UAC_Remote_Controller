@@ -52,6 +52,9 @@ impl ServiceSession<'_> {
         state: &PeerState,
         query: &AddressQuery,
     ) -> Result<bool, PeerRuntimeError> {
+        if !self.peer_live(state) {
+            return Ok(false);
+        }
         self.check_peer(state)?;
         if query.pc != self.engine.pc_identity() || query.device != state.binding.device {
             return Ok(false);
@@ -172,17 +175,24 @@ impl ServiceSession<'_> {
                 self.peers[index].deferred_query = Some(deferred);
                 continue;
             }
-            // The same checks the query passed on arrival, without ending a
-            // connection that changed since: its own events decide that.
-            if self.check_peer(&deferred.state).is_err()
-                || !self.address_query_current(&deferred.state, &deferred.query)?
-            {
+            // A connection that ended while this query waited has already
+            // retired itself. Registry, key and epoch mismatches remain fatal.
+            if !self.peer_live(&deferred.state) {
+                deferred.state.retire();
+                continue;
+            }
+            self.check_peer(&deferred.state)?;
+            if !self.address_query_current(&deferred.state, &deferred.query)? {
                 continue;
             }
             if self.key.public()? != self.pc_key {
                 return Err(PeerRuntimeError::Identity);
             }
-            self.answer_query(index, deferred.state, &deferred.query, deferred.deadline)?;
+            if self.answer_query(index, deferred.state, &deferred.query, deferred.deadline)?
+                == SessionProgress::PeerRejected
+            {
+                continue;
+            }
         }
         Ok(())
     }
@@ -234,16 +244,20 @@ impl ServiceSession<'_> {
         let bytes = encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)?;
         let id = self.next_response;
         self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        self.peers[index]
+        if self.peers[index]
             .responses
             .try_send(Response {
-                source: state,
+                source: Arc::clone(&state),
                 id,
                 bytes,
                 deadline,
                 kind: ResponseKind::Addresses,
             })
-            .map_err(|_| PeerRuntimeError::Protocol)?;
+            .is_err()
+        {
+            state.retire();
+            return Ok(SessionProgress::PeerRejected);
+        }
         let slot = &mut self.peers[index];
         slot.responses_in_flight
             .push_back((id, deadline, ResponseKind::Addresses));
