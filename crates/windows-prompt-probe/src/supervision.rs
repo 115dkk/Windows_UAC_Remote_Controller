@@ -181,6 +181,8 @@ impl fmt::Debug for ServiceMessage {
 impl HelperMessage {
     /// Whether this message's exact encoding fits the bounded watch frame.
     /// `Appeared` is the only variant whose size depends on captured content.
+    // Only the Windows watch loop calls this; other targets build the codec alone.
+    #[cfg(any(test, all(windows, target_pointer_width = "64")))]
     pub(crate) fn fits_watch_frame(&self) -> bool {
         match self {
             Self::Appeared { report, .. } => WATCH_HEADER_BYTES
