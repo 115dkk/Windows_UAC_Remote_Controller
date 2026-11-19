@@ -334,6 +334,17 @@ approve or deny. It is outside the modelled request and lease protocol. ALPN v3
 selects only whether this notice may be sent; v1 and v2 behavior remains
 compatible. No theorem, rule, canary or expected verdict changed.
 
+### Parked prompt census enumeration binding review (2026-11-19)
+
+`watch.rs` now collects only windows of the parked-prompt class when it counts
+parked prompts on the user's desktop, instead of enumerating every top-level
+window under the 128-window limit that suits the Winlogon desktop. A user's
+desktop held 447 windows on the PC where the census was found failing, so the
+count stayed 0 and no notice was sent. The change touches only how the bounded
+count is obtained. The Winlogon census, its limit, the helper messages, the
+notice and every request, decision and lease path are unchanged. No theorem,
+rule, canary or expected verdict changed.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |

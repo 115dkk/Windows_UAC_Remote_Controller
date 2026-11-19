@@ -36,7 +36,7 @@
     },
     {
       "path": "crates/windows-prompt-probe/src/ffi/watch.rs",
-      "sha256": "250913caba47b23e88c0790d96ead287bab1f2ba9691c836651e840240107ae9"
+      "sha256": "c85ced25640635ac2e821190c31447efd584cb34dd1d2e5c1f9340236f6dbf16"
     },
     {
       "path": "crates/phone-request-core/src/inbox.rs",

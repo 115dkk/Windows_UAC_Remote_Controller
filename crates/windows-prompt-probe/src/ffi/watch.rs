@@ -4,7 +4,8 @@
 //! The authenticated pipe peer and absolute lifetime are fixed before this runs.
 
 use super::{
-    Candidate, candidate_for, enumerate_without_budget, object_name, parked_candidate_for,
+    Candidate, candidate_for, enumerate_matching_without_budget, enumerate_without_budget,
+    object_name, parked_candidate_for,
     pipe_client::{WatchChannel, WatchRead},
     resources::{CleanupLog, OwnedDesktop},
     security, system_consent_path, uia, verify_input_desktop, verify_window_station,
@@ -312,12 +313,12 @@ fn worker_parked_census(
     // SAFETY: this fresh worker has created no USER or COM objects. The input
     // desktop handle remains owned by the parent until this worker joins.
     unsafe { SetThreadDesktop(desktop) }.map_err(|_| ())?;
-    let windows = enumerate_without_budget(desktop).map_err(|_| ())?;
+    // The user's desktop holds far more windows than the Winlogon census
+    // admits, so only windows of the parked class are collected.
+    let windows =
+        enumerate_matching_without_budget(desktop, parked_class_matches).map_err(|_| ())?;
     let mut count = 0u8;
     for hwnd in windows {
-        if !parked_class_matches(hwnd)? {
-            continue;
-        }
         if parked_candidate_for(hwnd, session, image, cleanup).map_err(|_| ())? {
             count = count.saturating_add(1).min(MAX_PARKED_PROMPTS);
             if count == MAX_PARKED_PROMPTS {
@@ -332,7 +333,7 @@ fn worker_parked_census(
 /// Any other window on the desktop is simply not a match: a long class name
 /// (WPF's `HwndWrapper[...;;<guid>]` exceeds 63 units) or a window that closed
 /// mid-enumeration must not fail the census for every parked prompt.
-fn parked_class_matches(hwnd: windows::Win32::Foundation::HWND) -> Result<bool> {
+fn parked_class_matches(hwnd: windows::Win32::Foundation::HWND) -> bool {
     // Window class names are at most 256 characters; one more unit shows truncation.
     let mut units = [0u16; 258];
     // SAFETY: read-only class query into an initialized bounded buffer for a
@@ -342,11 +343,11 @@ fn parked_class_matches(hwnd: windows::Win32::Foundation::HWND) -> Result<bool> 
         .ok()
         .filter(|length| *length > 0 && *length < units.len() - 1)
     else {
-        return Ok(false);
+        return false;
     };
-    Ok(PARKED_WINDOW_CLASS
+    PARKED_WINDOW_CLASS
         .encode_utf16()
-        .eq(units[..length].iter().copied()))
+        .eq(units[..length].iter().copied())
 }
 
 fn scoped_census(

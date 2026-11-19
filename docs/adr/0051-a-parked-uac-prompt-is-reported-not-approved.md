@@ -70,3 +70,17 @@ changed.
 - A 1.13 PC with a 1.12 phone behaves exactly as before: no notice.
 - The helper does one extra window enumeration per second while the user's
   desktop is in front.
+
+## Amendment, 2026-11-19: the census never ran on a real desktop
+
+On 2026-11-19 two `Editor.exe` prompts were parked on the development PC
+(18:35:11 and 18:44:43, the first one second after an approval from the phone
+had been applied) and the phone, connected over V3, showed nothing.
+`diagnostics.jsonl` held no `parked_on_taskbar` row since 1.13.0 was installed.
+The helper enumerated every top-level window of the `Default` desktop under
+`MAX_TOP_LEVEL_WINDOWS` (128), a limit chosen for the Winlogon desktop; that
+desktop held 447 windows, so every census failed and decision 1 kept the count
+at 0. The census now collects only windows of the parked class, whatever the
+number of other windows. A unit test enumerates the test's own desktop and, when
+it holds more than 128 windows, also shows the old enumeration failing there.
+Not yet observed with an installed build.
