@@ -346,10 +346,17 @@ async fn close(driver: &mut SocketDriver) -> Result<()> {
                     Err(_) => return Err("close_rejected"),
                 }
             }
-            match driver.next_event().await.map_err(|_| "close_failed")? {
-                SocketEvent::PeerClosed | SocketEvent::LocallyClosed => return Ok(()),
-                SocketEvent::Ready | SocketEvent::OutboundDrained => (),
-                SocketEvent::Frame(_) => return Err("unexpected_frame_on_close"),
+            match driver.next_event().await {
+                Ok(SocketEvent::PeerClosed | SocketEvent::LocallyClosed) => return Ok(()),
+                Ok(SocketEvent::Ready | SocketEvent::OutboundDrained) => (),
+                Ok(SocketEvent::Frame(_)) => return Err("unexpected_frame_on_close"),
+                // The PC stops reading as soon as its own close_notify is out, so
+                // this side's close_notify can meet a closed socket and the
+                // transport reports a reset. Everything this session had to
+                // deliver was verified before close() was called, and the
+                // product phone treats the same error as closed (android-bindings
+                // pairing/ceremony.rs close_driver); only a hang stays a failure.
+                Err(_) => return Ok(()),
             }
         }
     })

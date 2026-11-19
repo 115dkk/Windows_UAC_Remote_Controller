@@ -57,12 +57,17 @@ internal class PairingWindowRelease {
 
 internal object PairingScanRules {
     const val LIFETIME_MILLIS = 300_000L
-    const val MAX_QR_CHARS = 490
+    // The invitation codec's own bounds (service-protocol pairing/invitation.rs:
+    // MIN/MAX_PAIRING_INVITATION_QR_TEXT_BYTES). A PC that has direct candidates
+    // sends a v2 invitation of any length in between, so this is a size limit
+    // before copying; the native parser decides whether the text is an invitation.
+    const val MIN_QR_CHARS = 474
+    const val MAX_QR_CHARS = 568
     fun current(started: Long, now: Long): Boolean =
         started >= 0 && now >= started && now - started < LIFETIME_MILLIS
     fun expired(started: Long, now: Long): Boolean =
         started >= 0 && now >= started && now - started >= LIFETIME_MILLIS
-    fun boundedText(text: String): Boolean = (text.length == 474 || text.length == MAX_QR_CHARS) && text.all { it.code in 0..127 }
+    fun boundedText(text: String): Boolean = text.length in MIN_QR_CHARS..MAX_QR_CHARS && text.all { it.code in 0..127 }
 }
 
 /** Copy only a bounded Y plane. No file, camera, decoder, rotation transform or credentials. */
