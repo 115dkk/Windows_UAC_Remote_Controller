@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Fixed protected helper only. No inherited handles, shell, caller arguments,
 //! environment-sourced image path, foreign token, breakaway or privilege changes.
-use super::{ActiveRun, Handle, native, preflight::Preflight};
+use super::{Handle, native, native_run::NativeRunIo, preflight::Preflight};
 use crate::{ProbeSupervisorError as Error, SupervisorStage as Stage};
 use std::{mem, os::windows::ffi::OsStrExt};
 use windows::{
@@ -83,8 +83,13 @@ pub(super) fn job(preflight: &Preflight) -> Result<Handle, Error> {
     Ok(job)
 }
 
-pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
-    run.inspection_budget()?;
+pub(super) fn child(
+    run: &mut NativeRunIo,
+    watch: bool,
+    inspection: Option<u64>,
+    began: std::time::Instant,
+) -> Result<(), Error> {
+    super::active_run::inspection_budget(inspection)?;
     if run.pipe.is_some() || run.child.is_some() {
         return Err(Error::PeerMismatch);
     }
@@ -94,7 +99,7 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     // Reserve the unpredictable first-instance name BEFORE a process (and its
     // command line) exists. Every launch mode, including the inspector, uses it.
     run.pipe = Some(pipe(&run.preflight, &pipe_token)?);
-    let token = if run.inspection.is_some() {
+    let token = if inspection.is_some() {
         run.preflight
             .token
             .for_inspection_session(run.preflight.session.id, &run.preflight.sid_bytes)?
@@ -110,14 +115,13 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
         .probe_descriptor()
         .map_err(|_| Error::ServiceConfiguration)?;
     let attributes = attributes(descriptor.ptr().0);
-    let executable = if run.inspection.is_some() {
+    let executable = if inspection.is_some() {
         run.preflight.pins.service()
     } else {
         run.preflight.pins.probe()
     };
     let image = wide(executable.as_os_str())?;
-    let mut command_line =
-        helper_command_line(&image, watch, run.inspection.is_some(), &pipe_token)?;
+    let mut command_line = helper_command_line(&image, watch, inspection.is_some(), &pipe_token)?;
     let directory = wide(
         executable
             .parent()
@@ -125,7 +129,7 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
             .as_os_str(),
     )?;
     let environment = environment()?;
-    let mut desktop: Vec<u16> = if run.inspection.is_some() {
+    let mut desktop: Vec<u16> = if inspection.is_some() {
         "winsta0\\default\0"
     } else {
         "winsta0\\winlogon\0"
@@ -139,9 +143,9 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     };
     let mut info = PROCESS_INFORMATION::default();
     if !watch {
-        run.budget()?;
+        crate::probe_supervisor::wait_slice(began.elapsed())?;
     }
-    run.inspection_budget()?;
+    super::active_run::inspection_budget(inspection)?;
     // SAFETY: only our checked duplicate primary token and fixed pinned binary.
     // Quoted argv[0], optional fixed `watch`/`pair-inspector`, and a service-generated
     // 32-lowercase-hex pipe token (no quoting metacharacters). Inspector
@@ -192,7 +196,10 @@ pub(super) fn child(run: &mut ActiveRun, watch: bool) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn assign_and_authenticate(run: &mut ActiveRun) -> Result<(), Error> {
+pub(super) fn assign_and_authenticate(
+    run: &mut NativeRunIo,
+    inspection: Option<u64>,
+) -> Result<(), Error> {
     // SAFETY: own fresh EMPTY job and retained newly CREATED suspended child.
     // An empty Session0-created job may take this first target-session process;
     // the API, not a fabricated creator-session restriction, decides compatibility
@@ -200,10 +207,10 @@ pub(super) fn assign_and_authenticate(run: &mut ActiveRun) -> Result<(), Error> 
     unsafe { AssignProcessToJobObject(run.job.raw(), run.process()?) }
         .map_err(|error| native(Stage::AssignJob, error))?;
     run.assigned = true;
-    authenticate_child(run)
+    authenticate_child(run, inspection)
 }
 
-pub(super) fn authenticate_child(run: &ActiveRun) -> Result<(), Error> {
+pub(super) fn authenticate_child(run: &NativeRunIo, inspection: Option<u64>) -> Result<(), Error> {
     let process = run.process()?;
     // SAFETY: retained child query handle, scalar PID read, no reopen by PID.
     if unsafe { GetProcessId(process) } != run.pid || creation(process)? != run.creation {
@@ -227,7 +234,7 @@ pub(super) fn authenticate_child(run: &ActiveRun) -> Result<(), Error> {
         return Err(Error::PeerMismatch);
     }
     let actual = String::from_utf16(&image[..length as usize]).map_err(|_| Error::PeerMismatch)?;
-    let expected = (if run.inspection.is_some() {
+    let expected = (if inspection.is_some() {
         run.preflight.pins.service()
     } else {
         run.preflight.pins.probe()
