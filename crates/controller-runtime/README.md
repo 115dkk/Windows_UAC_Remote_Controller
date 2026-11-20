@@ -47,12 +47,15 @@ Public entry points:
 | `save_policy(&mut self, NotificationPolicy) -> Result<AppSnapshot, AppIssue>` | Commits validated local preferences before reporting saved state. |
 | `control_service(&mut self, ServiceAction) -> Result<AppSnapshot, AppIssue>` | Only explicit service-mutation entry; fixed enum actions through the native owner. |
 | `update_mobile_readiness_from_native(&mut self, MobileReadiness) -> Result<(), AppIssue>` | Native-host-only Android observation. Must not be registered as a Tauri command. |
-| `begin_pairing`, `remove_device`, `decide`, `read_activity`, `clear_activity` | Fixed unavailable errors; no simulated state mutation. |
+| `begin_pairing`, `begin_pairing_usb` | Starts the native pairing worker on Windows after checking the running service, control availability and pairing starter. |
+| `remove_device(&str)` | Validates the device against the current Windows management list, removes it through the native adapter and refreshes the snapshot. |
+| `read_activity` | Reads validated Windows management activity while the service is running and the pairing worker has joined. |
+| `decide`, `clear_activity` | Fixed unavailable errors; no simulated state mutation. |
 
-`remove_device` takes `&str`; `decide` takes `&str` and `DecisionIntent`;
-`read_activity` returns `Result<Vec<ActivityView>, AppIssue>`. Other unavailable
-actions return `Result<AppSnapshot, AppIssue>`. Unsupported IDs are not echoed,
-retained or interpreted. There is no credentials, QR or signing method.
+`decide` takes `&str` and `DecisionIntent`; `read_activity` returns
+`Result<Vec<ActivityView>, AppIssue>`. The other actions above return
+`Result<AppSnapshot, AppIssue>`. Pairing presentation belongs to the native worker;
+there is no credential-entry or signing method here.
 
 All runtime methods are synchronous. ROOT must serialize one runtime (for
 example, using the native managed mutex) and run disk work and especially
@@ -64,16 +67,19 @@ action is requested; `allowedActions` is never an authorization grant.
 ## Truthful presentation
 
 DTO field names match `ui/src/contracts.ts`: snapshot/view fields use camelCase;
-the established notification policy remains snake_case. Snapshot schema is 1.
+the established notification policy remains snake_case. Snapshot schema is 4.
 
 - `NotInstalled` comes only from a successful native absence observation. A
   first read error yields `service: null`; later failures retain a labelled
   stale state with all stale service actions disabled.
-- `Running` never sets `remoteRequestsReady`: no real request/identity/transport
-  owner is connected. Devices, requests and activity remain empty *with explicit
-  unavailable metadata*, never presented as successful known-empty owner reads.
-- `canPair`, `canUnpair` and `canClearActivity` remain false. Unsupported command
-  calls return fixed Korean issues and cannot create fake successes or entries.
+- `Running` alone never sets `remoteRequestsReady`. Validated management reads
+  supply devices and activity with explicit availability metadata. The Windows
+  snapshot's request collection remains unavailable.
+- On Windows, `canPair` requires a running service, available control and pairing
+  starter, no service issue, a joined previous worker and no active pairing attempt.
+  `canUnpair` requires current running-service management data, available control,
+  no service issue and at least one device. `canClearActivity` remains false in
+  AppRuntime, as do the unsupported `decide` and `clear_activity` operations.
 - Screen lock configured/missing/unavailable are distinct. Initial/error state
   is unavailable, not missing. Native readiness is not authentication evidence
   and never enables remote approval.
