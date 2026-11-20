@@ -58,6 +58,7 @@ pub(crate) struct WatchMachine {
     shutting_down: bool,
     ever_started: bool,
     run_has_heartbeat: bool,
+    alive_pending: bool,
     alive_recorded: bool,
     health: Option<WatcherHealth>,
     reported_start_error: Option<ProbeSupervisorError>,
@@ -80,6 +81,7 @@ impl WatchMachine {
             shutting_down: false,
             ever_started: false,
             run_has_heartbeat: false,
+            alive_pending: false,
             alive_recorded: false,
             health: None,
             reported_start_error: None,
@@ -87,15 +89,26 @@ impl WatchMachine {
         }
     }
 
-    pub(crate) fn launched(&mut self, now: Instant) -> Result<(), MessageError> {
+    pub(crate) fn launched(
+        &mut self,
+        attempted_at: Instant,
+        launch_finished_at: Instant,
+    ) -> Result<(), MessageError> {
         if self.unavailable || self.shutting_down || self.running || self.retry_at.is_none() {
             return Err(MessageError::Protocol);
         }
         self.running = true;
         self.cleanup_pending = false;
         self.retry_at = None;
-        self.last_message = now;
+        // First creation used to construct the native owner before starting this
+        // clock. Relaunch keeps its historical pre-launch heartbeat baseline.
+        self.last_message = if self.ever_started {
+            attempted_at
+        } else {
+            launch_finished_at
+        };
         self.run_has_heartbeat = false;
+        self.alive_pending = false;
         self.observe_health(WatcherHealth::Starting)?;
         if self.ever_started {
             self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Restarted))?;
@@ -232,10 +245,16 @@ impl WatchMachine {
         if heartbeat && !self.run_has_heartbeat {
             self.run_has_heartbeat = true;
             self.observe_health(WatcherHealth::Running)?;
-            if !self.alive_recorded {
-                self.alive_recorded = true;
-                self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Alive))?;
-            }
+            self.alive_pending = !self.alive_recorded;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn complete_poll(&mut self) -> Result<(), MessageError> {
+        if self.alive_pending {
+            self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Alive))?;
+            self.alive_pending = false;
+            self.alive_recorded = true;
         }
         Ok(())
     }
@@ -444,7 +463,7 @@ mod tests {
 
     fn running_machine(now: Instant) -> WatchMachine {
         let mut machine = WatchMachine::new(now);
-        machine.launched(now).unwrap();
+        machine.launched(now, now).unwrap();
         machine.drain();
         machine
     }

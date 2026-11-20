@@ -12,7 +12,7 @@ pub use windows_prompt_probe::{
     supervision::{ApplyOutcome, GoneReason, ReportOutcome, TargetIdentity},
 };
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(any(all(windows, target_pointer_width = "64"), test))]
 const MAX_WATCH_MESSAGES_PER_POLL: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -191,14 +191,14 @@ enum AdapterPoll {
 
 #[cfg(any(all(windows, target_pointer_width = "64"), test))]
 trait WatchAdapter {
-    fn launch(&mut self) -> Result<(), AdapterLaunchError>;
+    fn launch(&mut self) -> Result<std::time::Instant, AdapterLaunchError>;
     fn poll(&mut self) -> Result<AdapterPoll, ProbeSupervisorError>;
     fn write(&mut self, message: ServiceMessage) -> Result<(), ProbeSupervisorError>;
     fn session(&self) -> u32;
     fn fail_current(&mut self) -> Result<(), ProbeSupervisorError>;
     fn reap_current(&mut self) -> Result<bool, ProbeSupervisorError>;
     fn is_quarantined(&self) -> bool;
-    fn holds_lease(&self) -> bool;
+    fn has_watch_owner(&self) -> bool;
     fn begin_shutdown(&mut self);
     fn poll_shutdown(&mut self) -> bool;
 }
@@ -229,19 +229,20 @@ impl NativeWatchAdapter {
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 impl WatchAdapter for NativeWatchAdapter {
-    fn launch(&mut self) -> Result<(), AdapterLaunchError> {
+    fn launch(&mut self) -> Result<std::time::Instant, AdapterLaunchError> {
         if self.retained_without_owner {
             return Err(AdapterLaunchError::Retained(
                 ProbeSupervisorError::CleanupUnconfirmed,
             ));
         }
         if let Some(owner) = &mut self.owner {
-            return owner.relaunch().map_err(Self::launch_error);
+            owner.relaunch().map_err(Self::launch_error)?;
+            return Ok(std::time::Instant::now());
         }
         match crate::ffi::probe_supervisor::WatchOwner::new() {
             Ok(owner) => {
                 self.owner = Some(owner);
-                Ok(())
+                Ok(std::time::Instant::now())
             }
             Err(error) => {
                 if error == ProbeSupervisorError::CleanupUnconfirmed {
@@ -304,8 +305,8 @@ impl WatchAdapter for NativeWatchAdapter {
                 .is_some_and(|owner| owner.is_quarantined())
     }
 
-    fn holds_lease(&self) -> bool {
-        self.retained_without_owner || self.owner.is_some()
+    fn has_watch_owner(&self) -> bool {
+        self.owner.is_some()
     }
 
     fn begin_shutdown(&mut self) {
@@ -326,6 +327,7 @@ impl WatchAdapter for NativeWatchAdapter {
 /// Thread-affine owner for the fixed protected watch helper. Creation retries,
 /// restart cleanup, health and shutdown stay with this object.
 pub struct WatchSession {
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
     state: crate::watch_session::WatchMachine,
     #[cfg(any(all(windows, target_pointer_width = "64"), test))]
     inner: Box<dyn WatchAdapter>,
@@ -374,6 +376,7 @@ impl WatchSession {
         }
     }
 
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
     pub(crate) fn poll(
         &mut self,
         now: std::time::Instant,
@@ -400,9 +403,9 @@ impl WatchSession {
                     self.state.cleanup_confirmed();
                 }
                 match self.inner.launch() {
-                    Ok(()) => self
+                    Ok(finished_at) => self
                         .state
-                        .launched(now)
+                        .launched(now, finished_at)
                         .map_err(|_| ProbeSupervisorError::InvalidReport)?,
                     Err(AdapterLaunchError::Refused(error)) => {
                         self.state
@@ -444,6 +447,7 @@ impl WatchSession {
             if heartbeat_was_expired && !received_message && self.state.is_running() {
                 self.finish_failed_cycle(now);
             }
+            let _ = self.state.complete_poll();
             Ok(self.state.drain())
         }
         #[cfg(not(any(all(windows, target_pointer_width = "64"), test)))]
@@ -454,7 +458,7 @@ impl WatchSession {
     }
 
     #[cfg(any(all(windows, target_pointer_width = "64"), test))]
-    fn finish_failed_cycle(&mut self, now: std::time::Instant) {
+    fn finish_failed_cycle(&mut self, now: std::time::Instant) -> bool {
         // Failure cleanup, the quarantine observation and the state transition
         // form one sequence so no caller can accidentally reorder or omit one.
         let cleanup = self.inner.fail_current();
@@ -464,8 +468,9 @@ impl WatchSession {
             Err(ProbeSupervisorError::CleanupUnconfirmed)
         };
         let quarantined = self.inner.is_quarantined();
-        self.state
-            .failed(now, !matches!(reaped, Ok(true)) || quarantined);
+        let cleanup_confirmed = cleanup.is_ok() && matches!(reaped, Ok(true)) && !quarantined;
+        self.state.failed(now, !cleanup_confirmed);
+        cleanup_confirmed
     }
 
     pub fn apply(
@@ -486,7 +491,9 @@ impl WatchSession {
                 content_digest,
             };
             if let Err(error) = self.inner.write(message) {
-                self.finish_failed_cycle(std::time::Instant::now());
+                if !self.finish_failed_cycle(std::time::Instant::now()) {
+                    return Err(ProbeSupervisorError::CleanupUnconfirmed);
+                }
                 return Err(error);
             }
             Ok(())
@@ -498,10 +505,11 @@ impl WatchSession {
         }
     }
 
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
     pub(crate) fn blocks_diagnostic_probe(&self) -> bool {
         #[cfg(any(all(windows, target_pointer_width = "64"), test))]
         {
-            self.inner.holds_lease()
+            self.inner.has_watch_owner()
         }
         #[cfg(not(any(all(windows, target_pointer_width = "64"), test)))]
         {
@@ -516,6 +524,7 @@ impl WatchSession {
         }
     }
 
+    #[cfg(any(all(windows, target_pointer_width = "64"), test))]
     pub(crate) fn poll_shutdown(&mut self) -> bool {
         #[cfg(any(all(windows, target_pointer_width = "64"), test))]
         {
@@ -687,6 +696,37 @@ pub(crate) fn unique_session(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    use windows_prompt_probe::{LabelKind, ProbeCounts, PromptContentObservation, PromptLabel};
+
+    fn target(sequence: u32) -> TargetIdentity {
+        TargetIdentity {
+            hwnd: u64::from(sequence),
+            pid: 2,
+            created: 3,
+            sequence,
+        }
+    }
+
+    fn report() -> ProbeReport {
+        let content = PromptContentObservation::from_parts(
+            vec![1],
+            "synthetic".into(),
+            vec![PromptLabel::new(0, 1, LabelKind::Text, true, "label".into()).unwrap()],
+        )
+        .unwrap();
+        ProbeReport::from_observation(
+            ProbeCounts {
+                top_level_windows: 1,
+                qualified_candidates: 1,
+                elements: 1,
+                enabled_elements: 1,
+                maximum_depth: 1,
+                ..ProbeCounts::default()
+            },
+            content,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn public_entry_has_no_launch_or_target_inputs_and_is_never_called() {
@@ -860,14 +900,21 @@ mod tests {
     #[derive(Default)]
     struct TestWatchState {
         launches: std::collections::VecDeque<Result<(), AdapterLaunchError>>,
+        launch_finished: std::collections::VecDeque<Instant>,
         polls: std::collections::VecDeque<Result<AdapterPoll, ProbeSupervisorError>>,
+        writes: std::collections::VecDeque<Result<(), ProbeSupervisorError>>,
+        failures: std::collections::VecDeque<Result<(), ProbeSupervisorError>>,
         reaps: std::collections::VecDeque<Result<bool, ProbeSupervisorError>>,
+        quarantine_checks: std::collections::VecDeque<bool>,
         shutdown_polls: std::collections::VecDeque<bool>,
+        operations: Vec<&'static str>,
         launch_calls: usize,
+        poll_calls: usize,
+        write_calls: usize,
         fail_calls: usize,
         reap_calls: usize,
         shutdown_calls: usize,
-        held: bool,
+        has_watch_owner: bool,
         quarantined: bool,
         dropped: bool,
     }
@@ -876,28 +923,35 @@ mod tests {
     struct TestWatchAdapter(std::rc::Rc<std::cell::RefCell<TestWatchState>>);
 
     impl WatchAdapter for TestWatchAdapter {
-        fn launch(&mut self) -> Result<(), AdapterLaunchError> {
+        fn launch(&mut self) -> Result<Instant, AdapterLaunchError> {
             let mut state = self.0.borrow_mut();
             state.launch_calls += 1;
             let result = state.launches.pop_front().unwrap_or(Ok(()));
             match result {
-                Ok(()) => state.held = true,
-                Err(AdapterLaunchError::Retained(_)) => state.held = true,
-                Err(AdapterLaunchError::Refused(_)) => {}
+                Ok(()) => {
+                    state.has_watch_owner = true;
+                    Ok(state
+                        .launch_finished
+                        .pop_front()
+                        .unwrap_or_else(Instant::now))
+                }
+                Err(AdapterLaunchError::Retained(error)) => {
+                    Err(AdapterLaunchError::Retained(error))
+                }
+                Err(AdapterLaunchError::Refused(error)) => Err(AdapterLaunchError::Refused(error)),
             }
-            result
         }
 
         fn poll(&mut self) -> Result<AdapterPoll, ProbeSupervisorError> {
-            self.0
-                .borrow_mut()
-                .polls
-                .pop_front()
-                .unwrap_or(Ok(AdapterPoll::Pending))
+            let mut state = self.0.borrow_mut();
+            state.poll_calls += 1;
+            state.polls.pop_front().unwrap_or(Ok(AdapterPoll::Pending))
         }
 
         fn write(&mut self, _message: ServiceMessage) -> Result<(), ProbeSupervisorError> {
-            Ok(())
+            let mut state = self.0.borrow_mut();
+            state.write_calls += 1;
+            state.writes.pop_front().unwrap_or(Ok(()))
         }
 
         fn session(&self) -> u32 {
@@ -905,22 +959,28 @@ mod tests {
         }
 
         fn fail_current(&mut self) -> Result<(), ProbeSupervisorError> {
-            self.0.borrow_mut().fail_calls += 1;
-            Ok(())
+            let mut state = self.0.borrow_mut();
+            state.fail_calls += 1;
+            state.operations.push("fail_current");
+            state.failures.pop_front().unwrap_or(Ok(()))
         }
 
         fn reap_current(&mut self) -> Result<bool, ProbeSupervisorError> {
             let mut state = self.0.borrow_mut();
             state.reap_calls += 1;
+            state.operations.push("reap_current");
             state.reaps.pop_front().unwrap_or(Ok(true))
         }
 
         fn is_quarantined(&self) -> bool {
-            self.0.borrow().quarantined
+            let mut state = self.0.borrow_mut();
+            state.operations.push("is_quarantined");
+            let fallback = state.quarantined;
+            state.quarantine_checks.pop_front().unwrap_or(fallback)
         }
 
-        fn holds_lease(&self) -> bool {
-            self.0.borrow().held
+        fn has_watch_owner(&self) -> bool {
+            self.0.borrow().has_watch_owner
         }
 
         fn begin_shutdown(&mut self) {
@@ -958,6 +1018,13 @@ mod tests {
         AdapterPoll::Message(
             windows_prompt_probe::supervision::HelperMessage::Heartbeat { sequence: 0 },
         )
+    }
+
+    fn appeared(sequence: u32) -> AdapterPoll {
+        AdapterPoll::Message(windows_prompt_probe::supervision::HelperMessage::Appeared {
+            target: target(sequence),
+            report: report(),
+        })
     }
 
     #[test]
@@ -1018,6 +1085,127 @@ mod tests {
     }
 
     #[test]
+    fn first_start_uses_full_backoff_and_reports_only_changed_errors() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::NoInteractiveSession,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::NoInteractiveSession,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::SessionChanged,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::SessionChanged,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::HelperDamaged,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::HelperDamaged,
+                )),
+                Err(AdapterLaunchError::Refused(
+                    ProbeSupervisorError::NoInteractiveSession,
+                )),
+            ]
+            .into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        let mut attempted_at = began;
+        let mut reported = Vec::new();
+
+        for (attempt, delay) in [1_u64, 2, 5, 10, 30, 60].into_iter().enumerate() {
+            reported.extend(watch.poll(attempted_at).unwrap().into_iter().filter_map(
+                |observation| match observation {
+                    WatchObservation::StartFailed(error) => Some(error),
+                    _ => None,
+                },
+            ));
+            let next = attempted_at + Duration::from_secs(delay);
+            assert!(
+                watch
+                    .poll(next - Duration::from_millis(1))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(state.borrow().launch_calls, attempt + 1);
+            attempted_at = next;
+        }
+
+        reported.extend(
+            watch.poll(attempted_at).unwrap().into_iter().filter_map(
+                |observation| match observation {
+                    WatchObservation::StartFailed(error) => Some(error),
+                    _ => None,
+                },
+            ),
+        );
+        assert_eq!(state.borrow().launch_calls, 7);
+        assert_eq!(
+            reported,
+            [
+                ProbeSupervisorError::NoInteractiveSession,
+                ProbeSupervisorError::SessionChanged,
+                ProbeSupervisorError::HelperDamaged,
+                ProbeSupervisorError::NoInteractiveSession,
+            ]
+        );
+    }
+
+    #[test]
+    fn first_launch_heartbeat_baseline_is_taken_after_creation_finishes() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began + Duration::from_secs(16)].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+
+        watch.poll(began).unwrap();
+        assert!(
+            watch
+                .poll(began + Duration::from_secs(17))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.borrow().fail_calls, 0);
+    }
+
+    #[test]
+    fn first_alive_observation_follows_the_complete_message_batch() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            polls: [
+                Ok(heartbeat()),
+                Ok(AdapterPoll::Message(
+                    windows_prompt_probe::supervision::HelperMessage::Parked { count: 2 },
+                )),
+            ]
+            .into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, _state) = test_watch(began, state);
+
+        assert_eq!(
+            watch.poll(began).unwrap(),
+            vec![
+                WatchObservation::Health(WatcherHealth::Starting),
+                WatchObservation::Lifecycle(WatchLifecycle::Started),
+                WatchObservation::Health(WatcherHealth::Running),
+                WatchObservation::Event(WatchEvent::ParkedChanged { count: 2 }),
+                WatchObservation::Lifecycle(WatchLifecycle::Alive),
+            ]
+        );
+    }
+
+    #[test]
     fn watch_owner_does_not_reuse_an_old_heartbeat_after_helper_restart() {
         let began = Instant::now();
         let state = TestWatchState {
@@ -1061,6 +1249,287 @@ mod tests {
         assert_eq!(
             watch.poll(began + Duration::from_millis(6_002)).unwrap(),
             vec![WatchObservation::Health(WatcherHealth::Running)]
+        );
+    }
+
+    #[test]
+    fn failed_apply_write_reports_cleanup_failure_when_both_operations_fail() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            writes: [Err(ProbeSupervisorError::HelperFailed(7))].into(),
+            failures: [Err(ProbeSupervisorError::CleanupUnconfirmed)].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+        state.borrow_mut().polls.push_back(Ok(appeared(1)));
+        watch.poll(began + Duration::from_millis(1)).unwrap();
+
+        assert_eq!(
+            watch.apply(target(1), PromptAction::Deny, [7; 32]),
+            Err(ProbeSupervisorError::CleanupUnconfirmed)
+        );
+        assert_eq!(
+            state.borrow().operations,
+            ["fail_current", "is_quarantined"]
+        );
+    }
+
+    #[test]
+    fn twelve_failures_keep_retrying_at_the_cap_and_report_the_ninth_once() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+        let mut failed_at = began + Duration::from_millis(1);
+        let mut unavailable_lifecycles = 0;
+        let mut unavailable_events = 0;
+
+        for attempt in 1_u32..=12 {
+            state.borrow_mut().polls.push_back(Ok(AdapterPoll::Exited));
+            for observation in watch.poll(failed_at).unwrap() {
+                match observation {
+                    WatchObservation::Lifecycle(WatchLifecycle::Unavailable) => {
+                        unavailable_lifecycles += 1;
+                    }
+                    WatchObservation::Event(WatchEvent::HelperUnavailable) => {
+                        unavailable_events += 1;
+                    }
+                    _ => {}
+                }
+            }
+            let delay = match attempt {
+                1 => 5,
+                2 => 10,
+                3 => 20,
+                4 => 40,
+                _ => 60,
+            };
+            let retry_at = failed_at + Duration::from_secs(delay);
+            assert!(
+                watch
+                    .poll(retry_at - Duration::from_millis(1))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                watch
+                    .poll(retry_at)
+                    .unwrap()
+                    .contains(&WatchObservation::Event(WatchEvent::HelperRestarted {
+                        attempt
+                    }))
+            );
+            failed_at = retry_at + Duration::from_millis(1);
+        }
+
+        assert_eq!(unavailable_lifecycles, 1);
+        assert_eq!(unavailable_events, 1);
+        assert_eq!(state.borrow().launch_calls, 13);
+    }
+
+    #[test]
+    fn valid_message_resets_the_owner_failure_backoff() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+        let mut failed_at = began + Duration::from_millis(1);
+
+        for delay in [5_u64, 10, 20] {
+            state.borrow_mut().polls.push_back(Ok(AdapterPoll::Exited));
+            watch.poll(failed_at).unwrap();
+            let retry_at = failed_at + Duration::from_secs(delay);
+            watch.poll(retry_at).unwrap();
+            failed_at = retry_at + Duration::from_millis(1);
+        }
+
+        state.borrow_mut().polls.push_back(Ok(heartbeat()));
+        watch.poll(failed_at).unwrap();
+        let next_failure = failed_at + Duration::from_millis(1);
+        state.borrow_mut().polls.push_back(Ok(AdapterPoll::Exited));
+        watch.poll(next_failure).unwrap();
+        assert!(
+            watch
+                .poll(next_failure + Duration::from_millis(4_999))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            watch
+                .poll(next_failure + Duration::from_secs(5))
+                .unwrap()
+                .contains(&WatchObservation::Event(WatchEvent::HelperRestarted {
+                    attempt: 1,
+                }))
+        );
+        assert_eq!(state.borrow().launch_calls, 5);
+    }
+
+    #[test]
+    fn restart_forgets_target_and_accepts_reset_sequence_numbers() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+        state.borrow_mut().polls.push_back(Ok(appeared(9)));
+        watch.poll(began + Duration::from_millis(1)).unwrap();
+
+        state.borrow_mut().polls.push_back(Ok(AdapterPoll::Exited));
+        watch.poll(began + Duration::from_millis(2)).unwrap();
+        assert_eq!(
+            watch.apply(target(9), PromptAction::Deny, [1; 32]),
+            Err(ProbeSupervisorError::ApplyRefused)
+        );
+        watch.poll(began + Duration::from_millis(5_002)).unwrap();
+
+        {
+            let mut adapter = state.borrow_mut();
+            adapter.polls.push_back(Ok(heartbeat()));
+            adapter.polls.push_back(Ok(appeared(1)));
+        }
+        let observations = watch.poll(began + Duration::from_millis(5_003)).unwrap();
+        assert!(observations.iter().any(|observation| {
+            matches!(
+                observation,
+                WatchObservation::Event(WatchEvent::Appeared { target: actual, .. })
+                    if *actual == target(1)
+            )
+        }));
+        assert_eq!(watch.apply(target(1), PromptAction::Deny, [2; 32]), Ok(()));
+    }
+
+    #[test]
+    fn heartbeat_timeout_boundary_is_exact_at_the_owner_interface() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+
+        assert!(
+            watch
+                .poll(began + Duration::from_millis(14_999))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.borrow().fail_calls, 0);
+        assert_eq!(
+            watch.poll(began + Duration::from_secs(15)).unwrap(),
+            vec![WatchObservation::Health(WatcherHealth::Unavailable(
+                WatcherRefusal::HelperFailed,
+            ))]
+        );
+        assert_eq!(state.borrow().fail_calls, 1);
+    }
+
+    #[test]
+    fn polling_after_shutdown_does_no_launch_message_or_heartbeat_work() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+        watch.poll(began).unwrap();
+        state.borrow_mut().polls.push_back(Ok(AdapterPoll::Exited));
+        watch.begin_shutdown();
+        let before = {
+            let state = state.borrow();
+            (state.launch_calls, state.poll_calls, state.fail_calls)
+        };
+
+        assert!(
+            watch
+                .poll(began + Duration::from_secs(30))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            watch
+                .poll(began + Duration::from_secs(60))
+                .unwrap()
+                .is_empty()
+        );
+        let after = {
+            let state = state.borrow();
+            (state.launch_calls, state.poll_calls, state.fail_calls)
+        };
+        assert_eq!(after, before);
+        assert_eq!(state.borrow().shutdown_calls, 1);
+    }
+
+    #[test]
+    fn cleanup_failure_stays_with_the_watcher_instead_of_ending_the_service() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began].into(),
+            polls: [Ok(AdapterPoll::Exited)].into(),
+            failures: [Err(ProbeSupervisorError::CleanupUnconfirmed)].into(),
+            reaps: [Ok(true), Ok(true)].into(),
+            quarantine_checks: [true, true, false].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+
+        assert_eq!(
+            watch.poll(began).unwrap(),
+            vec![
+                WatchObservation::Health(WatcherHealth::Starting),
+                WatchObservation::Lifecycle(WatchLifecycle::Started),
+                WatchObservation::Health(WatcherHealth::Unavailable(WatcherRefusal::HelperFailed,)),
+            ]
+        );
+        assert_eq!(
+            state.borrow().operations,
+            ["fail_current", "is_quarantined"]
+        );
+        assert!(watch.blocks_diagnostic_probe());
+
+        assert!(
+            watch
+                .poll(began + Duration::from_secs(5))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.borrow().launch_calls, 1);
+        assert_eq!(
+            watch.poll(began + Duration::from_secs(10)).unwrap(),
+            vec![
+                WatchObservation::Health(WatcherHealth::Starting),
+                WatchObservation::Lifecycle(WatchLifecycle::Restarted),
+                WatchObservation::Event(WatchEvent::HelperRestarted { attempt: 1 }),
+            ]
+        );
+        assert_eq!(
+            state.borrow().operations,
+            [
+                "fail_current",
+                "is_quarantined",
+                "reap_current",
+                "is_quarantined",
+                "reap_current",
+                "is_quarantined",
+            ]
         );
     }
 
@@ -1120,6 +1589,23 @@ mod tests {
     }
 
     #[test]
+    fn retained_first_launch_uses_old_probe_admission_and_shutdown_result() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Err(AdapterLaunchError::Retained(
+                ProbeSupervisorError::CleanupUnconfirmed,
+            ))]
+            .into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, _state) = test_watch(began, state);
+
+        watch.poll(began).unwrap();
+        assert!(!watch.blocks_diagnostic_probe());
+        assert!(watch.poll_shutdown());
+    }
+
+    #[test]
     fn watch_owner_retained_launch_cleanup_uses_restart_backoff_and_keeps_the_adapter() {
         let began = Instant::now();
         let state = TestWatchState {
@@ -1136,7 +1622,7 @@ mod tests {
         let (mut watch, state) = test_watch(began, state);
 
         watch.poll(began).unwrap();
-        assert!(watch.blocks_diagnostic_probe());
+        assert!(!watch.blocks_diagnostic_probe());
         assert!(
             watch
                 .poll(began + Duration::from_secs(1))

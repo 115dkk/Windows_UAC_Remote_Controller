@@ -791,8 +791,9 @@ fn run(
                     Err(mpsc::RecvTimeoutError::Timeout) => (),
                 }
                 if let Some(request) = PROBE_REQUESTS.take() {
-                    // The native watcher adapter names whether it holds the shared
-                    // process lease; a refused first start does not reserve it.
+                    // Match the old admission boundary: only a WatchOwner returned
+                    // from construction blocks this path. A retained constructor
+                    // failure still lets the supervisor report the lease conflict.
                     let result = if watch
                         .as_ref()
                         .is_some_and(WatchSession::blocks_diagnostic_probe)
