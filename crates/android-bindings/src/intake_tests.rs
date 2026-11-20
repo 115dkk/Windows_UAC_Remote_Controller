@@ -354,6 +354,7 @@ enum PcNotice {
 enum PcCommand {
     Event(Box<PcEvent>, u8),
     ParkedPrompts(ParkedPromptsNotice, u8),
+    Close,
 }
 struct PcPeer {
     commands: mpsc::Sender<PcCommand>,
@@ -388,13 +389,15 @@ impl PcPeer {
                         _ = stopped.cancelled() => break,
                         command = receiver.recv() => {
                             let Some(command) = command else { break; };
-                            let frame = match command {
-                                PcCommand::Event(event, seed) => frame(*event, seed),
-                                PcCommand::ParkedPrompts(notice, seed) => {
-                                    parked_notice_frame(notice, seed)
+                            match command {
+                                PcCommand::Event(event, seed) => {
+                                    driver.queue_frame(frame(*event, seed)).unwrap();
                                 }
-                            };
-                            driver.queue_frame(frame).unwrap();
+                                PcCommand::ParkedPrompts(notice, seed) => {
+                                    driver.queue_frame(parked_notice_frame(notice, seed)).unwrap();
+                                }
+                                PcCommand::Close => driver.begin_close().unwrap(),
+                            }
                         }
                         event = driver.next_event() => match event {
                             Ok(SocketEvent::Ready) => (),
@@ -431,6 +434,24 @@ impl PcPeer {
         self.commands
             .try_send(PcCommand::ParkedPrompts(notice, APP_PC_KEY))
             .unwrap_or_else(|_| panic!("bounded PC command"));
+    }
+    fn close_orderly(&self) {
+        self.commands
+            .try_send(PcCommand::Close)
+            .unwrap_or_else(|_| panic!("bounded PC close command"));
+    }
+    fn wait_closed(&self) {
+        let end = Instant::now() + LIMIT;
+        loop {
+            match self
+                .notices
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .expect("bounded PC close")
+            {
+                PcNotice::Closed => return,
+                PcNotice::ClockDrained | PcNotice::EventDrained | PcNotice::Decision(_) => (),
+            }
+        }
     }
     fn wait(&self, want_decision: bool) -> Option<SignedDecision> {
         let end = Instant::now() + LIMIT;
@@ -643,6 +664,26 @@ impl Fixture {
         let _ = self.accepted_correlation_after(None);
         peer
     }
+    fn connect_scheduled(&self, generation: u64) -> PcPeer {
+        let (client, server) = carriers();
+        let peer = PcPeer::start(server);
+        let network_stop = CancellationToken::new();
+        let (ready_sender, mut ready) = tokio::sync::oneshot::channel();
+        let _ = self
+            .controller
+            .attach_network_stream(
+                self.reference,
+                client,
+                &network_stop,
+                generation,
+                ready_sender,
+            )
+            .unwrap();
+        peer.wait(false);
+        let _ = self.accepted_correlation_after(None);
+        assert_eq!(ready.try_recv(), Ok(()));
+        peer
+    }
     fn accepted_correlation_after(&self, previous: Option<u64>) -> u64 {
         let end = Instant::now() + LIMIT;
         for _ in 0..128 {
@@ -673,6 +714,18 @@ impl Fixture {
             self.notices
                 .recv_timeout(end.saturating_duration_since(Instant::now()))
                 .expect("bounded parked-prompt progress");
+        }
+    }
+    fn wait_for_disconnected(&self) -> NativeRequestCatalogStatus {
+        let end = Instant::now() + LIMIT;
+        loop {
+            let status = admitted_call(|| self.controller.request_catalog_status());
+            if status.attached_peers == 0 && status.connected_peers == 0 {
+                return status;
+            }
+            self.notices
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .expect("bounded peer completion progress");
         }
     }
     fn projection(&self) -> Arc<NativePendingRequest> {
@@ -775,6 +828,117 @@ fn network_change_and_pinned_ready_clear_distrusted_hint_addresses() {
     );
     fixture.cleanup();
     drop(peer);
+}
+
+#[test]
+fn peer_completion_records_transport_error_separately_from_orderly_close() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    const GENERATION: u64 = 9;
+    let seed_scheduler = |fixture: &Fixture| {
+        fixture
+            .controller
+            .connectivity
+            .states
+            .lock()
+            .unwrap()
+            .insert(
+                crate::connectivity::ConnectivityOwner::key(fixture.reference),
+                crate::connectivity::DialState {
+                    generation: GENERATION,
+                    in_flight: true,
+                    failures: 2,
+                    candidate_cursor: 3,
+                    retry_at: Some(Instant::now() + Duration::from_secs(20)),
+                    hint_backoff_shortened: false,
+                    prioritized_hint: None,
+                    failure: Some(crate::NativeDialFailure::NoAnswer),
+                },
+            );
+    };
+    let scheduler_state = |fixture: &Fixture| {
+        let key = crate::connectivity::ConnectivityOwner::key(fixture.reference);
+        let state = fixture.controller.connectivity.states.lock().unwrap()[&key];
+        let completion = fixture
+            .controller
+            .connectivity
+            .peer_completions
+            .lock()
+            .unwrap()
+            .get(&key)
+            .copied()
+            .map(|(_, cause)| cause);
+        (
+            completion,
+            state.in_flight,
+            state.failures,
+            state.candidate_cursor,
+            state.retry_at,
+            state.failure,
+        )
+    };
+
+    let orderly_fixture = fixture();
+    seed_scheduler(&orderly_fixture);
+    let orderly_peer = orderly_fixture.connect_scheduled(GENERATION);
+    let orderly_before = scheduler_state(&orderly_fixture);
+    orderly_peer.close_orderly();
+    orderly_peer.wait_closed();
+    let _ = orderly_fixture.wait_for_disconnected();
+    let orderly_after = scheduler_state(&orderly_fixture);
+    assert_eq!(
+        orderly_after.0,
+        Some(crate::intake::PeerCompletionCause::OrderlyClose)
+    );
+    assert_eq!(
+        (
+            orderly_after.1,
+            orderly_after.2,
+            orderly_after.3,
+            orderly_after.4,
+            orderly_after.5,
+        ),
+        (
+            orderly_before.1,
+            orderly_before.2,
+            orderly_before.3,
+            orderly_before.4,
+            orderly_before.5,
+        )
+    );
+    drop(orderly_peer);
+    orderly_fixture.cleanup();
+    drop(orderly_fixture);
+
+    let error_fixture = fixture();
+    seed_scheduler(&error_fixture);
+    let error_peer = error_fixture.connect_scheduled(GENERATION);
+    let error_before = scheduler_state(&error_fixture);
+    drop(error_peer);
+    let _ = error_fixture.wait_for_disconnected();
+    let error_after = scheduler_state(&error_fixture);
+    assert_eq!(
+        error_after.0,
+        Some(crate::intake::PeerCompletionCause::TransportError)
+    );
+    assert_eq!(
+        (
+            error_after.1,
+            error_after.2,
+            error_after.3,
+            error_after.4,
+            error_after.5,
+        ),
+        (
+            error_before.1,
+            error_before.2,
+            error_before.3,
+            error_before.4,
+            error_before.5,
+        )
+    );
+    error_fixture.cleanup();
 }
 
 #[test]
