@@ -189,7 +189,12 @@ Checked against upstream releases on 2026-09-08:
 
 Both PR and main jobs have read-only repository permission. Checkout does not
 persist credentials. Dependency/build caches are not shared with privileged
-release jobs. No `pull_request_target` or ignored failure is used.
+release jobs. The Android gate jobs restore a Gradle dependency cache
+(`~/.gradle/caches/modules-2` and the Gradle distribution, never build output)
+because the Gradle repositories intermittently answer "not found" for artifacts
+that exist; only runs on `main` save it, pull requests only restore it, and the
+Release workflow's jobs restore nothing and instead repeat the Android build
+after a pause. No `pull_request_target` or ignored failure is used.
 
 ## Release gate triggers
 
