@@ -85,6 +85,7 @@ mod resources;
 mod security;
 mod uia;
 mod watch;
+mod watch_transition;
 use resources::{CleanupLog, OwnedDesktop, OwnedHandle};
 
 const MAX_NAME_UNITS: usize = 128;

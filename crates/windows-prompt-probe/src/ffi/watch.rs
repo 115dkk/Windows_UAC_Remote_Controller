@@ -9,12 +9,15 @@ use super::{
     pipe_client::{WatchChannel, WatchRead},
     resources::{CleanupLog, OwnedDesktop},
     security, system_consent_path, uia, verify_input_desktop, verify_window_station,
+    watch_transition::{
+        Census, CycleAction, CycleFault, CyclePlan, Observation, OutcomeObservation, Tracked,
+        Transition, WatchState, WindowIdentity, cycle_action, fold_outcome_observations,
+    },
 };
 use crate::{
     NativeOperation, ProbeCounts, ProbeFailure, ProbeReport,
-    settle::{SettleGate, Settled},
     supervision::{
-        ApplyOutcome, GoneReason, HelperMessage, MAX_PARKED_PROMPTS, RefusalReason, ServiceMessage,
+        ApplyOutcome, HelperMessage, MAX_PARKED_PROMPTS, RefusalReason, ServiceMessage,
         TargetIdentity,
     },
 };
@@ -35,81 +38,12 @@ use windows::Win32::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const PARKED_CENSUS_INTERVAL: Duration = Duration::from_secs(1);
 const PARKED_WINDOW_CLASS: &str = "$$$Secure UAP Dummy Window Class For Interim Dialog";
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const OUTCOME_INTERVAL: Duration = Duration::from_millis(100);
 const OUTCOME_WINDOW: Duration = Duration::from_millis(2_000);
 
 type Result<T> = std::result::Result<T, ()>;
-
-struct Tracked {
-    identity: TargetIdentity,
-    report: ProbeReport,
-}
-
-enum Census {
-    None,
-    DesktopChanged,
-    VerificationFailed,
-    One {
-        identity: TargetIdentity,
-        report: Option<ProbeReport>,
-    },
-    Ambiguous,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CycleFault {
-    InputDesktopUnavailable,
-    InputDesktopNameUnavailable,
-    InputDesktopVerification(ProbeFailure),
-    CandidateQuery,
-    PostCaptureRecheck,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CycleAction {
-    DesktopChanged,
-    SkipWindow,
-    VerificationFailed,
-    Fatal,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OutcomeObservation {
-    Gone,
-    StillPresent,
-    Unobservable,
-}
-
-fn fold_outcome_observations(
-    observations: impl IntoIterator<Item = OutcomeObservation>,
-) -> ApplyOutcome {
-    if observations
-        .into_iter()
-        .any(|observation| observation == OutcomeObservation::Gone)
-    {
-        ApplyOutcome::Gone
-    } else {
-        ApplyOutcome::StillPresent
-    }
-}
-
-const fn cycle_action(fault: CycleFault) -> CycleAction {
-    match fault {
-        CycleFault::InputDesktopUnavailable | CycleFault::InputDesktopNameUnavailable => {
-            CycleAction::DesktopChanged
-        }
-        CycleFault::InputDesktopVerification(ProbeFailure::SecureInputDesktopProfileRequired) => {
-            CycleAction::DesktopChanged
-        }
-        CycleFault::InputDesktopVerification(_) => CycleAction::Fatal,
-        CycleFault::CandidateQuery => CycleAction::SkipWindow,
-        CycleFault::PostCaptureRecheck => CycleAction::VerificationFailed,
-    }
-}
 
 pub(super) fn run(
     channel: &mut WatchChannel,
@@ -125,18 +59,8 @@ pub(super) fn run(
     verify_window_station().map_err(|_| ())?;
     let image = system_consent_path().map_err(|_| ())?;
     lab_note!("watch helper started: session={session} own_pid={own_pid}");
-    let mut tracked: Option<Tracked> = None;
-    // A new or changed prompt waits here until its content stops changing;
-    // only then is it published. While it waits, nothing is tracked.
-    let mut settling = SettleGate::new();
-    // After apply refused a changed dialog, look at its content on the very next
-    // cycle instead of at the next heartbeat, so the phone is asked again soon.
-    let mut recheck_content = false;
-    let mut sequence = 0u32;
-    let mut last_output = Instant::now();
+    let mut state = WatchState::new(Instant::now());
     let mut last_desktop = String::new();
-    let mut last_parked = 0u8;
-    let mut last_parked_census: Option<Instant> = None;
 
     while began.elapsed() < MAX_LIFETIME {
         recheck_peer()?;
@@ -147,7 +71,7 @@ pub(super) fn run(
                 action,
                 content_digest,
             }) => {
-                let outcome = match tracked.as_ref() {
+                let outcome = match state.tracked() {
                     None => ApplyOutcome::Refused(RefusalReason::UnknownTarget),
                     Some(current) if current.identity != target => {
                         ApplyOutcome::Refused(RefusalReason::UnknownTarget)
@@ -159,40 +83,28 @@ pub(super) fn run(
                 if began.elapsed() >= MAX_LIFETIME {
                     break;
                 }
-                channel.write(&HelperMessage::Applied { target, outcome })?;
-                last_output = Instant::now();
-                if matches!(
-                    outcome,
-                    ApplyOutcome::Refused(RefusalReason::ContentChanged)
-                ) {
-                    recheck_content = true;
-                }
-                if matches!(outcome, ApplyOutcome::Gone)
-                    && tracked.as_ref().map(|current| current.identity) == Some(target)
-                {
-                    tracked = None;
-                }
+                state =
+                    publish_observation(channel, state, Observation::Applied { target, outcome })?;
             }
             WatchRead::Pending => {}
         }
 
-        // A heartbeat carrying a tracked sequence is also a fresh same-content
-        // witness. Decide before census: crossing the interval during a census
-        // that skipped UIA must not accidentally publish a renewal witness.
-        let heartbeat_due = last_output.elapsed() >= HEARTBEAT_INTERVAL;
+        // Freeze the capture plan before native work. Crossing the heartbeat
+        // interval during an identity-only census cannot become a renewal.
+        let plan = state.cycle_plan(Instant::now());
         let desktop = match open_input_desktop(cleanup) {
             Ok(desktop) => desktop,
             Err(()) => {
-                handle_desktop_cycle_fault(
-                    CycleFault::InputDesktopUnavailable,
+                state = publish_observation(
                     channel,
-                    &mut tracked,
-                    &mut settling,
-                    &mut last_output,
+                    state,
+                    Observation::DesktopFault(CycleFault::InputDesktopUnavailable),
                 )?;
-                if !finish_watch_cycle(began, channel, &mut last_output, heartbeat_due, sequence)? {
+                let Some(next) = finish_watch_cycle(began, channel, state, plan.heartbeat_due)?
+                else {
                     break;
-                }
+                };
+                state = next;
                 continue;
             }
         };
@@ -200,17 +112,17 @@ pub(super) fn run(
         {
             Ok(name) => name,
             Err(_) => {
-                handle_desktop_cycle_fault(
-                    CycleFault::InputDesktopNameUnavailable,
+                state = publish_observation(
                     channel,
-                    &mut tracked,
-                    &mut settling,
-                    &mut last_output,
+                    state,
+                    Observation::DesktopFault(CycleFault::InputDesktopNameUnavailable),
                 )?;
                 drop(desktop);
-                if !finish_watch_cycle(began, channel, &mut last_output, heartbeat_due, sequence)? {
+                let Some(next) = finish_watch_cycle(began, channel, state, plan.heartbeat_due)?
+                else {
                     break;
-                }
+                };
+                state = next;
                 continue;
             }
         };
@@ -223,208 +135,97 @@ pub(super) fn run(
             break;
         }
         if !desktop_name.eq_ignore_ascii_case("Winlogon") {
-            withdraw_for_desktop_change(channel, &mut tracked, &mut settling, &mut last_output)?;
-            let census_due =
-                last_parked_census.is_none_or(|at| at.elapsed() >= PARKED_CENSUS_INTERVAL);
-            if census_due {
-                last_parked_census = Some(Instant::now());
-                match scoped_parked_census(desktop.raw(), session, &image, cleanup) {
-                    Ok(count) if count != last_parked => {
-                        channel.write(&HelperMessage::Parked { count })?;
-                        last_parked = count;
-                        last_output = Instant::now();
-                    }
-                    Ok(_) => {}
-                    Err(()) => {
-                        // This optional census must not terminate or perturb the
-                        // secure-desktop approval path. Retain the last count.
-                        lab_note!("parked prompt census failed; retaining count={last_parked}");
-                    }
+            state = publish_observation(channel, state, Observation::DesktopChanged)?;
+            if state.parked_census_due(Instant::now()) {
+                let attempted_at = Instant::now();
+                let count = scoped_parked_census(desktop.raw(), session, &image, cleanup).ok();
+                if count.is_none() {
+                    // An optional census failure keeps the previous count.
+                    lab_note!("parked prompt census failed; retaining count");
                 }
+                state = publish_observation(
+                    channel,
+                    state,
+                    Observation::Parked {
+                        attempted_at,
+                        count,
+                    },
+                )?;
             }
         } else {
             if let Err(error) = verify_input_desktop(desktop.raw()) {
-                handle_desktop_cycle_fault(
-                    CycleFault::InputDesktopVerification(error.failure()),
+                state = publish_observation(
                     channel,
-                    &mut tracked,
-                    &mut settling,
-                    &mut last_output,
+                    state,
+                    Observation::DesktopFault(CycleFault::InputDesktopVerification(
+                        error.failure(),
+                    )),
                 )?;
                 drop(desktop);
-                if !finish_watch_cycle(began, channel, &mut last_output, heartbeat_due, sequence)? {
+                let Some(next) = finish_watch_cycle(began, channel, state, plan.heartbeat_due)?
+                else {
                     break;
-                }
+                };
+                state = next;
                 continue;
             }
-            let next_sequence = sequence.checked_add(1).ok_or(())?;
-            let census = scoped_census(
-                desktop.raw(),
-                session,
-                &image,
-                tracked.as_ref(),
-                heartbeat_due || recheck_content,
-                next_sequence,
-                cleanup,
-            )?;
-            recheck_content = false;
+            state.check_census_sequence()?;
+            let census = scoped_census(desktop.raw(), session, &image, plan, cleanup)?;
             if began.elapsed() >= MAX_LIFETIME {
                 drop(desktop);
                 break;
             }
             lab_note!("winlogon census: {}", census_kind(&census));
-            match census {
-                Census::DesktopChanged => {
-                    withdraw_for_desktop_change(
-                        channel,
-                        &mut tracked,
-                        &mut settling,
-                        &mut last_output,
-                    )?;
-                }
-                Census::None => {
-                    settling.clear();
-                    if let Some(current) = tracked.take() {
-                        channel.write(&HelperMessage::Gone {
-                            target: current.identity,
-                            reason: GoneReason::Closed,
-                        })?;
-                        last_output = Instant::now();
-                    }
-                }
-                Census::Ambiguous => {
-                    settling.clear();
-                    if let Some(current) = tracked.take() {
-                        channel.write(&HelperMessage::Gone {
-                            target: current.identity,
-                            reason: GoneReason::Ambiguous,
-                        })?;
-                        last_output = Instant::now();
-                    }
-                }
-                Census::VerificationFailed => {
-                    settling.clear();
-                    if let Some(current) = tracked.take() {
-                        channel.write(&HelperMessage::Gone {
-                            target: current.identity,
-                            reason: GoneReason::VerificationFailed,
-                        })?;
-                        last_output = Instant::now();
-                    }
-                }
-                Census::One {
-                    identity,
-                    report: None,
-                } => {
-                    if tracked.as_ref().map(|value| value.identity) != Some(identity)
-                        && let Some(current) = tracked.take()
-                    {
-                        channel.write(&HelperMessage::Gone {
-                            target: current.identity,
-                            reason: GoneReason::Replaced,
-                        })?;
-                        last_output = Instant::now();
-                    }
-                }
-                Census::One {
-                    identity,
-                    report: Some(report),
-                } => {
-                    // The phone's copy of a changed prompt is withdrawn at once;
-                    // its replacement is published once it has settled.
-                    if let Some(current) = tracked.take() {
-                        channel.write(&HelperMessage::Gone {
-                            target: current.identity,
-                            reason: GoneReason::Replaced,
-                        })?;
-                        last_output = Instant::now();
-                    }
-                    let window = (identity.hwnd, identity.pid, identity.created);
-                    let settled =
-                        settling.observe(Instant::now(), window, report, |held, fresh| {
-                            fresh.content() == held.content()
-                                && fresh.counts().describes_the_same_prompt(held.counts())
-                        });
-                    if let Settled::Publish(report) = settled {
-                        let message = HelperMessage::Appeared {
-                            target: identity,
-                            report: report.clone(),
-                        };
-                        if message.fits_watch_frame() {
-                            channel.write(&message)?;
-                            sequence = identity.sequence;
-                            tracked = Some(Tracked { identity, report });
-                            last_output = Instant::now();
-                        } else {
-                            // Capture admits more content than one watch frame. An
-                            // unpublishable observation is this cycle's verification
-                            // failure; no write is attempted and nothing is tracked.
-                            settling.clear();
-                            lab_note!("winlogon candidate exceeds watch frame");
-                        }
-                    }
-                }
-            }
+            state = publish_observation(channel, state, Observation::Census(census))?;
         }
         drop(desktop);
 
-        if !finish_watch_cycle(began, channel, &mut last_output, heartbeat_due, sequence)? {
+        let Some(next) = finish_watch_cycle(began, channel, state, plan.heartbeat_due)? else {
             break;
-        }
+        };
+        state = next;
     }
     channel.finish()
+}
+
+fn publish_observation(
+    channel: &mut WatchChannel,
+    state: WatchState,
+    observation: Observation,
+) -> Result<WatchState> {
+    write_transition(state.transition(Instant::now(), observation)?, |message| {
+        channel.write(message)?;
+        Ok(Instant::now())
+    })
+}
+
+fn write_transition(
+    transition: Transition,
+    mut write: impl FnMut(&HelperMessage) -> Result<Instant>,
+) -> Result<WatchState> {
+    let Transition { mut next, messages } = transition;
+    for message in &messages {
+        next.output_written(write(message)?);
+    }
+    Ok(next)
 }
 
 fn finish_watch_cycle(
     began: Instant,
     channel: &mut WatchChannel,
-    last_output: &mut Instant,
+    state: WatchState,
     heartbeat_due: bool,
-    sequence: u32,
-) -> Result<bool> {
+) -> Result<Option<WatchState>> {
     if began.elapsed() >= MAX_LIFETIME {
-        return Ok(false);
+        return Ok(None);
     }
-    if heartbeat_due && last_output.elapsed() >= HEARTBEAT_INTERVAL {
-        channel.write(&HelperMessage::Heartbeat { sequence })?;
-        *last_output = Instant::now();
-    }
+    let state = publish_observation(channel, state, Observation::FinishCycle { heartbeat_due })?;
     let remaining = MAX_LIFETIME.saturating_sub(began.elapsed());
     if remaining.is_zero() {
-        return Ok(false);
+        return Ok(None);
     }
     std::thread::sleep(POLL_INTERVAL.min(remaining));
-    Ok(true)
-}
-
-fn handle_desktop_cycle_fault(
-    fault: CycleFault,
-    channel: &mut WatchChannel,
-    tracked: &mut Option<Tracked>,
-    settling: &mut SettleGate<(u64, u32, u64), ProbeReport>,
-    last_output: &mut Instant,
-) -> Result<()> {
-    if cycle_action(fault) != CycleAction::DesktopChanged {
-        return Err(());
-    }
-    withdraw_for_desktop_change(channel, tracked, settling, last_output)
-}
-
-fn withdraw_for_desktop_change(
-    channel: &mut WatchChannel,
-    tracked: &mut Option<Tracked>,
-    settling: &mut SettleGate<(u64, u32, u64), ProbeReport>,
-    last_output: &mut Instant,
-) -> Result<()> {
-    settling.clear();
-    if let Some(current) = tracked.take() {
-        channel.write(&HelperMessage::Gone {
-            target: current.identity,
-            reason: GoneReason::DesktopChanged,
-        })?;
-        *last_output = Instant::now();
-    }
-    Ok(())
+    Ok(Some(state))
 }
 
 fn open_input_desktop(cleanup: &CleanupLog) -> Result<OwnedDesktop> {
@@ -503,26 +304,14 @@ fn scoped_census(
     desktop: HDESK,
     session: u32,
     image: &[u16],
-    tracked: Option<&Tracked>,
-    verify_content: bool,
-    next_sequence: u32,
+    plan: CyclePlan,
     cleanup: &CleanupLog,
 ) -> Result<Census> {
     let token = desktop.0 as usize;
     let cleanup = Arc::clone(cleanup);
     std::thread::scope(|scope| {
         scope
-            .spawn(move || {
-                worker_census(
-                    token,
-                    session,
-                    image,
-                    tracked,
-                    verify_content,
-                    next_sequence,
-                    &cleanup,
-                )
-            })
+            .spawn(move || worker_census(token, session, image, plan, &cleanup))
             .join()
             .map_err(|_| ())?
     })
@@ -532,9 +321,7 @@ fn worker_census(
     token: usize,
     session: u32,
     image: &[u16],
-    tracked: Option<&Tracked>,
-    verify_content: bool,
-    next_sequence: u32,
+    plan: CyclePlan,
     cleanup: &CleanupLog,
 ) -> Result<Census> {
     security::reject_impersonation(cleanup).map_err(|_| ())?;
@@ -582,18 +369,13 @@ fn worker_census(
     let Some(candidate) = candidates.pop() else {
         return Ok(Census::None);
     };
-    let same = tracked.is_some_and(|value| native_identity(&candidate, value.identity));
-    let identity = if same {
-        tracked.ok_or(())?.identity
-    } else {
-        target_identity(&candidate, next_sequence)?
-    };
+    let window = window_identity(&candidate)?;
     if candidate.recheck(session, image, cleanup).is_err() {
         return Ok(Census::VerificationFailed);
     }
-    if same && !verify_content {
+    if !plan.capture(window) {
         return Ok(Census::One {
-            identity,
+            window,
             report: None,
         });
     }
@@ -635,22 +417,8 @@ fn worker_census(
         }
         return Err(());
     }
-    if same
-        && tracked.is_some_and(|prior| {
-            report.content() == prior.report.content()
-                && report
-                    .counts()
-                    .describes_the_same_prompt(prior.report.counts())
-        })
-    {
-        return Ok(Census::One {
-            identity,
-            report: None,
-        });
-    }
     Ok(Census::One {
-        // Changed content under the same HWND is a replacement, not renewal.
-        identity: target_identity(&candidate, next_sequence)?,
+        window,
         report: Some(report),
     })
 }
@@ -664,21 +432,20 @@ fn census_kind(census: &Census) -> &'static str {
         Census::One { report: None, .. } => "one_same",
         Census::One {
             report: Some(_), ..
-        } => "one_new",
+        } => "one_captured",
         Census::Ambiguous => "ambiguous",
     }
 }
 
-fn target_identity(candidate: &Candidate, sequence: u32) -> Result<TargetIdentity> {
+fn window_identity(candidate: &Candidate) -> Result<WindowIdentity> {
     let hwnd = u64::try_from(candidate.hwnd.0 as usize).map_err(|_| ())?;
-    if hwnd == 0 || candidate.pid == 0 || candidate.creation == 0 || sequence == 0 {
+    if hwnd == 0 || candidate.pid == 0 || candidate.creation == 0 {
         return Err(());
     }
-    Ok(TargetIdentity {
+    Ok(WindowIdentity {
         hwnd,
         pid: candidate.pid,
         created: candidate.creation,
-        sequence,
     })
 }
 
@@ -925,94 +692,57 @@ fn target_outcome_census(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{LabelKind, PromptContentObservation, PromptLabel};
 
     #[test]
-    fn externally_controlled_cycle_faults_are_recoverable_without_accepting_a_candidate() {
-        assert_eq!(
-            cycle_action(CycleFault::InputDesktopUnavailable),
-            CycleAction::DesktopChanged
-        );
-        assert_eq!(
-            cycle_action(CycleFault::InputDesktopNameUnavailable),
-            CycleAction::DesktopChanged
-        );
-        assert_eq!(
-            cycle_action(CycleFault::InputDesktopVerification(
-                ProbeFailure::SecureInputDesktopProfileRequired,
-            )),
-            CycleAction::DesktopChanged
-        );
-        assert_eq!(
-            cycle_action(CycleFault::CandidateQuery),
-            CycleAction::SkipWindow
-        );
-        assert_eq!(
-            cycle_action(CycleFault::PostCaptureRecheck),
-            CycleAction::VerificationFailed
-        );
-    }
-
-    #[test]
-    fn unexpected_desktop_verification_failures_remain_fatal() {
-        for failure in [
-            ProbeFailure::ThreadImpersonationPresent,
-            ProbeFailure::MalformedNativeData(NativeOperation::DesktopInput),
-            ProbeFailure::NativeCall {
-                operation: NativeOperation::DesktopInput,
-                hresult: -1,
+    fn failed_appeared_write_returns_no_committed_watch_state() {
+        let start = Instant::now();
+        let report = ProbeReport::from_observation(
+            ProbeCounts {
+                top_level_windows: 1,
+                qualified_candidates: 1,
+                elements: 2,
+                enabled_elements: 2,
+                maximum_depth: 1,
+                ..ProbeCounts::default()
             },
-        ] {
-            assert_eq!(
-                cycle_action(CycleFault::InputDesktopVerification(failure)),
-                CycleAction::Fatal
+            PromptContentObservation::from_parts(
+                vec![1],
+                String::new(),
+                vec![PromptLabel::new(1, 1, LabelKind::Text, true, "synthetic".into()).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let observation = || {
+            Observation::Census(Census::One {
+                window: WindowIdentity {
+                    hwnd: 1,
+                    pid: 2,
+                    created: 3,
+                },
+                report: Some(report.clone()),
+            })
+        };
+        let state = write_transition(
+            WatchState::new(start)
+                .transition(start, observation())
+                .unwrap(),
+            |_| panic!("settling must not write"),
+        )
+        .unwrap();
+        let pending = state
+            .transition(start + Duration::from_secs(1), observation())
+            .unwrap();
+        let mut writes = 0;
+        let result = write_transition(pending, |message| {
+            assert!(
+                matches!(message, HelperMessage::Appeared { target, .. } if target.sequence == 1)
             );
-        }
-    }
-
-    #[test]
-    fn any_gone_observation_establishes_gone() {
-        assert_eq!(
-            fold_outcome_observations([
-                OutcomeObservation::StillPresent,
-                OutcomeObservation::Unobservable,
-                OutcomeObservation::Gone,
-                OutcomeObservation::Unobservable,
-            ]),
-            ApplyOutcome::Gone
-        );
-    }
-
-    #[test]
-    fn all_unobservable_observations_do_not_establish_disappearance() {
-        assert_eq!(
-            fold_outcome_observations([
-                OutcomeObservation::Unobservable,
-                OutcomeObservation::Unobservable,
-                OutcomeObservation::Unobservable,
-            ]),
-            ApplyOutcome::StillPresent
-        );
-    }
-
-    #[test]
-    fn still_present_then_unobservable_does_not_establish_disappearance() {
-        assert_eq!(
-            fold_outcome_observations([
-                OutcomeObservation::StillPresent,
-                OutcomeObservation::Unobservable,
-                OutcomeObservation::Unobservable,
-            ]),
-            ApplyOutcome::StillPresent
-        );
-    }
-
-    #[test]
-    fn unobservable_then_gone_establishes_disappearance() {
-        assert_eq!(
-            fold_outcome_observations(
-                [OutcomeObservation::Unobservable, OutcomeObservation::Gone,]
-            ),
-            ApplyOutcome::Gone
-        );
+            writes += 1;
+            Err(())
+        });
+        assert!(result.is_err());
+        assert_eq!(writes, 1);
     }
 }
