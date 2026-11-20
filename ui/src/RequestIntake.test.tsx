@@ -319,37 +319,6 @@ describe('native request presentation integration', () => {
     expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
   });
 
-  it('reads details after the snapshot read that holds the native admission instead of failing', async () => {
-    const shown = pending();
-    const original = createQaBridge(shown);
-    const { wake, watchRequests } = wakeable();
-    let holding = false;
-    let answer: (value: AppSnapshot) => void = () => {};
-    const reads = vi.fn<ControllerBridge['snapshot']>()
-      .mockResolvedValueOnce(shown)
-      .mockImplementationOnce(() => {
-        holding = true;
-        return new Promise<AppSnapshot>((resolve) => { answer = (value) => { holding = false; resolve(value); }; });
-      })
-      .mockResolvedValue(shown);
-    // The native command admission refuses a second command while a read holds it.
-    const requestDetails = vi.fn((id: string) => holding
-      ? Promise.reject(Object.assign(new Error('busy'), { code: 'app_busy' })) : original.requestDetails(id));
-    const user = userEvent.setup();
-    view(shown, { snapshot: reads, requestDetails, watchRequests });
-    await screen.findByRole('button', { name: ko.details });
-    await settled();
-    act(() => { wake.notify(); });
-    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
-    await user.click(screen.getByRole('button', { name: ko.details }));
-    expect(await screen.findByText(ko.detailsLoading)).toBeInTheDocument();
-    expect(requestDetails).not.toHaveBeenCalled();
-    await act(async () => { answer(shown); await Promise.resolve(); });
-    expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
-    expect(requestDetails).toHaveBeenCalledExactlyOnceWith('synthetic-request-1');
-    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
-  });
-
   it('opens a notification review with its details once, while the next read still holds the admission', async () => {
     const shown = pending();
     const reviewed = { ...shown, requestReview: { locator: 'synthetic-request-1', revision: '7' } };

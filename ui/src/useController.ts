@@ -93,12 +93,110 @@ function emptyState(owner: ControllerBridge): ViewState {
   return { owner, snapshot: null, refreshing: true, busy: null, stale: false, error: null, notice: null, requestObservedAt: 0, scannerFocusRevision: 0 };
 }
 
-async function readSnapshot(bridge: ControllerBridge): Promise<AppSnapshot> {
-  const started = performance.now();
+interface WorkTicket {
+  readonly owner: ControllerBridge;
+  readonly revision: number;
+  readonly visibility: number;
+}
+
+/** One renderer owns admission ordering and response publication. Commands
+ * reserve the next turn ahead of details; refreshes are coalesced by the hook.
+ * The actual bridge promise holds admission even if its UI read times out. */
+class ControllerWork {
+  owner: ControllerBridge | null = null;
+  revision = 0;
+  visibility = 0;
+  command: WorkTicket | null = null;
+  read: { owner: ControllerBridge; promise: Promise<AppSnapshot> } | null = null;
+  private active: object | null = null;
+  private admissionOwner: ControllerBridge | null = null;
+  private readonly queued: { kind: 'read' | 'details' | 'command'; start: () => void }[] = [];
+
+  settled: () => void = () => undefined;
+
+  activate(owner: ControllerBridge) {
+    // A replacement bridge is a different owner. Its admission is independent;
+    // the old promise still settles, but cannot release the new owner's slot.
+    if (this.admissionOwner !== owner) {
+      this.admissionOwner = owner;
+      this.active = null;
+    }
+    this.owner = owner;
+    this.read = null;
+    this.command = null;
+    this.drain();
+  }
+
+  ticket(owner: ControllerBridge, supersede = false): WorkTicket {
+    if (supersede) this.revision += 1;
+    return { owner, revision: this.revision, visibility: this.visibility };
+  }
+
+  current(ticket: WorkTicket): boolean {
+    return this.owner === ticket.owner && this.revision === ticket.revision;
+  }
+
+  visible(ticket: WorkTicket): boolean {
+    return this.current(ticket) && this.visibility === ticket.visibility && document.visibilityState === 'visible';
+  }
+
+  presentation(ticket: WorkTicket, next: ViewState): ViewState | null {
+    if (!this.current(ticket)) return null;
+    return !this.visible(ticket) && next.snapshot ? { ...next, snapshot: withoutRequestBodies(next.snapshot) } : next;
+  }
+
+  get hasCalls(): boolean { return this.active !== null || this.queued.length > 0; }
+  get occupied(): boolean { return this.hasCalls || this.command !== null; }
+
+  finishCommand(ticket: WorkTicket) {
+    if (this.command === ticket) this.command = null;
+    this.drain();
+    this.settled();
+  }
+
+  call<T>(ticket: WorkTicket, kind: 'read' | 'details' | 'command', action: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queued.push({ kind, start: () => {
+        const active = {};
+        this.active = active;
+        const run = async () => {
+          if (!this.current(ticket) || (kind === 'details' && !this.visible(ticket))) throw new Error('superseded');
+          const answer = await action();
+          if (kind === 'details' && !this.visible(ticket)) throw new Error('superseded');
+          return answer;
+        };
+        void run().then(resolve, reject).finally(() => {
+          if (this.active !== active) return;
+          this.active = null;
+          this.drain();
+          this.settled();
+        });
+      } });
+      this.drain();
+    });
+  }
+
+  private drain() {
+    if (this.active) return;
+    const next = this.command === null ? 0 : this.queued.findIndex((item) => item.kind === 'command');
+    if (next >= 0) this.queued.splice(next, 1)[0]?.start();
+  }
+
+  snapshot(ticket: WorkTicket, kind: 'read' | 'command'): Promise<AppSnapshot> {
+    const started = performance.now();
+    const read = { owner: ticket.owner, promise: readSnapshot(this.call(ticket, kind, () => ticket.owner.snapshot()), started) };
+    this.read = read;
+    return read.promise.finally(() => {
+      if (this.read === read) this.read = null;
+    });
+  }
+}
+
+async function readSnapshot(response: Promise<AppSnapshot>, started: number): Promise<AppSnapshot> {
   let timer: number | undefined;
   try {
     const snapshot = await Promise.race([
-      bridge.snapshot(),
+      response,
       new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => { reject(new Error('snapshot_timeout')); }, 15000); }),
     ]);
     return ageRequestPresentation(snapshot, performance.now() - started);
@@ -166,12 +264,7 @@ function scannerFailure(error: unknown, transport?: 'usb'): string {
 export function useController(bridge: ControllerBridge) {
   const [state, setState] = useState<ViewState>(() => emptyState(bridge));
   const current = useRef<ViewState>(state);
-  const revision = useRef(0);
-  const visibilityRevision = useRef(0);
-  const liveOwner = useRef<ControllerBridge | null>(null);
   const readPending = useRef(false);
-  const activeRead = useRef<{ owner: ControllerBridge; promise: Promise<AppSnapshot> } | null>(null);
-  const commandPending = useRef(false);
   // Every snapshot read, command and details read shares one native command
   // admission. A change reported while it is held is remembered here and read
   // once the work in flight lets go, instead of waiting for the periodic read.
@@ -182,8 +275,8 @@ export function useController(bridge: ControllerBridge) {
   // to the request's own deadline comes back unchanged, and asking again for it
   // read the owner continuously for the last second of every request.
   const earlyReadLeaseEnd = useRef<number | null>(null);
-  const detailsReads = useRef<{ owner: ControllerBridge | null; count: number }>({ owner: null, count: 0 });
   const resumeRefresh = useRef<() => void>(() => undefined);
+  const work = useRef(new ControllerWork());
   const scannerReturn = useRef({ pending: false, opened: false, wake: false });
   const scannerFocusRevision = useRef(0);
   const dismissScannerReturnFocus = useCallback(() => {
@@ -200,33 +293,32 @@ export function useController(bridge: ControllerBridge) {
     return scannerFocusRevision.current;
   }, []);
 
-  const publish = useCallback((next: ViewState) => {
-    const visible = document.visibilityState === 'visible';
-    const presentation = !visible && next.snapshot ? { ...next, snapshot: withoutRequestBodies(next.snapshot) } : next;
+  const publish = useCallback((next: ViewState, ticket = work.current.ticket(next.owner)) => {
+    const presentation = work.current.presentation(ticket, next);
+    if (presentation === null) return;
     current.current = presentation;
     setState(presentation);
-  }, []);
+  }, [work]);
 
   const refresh = useCallback(async (announce = false) => {
-    if (liveOwner.current !== bridge) return;
+    if (work.current.owner !== bridge) return;
     // Dropping this call lost the native wake that announces a new request
     // whenever any other read was running, and the card then waited for the
     // periodic read. The work in flight may already have read past the change.
-    if (commandPending.current || readPending.current || activeRead.current !== null
-      || (detailsReads.current.owner === bridge && detailsReads.current.count > 0)) {
+    if (work.current.occupied || readPending.current || work.current.read !== null) {
       refreshWanted.current = true;
       return;
     }
     refreshWanted.current = false;
     readPending.current = true;
-    const attempt = ++revision.current;
+    const attempt = work.current.ticket(bridge, true);
+    const post = (next: ViewState) => publish(next, attempt);
     const previous = current.current.owner === bridge ? current.current : emptyState(bridge);
-    publish({ ...previous, refreshing: true, notice: null });
-    const read = { owner: bridge, promise: readSnapshot(bridge) };
-    activeRead.current = read;
+    post({ ...previous, refreshing: true, notice: null });
+    const response = work.current.snapshot(attempt, 'read');
     try {
-      const snapshot = await read.promise;
-      if (liveOwner.current !== bridge || attempt !== revision.current) return;
+      const snapshot = await response;
+      if (!work.current.current(attempt)) return;
       const latest = current.current;
       // The wake for a new request is sent while the native intake still holds
       // the owner, so the read it starts can find the owner busy. That answer
@@ -234,7 +326,7 @@ export function useController(bridge: ControllerBridge) {
       // still run from its own observation, and let the owner's next wake read
       // again. Only an explicit refresh reports the busy owner.
       if (!announce && snapshot.issue?.code === 'app_busy' && latest.owner === bridge && latest.snapshot !== null) {
-        publish({ ...latest, refreshing: false });
+        post({ ...latest, refreshing: false });
         // The next wake may be a long way off, and a request whose lease ran
         // out is off the screen until something reads again. Ask a few times.
         const wait = BUSY_READ_WAITS_MILLIS[busyReads.current];
@@ -242,7 +334,7 @@ export function useController(bridge: ControllerBridge) {
           busyReads.current += 1;
           window.clearTimeout(busyReadTimer.current);
           busyReadTimer.current = window.setTimeout(() => {
-            if (liveOwner.current !== bridge) return;
+            if (work.current.owner !== bridge) return;
             refreshWanted.current = true;
             resumeRefresh.current();
           }, wait);
@@ -250,42 +342,27 @@ export function useController(bridge: ControllerBridge) {
         return;
       }
       busyReads.current = 0;
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
+      post({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: announce && !snapshot.issue ? ko.updated : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
     } catch (failure) {
-      if (liveOwner.current !== bridge || attempt !== revision.current) return;
+      if (!work.current.current(attempt)) return;
       const latest = current.current;
-      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
+      post({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: latest.snapshot !== null, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
     } finally {
-      if (activeRead.current === read) activeRead.current = null;
-      if (liveOwner.current === bridge && attempt === revision.current) readPending.current = false;
+      if (work.current.current(attempt)) readPending.current = false;
       resumeRefresh.current();
     }
-  }, [bridge, publish, scannerReturnRevision]);
+  }, [bridge, publish, scannerReturnRevision, work]);
 
-  /** Original command text is still read only on demand. It shares the native
-   * admission with the snapshot read, and a notification review opens the
-   * disclosure the moment its snapshot is published, often while the next read
-   * is already running. So it waits for the exact read holding the admission
-   * instead of colliding with it and showing the retry state. The wait counts
-   * against the body's own display lease, never extends it. */
+  /** Details share admission with every native call. Their display lifetime
+   * still includes the wait, and a retired owner or hidden page gets no body. */
   const readDetails = useCallback(async (requestId: string): Promise<RequestDetailsView> => {
-    if (detailsReads.current.owner !== bridge) detailsReads.current = { owner: bridge, count: 0 };
-    const reads = detailsReads.current;
-    reads.count += 1;
-    try {
-      for (let held = activeRead.current; held?.owner === bridge; held = activeRead.current) {
-        try { await held.promise; } catch { /* The details read reports its own failure. */ }
-      }
-      return await bridge.requestDetails(requestId);
-    } finally {
-      reads.count -= 1;
-      resumeRefresh.current();
-    }
-  }, [bridge]);
+    const ticket = work.current.ticket(bridge);
+    return work.current.call(ticket, 'details', () => bridge.requestDetails(requestId));
+  }, [bridge, work]);
 
   const run = useCallback(async (command: ClientCommand): Promise<AppSnapshot | null> => {
     const previous = current.current;
-    if (liveOwner.current !== bridge || commandPending.current || previous.owner !== bridge
+    if (work.current.owner !== bridge || work.current.command !== null || previous.owner !== bridge
       || previous.stale || !previous.snapshot || !exposedBySnapshot(previous.snapshot, command)) return null;
     if (command.kind === 'decision' && previous.snapshot.requests.some((request) => request.id === command.requestId
       && performance.now() - previous.requestObservedAt >= request.refreshAfterMillis)) {
@@ -293,124 +370,96 @@ export function useController(bridge: ControllerBridge) {
       void refresh();
       return null;
     }
-    // A renderer revision cannot cancel the native read's admission lease.
-    // Serialize this camera-entry intent behind that exact read, then recheck
-    // its fresh capability.
-    const scannerRead = command.kind === 'scan_pairing' && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const folderRead = command.kind === 'diagnostics-folder' && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const exportRead = (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') && activeRead.current?.owner === bridge ? activeRead.current : null;
-    // Owner commands wait for the held read too. So do approval and denial:
-    // sent while a read held the native admission they were refused as busy,
-    // and the refusal took the request off the screen until the next read.
-    const ownerRead = QUEUED_OWNER_COMMANDS.has(command.kind) && activeRead.current?.owner === bridge ? activeRead.current : null;
-    const decisionRead = command.kind === 'decision' && activeRead.current?.owner === bridge ? activeRead.current : null;
-    commandPending.current = true;
+    const heldRead = work.current.read?.owner === bridge ? work.current.read : null;
+    // Capture both outcomes immediately: a UI timeout does not release native
+    // admission, and its rejection can precede our turn by an arbitrary time.
+    const observation = heldRead?.promise.then(
+      (snapshot) => ({ snapshot, observedAt: performance.now(), failure: null }),
+      (failure: unknown) => ({ snapshot: null, observedAt: 0, failure }),
+    );
+    const attempt = work.current.ticket(bridge, true);
+    work.current.command = attempt;
+    const post = (next: ViewState) => publish(next, attempt);
+    const invoke = <T,>(action: () => Promise<T>) => work.current.call(attempt, 'command', action);
     if (command.kind === 'scan_pairing') scannerReturn.current = { pending: true, opened: false, wake: false };
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
     readPending.current = false;
-    const attempt = ++revision.current; // A command supersedes an older snapshot request.
-    const visibilityAttempt = visibilityRevision.current;
-    publish({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
+    post({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
     let scannerOpened = false;
     try {
-      if (scannerRead) {
-        let snapshot: AppSnapshot;
-        try { snapshot = await scannerRead.promise; }
-        catch (failure) {
-          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-          scannerReturn.current = { pending: false, opened: false, wake: false };
+      // Reserve the next turn for this one explicit command, not a FIFO of
+      // stale taps. All command kinds wait for the actual admission holder.
+      if (work.current.hasCalls) await invoke(() => Promise.resolve());
+      if (!work.current.current(attempt)) return null;
+      const observed = observation ? await observation : undefined;
+      if (!work.current.current(attempt)) return null;
+      const fresh = observed?.snapshot ? ageRequestPresentation(observed.snapshot, performance.now() - observed.observedAt) : null;
+      if (heldRead && (command.kind === 'scan_pairing' || QUEUED_OWNER_COMMANDS.has(command.kind))) {
+        if (fresh === null) {
+          if (command.kind === 'scan_pairing') dismissScannerReturnFocus();
           const latest = current.current;
-          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
-            refreshing: false, busy: null, stale: true, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
+          post({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
+            refreshing: false, busy: null, stale: true, error: authoredIssue(observed?.failure) ?? generic(ko.loadFailure), notice: null });
           return null;
         }
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        const visible = document.visibilityState === 'visible';
-        const mayOpen = scannerReturn.current.pending && visible
-          && exposedBySnapshot(snapshot, command);
-        publish({ ...current.current, snapshot: visible ? snapshot : withoutRequestBodies(snapshot), refreshing: false, busy: mayOpen ? 'scan_pairing' : null,
-          stale: false, error: null, notice: null, requestObservedAt: performance.now() });
-        if (!mayOpen) {
-          scannerReturn.current = { pending: false, opened: false, wake: false };
+        const mayRun = exposedBySnapshot(fresh, command)
+          && (command.kind !== 'scan_pairing' || (scannerReturn.current.pending && work.current.visible(attempt)));
+        if (command.kind === 'scan_pairing' || !mayRun) {
+          post({ ...current.current, snapshot: fresh, refreshing: false, busy: mayRun ? command.kind : null,
+            stale: false, error: null, notice: null, requestObservedAt: performance.now() });
+        }
+        if (!mayRun) {
+          if (command.kind === 'scan_pairing') dismissScannerReturnFocus();
           return null;
         }
       }
       if (command.kind === 'scan_pairing') {
-        if (command.transport === 'usb') await bridge.openPairingScanner('usb');
-        else await bridge.openPairingScanner();
+        if (!scannerReturn.current.pending || !work.current.visible(attempt)) {
+          dismissScannerReturnFocus();
+          post({ ...current.current, refreshing: false, busy: null });
+          return null;
+        }
+        if (command.transport === 'usb') await invoke(() => bridge.openPairingScanner('usb'));
+        else await invoke(() => bridge.openPairingScanner());
         scannerOpened = true;
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        if (!work.current.current(attempt)) return null;
         scannerReturn.current.opened = true;
         // Dialog acknowledgement is input-entry only. Refresh native capability,
         // never invent a paired PC, a read result or a success notification.
-        const snapshot = await readSnapshot(bridge);
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
+        const snapshot = await work.current.snapshot(attempt, 'command');
+        if (!work.current.current(attempt)) return null;
+        post({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
         return null;
       }
       if (command.kind === 'lock-settings' || command.kind === 'notification-settings') {
-        if (command.kind === 'lock-settings') await bridge.openLockSettings();
-        else await bridge.openNotificationSettings();
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        publish({ ...current.current, refreshing: false, busy: null, notice: ko.returnFromSettings });
+        if (command.kind === 'lock-settings') await invoke(() => bridge.openLockSettings());
+        else await invoke(() => bridge.openNotificationSettings());
+        if (!work.current.current(attempt)) return null;
+        post({ ...current.current, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
       if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
-        // Native export shares command admission with the current read, but is
-        // independent of service/activity readiness and does not mutate either.
-        if (exportRead) {
-          try { await exportRead.promise; } catch { /* Logs remain useful after a failed service read. */ }
-          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        }
         let notice: string = ko.diagnosticsExported;
         if (command.kind === 'diagnostics-save') {
-          const result = await bridge.saveAndroidDiagnostics();
+          const result = await invoke(() => bridge.saveAndroidDiagnostics());
           if (result !== 'saved' && result !== 'cancelled') throw new Error('invalid_save_result');
           notice = result === 'saved' ? ko.diagnosticsSaved : ko.diagnosticsSaveCancelled;
-        } else await bridge.exportAndroidDiagnostics();
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        } else await invoke(() => bridge.exportAndroidDiagnostics());
+        if (!work.current.current(attempt)) return null;
         // Preserve any request-body withdrawal while the Sharesheet was open.
-        publish({ ...current.current, refreshing: false, busy: null, error: null, notice });
+        post({ ...current.current, refreshing: false, busy: null, error: null, notice });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
-        // The folder is independent of service readiness, but its native command
-        // shares admission with this exact in-flight read. Wait for that read to
-        // release admission; never queue an approval/denial or start another read.
-        if (folderRead) {
-          try { await folderRead.promise; } catch { /* Diagnostic files can outlive service reads. */ }
-          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        }
-        await bridge.openDiagnosticsFolder();
+        await invoke(() => bridge.openDiagnosticsFolder());
         console.info('UAC_DIAGNOSTIC_FOLDER_V1 outcome=accepted');
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        publish({ ...current.current, refreshing: false, busy: null, error: null, notice: null });
+        if (!work.current.current(attempt)) return null;
+        post({ ...current.current, refreshing: false, busy: null, error: null, notice: null });
         return null;
       }
-      if (ownerRead) {
-        // Command buttons stay enabled while a background read runs. The native
-        // admission would answer the command with app_busy and nothing would
-        // happen (a pairing that never began, a setting that was never saved),
-        // so wait for that exact read and recheck its fresh capability first,
-        // as the phone's scanner intent does.
-        let fresh: AppSnapshot;
-        try { fresh = await ownerRead.promise; }
-        catch (failure) {
-          if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-          const latest = current.current;
-          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null,
-            refreshing: false, busy: null, stale: true, error: authoredIssue(failure) ?? generic(ko.loadFailure), notice: null });
-          return null;
-        }
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        if (!exposedBySnapshot(fresh, command)) {
-          publish({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
-          return null;
-        }
-      }
       if (command.kind === 'decision') {
-        const superseded = () => liveOwner.current !== bridge || attempt !== revision.current;
-        const visible = () => document.visibilityState === 'visible' && visibilityAttempt === visibilityRevision.current;
+        const superseded = () => !work.current.current(attempt);
+        const visible = () => work.current.visible(attempt);
         // The request as it is on screen now, while its display lease holds. A
         // page that went to the background has already withdrawn it.
         const shown = (): boolean => {
@@ -422,26 +471,24 @@ export function useController(bridge: ControllerBridge) {
         // The tap is given up: nothing is sent, and the next read says what is there.
         const withdrawn = (): null => {
           const latest = current.current;
-          publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null });
+          post({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null });
           refreshWanted.current = true;
           return null;
         };
-        if (decisionRead) {
+        if (heldRead) {
           // The tap is kept and sent once the read lets go. What it answers is
           // still the card that was tapped: the read either shows that same
           // request again, and the tap goes out with the locator it had, or it
           // shows something else, and the tap is dropped in favour of that.
-          let fresh: AppSnapshot | null = null;
-          try { fresh = await decisionRead.promise; } catch { /* The decision reports its own failure below. */ }
           if (superseded()) return null;
           // Leaving the app withdrew the request, and withdrew the tap with it.
           if (!visible()) return withdrawn();
           if (fresh !== null && fresh.issue?.code !== 'app_busy') {
             if (!exposedBySnapshot(fresh, command)) {
-              publish({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
+              post({ owner: bridge, snapshot: fresh, refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(fresh) });
               return null;
             }
-            publish({ ...current.current, snapshot: fresh, refreshing: false, busy: 'decision', stale: false, error: null, notice: null, requestObservedAt: performance.now() });
+            post({ ...current.current, snapshot: fresh, refreshing: false, busy: 'decision', stale: false, error: null, notice: null, requestObservedAt: performance.now() });
           } else if (!shown()) return withdrawn();
         }
         if (!shown()) return withdrawn();
@@ -449,7 +496,7 @@ export function useController(bridge: ControllerBridge) {
           const started = performance.now();
           let answer: AppSnapshot | null = null;
           let refusal: unknown = null;
-          try { answer = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started); }
+          try { answer = ageRequestPresentation(await invoke(() => dispatch(bridge, command)), performance.now() - started); }
           catch (failure) { refusal = failure; }
           if (superseded()) return null;
           const wait = DECISION_BUSY_WAITS_MILLIS[tries];
@@ -459,7 +506,7 @@ export function useController(bridge: ControllerBridge) {
             if (!visible()) {
               // Answered after the app was left: nothing is offered again, and
               // no request text goes back on a page nobody is looking at.
-              publish({ owner: bridge, snapshot: withoutRequestBodies(answer), refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
+              post({ owner: bridge, snapshot: withoutRequestBodies(answer), refreshing: false, busy: null, stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
               return null;
             }
             if (!observed && (refused || answer.issue?.code === 'app_busy')) {
@@ -468,14 +515,14 @@ export function useController(bridge: ControllerBridge) {
               // card; offer a refused decision again, and otherwise read.
               if (!(refused && wait !== undefined && shown())) {
                 const latest = current.current;
-                publish({ ...latest, refreshing: false, busy: null, notice: null,
+                post({ ...latest, refreshing: false, busy: null, notice: null,
                   error: refused && answer.issue ? { message: answer.issue.message, nextAction: answer.issue.nextAction } : null });
                 if (!refused) refreshWanted.current = true;
                 return null;
               }
             } else {
               const again = refused && wait !== undefined && exposedBySnapshot(answer, command);
-              publish({ owner: bridge, snapshot: again ? { ...answer, issue: null } : answer, refreshing: false, busy: again ? 'decision' : null,
+              post({ owner: bridge, snapshot: again ? { ...answer, issue: null } : answer, refreshing: false, busy: again ? 'decision' : null,
                 stale: false, error: null, notice: null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(answer) });
               if (!again) return answer.issue ? null : answer;
             }
@@ -483,7 +530,7 @@ export function useController(bridge: ControllerBridge) {
           else if (wait === undefined) {
             // Refused before anything began, so what is on screen is still what
             // the owner holds. Say so and leave the request where it is.
-            publish({ ...current.current, refreshing: false, busy: null, error: authoredIssue(refusal) ?? generic(ko.actionFailure), notice: null });
+            post({ ...current.current, refreshing: false, busy: null, error: authoredIssue(refusal) ?? generic(ko.actionFailure), notice: null });
             return null;
           }
           await pause(wait ?? 0);
@@ -492,17 +539,17 @@ export function useController(bridge: ControllerBridge) {
         }
       }
       const started = performance.now();
-      const snapshot = ageRequestPresentation(await dispatch(bridge, command), performance.now() - started);
-      if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+      const snapshot = ageRequestPresentation(await invoke(() => dispatch(bridge, command)), performance.now() - started);
+      if (!work.current.current(attempt)) return null;
       // Native cancellation and errors are AppIssue results, never local success.
       // A finished repair is otherwise silent: its notice just disappears.
       const repaired = command.kind === 'service' && command.action === 'repair' && !snapshot.issue;
-      publish({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: repaired ? ko.repairDone : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
+      post({ owner: bridge, snapshot, refreshing: false, busy: null, stale: false, error: null, notice: repaired ? ko.repairDone : null, requestObservedAt: performance.now(), scannerFocusRevision: scannerReturnRevision(snapshot) });
       return snapshot.issue ? null : snapshot;
     } catch (failure) {
-      if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+      if (!work.current.current(attempt)) return null;
       if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
-        publish({ ...current.current, refreshing: false, busy: null, error: generic(command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure), notice: null });
+        post({ ...current.current, refreshing: false, busy: null, error: generic(command.kind === 'diagnostics-save' ? ko.diagnosticsSaveFailure : ko.diagnosticsExportFailure), notice: null });
         return null;
       }
       if (command.kind === 'diagnostics-folder') {
@@ -516,17 +563,17 @@ export function useController(bridge: ControllerBridge) {
         // Closed diagnosis only: no path, exception text or arbitrary native code.
         console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}${numeric}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
-        publish({ ...current.current, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
+        post({ ...current.current, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
         return null;
       }
       if (command.kind === 'scan_pairing' && !scannerOpened) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
         const error = generic(scannerFailure(failure, command.transport));
         let snapshot: AppSnapshot | null = null;
-        try { snapshot = await readSnapshot(bridge); } catch { /* Keep recovery, never raw native errors. */ }
-        if (liveOwner.current !== bridge || attempt !== revision.current) return null;
+        try { snapshot = await work.current.snapshot(attempt, 'command'); } catch { /* Keep recovery, never raw native errors. */ }
+        if (!work.current.current(attempt)) return null;
         const latest = current.current;
-        publish({ ...latest, snapshot: snapshot ?? (latest.snapshot ? withoutRequestBodies(latest.snapshot) : null),
+        post({ ...latest, snapshot: snapshot ?? (latest.snapshot ? withoutRequestBodies(latest.snapshot) : null),
           refreshing: false, busy: null, stale: snapshot === null, error, notice: null,
           requestObservedAt: snapshot ? performance.now() : latest.requestObservedAt });
         return null;
@@ -534,15 +581,14 @@ export function useController(bridge: ControllerBridge) {
       // The owner's own refusal names its reason and next step. Anything else,
       // a timeout or a transport failure among them, keeps the generic line.
       const latest = current.current;
-      publish({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
+      post({ ...latest, snapshot: latest.snapshot ? withoutRequestBodies(latest.snapshot) : null, refreshing: false, busy: null, stale: true,
         error: authoredIssue(failure) ?? generic(scannerOpened ? ko.loadFailure
           : command.kind === 'policy' || command.kind === 'relay' || command.kind === 'external-access' ? ko.saveFailure : ko.actionFailure), notice: null });
       return null;
     } finally {
-      if (liveOwner.current === bridge && attempt === revision.current) commandPending.current = false;
-      resumeRefresh.current();
+      work.current.finishCommand(attempt);
     }
-  }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision]);
+  }, [bridge, dismissScannerReturnFocus, publish, refresh, scannerReturnRevision, work]);
 
   // A request's display lease is clipped to the end of the wall minute, so one
   // that arrives at :58 holds a two-second lease. Withdrawing the bodies and
@@ -559,7 +605,7 @@ export function useController(bridge: ControllerBridge) {
     if (!snapshot?.requests.length || state.owner !== bridge) return;
     const remaining = Math.max(0, Math.min(...snapshot.requests.map((request) => request.refreshAfterMillis))
       - (performance.now() - state.requestObservedAt));
-    const showing = () => liveOwner.current === bridge && current.current.snapshot === snapshot;
+    const showing = () => work.current.owner === bridge && current.current.snapshot === snapshot;
     const leaseEnd = performance.now() + remaining;
     const asked = earlyReadLeaseEnd.current;
     const early = asked !== null && leaseEnd <= asked + REQUEST_LEASE_SLACK_MILLIS ? undefined : window.setTimeout(() => {
@@ -573,24 +619,24 @@ export function useController(bridge: ControllerBridge) {
       if (document.visibilityState === 'visible') void refresh();
     }, remaining);
     return () => { window.clearTimeout(early); window.clearTimeout(withdraw); };
-  }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot]);
+  }, [bridge, publish, refresh, state.owner, state.requestObservedAt, state.snapshot, work]);
 
   // One more read for the changes remembered while the admission was held. A
   // hidden page reads nothing; becoming visible reads anyway.
   useEffect(() => {
     resumeRefresh.current = () => {
-      if (!refreshWanted.current || liveOwner.current !== bridge) return;
+      if (!refreshWanted.current || work.current.owner !== bridge) return;
       if (document.visibilityState !== 'visible') { refreshWanted.current = false; return; }
       void refresh();
     };
+    work.current.settled = () => resumeRefresh.current();
     return () => { resumeRefresh.current = () => undefined; };
-  }, [bridge, refresh]);
+  }, [bridge, refresh, work]);
 
   useEffect(() => {
-    liveOwner.current = bridge;
+    const ownerWork = work.current;
+    ownerWork.activate(bridge);
     readPending.current = false;
-    activeRead.current = null;
-    commandPending.current = false;
     refreshWanted.current = false;
     busyReads.current = 0;
     earlyReadLeaseEnd.current = null;
@@ -606,7 +652,7 @@ export function useController(bridge: ControllerBridge) {
         void refresh();
       }
       else {
-        visibilityRevision.current += 1;
+        work.current.visibility += 1;
         if (scannerReturn.current.pending && !scannerReturn.current.opened) dismissScannerReturnFocus();
         if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
       }
@@ -616,21 +662,21 @@ export function useController(bridge: ControllerBridge) {
     void bridge.watchRequests?.(onForeground).then((stop) => {
       if (disposed) void stop().catch(() => undefined);
       else unsubscribe = stop;
-    }).catch(() => undefined); // Sticky native review + periodic read still work.
+    }).catch(() => undefined); // Sticky native review + periodic read still work.current.
     window.addEventListener('focus', onForeground);
     document.addEventListener('visibilitychange', onForeground);
     const timer = window.setInterval(onForeground, 5000);
     return () => {
       disposed = true;
       void unsubscribe?.().catch(() => undefined);
-      liveOwner.current = null;
-      revision.current += 1;
+      ownerWork.owner = null;
+      ownerWork.revision += 1;
       window.clearInterval(timer);
       window.clearTimeout(busyReadTimer.current);
       window.removeEventListener('focus', onForeground);
       document.removeEventListener('visibilitychange', onForeground);
     };
-  }, [bridge, dismissScannerReturnFocus, publish, refresh]);
+  }, [bridge, dismissScannerReturnFocus, publish, refresh, work]);
 
   return { ...(state.owner === bridge ? state : emptyState(bridge)), refresh, run, readDetails, dismissScannerReturnFocus };
 }

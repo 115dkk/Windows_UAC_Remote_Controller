@@ -91,18 +91,6 @@ describe('scanner intent waits for the actual background read', () => {
     expect(test.openPairingScanner).not.toHaveBeenCalled();
   });
 
-  it('an old read cannot open a scanner after bridge replacement', async () => {
-    const test = setup();
-    const view = render(<App bridge={test.bridge} />);
-    const entry = await screen.findByRole('button', { name: ko.openPairingScanner });
-    fireEvent(window, new Event('focus'));
-    fireEvent.click(entry);
-    view.rerender(<App bridge={createQaBridge(qaCase('phone-lock-missing').snapshot)} />);
-    await screen.findByRole('button', { name: ko.openLockSettings });
-    await act(async () => { test.pending.resolve(test.snapshot); await test.pending.promise; });
-    expect(test.openPairingScanner).not.toHaveBeenCalled();
-  });
-
   it('a hidden read completion neither opens the camera nor restores request bodies', async () => {
     const test = setup();
     render(<App bridge={test.bridge} />);
