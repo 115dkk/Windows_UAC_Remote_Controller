@@ -383,8 +383,8 @@ fn run(
     let mut step = RuntimeStep::Ready;
     // Keep session OUTSIDE this unwind boundary: every returned error or unwind
     // takes the same staged drain before registry/key release or Finished.
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || -> Result<(), ServiceError> {
+    let runtime_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), RuntimeFailure> {
             if cancellation_requested(stop) {
                 return Ok(());
             }
@@ -411,7 +411,10 @@ fn run(
                 ActivityEvent::Service(ServiceOutcome::Started),
             )?;
             step = RuntimeStep::Pairing;
-            if let Some(reason) = session.activate_pairing(ready).map_err(session_error)? {
+            if let Some(reason) = session
+                .activate_pairing(ready)
+                .map_err(runtime_session_failure)?
+            {
                 // Fixed kind only; the reason itself stays out of the journal.
                 append(
                     &mut journal,
@@ -426,7 +429,7 @@ fn run(
             step = RuntimeStep::Relay;
             session
                 .configure_relay_after_ready(relay)
-                .map_err(session_error)?;
+                .map_err(runtime_session_failure)?;
             step = RuntimeStep::Watcher;
             // A watcher that cannot start yet keeps the service and the
             // phones' connections up; it is retried, never a reason to exit.
@@ -480,7 +483,7 @@ fn run(
                 let events = match watch.as_mut() {
                     Some(watcher) => watcher
                         .poll(iteration_now)
-                        .map_err(|_| ServiceError::WorkerFailed)?,
+                        .map_err(|_| RuntimeFailure::watcher())?,
                     None => Vec::new(),
                 };
                 for event in events {
@@ -496,7 +499,7 @@ fn run(
                         )?;
                         session
                             .set_parked_prompts(*count, iteration_now)
-                            .map_err(session_error)?;
+                            .map_err(runtime_session_failure)?;
                         continue;
                     }
                     // Fixed lifecycle kinds only: the events carry no prompt content here.
@@ -529,7 +532,7 @@ fn run(
                     }
                     let progress = session
                         .handle_watch_event(event, iteration_now)
-                        .map_err(session_error)?;
+                        .map_err(runtime_session_failure)?;
                     journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
                 }
                 let current_heartbeats = current_watch_heartbeats(&watch);
@@ -547,7 +550,7 @@ fn run(
                 }
                 if let Some(progress) = session
                     .prompt_deadline_step(iteration_now)
-                    .map_err(session_error)?
+                    .map_err(runtime_session_failure)?
                 {
                     journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
                 }
@@ -555,7 +558,7 @@ fn run(
                     Some(watcher) => session.process_one_with_watch(watcher),
                     None => session.process_one(),
                 };
-                match processed.map_err(session_error)? {
+                match processed.map_err(runtime_session_failure)? {
                     SessionProgress::DecisionRejected(error) => {
                         decision_rejections.record(error, iteration_now);
                     }
@@ -650,14 +653,19 @@ fn run(
             )?;
             Ok(())
         },
-    ))
-    .inspect(|result| {
-        if let Err(error) = result {
-            record_runtime_failure(step, false, error.service_diagnostic_code());
+    ));
+    let outcome = match runtime_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(failure)) => {
+            record_runtime_failure(step, failure);
+            Err(failure.error)
         }
-    })
-    .inspect_err(|_| record_runtime_failure(step, true, 0))
-    .unwrap_or(Err(ServiceError::WorkerFailed));
+        Err(_) => {
+            let failure = RuntimeFailure::panicked();
+            record_runtime_failure(step, failure);
+            Err(failure.error)
+        }
+    };
     PROBE_REQUESTS.close();
     if let Some(watch) = watch.as_mut() {
         watch.begin_shutdown();
@@ -712,6 +720,28 @@ fn session_error(error: PeerRuntimeError) -> ServiceError {
         PeerRuntimeError::Clock => ServiceError::InvalidClock,
         PeerRuntimeError::Registry => ServiceError::RegistryUnavailable,
         _ => ServiceError::WorkerFailed,
+    }
+}
+
+fn runtime_session_failure(error: PeerRuntimeError) -> RuntimeFailure {
+    use crate::public_diagnostics::RuntimeFailureCause as Cause;
+    let cause = match error {
+        PeerRuntimeError::Closed => Cause::SessionClosed,
+        PeerRuntimeError::Registry => Cause::Registry,
+        PeerRuntimeError::PeerChanged => Cause::PeerChanged,
+        PeerRuntimeError::Identity => Cause::Identity,
+        PeerRuntimeError::Clock => Cause::Clock,
+        PeerRuntimeError::Capacity => Cause::Capacity,
+        PeerRuntimeError::Protocol => Cause::Protocol,
+        PeerRuntimeError::Io => Cause::Io,
+        PeerRuntimeError::Unwind => Cause::Panicked,
+        PeerRuntimeError::CleanupPending => Cause::CleanupPending,
+        PeerRuntimeError::Signing(_) => Cause::Signing,
+    };
+    RuntimeFailure {
+        error: session_error(error),
+        cause,
+        panicked: error == PeerRuntimeError::Unwind,
     }
 }
 
@@ -890,11 +920,51 @@ enum RuntimeStep {
     Loop = 5,
 }
 
-fn record_runtime_failure(step: RuntimeStep, panicked: bool, code: u32) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeFailure {
+    error: ServiceError,
+    cause: crate::public_diagnostics::RuntimeFailureCause,
+    panicked: bool,
+}
+
+impl RuntimeFailure {
+    fn watcher() -> Self {
+        Self {
+            error: ServiceError::WorkerFailed,
+            cause: crate::public_diagnostics::RuntimeFailureCause::Watcher,
+            panicked: false,
+        }
+    }
+
+    fn panicked() -> Self {
+        Self {
+            error: ServiceError::WorkerFailed,
+            cause: crate::public_diagnostics::RuntimeFailureCause::Panicked,
+            panicked: true,
+        }
+    }
+}
+
+impl From<ServiceError> for RuntimeFailure {
+    fn from(error: ServiceError) -> Self {
+        Self {
+            error,
+            cause: crate::public_diagnostics::RuntimeFailureCause::Service,
+            panicked: false,
+        }
+    }
+}
+
+fn record_runtime_failure(step: RuntimeStep, failure: RuntimeFailure) {
     crate::public_diagnostics::record(crate::public_diagnostics::Event::RuntimeFailure {
         step: step as u8,
-        panicked,
-        code,
+        cause: failure.cause,
+        panicked: failure.panicked,
+        code: if failure.panicked {
+            0
+        } else {
+            failure.error.service_diagnostic_code()
+        },
     });
 }
 
@@ -1107,6 +1177,88 @@ mod tests {
         );
         assert_eq!(reports.rows.len(), 3);
         assert_eq!(reports.rows[0].at, began + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn runtime_failure_mapping_preserves_session_causes_and_caught_panics() {
+        use crate::public_diagnostics::RuntimeFailureCause;
+        use crate::tls_signer::TlsSigningBridgeError;
+
+        let cases = [
+            (
+                PeerRuntimeError::Closed,
+                RuntimeFailureCause::SessionClosed,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Registry,
+                RuntimeFailureCause::Registry,
+                false,
+                ServiceError::RegistryUnavailable,
+            ),
+            (
+                PeerRuntimeError::PeerChanged,
+                RuntimeFailureCause::PeerChanged,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Identity,
+                RuntimeFailureCause::Identity,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Clock,
+                RuntimeFailureCause::Clock,
+                false,
+                ServiceError::InvalidClock,
+            ),
+            (
+                PeerRuntimeError::Capacity,
+                RuntimeFailureCause::Capacity,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Protocol,
+                RuntimeFailureCause::Protocol,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Io,
+                RuntimeFailureCause::Io,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Unwind,
+                RuntimeFailureCause::Panicked,
+                true,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::CleanupPending,
+                RuntimeFailureCause::CleanupPending,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+            (
+                PeerRuntimeError::Signing(TlsSigningBridgeError::InvalidSignature),
+                RuntimeFailureCause::Signing,
+                false,
+                ServiceError::WorkerFailed,
+            ),
+        ];
+
+        for (error, cause, panicked, service_error) in cases {
+            let failure = runtime_session_failure(error);
+            assert_eq!(failure.error, service_error);
+            assert_eq!(failure.cause, cause);
+            assert_eq!(failure.panicked, panicked);
+        }
     }
 
     #[test]

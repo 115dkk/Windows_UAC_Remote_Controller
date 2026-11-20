@@ -89,6 +89,7 @@ pub(crate) enum Event {
     // this fixed step. `code` is the SCM diagnostic code; 0 for a panic.
     RuntimeFailure {
         step: u8,
+        cause: RuntimeFailureCause,
         panicked: bool,
         code: u32,
     },
@@ -97,6 +98,24 @@ pub(crate) enum Event {
     DecisionRejected {
         reason: DecisionRejectionReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeFailureCause {
+    Service,
+    SessionClosed,
+    Registry,
+    PeerChanged,
+    Identity,
+    Clock,
+    Capacity,
+    Protocol,
+    Io,
+    Panicked,
+    CleanupPending,
+    Signing,
+    Watcher,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -391,6 +410,7 @@ mod tests {
             Event::LanAnnounceFailed { code: 5 },
             Event::RuntimeFailure {
                 step: 4,
+                cause: RuntimeFailureCause::Service,
                 panicked: false,
                 code: 1,
             },
@@ -416,6 +436,7 @@ mod tests {
                     "reason",
                     "error",
                     "step",
+                    "cause",
                     "panicked",
                     "fault",
                     "action",
@@ -466,6 +487,30 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn runtime_failure_row_names_the_fixed_cause_and_caught_panic() {
+        assert_eq!(
+            serde_json::to_value(row(Event::RuntimeFailure {
+                step: 5,
+                cause: RuntimeFailureCause::Panicked,
+                panicked: true,
+                code: 0,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "runtime_failure",
+                "step": 5,
+                "cause": "panicked",
+                "panicked": true,
+                "code": 0,
+            })
+        );
     }
 
     #[test]
