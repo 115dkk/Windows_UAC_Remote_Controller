@@ -38,7 +38,9 @@ use crate::{
     INSTALLATION_FOLDER, REPAIR_FOLDER, REPAIR_MANIFEST, SERVICE_EXECUTABLE, ServiceError,
     ServiceOperation,
     policy::{self, ObjectPolicy},
+    repair_manifest::{self, RepairFile, RepairFileName},
 };
+use sha2::{Digest, Sha256};
 
 /// Keeps every ancestor, directory and binary pinned until mutation completes.
 /// Path and handle values intentionally have no Debug representation.
@@ -178,21 +180,332 @@ impl ValidatedServiceInstallation for ValidatedRepairInstallation {
 }
 
 impl ValidatedRepairInstallation {
-    pub(crate) fn target(&self, name: &str) -> PathBuf {
-        self.installation.join(name)
-    }
-
-    pub(crate) fn source(&self, name: &str) -> PathBuf {
-        self.repair.join(name)
-    }
-
-    pub(crate) fn manifest(&self) -> PathBuf {
-        self.repair.join(REPAIR_MANIFEST)
-    }
-
-    pub(crate) fn trusted(&self) -> &[Vec<u8>] {
+    fn trusted(&self) -> &[Vec<u8>] {
         &self.trusted
     }
+}
+
+const REPAIR_NAMES: [RepairFileName; 2] = [RepairFileName::Service, RepairFileName::Probe];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepairLeaf {
+    Manifest,
+    Source(RepairFileName),
+    Staging(RepairFileName),
+    Target(RepairFileName),
+    RunningImage,
+}
+
+// Only the native adapter resolves paths or owns file handles. Callers receive
+// retained, checked source bytes and a prepared replacement, never a staging path.
+trait RepairIo {
+    type Read;
+    type Write: RepairWrite;
+    fn open(&self, leaf: RepairLeaf) -> Result<Option<Self::Read>, ServiceError>;
+    fn read(&self, pin: &Self::Read, limit: u64) -> Result<Vec<u8>, ServiceError>;
+    fn recheck(&self, leaf: RepairLeaf, pin: &Self::Read) -> Result<(), ServiceError>;
+    fn delete(&self, name: RepairFileName) -> Result<(), ServiceError>;
+    fn create(&self, name: RepairFileName) -> Result<Self::Write, ServiceError>;
+    fn replace(&self, name: RepairFileName) -> Result<(), ServiceError>;
+}
+
+pub(crate) trait RepairWrite {
+    fn write(&self, bytes: &[u8]) -> Result<usize, ServiceError>;
+    fn flush(&self) -> Result<(), ServiceError>;
+}
+
+struct RepairImage {
+    manifest: RepairFile,
+    bytes: Vec<u8>,
+}
+
+struct RepairFiles<B: RepairIo> {
+    io: B,
+    sources: [RepairImage; 2],
+}
+
+struct PreparedRepair<'a, B: RepairIo> {
+    files: &'a RepairFiles<B>,
+    replacements: Vec<RepairFile>,
+}
+
+fn repair_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn repair_bytes_match(bytes: &[u8], expected: RepairFile) -> bool {
+    bytes.len() as u64 == expected.bytes()
+        && repair_digest(bytes) == expected.sha256()
+        && super::pe_header_is_plausible(bytes)
+}
+
+fn read_repair<B: RepairIo>(
+    io: &B,
+    leaf: RepairLeaf,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, ServiceError> {
+    let Some(pin) = io.open(leaf)? else {
+        return Ok(None);
+    };
+    let bytes = match io.read(&pin, limit) {
+        Ok(bytes) => bytes,
+        Err(ServiceError::RepairSourceUnusable) => {
+            // Oversize or changed-size data is damaged, not permission to replace
+            // an untrusted leaf. Revalidate the retained object before classifying it.
+            io.recheck(leaf, &pin)?;
+            return Err(ServiceError::RepairSourceUnusable);
+        }
+        Err(error) => return Err(error),
+    };
+    io.recheck(leaf, &pin)?;
+    Ok(Some(bytes))
+}
+
+impl<B: RepairIo> RepairFiles<B> {
+    fn load(io: B) -> Result<Self, ServiceError> {
+        let load = || {
+            let bytes = read_repair(
+                &io,
+                RepairLeaf::Manifest,
+                repair_manifest::MAX_REPAIR_MANIFEST_BYTES,
+            )?
+            .ok_or(ServiceError::RepairSourceUnusable)?;
+            let manifest =
+                repair_manifest::parse(&bytes).map_err(|_| ServiceError::RepairSourceUnusable)?;
+            let mut sources = Vec::new();
+            for file in manifest.files() {
+                let bytes = read_repair(
+                    &io,
+                    RepairLeaf::Source(file.name()),
+                    repair_manifest::MAX_REPAIR_FILE_BYTES,
+                )?
+                .ok_or(ServiceError::RepairSourceUnusable)?;
+                if !repair_bytes_match(&bytes, file) {
+                    return Err(ServiceError::RepairSourceUnusable);
+                }
+                sources.push(RepairImage {
+                    manifest: file,
+                    bytes,
+                });
+            }
+            sources
+                .try_into()
+                .map_err(|_| ServiceError::RepairSourceUnusable)
+        };
+        let sources = load().map_err(|_| ServiceError::RepairSourceUnusable)?;
+        Ok(Self { io, sources })
+    }
+
+    fn verify_running_image(&self) -> Result<(), ServiceError> {
+        let bytes = read_repair(
+            &self.io,
+            RepairLeaf::RunningImage,
+            repair_manifest::MAX_REPAIR_FILE_BYTES,
+        )
+        .map_err(|_| ServiceError::RepairSourceUnusable)?
+        .ok_or(ServiceError::RepairSourceUnusable)?;
+        if repair_bytes_match(&bytes, self.sources[0].manifest) {
+            Ok(())
+        } else {
+            Err(ServiceError::RepairSourceUnusable)
+        }
+    }
+
+    fn matches(
+        &self,
+        leaf: RepairLeaf,
+        expected: RepairFile,
+    ) -> Result<Option<bool>, ServiceError> {
+        match read_repair(&self.io, leaf, repair_manifest::MAX_REPAIR_FILE_BYTES) {
+            Ok(bytes) => Ok(bytes.map(|bytes| repair_bytes_match(&bytes, expected))),
+            Err(ServiceError::RepairSourceUnusable) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn target_matches(&self, expected: RepairFile) -> Result<Option<bool>, ServiceError> {
+        self.matches(RepairLeaf::Target(expected.name()), expected)
+    }
+
+    fn verify(&self, leaf: RepairLeaf, expected: RepairFile) -> Result<(), ServiceError> {
+        if self.matches(leaf, expected)? == Some(true) {
+            Ok(())
+        } else {
+            Err(ServiceError::UnexpectedState)
+        }
+    }
+
+    fn prepare(&self, restore: &[RepairFileName]) -> Result<PreparedRepair<'_, B>, ServiceError> {
+        let prepare = || {
+            let mut replacements = Vec::new();
+            for source in &self.sources {
+                let name = source.manifest.name();
+                if !restore.contains(&name) {
+                    continue;
+                }
+                self.io.delete(name)?;
+                let output = self.io.create(name)?;
+                super::write_all_and_flush(&output, &source.bytes)?;
+                drop(output);
+                self.verify(RepairLeaf::Staging(name), source.manifest)?;
+                replacements.push(source.manifest);
+            }
+            Ok(PreparedRepair {
+                files: self,
+                replacements,
+            })
+        };
+        let prepared = prepare();
+        if prepared.is_err() {
+            let _ = cleanup_repair_staging(&self.io);
+        }
+        prepared
+    }
+}
+
+impl<B: RepairIo> PreparedRepair<'_, B> {
+    fn install(self) -> Result<(), ServiceError> {
+        for expected in self.replacements {
+            let name = expected.name();
+            self.files.verify(RepairLeaf::Staging(name), expected)?;
+            self.files.io.replace(name)?;
+            self.files.verify(RepairLeaf::Target(name), expected)?;
+        }
+        Ok(())
+    }
+}
+
+fn cleanup_repair_staging<B: RepairIo>(io: &B) -> Result<(), ServiceError> {
+    let mut failure = None;
+    for name in REPAIR_NAMES {
+        if let Err(error) = io.delete(name) {
+            failure.get_or_insert(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+struct NativeRepairIo<'a>(&'a ValidatedRepairInstallation);
+
+impl NativeRepairIo<'_> {
+    fn path(&self, leaf: RepairLeaf) -> Result<PathBuf, ServiceError> {
+        Ok(match leaf {
+            RepairLeaf::Manifest => self.0.repair.join(REPAIR_MANIFEST),
+            RepairLeaf::Source(name) => self.0.repair.join(name.as_str()),
+            RepairLeaf::Staging(name) => self
+                .0
+                .installation
+                .join(format!("{}.repair-new", name.as_str())),
+            RepairLeaf::Target(name) => self.0.installation.join(name.as_str()),
+            RepairLeaf::RunningImage => {
+                std::env::current_exe().map_err(|_| ServiceError::RepairSourceUnusable)?
+            }
+        })
+    }
+}
+
+impl RepairIo for NativeRepairIo<'_> {
+    type Read = OwnedHandle;
+    type Write = OwnedHandle;
+
+    fn open(&self, leaf: RepairLeaf) -> Result<Option<OwnedHandle>, ServiceError> {
+        open_repair_leaf(self.0, &self.path(leaf)?)
+    }
+    fn read(&self, pin: &OwnedHandle, limit: u64) -> Result<Vec<u8>, ServiceError> {
+        super::read_bounded(pin, limit)
+    }
+    fn recheck(&self, leaf: RepairLeaf, pin: &OwnedHandle) -> Result<(), ServiceError> {
+        verify_repair_leaf(self.0, &self.path(leaf)?, pin)
+    }
+    fn delete(&self, name: RepairFileName) -> Result<(), ServiceError> {
+        delete_repair_leaf(self.0, &self.path(RepairLeaf::Staging(name))?)
+    }
+    fn create(&self, name: RepairFileName) -> Result<OwnedHandle, ServiceError> {
+        create_repair_leaf(self.0, &self.path(RepairLeaf::Staging(name))?)
+    }
+    fn replace(&self, name: RepairFileName) -> Result<(), ServiceError> {
+        move_repair_leaf(
+            self.0,
+            &self.path(RepairLeaf::Staging(name))?,
+            &self.path(RepairLeaf::Target(name))?,
+        )
+    }
+}
+
+pub(crate) struct RepairSources<'a> {
+    files: RepairFiles<NativeRepairIo<'a>>,
+    _maintenance: &'a super::MaintenanceGuard,
+}
+
+impl RepairSources<'_> {
+    pub(crate) fn files(&self) -> [RepairFileName; 2] {
+        REPAIR_NAMES
+    }
+    pub(crate) fn verify_running_image(&self) -> Result<(), ServiceError> {
+        self.files.verify_running_image()
+    }
+}
+
+pub(crate) struct RepairStaging<'a, 'i> {
+    prepared: PreparedRepair<'a, NativeRepairIo<'i>>,
+    sources: &'a RepairSources<'i>,
+}
+
+pub(crate) fn open_repair_source<'a>(
+    installation: &'a ValidatedRepairInstallation,
+    maintenance: &'a super::MaintenanceGuard,
+) -> Result<RepairSources<'a>, ServiceError> {
+    Ok(RepairSources {
+        files: RepairFiles::load(NativeRepairIo(installation))?,
+        _maintenance: maintenance,
+    })
+}
+
+pub(crate) fn open_optional_repair_target(
+    sources: &RepairSources<'_>,
+    name: RepairFileName,
+) -> Result<Option<bool>, ServiceError> {
+    let expected = sources
+        .files
+        .sources
+        .iter()
+        .find(|source| source.manifest.name() == name)
+        .ok_or(ServiceError::UnexpectedState)?
+        .manifest;
+    sources.files.target_matches(expected)
+}
+
+pub(crate) fn create_repair_target<'a, 'i>(
+    sources: &'a RepairSources<'i>,
+    restore: &[RepairFileName],
+) -> Result<RepairStaging<'a, 'i>, ServiceError> {
+    Ok(RepairStaging {
+        prepared: sources.files.prepare(restore)?,
+        sources,
+    })
+}
+
+pub(crate) fn move_repair_staging(staging: RepairStaging<'_, '_>) -> Result<(), ServiceError> {
+    staging.prepared.install()?;
+    // Include skipped targets before SCM configuration. The caller cannot forget
+    // the final fixed-set verification after successful replacements.
+    super::verify_repair_target(staging.sources)
+}
+
+pub(crate) fn verify_repair_target(sources: &RepairSources<'_>) -> Result<(), ServiceError> {
+    for source in &sources.files.sources {
+        let expected = source.manifest;
+        sources
+            .files
+            .verify(RepairLeaf::Target(expected.name()), expected)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_repair_staging(
+    installation: &ValidatedRepairInstallation,
+) -> Result<(), ServiceError> {
+    cleanup_repair_staging(&NativeRepairIo(installation))
 }
 
 pub(crate) fn validate_repair_installation() -> Result<ValidatedRepairInstallation, ServiceError> {
@@ -777,19 +1090,7 @@ fn file_identity(handle: &OwnedHandle) -> Result<(u32, u32, u32), ServiceError> 
     ))
 }
 
-pub(crate) fn open_repair_source(
-    installation: &ValidatedRepairInstallation,
-    path: &Path,
-) -> Result<OwnedHandle, ServiceError> {
-    open_checked(
-        path,
-        false,
-        ObjectPolicy::Installation,
-        installation.trusted(),
-    )
-}
-
-pub(crate) fn open_optional_repair_target(
+fn open_repair_leaf(
     installation: &ValidatedRepairInstallation,
     path: &Path,
 ) -> Result<Option<OwnedHandle>, ServiceError> {
@@ -808,26 +1109,7 @@ pub(crate) fn open_optional_repair_target(
     }
 }
 
-fn open_repair_staging(
-    installation: &ValidatedRepairInstallation,
-    path: &Path,
-) -> Result<Option<OwnedHandle>, ServiceError> {
-    match open_checked(
-        path,
-        false,
-        ObjectPolicy::Installation,
-        installation.trusted(),
-    ) {
-        Ok(handle) => Ok(Some(handle)),
-        Err(ServiceError::WindowsCall {
-            operation: ServiceOperation::OpenProtectedPath,
-            code,
-        }) if is_windows_code(code, ERROR_FILE_NOT_FOUND) => Ok(None),
-        Err(_) => Err(ServiceError::UntrustedInstallation),
-    }
-}
-
-pub(crate) fn verify_repair_target(
+fn verify_repair_leaf(
     installation: &ValidatedRepairInstallation,
     path: &Path,
     original: &OwnedHandle,
@@ -851,11 +1133,11 @@ pub(crate) fn verify_repair_target(
     Ok(())
 }
 
-pub(crate) fn delete_repair_staging(
+fn delete_repair_leaf(
     installation: &ValidatedRepairInstallation,
     path: &Path,
 ) -> Result<(), ServiceError> {
-    let Some(pin) = open_repair_staging(installation, path)? else {
+    let Some(pin) = open_repair_leaf(installation, path)? else {
         return Ok(());
     };
     drop(pin);
@@ -866,7 +1148,7 @@ pub(crate) fn delete_repair_staging(
         .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
 }
 
-pub(crate) fn create_repair_target(
+fn create_repair_leaf(
     // Proof that the protected parent pins are held for this whole call.
     _installation: &ValidatedRepairInstallation,
     path: &Path,
@@ -925,25 +1207,38 @@ pub(crate) fn create_repair_target(
     Ok(handle)
 }
 
-pub(crate) fn write_all_and_flush(handle: &OwnedHandle, bytes: &[u8]) -> Result<(), ServiceError> {
+pub(crate) fn write_all_and_flush<W: RepairWrite>(
+    handle: &W,
+    bytes: &[u8],
+) -> Result<(), ServiceError> {
     let mut offset = 0;
     while offset < bytes.len() {
+        let written = handle.write(&bytes[offset..])?;
+        if written == 0 || written > bytes.len() - offset {
+            return Err(ServiceError::UnexpectedState);
+        }
+        offset += written;
+    }
+    handle.flush()
+}
+
+impl RepairWrite for OwnedHandle {
+    fn write(&self, bytes: &[u8]) -> Result<usize, ServiceError> {
         let mut written = 0;
         // SAFETY: live exclusive synchronous file, bounded initialized input and
         // scalar output. The call retains no pointer and partial writes advance.
-        unsafe { WriteFile(handle.0, Some(&bytes[offset..]), Some(&mut written), None) }
+        unsafe { WriteFile(self.0, Some(bytes), Some(&mut written), None) }
             .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))?;
-        if written == 0 || written as usize > bytes.len() - offset {
-            return Err(ServiceError::UnexpectedState);
-        }
-        offset += written as usize;
+        Ok(written as usize)
     }
-    // SAFETY: the same live exclusive file remains owned through the flush.
-    unsafe { FlushFileBuffers(handle.0) }
-        .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
+    fn flush(&self) -> Result<(), ServiceError> {
+        // SAFETY: the same live exclusive file remains owned through the flush.
+        unsafe { FlushFileBuffers(self.0) }
+            .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
+    }
 }
 
-pub(crate) fn move_repair_staging(
+fn move_repair_leaf(
     installation: &ValidatedRepairInstallation,
     staging: &Path,
     target: &Path,
@@ -961,6 +1256,344 @@ pub(crate) fn move_repair_staging(
         )
     }
     .map_err(|error| win_error(ServiceOperation::WriteRepairFile, error))
+}
+
+#[cfg(test)]
+mod repair_interface_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Default)]
+    struct State {
+        files: Vec<(RepairLeaf, Vec<u8>)>,
+        events: Vec<String>,
+        fail: Option<String>,
+        partial: usize,
+    }
+
+    #[derive(Clone)]
+    struct FakeIo(Rc<RefCell<State>>);
+    struct Pin {
+        io: FakeIo,
+        leaf: RepairLeaf,
+        writing: bool,
+    }
+    impl Drop for Pin {
+        fn drop(&mut self) {
+            self.io.0.borrow_mut().events.push(format!(
+                "close_{}:{:?}",
+                if self.writing { "write" } else { "read" },
+                self.leaf
+            ));
+        }
+    }
+    impl FakeIo {
+        fn event(&self, action: &str, leaf: RepairLeaf) -> Result<(), ServiceError> {
+            let event = format!("{action}:{leaf:?}");
+            let mut state = self.0.borrow_mut();
+            state.events.push(event.clone());
+            if state.fail.as_ref() == Some(&event) {
+                return Err(ServiceError::UnexpectedState);
+            }
+            Ok(())
+        }
+        fn put(&self, leaf: RepairLeaf, bytes: Vec<u8>) {
+            let mut state = self.0.borrow_mut();
+            state.files.retain(|(name, _)| *name != leaf);
+            state.files.push((leaf, bytes));
+        }
+        fn bytes(&self, leaf: RepairLeaf) -> Option<Vec<u8>> {
+            self.0
+                .borrow()
+                .files
+                .iter()
+                .find_map(|(name, bytes)| (*name == leaf).then(|| bytes.clone()))
+        }
+        fn fixture() -> Self {
+            let io = Self(Rc::new(RefCell::new(State {
+                partial: 7,
+                ..State::default()
+            })));
+            let mut bytes = vec![0; 0x48];
+            bytes[..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+            bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+            bytes[0x44..0x46].copy_from_slice(&0x8664_u16.to_le_bytes());
+            let hash = repair_digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let files = [RepairFileName::Service, RepairFileName::Probe].map(|name| {
+                io.put(RepairLeaf::Source(name), bytes.clone());
+                serde_json::json!({"name": name.as_str(), "bytes": bytes.len(), "sha256": hash})
+            });
+            io.put(RepairLeaf::RunningImage, bytes);
+            io.put(
+                RepairLeaf::Manifest,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": 1, "product": "uac-remote-controller",
+                    "version": env!("CARGO_PKG_VERSION"), "files": files
+                }))
+                .unwrap(),
+            );
+            io
+        }
+    }
+    impl RepairWrite for Pin {
+        fn write(&self, bytes: &[u8]) -> Result<usize, ServiceError> {
+            self.io.event("write", self.leaf)?;
+            let count = bytes.len().min(self.io.0.borrow().partial);
+            let mut state = self.io.0.borrow_mut();
+            state
+                .files
+                .iter_mut()
+                .find(|(leaf, _)| *leaf == self.leaf)
+                .unwrap()
+                .1
+                .extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&self) -> Result<(), ServiceError> {
+            self.io.event("flush", self.leaf)
+        }
+    }
+    impl RepairIo for FakeIo {
+        type Read = Pin;
+        type Write = Pin;
+        fn open(&self, leaf: RepairLeaf) -> Result<Option<Pin>, ServiceError> {
+            self.event("open", leaf)?;
+            Ok(self.bytes(leaf).map(|_| Pin {
+                io: self.clone(),
+                leaf,
+                writing: false,
+            }))
+        }
+        fn read(&self, pin: &Pin, limit: u64) -> Result<Vec<u8>, ServiceError> {
+            self.event("read", pin.leaf)?;
+            let bytes = self.bytes(pin.leaf).unwrap();
+            if bytes.len() as u64 > limit {
+                return Err(ServiceError::RepairSourceUnusable);
+            }
+            Ok(bytes)
+        }
+        fn recheck(&self, leaf: RepairLeaf, _: &Pin) -> Result<(), ServiceError> {
+            self.event("recheck", leaf)
+        }
+        fn delete(&self, name: RepairFileName) -> Result<(), ServiceError> {
+            let leaf = RepairLeaf::Staging(name);
+            self.event("delete", leaf)?;
+            self.0.borrow_mut().files.retain(|(key, _)| *key != leaf);
+            Ok(())
+        }
+        fn create(&self, name: RepairFileName) -> Result<Pin, ServiceError> {
+            let leaf = RepairLeaf::Staging(name);
+            self.event("create", leaf)?;
+            self.put(leaf, Vec::new());
+            Ok(Pin {
+                io: self.clone(),
+                leaf,
+                writing: true,
+            })
+        }
+        fn replace(&self, name: RepairFileName) -> Result<(), ServiceError> {
+            self.event("rename", RepairLeaf::Staging(name))?;
+            self.put(
+                RepairLeaf::Target(name),
+                self.bytes(RepairLeaf::Staging(name)).unwrap(),
+            );
+            self.0
+                .borrow_mut()
+                .files
+                .retain(|(leaf, _)| *leaf != RepairLeaf::Staging(name));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn repair_interface_prepares_same_bytes_with_partial_writes_before_installing() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        files.verify_running_image().unwrap();
+        let prepared = files
+            .prepare(&[RepairFileName::Service, RepairFileName::Probe])
+            .unwrap();
+        let events = io.0.borrow().events.clone();
+        assert!(!events.iter().any(|event| event.starts_with("rename:")));
+        for name in [RepairFileName::Service, RepairFileName::Probe] {
+            let leaf = RepairLeaf::Staging(name);
+            assert_eq!(io.bytes(leaf), io.bytes(RepairLeaf::Source(name)));
+            let at = |action| {
+                events
+                    .iter()
+                    .position(|event| event == &format!("{action}:{leaf:?}"))
+                    .unwrap()
+            };
+            assert!(at("create") < at("write"));
+            assert!(at("write") < at("flush"));
+            assert!(at("flush") < at("close_write"));
+            assert!(at("close_write") < at("open"));
+            assert!(at("open") < at("read"));
+            assert!(at("read") < at("recheck"));
+        }
+        prepared.install().unwrap();
+        for name in [RepairFileName::Service, RepairFileName::Probe] {
+            assert_eq!(
+                io.bytes(RepairLeaf::Target(name)),
+                io.bytes(RepairLeaf::Source(name))
+            );
+        }
+    }
+
+    #[test]
+    fn repair_interface_write_flush_or_reopen_failure_never_yields_installable_staging() {
+        for action in ["create", "write", "flush", "open", "read", "recheck"] {
+            let io = FakeIo::fixture();
+            let files = RepairFiles::load(io.clone()).unwrap();
+            io.0.borrow_mut().fail = Some(format!("{action}:Staging(Probe)"));
+            assert!(
+                files
+                    .prepare(&[RepairFileName::Service, RepairFileName::Probe])
+                    .is_err()
+            );
+            let state = io.0.borrow();
+            assert!(
+                !state
+                    .events
+                    .iter()
+                    .any(|event| event.starts_with("rename:"))
+            );
+            assert!(
+                state
+                    .files
+                    .iter()
+                    .all(|(leaf, _)| !matches!(leaf, RepairLeaf::Staging(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn repair_interface_prepares_retained_bytes_not_a_later_source_read() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        let original = io
+            .bytes(RepairLeaf::Source(RepairFileName::Service))
+            .unwrap();
+        io.put(RepairLeaf::Source(RepairFileName::Service), vec![0; 72]);
+        files.prepare(&[RepairFileName::Service]).unwrap();
+        assert_eq!(
+            io.bytes(RepairLeaf::Staging(RepairFileName::Service)),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn repair_interface_zero_write_and_changed_staging_fail_closed() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        io.0.borrow_mut().partial = 0;
+        assert!(files.prepare(&[RepairFileName::Service]).is_err());
+        io.0.borrow_mut().partial = 7;
+        let prepared = files.prepare(&[RepairFileName::Service]).unwrap();
+        io.put(RepairLeaf::Staging(RepairFileName::Service), vec![0; 72]);
+        assert!(prepared.install().is_err());
+        assert!(
+            !io.0
+                .borrow()
+                .events
+                .iter()
+                .any(|event| event.starts_with("rename:"))
+        );
+    }
+
+    #[test]
+    fn repair_interface_rename_failure_stops_before_the_next_target() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        let prepared = files
+            .prepare(&[RepairFileName::Service, RepairFileName::Probe])
+            .unwrap();
+        io.0.borrow_mut().fail = Some("rename:Staging(Service)".into());
+        assert!(prepared.install().is_err());
+        assert!(
+            io.bytes(RepairLeaf::Target(RepairFileName::Service))
+                .is_none()
+        );
+        assert!(
+            !io.0
+                .borrow()
+                .events
+                .iter()
+                .any(|event| event == "rename:Staging(Probe)")
+        );
+    }
+
+    #[test]
+    fn repair_interface_rejects_damaged_source_and_checks_running_image_separately() {
+        let io = FakeIo::fixture();
+        io.put(RepairLeaf::Source(RepairFileName::Probe), vec![0; 72]);
+        assert!(matches!(
+            RepairFiles::load(io.clone()),
+            Err(ServiceError::RepairSourceUnusable)
+        ));
+        assert!(
+            !io.0
+                .borrow()
+                .events
+                .iter()
+                .any(|event| event.starts_with("create:"))
+        );
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        io.put(RepairLeaf::RunningImage, vec![0; 72]);
+        assert_eq!(
+            files.verify_running_image(),
+            Err(ServiceError::RepairSourceUnusable)
+        );
+        io.0.borrow_mut().fail = Some("recheck:Source(Service)".into());
+        assert!(matches!(
+            RepairFiles::load(io),
+            Err(ServiceError::RepairSourceUnusable)
+        ));
+    }
+
+    #[test]
+    fn repair_interface_post_rename_verification_precedes_next_replacement() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        let prepared = files
+            .prepare(&[RepairFileName::Service, RepairFileName::Probe])
+            .unwrap();
+        io.0.borrow_mut().fail = Some("recheck:Target(Service)".into());
+        assert!(prepared.install().is_err());
+        assert!(
+            io.bytes(RepairLeaf::Target(RepairFileName::Service))
+                .is_some()
+        );
+        assert!(
+            !io.0
+                .borrow()
+                .events
+                .iter()
+                .any(|event| event == "rename:Staging(Probe)")
+        );
+    }
+
+    #[test]
+    fn repair_interface_target_observation_distinguishes_missing_mismatch_and_untrusted() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        let expected = files.sources[0].manifest;
+        assert_eq!(files.target_matches(expected), Ok(None));
+        io.put(RepairLeaf::Target(expected.name()), vec![0; 72]);
+        assert_eq!(files.target_matches(expected), Ok(Some(false)));
+        io.put(
+            RepairLeaf::Target(expected.name()),
+            io.bytes(RepairLeaf::Source(expected.name())).unwrap(),
+        );
+        assert_eq!(files.target_matches(expected), Ok(Some(true)));
+        io.0.borrow_mut().fail = Some("open:Target(Service)".into());
+        assert!(files.target_matches(expected).is_err());
+    }
 }
 
 /// Elevated install-only provisioning. Existing directories are checked rather
