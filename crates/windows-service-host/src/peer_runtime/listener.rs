@@ -11,6 +11,7 @@ use windows_port_owner::ListenerOwner;
 
 const OWNER_LOOKUP_INTERVAL: Duration = Duration::from_secs(5);
 const RELAY_ABUSE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const PEER_WORKER_EXIT_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Whether the embedded relay's counters are due for a diagnostics row: they
 /// moved since the last row, and that row is at least a minute old.
@@ -37,6 +38,43 @@ fn observe_relay_exit_with(
     record(crate::public_diagnostics::Event::RelayWorkerStopped {
         outcome: exit.into(),
     });
+}
+
+fn observe_peer_worker_exits_with(
+    exits: [(super::PeerExitCause, u64); 8],
+    pending: &mut [u64; 8],
+    reported: &mut [Option<Instant>; 8],
+    now: Instant,
+    flush: bool,
+    mut record: impl FnMut(crate::public_diagnostics::Event),
+) {
+    for (cause, count) in exits {
+        let pending = &mut pending[cause as usize];
+        *pending = pending.saturating_add(count);
+    }
+    for cause in [
+        super::PeerExitCause::LocallyClosed,
+        super::PeerExitCause::PeerClosed,
+        super::PeerExitCause::TlsFailure,
+        super::PeerExitCause::Timeout,
+        super::PeerExitCause::ProtocolViolation,
+        super::PeerExitCause::ClockFailure,
+        super::PeerExitCause::IoFailure,
+        super::PeerExitCause::Panic,
+    ] {
+        let index = cause as usize;
+        if pending[index] == 0
+            || (!flush
+                && reported[index].is_some_and(|at| {
+                    now.saturating_duration_since(at) < PEER_WORKER_EXIT_REPORT_INTERVAL
+                }))
+        {
+            continue;
+        }
+        let count = std::mem::take(&mut pending[index]);
+        reported[index] = Some(now);
+        record(crate::public_diagnostics::Event::PeerWorkerExited { cause, count });
+    }
 }
 
 fn fault_for_failure(
@@ -88,6 +126,20 @@ impl ServiceSession<'_> {
             );
             self.relay_listener_fault = fault;
         }
+    }
+
+    /// Accumulates joined peer exits and emits only closed cause/count rows.
+    /// `flush` is reserved for the last quiescent shutdown poll.
+    pub(super) fn observe_peer_worker_exits(&mut self, now: Instant, flush: bool) {
+        let exits = self.take_peer_worker_exits();
+        observe_peer_worker_exits_with(
+            exits,
+            &mut self.peer_worker_exit_pending,
+            &mut self.peer_worker_exit_reported_at,
+            now,
+            flush,
+            crate::public_diagnostics::record,
+        );
     }
 
     /// Records a finished relay worker once. `take_exit` makes repeated drain
@@ -184,6 +236,99 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn peer_worker_exit_rows_accumulate_until_due_and_flush_at_shutdown() {
+        use crate::peer_runtime::PeerExitCause;
+
+        fn exits(values: &[(PeerExitCause, u64)]) -> [(PeerExitCause, u64); 8] {
+            let mut counts = [0_u64; 8];
+            for (cause, count) in values {
+                counts[*cause as usize] = *count;
+            }
+            [
+                PeerExitCause::LocallyClosed,
+                PeerExitCause::PeerClosed,
+                PeerExitCause::TlsFailure,
+                PeerExitCause::Timeout,
+                PeerExitCause::ProtocolViolation,
+                PeerExitCause::ClockFailure,
+                PeerExitCause::IoFailure,
+                PeerExitCause::Panic,
+            ]
+            .map(|cause| (cause, counts[cause as usize]))
+        }
+
+        let start = Instant::now();
+        let mut pending = [0_u64; 8];
+        let mut reported = [None; 8];
+        let mut rows = Vec::new();
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 2)]),
+            &mut pending,
+            &mut reported,
+            start,
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[
+                (PeerExitCause::Timeout, 3),
+                (PeerExitCause::PeerClosed, 1),
+            ]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(10),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(59),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 4)]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(60),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 5)]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(61),
+            true,
+            |event| rows.push(event),
+        );
+
+        let values: Vec<_> = rows
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("timeout", 2),
+                ("peer_closed", 1),
+                ("timeout", 7),
+                ("timeout", 5),
+            ]
+            .map(|(cause, count)| {
+                serde_json::json!({
+                    "kind": "peer_worker_exited",
+                    "cause": cause,
+                    "count": count,
+                })
+            })
+        );
+        assert!(pending.iter().all(|count| *count == 0));
     }
 
     #[test]

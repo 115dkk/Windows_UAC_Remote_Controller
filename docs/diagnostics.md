@@ -38,6 +38,10 @@ Explorer or relaunch the app without administrator elevation.
   Each embedded relay worker exit is recorded once as `relay_worker_stopped`,
   with a fixed clean, error or panic status. A clean exit includes aggregate
   connection and timeout counts; the four abuse counts remain in `relay_abuse`.
+  Joined phone-connection workers are recorded as `peer_worker_exited` with a
+  fixed cause and aggregate count. Counts accumulate between rows; each cause
+  is normally written at most once a minute, and pending counts are written as
+  the service session finishes shutting down.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.

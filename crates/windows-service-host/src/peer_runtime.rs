@@ -649,6 +649,10 @@ pub struct ServiceSession<'key> {
     budget: Arc<ConnectionBudget>,
     peers: Vec<PeerSlot>,
     peer_worker_exits: [u64; 8],
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    peer_worker_exit_pending: [u64; 8],
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    peer_worker_exit_reported_at: [Option<Instant>; 8],
     next_response: u64,
     cursor: usize,
     closing: bool,
@@ -779,6 +783,10 @@ impl<'key> ServiceSession<'key> {
             ),
             peers: Vec::new(),
             peer_worker_exits: [0; 8],
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            peer_worker_exit_pending: [0; 8],
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            peer_worker_exit_reported_at: [None; 8],
             next_response: 1,
             cursor: 0,
             closing: false,
@@ -1741,7 +1749,10 @@ impl<'key> ServiceSession<'key> {
             self.poll_dialer(now)?;
         }
         self.revalidate_peers()?;
-        if self.reap_finished() != 0 {
+        let reaped = self.reap_finished();
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.observe_peer_worker_exits(Instant::now(), false);
+        if reaped != 0 {
             return Ok(SessionProgress::PeerRetired);
         }
         let signing = self
@@ -2610,7 +2621,7 @@ impl<'key> ServiceSession<'key> {
     }
     /// Bounded, identity-free counts of joined peer workers, cleared on read.
     /// They are observations only and do not affect retirement or cleanup.
-    pub fn take_peer_worker_exits(&mut self) -> [(PeerExitCause, u64); 8] {
+    fn take_peer_worker_exits(&mut self) -> [(PeerExitCause, u64); 8] {
         let counts = std::mem::take(&mut self.peer_worker_exits);
         [
             PeerExitCause::LocallyClosed,
@@ -2746,6 +2757,8 @@ impl<'key> ServiceSession<'key> {
             + self.pairing_owners()
             + self.management_owners()
             + self.dialer_owners();
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.observe_peer_worker_exits(Instant::now(), owners == 0);
         if owners == 0 {
             SessionCleanup::Quiescent {
                 io_failed: self.io_failed,
@@ -2818,6 +2831,8 @@ impl Drop for ServiceSession<'_> {
     fn drop(&mut self) {
         self.begin_shutdown();
         self.reap_finished();
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.observe_peer_worker_exits(Instant::now(), true);
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             self.pairing.poll_shutdown();

@@ -77,6 +77,12 @@ pub(crate) enum Event {
     RelayWorkerStopped {
         outcome: RelayWorkerOutcome,
     },
+    // Joined peer workers grouped by a closed cause. Counts accumulated during
+    // the reporting interval contain no device or connection identity.
+    PeerWorkerExited {
+        cause: crate::peer_runtime::PeerExitCause,
+        count: u64,
+    },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
     HintsRefreshed {
@@ -492,6 +498,10 @@ mod tests {
             Event::RelayWorkerStopped {
                 outcome: RelayWorkerOutcome::Panicked,
             },
+            Event::PeerWorkerExited {
+                cause: crate::peer_runtime::PeerExitCause::Timeout,
+                count: 2,
+            },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -546,9 +556,40 @@ mod tests {
                     "rejected_pc_sources",
                     "rejected_evictions",
                     "outcome",
+                    "count",
                 ]
                 .contains(&key.as_str())
             }));
+        }
+    }
+
+    #[test]
+    fn peer_worker_exit_rows_have_fixed_cause_names_and_counts() {
+        for (cause, name) in [
+            (crate::peer_runtime::PeerExitCause::LocallyClosed, "locally_closed"),
+            (crate::peer_runtime::PeerExitCause::PeerClosed, "peer_closed"),
+            (crate::peer_runtime::PeerExitCause::TlsFailure, "tls_failure"),
+            (crate::peer_runtime::PeerExitCause::Timeout, "timeout"),
+            (
+                crate::peer_runtime::PeerExitCause::ProtocolViolation,
+                "protocol_violation",
+            ),
+            (crate::peer_runtime::PeerExitCause::ClockFailure, "clock_failure"),
+            (crate::peer_runtime::PeerExitCause::IoFailure, "io_failure"),
+            (crate::peer_runtime::PeerExitCause::Panic, "panic"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::PeerWorkerExited { cause, count: 7 })).unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "peer_worker_exited",
+                    "cause": name,
+                    "count": 7,
+                })
+            );
         }
     }
 
