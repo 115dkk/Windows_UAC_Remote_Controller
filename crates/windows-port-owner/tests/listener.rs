@@ -81,7 +81,9 @@ fn child_listener() {
     assert!(matches!(address.as_str(), "127.0.0.1:0" | "[::1]:0"));
     let listener = TcpListener::bind(address).unwrap();
     let endpoint = listener.local_addr().unwrap();
-    println!("PORT_OWNER_TEST_ENDPOINT={endpoint}");
+    // libtest prints "test child_listener ... " without a newline when it runs serially, so the
+    // announcement starts on a line of its own.
+    println!("\nPORT_OWNER_TEST_ENDPOINT={endpoint}");
     std::io::stdout().flush().unwrap();
     std::thread::sleep(Duration::from_secs(10));
 }
