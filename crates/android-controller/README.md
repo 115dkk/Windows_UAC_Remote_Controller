@@ -225,8 +225,9 @@ body-free snapshot; it never silently selects the model factory or removes files
 
 ### Full versus policy-only native key preflight
 
-`open_existing_with_key_preflight` is a source-level full request-bearing restore
-seam, not live intake or a change to Application/UniFFI startup. Its callback has
+`open_existing_with_key_preflight` is the full request-bearing restore that
+Application/UniFFI startup calls (`MobileController::open` in `android-bindings`).
+It is not live intake. Its callback has
 type `FnOnce(&ControllerCheckpoint) -> Result<(), DurableFault>` and runs under
 the existing SnapshotStore writer lock. The unchanged full path orders work as:
 

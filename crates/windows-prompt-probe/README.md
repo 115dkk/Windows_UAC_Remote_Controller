@@ -125,7 +125,9 @@ the library does not replace a host panic hook. Windows/API/worker failures retu
 nonzero; argument rejection returns 2. Successful metadata is not authorization.
 
 `supervision::run_supervised_helper()` takes no caller-selected target. Before probing, it checks
-the actual own SYSTEM/system-IL/session/restricted-service-SID token, opens only
+the actual own SYSTEM/system-IL/session token and its enabled service SID group (the
+restricting-SID list is expected to be empty, and a nonempty one must name the service
+SID; ADR 0028), opens only
 the local pipe named by its token (`PromptProbe.v4.<token>`, created by the service
 before the helper exists; ADR 0052), uses identification-only security QoS, and
 matches the pipe server to the running fixed SCM service. A retained server
