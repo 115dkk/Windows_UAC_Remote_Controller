@@ -293,6 +293,13 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
+      # The release-notes scripts below run on the repository's pinned Node,
+      # like every other job of this workflow, not on the runner image's default.
+      - name: Set up the pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0, Node 24
+        with:
+          node-version-file: '.node-version'
+          package-manager-cache: false
       - name: Download every release artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, Node 24
         with:
