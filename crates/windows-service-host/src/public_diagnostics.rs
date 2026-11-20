@@ -14,6 +14,8 @@ use windows_prompt_probe::supervision::RefusalReason;
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_RECORD_BYTES: usize = 1024;
 
+static RECORD_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Event {
@@ -494,30 +496,44 @@ fn append(file: &mut File, record: &Record) -> io::Result<()> {
     result.and(unlocked)
 }
 
-#[cfg(windows)]
-pub(crate) fn record(event: Event) {
-    // Unit tests reach this through the refusal and startup paths; the
-    // installed product's journal in ProgramData is not theirs to append to.
-    if cfg!(test) {
-        return;
-    }
-    let Ok(mut opened) = crate::ffi::public_diagnostics::open_file() else {
-        return;
-    };
+fn record_with(event: Event, write: impl FnOnce(&Record) -> bool) -> bool {
+    // File locks still reject a concurrent process without waiting. Threads in
+    // this process wait for at most one bounded open/write/sync, the same IO cost
+    // already paid by a service thread writing its own synchronous diagnostic.
+    let _guard = RECORD_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unix_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|value| u64::try_from(value.as_millis()).ok());
-    let _ = append(
-        &mut opened.file,
-        &Record {
-            schema: 1,
-            version: env!("CARGO_PKG_VERSION"),
-            unix_millis,
-            pid: std::process::id(),
-            event,
-        },
-    );
+    write(&Record {
+        schema: 1,
+        version: env!("CARGO_PKG_VERSION"),
+        unix_millis,
+        pid: std::process::id(),
+        event,
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn try_record(event: Event) -> bool {
+    // Unit tests reach this through the refusal and startup paths; the
+    // installed product's journal in ProgramData is not theirs to append to.
+    if cfg!(test) {
+        return false;
+    }
+    record_with(event, |record| {
+        let Ok(mut opened) = crate::ffi::public_diagnostics::open_file() else {
+            return false;
+        };
+        append(&mut opened.file, record).is_ok()
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn record(event: Event) {
+    let _ = try_record(event);
 }
 
 #[cfg(test)]
@@ -1436,5 +1452,47 @@ mod tests {
             .is_err()
         );
         assert_eq!(first.metadata().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn concurrent_in_process_record_writers_lose_no_rows() {
+        const WRITES_PER_THREAD: usize = 16;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.jsonl");
+        File::create(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let written = std::sync::atomic::AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                let written = &written;
+                scope.spawn(move || {
+                    for _ in 0..WRITES_PER_THREAD {
+                        barrier.wait();
+                        if record_with(Event::StartupFailure { stage: 7, code: 5 }, |record| {
+                            let Ok(mut file) = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&path)
+                            else {
+                                return false;
+                            };
+                            append(&mut file, record).is_ok()
+                        }) {
+                            written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            written.load(std::sync::atomic::Ordering::SeqCst),
+            2 * WRITES_PER_THREAD
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 2 * WRITES_PER_THREAD);
     }
 }

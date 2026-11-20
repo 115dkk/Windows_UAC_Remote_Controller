@@ -388,28 +388,30 @@ struct DecisionRejectionReports {
 }
 
 impl DecisionRejectionReports {
-    fn should_record(
+    fn record(&mut self, error: DecisionError, at: Instant) {
+        self.record_with(error, at, crate::public_diagnostics::try_record);
+    }
+
+    fn record_with(
         &mut self,
-        reason: crate::public_diagnostics::DecisionRejectionReason,
+        error: DecisionError,
         at: Instant,
-    ) -> bool {
+        write: impl FnOnce(crate::public_diagnostics::Event) -> bool,
+    ) {
+        let reason = decision_rejection_reason(error);
+        if self.rows.iter().any(|previous| {
+            previous.reason == reason
+                && at.saturating_duration_since(previous.at) < DECISION_REJECTION_REPORT_INTERVAL
+        }) {
+            return;
+        }
+        if !write(crate::public_diagnostics::Event::DecisionRejected { reason }) {
+            return;
+        }
         if let Some(previous) = self.rows.iter_mut().find(|row| row.reason == reason) {
-            if at.saturating_duration_since(previous.at) < DECISION_REJECTION_REPORT_INTERVAL {
-                return false;
-            }
             previous.at = at;
         } else {
             self.rows.push(DecisionRejectionReport { reason, at });
-        }
-        true
-    }
-
-    fn record(&mut self, error: DecisionError, at: Instant) {
-        let reason = decision_rejection_reason(error);
-        if self.should_record(reason, at) {
-            crate::public_diagnostics::record(crate::public_diagnostics::Event::DecisionRejected {
-                reason,
-            });
         }
     }
 }
@@ -451,10 +453,21 @@ struct JournalFailureReports {
 
 impl JournalFailureReports {
     fn record(&mut self, operation: JournalOperation, error: &JournalError, at: Instant) {
-        self.record_fault(
+        self.record_with(operation, error, at, crate::public_diagnostics::try_record);
+    }
+
+    fn record_with(
+        &mut self,
+        operation: JournalOperation,
+        error: &JournalError,
+        at: Instant,
+        write: impl FnOnce(crate::public_diagnostics::Event) -> bool,
+    ) {
+        self.record_fault_with(
             operation,
             crate::public_diagnostics::JournalFault::from(error),
             at,
+            write,
         );
     }
 
@@ -464,21 +477,22 @@ impl JournalFailureReports {
         fault: crate::public_diagnostics::JournalFault,
         at: Instant,
     ) {
-        if let Some(previous) = self
-            .rows
-            .iter_mut()
-            .find(|row| row.operation == operation && row.fault == fault)
-        {
-            if at.saturating_duration_since(previous.at) < JOURNAL_FAILURE_REPORT_INTERVAL {
-                return;
-            }
-            previous.at = at;
-        } else {
-            self.rows.push(JournalFailureReport {
-                operation,
-                fault,
-                at,
-            });
+        self.record_fault_with(operation, fault, at, crate::public_diagnostics::try_record);
+    }
+
+    fn record_fault_with(
+        &mut self,
+        operation: JournalOperation,
+        fault: crate::public_diagnostics::JournalFault,
+        at: Instant,
+        write: impl FnOnce(crate::public_diagnostics::Event) -> bool,
+    ) {
+        if self.rows.iter().any(|previous| {
+            previous.operation == operation
+                && previous.fault == fault
+                && at.saturating_duration_since(previous.at) < JOURNAL_FAILURE_REPORT_INTERVAL
+        }) {
+            return;
         }
         let event = match operation {
             JournalOperation::Append => {
@@ -488,7 +502,22 @@ impl JournalFailureReports {
                 crate::public_diagnostics::Event::JournalPurgeFailed { fault }
             }
         };
-        crate::public_diagnostics::record(event);
+        if !write(event) {
+            return;
+        }
+        if let Some(previous) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.operation == operation && row.fault == fault)
+        {
+            previous.at = at;
+        } else {
+            self.rows.push(JournalFailureReport {
+                operation,
+                fault,
+                at,
+            });
+        }
     }
 }
 
@@ -1350,38 +1379,72 @@ mod tests {
     fn journal_failure_rows_are_limited_by_operation_and_fault_for_sixty_seconds() {
         let began = Instant::now();
         let mut reports = JournalFailureReports::default();
-        reports.record(
+        reports.record_with(
             JournalOperation::Append,
             &JournalError::MissingStorage,
             began,
+            |_| true,
         );
-        reports.record(
+        reports.record_with(
             JournalOperation::Append,
             &JournalError::MissingStorage,
             began + Duration::from_secs(59),
+            |_| true,
         );
         assert_eq!(reports.rows.len(), 1);
         assert_eq!(reports.rows[0].at, began);
 
-        reports.record(
+        reports.record_with(
             JournalOperation::Append,
             &JournalError::CorruptStorage,
             began + Duration::from_secs(59),
+            |_| true,
         );
-        reports.record(
+        reports.record_with(
             JournalOperation::Purge,
             &JournalError::MissingStorage,
             began + Duration::from_secs(59),
+            |_| true,
         );
         assert_eq!(reports.rows.len(), 3);
 
-        reports.record(
+        reports.record_with(
             JournalOperation::Append,
             &JournalError::MissingStorage,
             began + Duration::from_secs(60),
+            |_| true,
         );
         assert_eq!(reports.rows.len(), 3);
         assert_eq!(reports.rows[0].at, began + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn failed_journal_diagnostic_does_not_consume_the_rate_limit() {
+        let began = Instant::now();
+        let mut attempts = 0;
+        let mut reports = JournalFailureReports::default();
+        reports.record_with(
+            JournalOperation::Append,
+            &JournalError::MissingStorage,
+            began,
+            |_| {
+                attempts += 1;
+                false
+            },
+        );
+        reports.record_with(
+            JournalOperation::Append,
+            &JournalError::MissingStorage,
+            began + Duration::from_secs(1),
+            |_| {
+                attempts += 1;
+                true
+            },
+        );
+
+        assert_eq!(attempts, 2);
+        assert_eq!(reports.rows.len(), 1);
+        assert_eq!(reports.rows[0].at, began + Duration::from_secs(1));
     }
 
     #[test]
@@ -1508,20 +1571,50 @@ mod tests {
         }
 
         let began = Instant::now();
+        let mut attempts = 0;
         let mut reports = DecisionRejectionReports::default();
-        assert!(reports.should_record(DecisionRejectionReason::Expired, began));
-        assert!(!reports.should_record(
-            DecisionRejectionReason::Expired,
-            began + Duration::from_secs(59)
-        ));
-        assert!(reports.should_record(
-            DecisionRejectionReason::BindingMismatch,
-            began + Duration::from_secs(59)
-        ));
-        assert!(reports.should_record(
-            DecisionRejectionReason::Expired,
-            began + Duration::from_secs(60)
-        ));
+        for (error, at) in [
+            (DecisionError::Expired, began),
+            (DecisionError::Expired, began + Duration::from_secs(59)),
+            (
+                DecisionError::BindingMismatch,
+                began + Duration::from_secs(59),
+            ),
+            (DecisionError::Expired, began + Duration::from_secs(60)),
+        ] {
+            reports.record_with(error, at, |_| {
+                attempts += 1;
+                true
+            });
+        }
+        assert_eq!(attempts, 3);
+        assert_eq!(reports.rows.len(), 2);
+        assert_eq!(reports.rows[0].at, began + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn failed_decision_diagnostic_does_not_consume_the_rate_limit() {
+        use approval_core::DecisionError;
+
+        let began = Instant::now();
+        let mut attempts = 0;
+        let mut reports = DecisionRejectionReports::default();
+        reports.record_with(DecisionError::Expired, began, |_| {
+            attempts += 1;
+            false
+        });
+        reports.record_with(
+            DecisionError::Expired,
+            began + Duration::from_secs(1),
+            |_| {
+                attempts += 1;
+                true
+            },
+        );
+
+        assert_eq!(attempts, 2);
+        assert_eq!(reports.rows.len(), 1);
+        assert_eq!(reports.rows[0].at, began + Duration::from_secs(1));
     }
 
     #[test]
