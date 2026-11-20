@@ -195,8 +195,8 @@ mod tests {
 
     #[test]
     fn finished_relay_worker_emits_exactly_one_diagnostic_at_listener_seam() {
-        let mut relay = relay_service::HostedRelay::start((std::net::Ipv4Addr::LOCALHOST, 0).into())
-            .unwrap();
+        let mut relay =
+            relay_service::HostedRelay::start((std::net::Ipv4Addr::LOCALHOST, 0).into()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !relay.drain() {
             assert!(Instant::now() < deadline);
@@ -273,10 +273,7 @@ mod tests {
             |event| rows.push(event),
         );
         observe_peer_worker_exits_with(
-            exits(&[
-                (PeerExitCause::Timeout, 3),
-                (PeerExitCause::PeerClosed, 1),
-            ]),
+            exits(&[(PeerExitCause::Timeout, 3), (PeerExitCause::PeerClosed, 1)]),
             &mut pending,
             &mut reported,
             start + Duration::from_secs(10),

@@ -83,6 +83,11 @@ pub(crate) enum Event {
         cause: crate::peer_runtime::PeerExitCause,
         count: u64,
     },
+    // A management pipe listener could not be recreated. The service session
+    // continues and retries; only closed categories and numeric codes leave it.
+    ManagementListenerCreationFailed {
+        error: ManagementListenerFailure,
+    },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
     HintsRefreshed {
@@ -109,6 +114,76 @@ pub(crate) enum Event {
     DecisionRejected {
         reason: DecisionRejectionReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ManagementListenerFailure {
+    Busy,
+    Closed,
+    InvalidPhase,
+    InvalidMessage,
+    InvalidDeadline,
+    DeadlineElapsed,
+    Cancelled,
+    EndOfStream,
+    Rejected,
+    Malformed,
+    CleanupUnconfirmed,
+    Service { code: u32 },
+    Native { stage: u8, code: u32 },
+}
+
+impl From<crate::PairingPeerError> for ManagementListenerFailure {
+    fn from(error: crate::PairingPeerError) -> Self {
+        match error {
+            crate::PairingPeerError::Busy => Self::Busy,
+            crate::PairingPeerError::Closed => Self::Closed,
+            crate::PairingPeerError::InvalidPhase => Self::InvalidPhase,
+            crate::PairingPeerError::InvalidMessage => Self::InvalidMessage,
+            crate::PairingPeerError::InvalidDeadline => Self::InvalidDeadline,
+            crate::PairingPeerError::DeadlineElapsed => Self::DeadlineElapsed,
+            crate::PairingPeerError::Cancelled => Self::Cancelled,
+            crate::PairingPeerError::EndOfStream => Self::EndOfStream,
+            crate::PairingPeerError::Rejected => Self::Rejected,
+            crate::PairingPeerError::Malformed => Self::Malformed,
+            crate::PairingPeerError::CleanupUnconfirmed => Self::CleanupUnconfirmed,
+            crate::PairingPeerError::Service(error) => Self::Service {
+                code: error.service_diagnostic_code(),
+            },
+            crate::PairingPeerError::Native { stage, hresult } => Self::Native {
+                stage: pairing_peer_stage_code(stage),
+                code: hresult as u32,
+            },
+        }
+    }
+}
+
+const fn pairing_peer_stage_code(stage: crate::PairingPeerStage) -> u8 {
+    match stage {
+        crate::PairingPeerStage::CreateEndpoint => 1,
+        crate::PairingPeerStage::CreateEvent => 2,
+        crate::PairingPeerStage::Connect => 3,
+        crate::PairingPeerStage::Read => 4,
+        crate::PairingPeerStage::Write => 5,
+        crate::PairingPeerStage::PollIo => 6,
+        crate::PairingPeerStage::CancelIo => 7,
+        crate::PairingPeerStage::QueryPeer => 8,
+        crate::PairingPeerStage::QueryProcess => 9,
+        crate::PairingPeerStage::QueryToken => 10,
+        crate::PairingPeerStage::QuerySession => 11,
+        crate::PairingPeerStage::QueryUacPolicy => 12,
+        crate::PairingPeerStage::WatchUacPolicy => 13,
+        crate::PairingPeerStage::CloseUacPolicy => 14,
+        crate::PairingPeerStage::OpenStarterProcess => 15,
+        crate::PairingPeerStage::OpenHelperProcess => 16,
+        crate::PairingPeerStage::OpenManagementProcess => 17,
+        crate::PairingPeerStage::QueryProcessTimes => 18,
+        crate::PairingPeerStage::QueryPeerImage => 19,
+        crate::PairingPeerStage::QueryManagementImage => 20,
+        crate::PairingPeerStage::QueryStarterImage => 21,
+        crate::PairingPeerStage::QueryHelperImage => 22,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -502,6 +577,9 @@ mod tests {
                 cause: crate::peer_runtime::PeerExitCause::Timeout,
                 count: 2,
             },
+            Event::ManagementListenerCreationFailed {
+                error: ManagementListenerFailure::Native { stage: 1, code: 5 },
+            },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -564,17 +642,127 @@ mod tests {
     }
 
     #[test]
+    fn management_listener_failures_have_closed_fixed_schema() {
+        for (error, name) in [
+            (crate::PairingPeerError::Busy, "busy"),
+            (crate::PairingPeerError::Closed, "closed"),
+            (crate::PairingPeerError::InvalidPhase, "invalid_phase"),
+            (crate::PairingPeerError::InvalidMessage, "invalid_message"),
+            (crate::PairingPeerError::InvalidDeadline, "invalid_deadline"),
+            (crate::PairingPeerError::DeadlineElapsed, "deadline_elapsed"),
+            (crate::PairingPeerError::Cancelled, "cancelled"),
+            (crate::PairingPeerError::EndOfStream, "end_of_stream"),
+            (crate::PairingPeerError::Rejected, "rejected"),
+            (crate::PairingPeerError::Malformed, "malformed"),
+            (
+                crate::PairingPeerError::CleanupUnconfirmed,
+                "cleanup_unconfirmed",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                    error: error.into(),
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": {"kind": name},
+                })
+            );
+        }
+
+        assert_eq!(
+            serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                error: crate::PairingPeerError::Service(crate::ServiceError::Timeout).into(),
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "management_listener_creation_failed",
+                "error": {"kind": "service", "code": 6},
+            })
+        );
+
+        for (stage, fixed) in [
+            (crate::PairingPeerStage::CreateEndpoint, 1),
+            (crate::PairingPeerStage::CreateEvent, 2),
+            (crate::PairingPeerStage::Connect, 3),
+            (crate::PairingPeerStage::Read, 4),
+            (crate::PairingPeerStage::Write, 5),
+            (crate::PairingPeerStage::PollIo, 6),
+            (crate::PairingPeerStage::CancelIo, 7),
+            (crate::PairingPeerStage::QueryPeer, 8),
+            (crate::PairingPeerStage::QueryProcess, 9),
+            (crate::PairingPeerStage::QueryToken, 10),
+            (crate::PairingPeerStage::QuerySession, 11),
+            (crate::PairingPeerStage::QueryUacPolicy, 12),
+            (crate::PairingPeerStage::WatchUacPolicy, 13),
+            (crate::PairingPeerStage::CloseUacPolicy, 14),
+            (crate::PairingPeerStage::OpenStarterProcess, 15),
+            (crate::PairingPeerStage::OpenHelperProcess, 16),
+            (crate::PairingPeerStage::OpenManagementProcess, 17),
+            (crate::PairingPeerStage::QueryProcessTimes, 18),
+            (crate::PairingPeerStage::QueryPeerImage, 19),
+            (crate::PairingPeerStage::QueryManagementImage, 20),
+            (crate::PairingPeerStage::QueryStarterImage, 21),
+            (crate::PairingPeerStage::QueryHelperImage, 22),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                    error: crate::PairingPeerError::Native {
+                        stage,
+                        hresult: 0x8007_0005_u32 as i32,
+                    }
+                    .into(),
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": {
+                        "kind": "native",
+                        "stage": fixed,
+                        "code": 0x8007_0005_u32,
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
     fn peer_worker_exit_rows_have_fixed_cause_names_and_counts() {
         for (cause, name) in [
-            (crate::peer_runtime::PeerExitCause::LocallyClosed, "locally_closed"),
-            (crate::peer_runtime::PeerExitCause::PeerClosed, "peer_closed"),
-            (crate::peer_runtime::PeerExitCause::TlsFailure, "tls_failure"),
+            (
+                crate::peer_runtime::PeerExitCause::LocallyClosed,
+                "locally_closed",
+            ),
+            (
+                crate::peer_runtime::PeerExitCause::PeerClosed,
+                "peer_closed",
+            ),
+            (
+                crate::peer_runtime::PeerExitCause::TlsFailure,
+                "tls_failure",
+            ),
             (crate::peer_runtime::PeerExitCause::Timeout, "timeout"),
             (
                 crate::peer_runtime::PeerExitCause::ProtocolViolation,
                 "protocol_violation",
             ),
-            (crate::peer_runtime::PeerExitCause::ClockFailure, "clock_failure"),
+            (
+                crate::peer_runtime::PeerExitCause::ClockFailure,
+                "clock_failure",
+            ),
             (crate::peer_runtime::PeerExitCause::IoFailure, "io_failure"),
             (crate::peer_runtime::PeerExitCause::Panic, "panic"),
         ] {
@@ -655,7 +843,10 @@ mod tests {
         for (error, name) in [
             (RelayWorkerError::AcceptFailed, "accept_failed"),
             (RelayWorkerError::TaskFailed, "task_failed"),
-            (RelayWorkerError::IdentifierExhausted, "identifier_exhausted"),
+            (
+                RelayWorkerError::IdentifierExhausted,
+                "identifier_exhausted",
+            ),
             (RelayWorkerError::ShutdownIncomplete, "shutdown_incomplete"),
         ] {
             assert_eq!(

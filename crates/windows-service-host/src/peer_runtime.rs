@@ -672,6 +672,18 @@ impl fmt::Debug for ServiceSession<'_> {
     }
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn observe_management_listener_failure_with(
+    error: crate::PairingPeerError,
+    mut record: impl FnMut(crate::public_diagnostics::Event),
+) {
+    record(
+        crate::public_diagnostics::Event::ManagementListenerCreationFailed {
+            error: error.into(),
+        },
+    );
+}
+
 impl<'key> ServiceSession<'key> {
     /// Presentation only; the exclusive native journal owner is the sole caller.
     /// Failed reads discard the previous snapshot instead of exposing stale data.
@@ -1657,14 +1669,25 @@ impl<'key> ServiceSession<'key> {
             // A deferred mutation owns its original AwaitingReply connection.
             // Do not admit/rearm another caller until the persisted relay
             // configuration has been applied, even if this requester exits.
-            if self.pending_relay.is_none()
-                && let management::ManagementProgress::Request { class, request } =
-                    self.management.poll().map_err(|_| PeerRuntimeError::Io)?
-                && let Some(response) = self.handle_management(class, request)?
-            {
-                self.management
-                    .reply(response)
-                    .map_err(|_| PeerRuntimeError::Io)?;
+            if self.pending_relay.is_none() {
+                let progress = self.management.poll().map_err(|_| PeerRuntimeError::Io)?;
+                match progress {
+                    management::ManagementProgress::ListenerCreationFailed(error) => {
+                        observe_management_listener_failure_with(
+                            error,
+                            crate::public_diagnostics::record,
+                        );
+                    }
+                    management::ManagementProgress::Request { class, request } => {
+                        if let Some(response) = self.handle_management(class, request)? {
+                            self.management
+                                .reply(response)
+                                .map_err(|_| PeerRuntimeError::Io)?;
+                        }
+                    }
+                    management::ManagementProgress::Idle
+                    | management::ManagementProgress::Replied => {}
+                }
             }
             if self.pending_relay.is_some() {
                 self.poll_pending_relay()?;

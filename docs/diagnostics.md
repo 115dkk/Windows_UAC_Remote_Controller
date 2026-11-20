@@ -41,7 +41,10 @@ Explorer or relaunch the app without administrator elevation.
   Joined phone-connection workers are recorded as `peer_worker_exited` with a
   fixed cause and aggregate count. Counts accumulate between rows; each cause
   is normally written at most once a minute, and pending counts are written as
-  the service session finishes shutting down.
+  the service session finishes shutting down. A management pipe listener that
+  cannot be recreated is recorded once per outage as
+  `management_listener_creation_failed`, with a fixed failure name or numeric
+  service/native stage and code. The service keeps retrying the listener.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.

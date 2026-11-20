@@ -526,6 +526,40 @@ mod tests {
     }
 
     #[test]
+    fn one_listener_outage_records_one_row_at_the_session_seam() {
+        let first = creation_failure();
+        let mut management = ServiceManagement::dormant();
+        management.create_results = Some([Err(first), Err(PairingPeerError::Busy)].into());
+        management.state = State::Closing(ManagementPipe::empty_owner_for_test());
+        let now = Instant::now();
+        let mut rows = Vec::new();
+
+        for at in [now, now + REARM_INTERVAL] {
+            if let ManagementProgress::ListenerCreationFailed(error) =
+                management.poll_at(at).unwrap()
+            {
+                super::super::observe_management_listener_failure_with(error, |event| {
+                    rows.push(event)
+                });
+            }
+        }
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap(),
+            serde_json::json!({
+                "kind": "management_listener_creation_failed",
+                "error": {
+                    "kind": "native",
+                    "stage": 1,
+                    "code": 0x8007_0005_u32,
+                },
+            })
+        );
+        assert!(management.drain());
+    }
+
+    #[test]
     fn recreation_failure_reports_once_per_episode_and_again_after_success() {
         let first = creation_failure();
         let repeated = PairingPeerError::Busy;
