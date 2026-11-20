@@ -34,6 +34,9 @@ test('only shell opening is explicitly deferred; native authorization gates rema
   assert.match(lab, /scope = 'ordinary_user_diagnostic_folder_opening'/u);
   assert.match(lab, /nativeWindowsDenied -ne \$true/u);
   assert.match(lab, /steps\.probe\.outputs\.probe_observed != 'true'/u);
+  // The verdict comes from the tested script and from this run's evidence, never from a whole-journal search.
+  assert.match(lab, /tools\/windows-uac-probe-observation\.ps1" -JournalPath \$journal -StartedUnixMs \$probeStartedUnixMs -RequestStarted:\$requestStarted -ConsentObserved:\(\[bool\]\$consent\)/u);
+  assert.doesNotMatch(lab, /Select-String -Pattern '"category":"request"/u);
   assert.doesNotMatch(lab, /continue-on-error:\s*true/u);
   assert.match(read('tools/windows-medium-client.ps1'), /\$logReader\.RequirePublicDiagnosticsReadOnly\(\)/u);
   assert.match(read('docs/RELEASE_NOTES_TEMPLATE.md'), /\{\{VERIFICATION_URL\}\}/u);
