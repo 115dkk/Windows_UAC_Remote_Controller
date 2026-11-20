@@ -61,6 +61,24 @@ observation. `PcPublicKey::from_spki_der` accepts canonical91-byte P-256 SPKI an
 compares as the same key as its SEC1 encoding. These facts still do not establish
 current enrollment, TLS peer, recipient/revision or native provenance.
 
+## Pairing message versions
+
+The pairing codecs use their own versions, separate from PC event v1. Under
+[ADR 0053](../../docs/adr/0053-the-comparison-code-is-committed-before-it-is-revealed.md),
+`CandidateSubmission` (`WUACSUB\0`) is version 2 and carries the phone's 32-byte
+SAS commitment after the invitation context. The signed frozen candidate
+(`WUACFRZ\0`) is version 2, uses the `candidate-frozen/v2` signing domain and
+ends its body with the PC's random value and the phone's commitment. Version 1
+submissions and frozen candidates are rejected.
+
+After matching the signed candidate, the phone sends `PairingReveal`
+(`WUACRVL\0`, version 1, 140 bytes) inside TLS before showing the comparison code.
+It carries the ceremony nonce, phone-key digest, digest of the exact signed
+candidate and the 32-byte phone reveal. The PC checks these bindings and the
+commitment before showing its code or accepting confirmation. The code uses
+`pairing-sas/v2`, the frozen body and the reveal. QR and USB use the same exchange;
+these codec constructors alone do not authorize enrollment.
+
 ## Phone clock request
 
 `ClockProbe::request()` produces a fixed80-byte request from that pending probe:

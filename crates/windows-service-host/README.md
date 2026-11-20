@@ -267,8 +267,11 @@ own primary token, compares groups/restricted SIDs/privilege flags, changes only
 the duplicate's session and checks again. The child token is queried and compared
 to the same facts. No token is copied from another process.
 
-Only the pinned protected sibling `uac-prompt-probe.exe` may be created. It has
-no arguments, inherited handles or inherited user environment. Its working
+The observation/watch helper is the pinned protected sibling
+`uac-prompt-probe.exe`. The service passes a fresh 32-character lowercase
+hexadecimal pipe token, preceded by `watch` in watch mode, and creates that pipe
+before the child (ADR 0052). It passes no inherited handles or user environment.
+Its working
 directory is the protected installation and desktop is fixed to
 `winsta0\winlogon`; access failure is not repaired by changing desktop security.
 Creation is suspended. A fresh unnamed job has KILL_ON_JOB_CLOSE and an active
