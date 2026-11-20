@@ -119,9 +119,21 @@ pub(super) struct RegistryFixture {
     pub(super) relay: Option<std::net::SocketAddr>,
     pub(super) routes: BTreeMap<DeviceId, (std::net::SocketAddr, relay_service::RouteId)>,
     after_checkpoint: RefCell<Option<Box<dyn FnMut()>>>,
+    identity_checks: Cell<usize>,
 }
 impl RegistryFixture {
+    // Mirrors the native registry's healthy() check at each read boundary.
+    pub(super) fn verify_identity(&self) {
+        self.identity_checks.set(self.identity_checks.get() + 1);
+    }
+
+    pub(super) fn read_transport(&self, device: DeviceId) -> Option<TlsPublicKey> {
+        self.verify_identity();
+        self.transport.get(&device).cloned()
+    }
+
     pub(super) fn read_checkpoint(&self) -> RegistryCheckpoint {
+        self.verify_identity();
         let checkpoint = self.checkpoint.clone();
         // Test-only time advancement after the actual typed snapshot read. The
         // hook must not borrow this registry again or manufacture peer evidence.
@@ -153,6 +165,7 @@ fn registry() -> Rc<RefCell<RegistryFixture>> {
         relay: None,
         routes: BTreeMap::new(),
         after_checkpoint: RefCell::new(None),
+        identity_checks: Cell::new(0),
     }))
 }
 fn replace_first(registry: &Rc<RefCell<RegistryFixture>>) {
@@ -749,6 +762,91 @@ fn finished_peer_worker(
         advertised: None,
         query_lapsed: false,
         deferred_query: None,
+    });
+}
+
+// These peers have no transport or decision provenance. Only the idle registry
+// pass is exercised; real decision tests continue to use TCP/TLS frames.
+fn idle_revalidation_fixture(
+    count: u8,
+    test: impl FnOnce(&mut ServiceSession<'_>, &Rc<RefCell<RegistryFixture>>),
+) {
+    let key = Identity::new();
+    let registry = registry();
+    {
+        let mut fixture = registry.borrow_mut();
+        let entries = (1..=count)
+            .map(|id| {
+                let seed = 40 + id * 3;
+                fixture.transport.insert(device(id), public(seed + 2));
+                RegistryCheckpointEntry::new(
+                    device(id),
+                    u64::from(id),
+                    DeviceKeys::new(decision_key(seed), decision_key(seed + 1)).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        fixture.checkpoint = RegistryCheckpoint::new(32, u64::from(count) + 1, entries).unwrap();
+    }
+    let mut session = ServiceSession::new(
+        RegistryOwner::Fixture(Rc::clone(&registry), PhantomData),
+        SessionKey::Fixture(&key),
+        Instant::now(),
+        Arc::new(ServiceClock),
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for id in 1..=count {
+            finished_peer_worker(&mut session, || Ok(PeerExitCause::LocallyClosed));
+            let binding = session.binding(device(id)).unwrap();
+            Arc::get_mut(&mut session.peers.last_mut().unwrap().state)
+                .unwrap()
+                .binding = binding;
+        }
+        registry.borrow().identity_checks.set(0);
+        test(&mut session, &registry);
+    }));
+    drain(&mut session);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn idle_revalidation_checks_identity_once_for_zero_one_and_thirty_two_peers() {
+    let mut checks = Vec::new();
+    for count in [0, 1, 32] {
+        idle_revalidation_fixture(count, |session, registry| {
+            session.revalidate_peers().unwrap();
+            checks.push(registry.borrow().identity_checks.get());
+            assert!(session.peers.iter().all(|peer| peer.state.live()));
+        });
+    }
+    assert_eq!(checks, [1, 1, 1], "identity checks for 0, 1, 32 peers");
+}
+
+#[test]
+fn idle_revalidation_reads_registry_changes_on_the_next_pass() {
+    idle_revalidation_fixture(2, |session, registry| {
+        session.revalidate_peers().unwrap();
+        replace_first(registry);
+        assert_eq!(session.revalidate_peers(), Err(PeerRuntimeError::Registry));
+    });
+}
+
+#[test]
+fn idle_revalidation_retires_only_the_peer_with_a_changed_transport_key() {
+    idle_revalidation_fixture(2, |session, registry| {
+        session.revalidate_peers().unwrap();
+        registry
+            .borrow_mut()
+            .transport
+            .insert(device(1), public(150));
+        session.revalidate_peers().unwrap();
+        assert!(!session.peers[0].state.live());
+        assert!(session.peers[1].state.live());
+        assert!(!session.closing);
     });
 }
 

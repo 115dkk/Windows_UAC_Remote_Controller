@@ -339,6 +339,29 @@ enum RegistryOwner<'key> {
     ),
 }
 impl RegistryOwner<'_> {
+    fn checkpoint_and_transport_keys(
+        &mut self,
+        devices: &[DeviceId],
+    ) -> Result<crate::trust_registry::PeerRegistrySnapshot, PeerRuntimeError> {
+        match self {
+            #[cfg(windows)]
+            Self::Native(owner) => owner
+                .checkpoint_and_transport_keys(devices)
+                .map_err(|_| PeerRuntimeError::Registry),
+            #[cfg(test)]
+            Self::Fixture(owner, _) => {
+                let fixture = owner.borrow();
+                Ok(crate::trust_registry::PeerRegistrySnapshot {
+                    checkpoint: fixture.read_checkpoint(),
+                    transport_keys: devices
+                        .iter()
+                        .map(|device| (*device, fixture.transport.get(device).cloned()))
+                        .collect(),
+                })
+            }
+        }
+    }
+
     fn checkpoint(&mut self) -> Result<RegistryCheckpoint, PeerRuntimeError> {
         match self {
             #[cfg(windows)]
@@ -356,7 +379,7 @@ impl RegistryOwner<'_> {
                 .transport_key(device)
                 .map_err(|_| PeerRuntimeError::Registry),
             #[cfg(test)]
-            Self::Fixture(owner, _) => Ok(owner.borrow().transport.get(&device).cloned()),
+            Self::Fixture(owner, _) => Ok(owner.borrow().read_transport(device)),
         }
     }
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -2595,16 +2618,44 @@ impl<'key> ServiceSession<'key> {
         Ok(checkpoint)
     }
     fn revalidate_peers(&mut self) -> Result<(), PeerRuntimeError> {
-        self.check_registry()?;
-        for index in 0..self.peers.len() {
-            let state = Arc::clone(&self.peers[index].state);
-            if state.live() && self.binding(state.binding.device)? != state.binding {
+        let states: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|peer| peer.state.live())
+            .map(|peer| Arc::clone(&peer.state))
+            .collect();
+        let devices: Vec<_> = states.iter().map(|state| state.binding.device).collect();
+        let snapshot = self
+            .registry
+            .as_mut()
+            .ok_or(PeerRuntimeError::Closed)?
+            .checkpoint_and_transport_keys(&devices)?;
+        if snapshot.checkpoint != self.engine.registry_checkpoint_for_privileged_host() {
+            return Err(PeerRuntimeError::Registry);
+        }
+        for (state, (device, transport)) in states.iter().zip(snapshot.transport_keys) {
+            if !state.live() {
+                continue;
+            }
+            let entry = snapshot
+                .checkpoint
+                .entries()
+                .iter()
+                .find(|entry| entry.device_id() == device)
+                .ok_or(PeerRuntimeError::PeerChanged)?;
+            let transport = transport.ok_or(PeerRuntimeError::PeerChanged)?;
+            if entry.revision() != state.binding.revision
+                || entry.keys() != &state.binding.keys
+                || transport != state.binding.transport
+            {
                 state.retire();
             }
         }
         Ok(())
     }
     fn binding(&mut self, device: DeviceId) -> Result<PeerBinding, PeerRuntimeError> {
+        // Keep decision-path reads separate: expiry during peer validation must
+        // be observed before authorization is consumed (audit #33 A-27).
         self.check_registry()?;
         let registry = self.registry.as_mut().ok_or(PeerRuntimeError::Closed)?;
         let checkpoint = registry.checkpoint()?;
