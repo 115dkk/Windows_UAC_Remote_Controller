@@ -22,6 +22,8 @@ internal class ApprovalDecisionCoordinator<Submission>(
     private val cleanup: () -> Unit,
     private val ready: () -> Boolean = { true },
     private val onDeferred: () -> Unit = {},
+    private val onJobStarted: () -> Unit = {},
+    private val onJobFinished: () -> Unit = {},
 ) {
     private val lock = Any()
     private val retry = ApprovalBusyRetry()
@@ -75,15 +77,18 @@ internal class ApprovalDecisionCoordinator<Submission>(
             if (terminal || transferred || cleanupComplete) return
             jobs++
         }
+        onJobStarted()
         if (!enqueue {
                 try {
                     finishOnWorker()
                 } finally {
                     synchronized(lock) { jobs-- }
+                    onJobFinished()
                     tryCleanup()
                 }
             }) {
             synchronized(lock) { jobs-- }
+            onJobFinished()
             fail(IllegalStateException("Approval decision worker rejected"))
         }
     }

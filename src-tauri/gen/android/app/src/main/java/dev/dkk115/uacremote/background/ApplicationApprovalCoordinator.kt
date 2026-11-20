@@ -506,6 +506,8 @@ internal class ApplicationApprovalCoordinator(
             onDeferred = {
                 if (move(Phase.FINISHING, Phase.SIGNED)) post(this) { advance(this) }
             },
+            onJobStarted = cleanupOwner::jobStarted,
+            onJobFinished = { cleanupOwner.jobFinished() },
         )
         @Volatile var deadlineNanos = 0L
         private var phase = Phase.PREPARING
