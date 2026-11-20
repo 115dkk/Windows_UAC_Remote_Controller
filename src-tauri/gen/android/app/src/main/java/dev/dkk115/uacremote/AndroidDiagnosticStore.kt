@@ -7,6 +7,8 @@ import android.os.Process
 import android.system.Os
 import android.system.OsConstants
 import dev.dkk115.uacremote.background.*
+import dev.dkk115.uacremote.security.DeviceKeyError
+import dev.dkk115.uacremote.security.RollbackState
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -70,6 +72,9 @@ internal object AndroidDiagnosticStore {
     )
     private val measurementNames = mapOf("APPROVAL_EXPIRED_ON_WORKER" to "phase", "APPROVAL_CLEANUP_REFUSED" to "reason", "APPROVAL_CLEANUP_COMPLETE" to "admission_waits", "APPROVAL_RETIRE_BUSY" to "waits", "APPROVAL_WORK_BUSY" to "waits", "APPROVAL_CLEANUP_WAKE" to "posted", "NOTIFICATION_REMAINING" to "millis")
     private val throwSites = setOf("INTAKE_PROGRESS", "PRESENTATION_CLOCK", "PUBLISH_PENDING_REQUEST", "WITHDRAW_REQUESTS", "CLOCK", "REGISTRY_PUBLISH_CAUSE", "APPROVAL_CLOSE_SUBMISSION", "APPROVAL_RETIRE", "APPROVAL_CLOSE_ATTEMPT", "APPROVAL_CLOSE_PLAN", "APPROVAL_CLEANUP_COMPLETE")
+    private val keyOperations = NativeKeyOperation.values().map { it.name }.toSet()
+    private val keyErrors = DeviceKeyError.values().map { it.name }.toSet()
+    private val rollbackStates = RollbackState.values().map { it.name }.toSet()
     private val nativePatterns = listOf(
         Regex("UAC_NATIVE_DECISION_V1 sample=[0-9]+ action=(?:approve|deny) outcome=(?:approved|denied|failed|cancelled|expired|expired_locally|pc_completed) timing_eligible=(?:true|false) action_to_receipt_ms=[0-9]+ action_to_auth_ms=(?:none|[0-9]+) auth_to_receipt_ms=(?:none|[0-9]+) local_ready_to_receipt_ms=(?:none|[0-9]+)"),
         Regex("UAC_NATIVE_INTAKE_V1 site=[A-Z0-9_]+ error=[A-Z0-9_]+"),
@@ -78,6 +83,7 @@ internal object AndroidDiagnosticStore {
         Regex("UAC_NATIVE_VALUE_V1 site=[A-Za-z0-9_$]+ name=[A-Za-z0-9_$]+ value=-?[0-9]+"),
         Regex("UAC_NATIVE_THROW_V1 site=[A-Za-z0-9_$]+ at=(?:unknown|[A-Za-z0-9_$.:|]+) kind=[A-Za-z0-9_$]+"),
         Regex("UAC_NATIVE_PANIC_V1 file=[A-Za-z0-9_./\\\\:$<>-]+ line=[0-9]+ column=[0-9]+ thread=[A-Za-z0-9_-]+"),
+        Regex("UAC_NATIVE_KEY_FAILURE_V1 operation=[A-Z0-9_]+ code=[A-Z0-9_]+ rollback=[A-Z0-9_]+"),
     )
     private val lock = Any()
     // Logging never waits for filesystem IO on an auth/service/main thread.
@@ -221,6 +227,8 @@ internal object AndroidDiagnosticStore {
             "UAC_NATIVE_THROW_V1" -> fields["site"] in throwSites && fields["kind"]!!.length <= 64 &&
                 (fields["at"] == "unknown" || fields["at"]!!.split('|').let { frames -> frames.size <= 3 && frames.all { Regex("[A-Za-z0-9_$]{1,64}\\.[A-Za-z0-9_$]{1,64}:[0-9]{1,10}").matches(it) } })
             "UAC_NATIVE_PANIC_V1" -> fields["file"]!!.length <= 128 && fields["thread"]!!.length <= 32 && fields["line"]?.toUIntOrNull() != null && fields["column"]?.toUIntOrNull() != null
+            "UAC_NATIVE_KEY_FAILURE_V1" -> fields["operation"] in keyOperations &&
+                fields["code"] in keyErrors && fields["rollback"] in rollbackStates
             else -> false
         }
     }

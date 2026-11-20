@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package dev.dkk115.uacremote
 
+import dev.dkk115.uacremote.background.NativeKeyFailureMapping
+import dev.dkk115.uacremote.background.NativeKeyOperation
+import dev.dkk115.uacremote.security.DeviceKeyError
+import dev.dkk115.uacremote.security.KeyStoreOutcome
+import dev.dkk115.uacremote.security.RollbackState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -54,6 +59,30 @@ class AndroidDiagnosticExportTest {
         assertFalse(AndroidDiagnosticStore.persistable("UacNative", "UAC_NATIVE_VALUE_V1 site=APPROVAL_RETIRE_BUSY name=secret value=1"))
         assertTrue(AndroidDiagnosticStore.persistable("UacBoot", "stage=CALLBACK_PIN pinned=42"))
         assertTrue(AndroidDiagnosticStore.persistable("UacBoot", "stage=OWNER_READY owner_step=READY owner_phase=READY"))
+    }
+
+    @Test fun nativeKeyFailureRecordsAdmitOnlyTheMappedClosedShape() {
+        for (operation in NativeKeyOperation.values()) {
+            for (error in DeviceKeyError.values()) {
+                for (rollback in RollbackState.values()) {
+                    val line = NativeKeyFailureMapping.map(
+                        operation,
+                        KeyStoreOutcome.Failure(error, rollback),
+                    ).diagnosticLine()
+                    assertTrue(line, AndroidDiagnosticStore.persistable("UacNative", line))
+                }
+            }
+        }
+
+        val line = NativeKeyFailureMapping.map(
+            NativeKeyOperation.REOPEN_SET,
+            KeyStoreOutcome.Failure(DeviceKeyError.KEY_MISSING, RollbackState.NOT_NEEDED),
+        ).diagnosticLine()
+        assertFalse(AndroidDiagnosticStore.persistable("UacNative", line.replace("REOPEN_SET", "UNKNOWN")))
+        assertFalse(AndroidDiagnosticStore.persistable("UacNative", line.replace("KEY_MISSING", "UNKNOWN")))
+        assertFalse(AndroidDiagnosticStore.persistable("UacNative", line.replace("NOT_NEEDED", "UNKNOWN")))
+        assertFalse(AndroidDiagnosticStore.persistable("UacNative", "$line extra=FIELD"))
+        assertFalse(AndroidDiagnosticStore.persistable("UacNative", line + "X".repeat(AndroidDiagnosticStore.MAX_LINE_CHARS)))
     }
 
     @Test fun storedRecordsRoundTripThroughStrictValidation() {
