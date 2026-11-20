@@ -17,6 +17,7 @@ Rust constructors alone do not prove its privilege or native observations.
 | Opened (1) | Full existing `RequestBinding`, original service-issued tick, exact program name/path/details, and verified content digest |
 | Resolved (2) | The same full binding and original issued tick, plus actual Approved/Denied/Cancelled/Expired/Failed outcome |
 | Clock (3) | PC, service epoch, fresh phone probe nonce and service sample tick |
+| Renewed (4) | Previous full binding and issued tick, replacement full binding and issued tick, then the same program name/path/details |
 
 All numeric fields are big-endian. The body starts with version `u16=1` and a
 one-byte kind. Request binding fields use the same order as approval-protocol:
@@ -26,6 +27,14 @@ wall-clock timestamps. Zero issuance/sample is valid at epoch start. Expiry is
 still positive and original request lifetime is strictly `0 < expiry-issued <=
 120,000,000,000` ns. Text fields are separately u32-length-prefixed, exact UTF-8,
 and retain approval-protocol's 98,304-byte per-field limits.
+
+A `Renewed` event replaces a bounded lease, not the logical request. PC, epoch,
+OS session/logon, request ID and content digest stay the same; the nonce changes.
+The new issued tick must be later than the previous issued tick and earlier than
+its expiry, and the new expiry must be later than the previous expiry. Both
+leases satisfy the lifetime bound above. The replacement invalidates decisions
+and authentication tied to the previous binding; an ordinary retransmission does
+not extend a lease.
 
 Sign `Windows-UAC-Remote-Controller/pc-event/v1` followed by NUL and the entire
 body using P-256/SHA-256. Android/JCA-style SHA256withECDSA hashes those bytes;
@@ -86,14 +95,14 @@ remain transient display data and must not reach ordinary logs/history, even
 though they are correctly signed. Redaction is not heap zeroization or a crash
 dump policy.
 
-## Required integration, still incomplete
+## Required integration outside this codec
 
 - A trusted QR/native enrollment ceremony, attestation and live key revocation.
 - Exact Windows prompt capture and actual result generation, not signature
   acceptance relabelled as Windows success.
 - The supplied authenticated monotonic clock correlation must be connected to
   native clocks. Never start a new full TTL at each receipt/reconnect; retain
-  each request's first mapping and suppression state.
+  each lease's first mapping and the logical request's suppression state.
 - Phone-side off-hours pre-display drop, restart/replay reconciliation and
   Android-owned expiry/cancellation withdrawal.
 - TLS/relay actors with bounded queues. The secure-channel crate authenticates
@@ -114,8 +123,12 @@ older than five minutes. A native monotonic regression irreversibly faults the
 correlation. Issuance preceding the phone origin saturates to zero; expiry is
 never extended or saturated forward to rescue an invalid request.
 
-Keep the first mapping for the entire request. The phone inbox retains extra
-body-free replay guards until the first probe's received-anchor upper expiry;
+Keep the first mapping for duplicate deliveries of the same lease. After the
+owner validates a signed renewal and its original receiving association, map the
+replacement binding's issuance and expiry with `ClockCorrelation::map_request`;
+do not reuse the previous lease's expiry. A renewal must preserve the logical
+request's off-hours/discard suppression. The phone inbox retains extra
+body-free replay guards through the lease's received-anchor upper expiry;
 pruning at the conservative lower expiry alone could let a later, more favorable
 clock probe resurrect the request. Neither this codec nor a fresh TLS connection
 provides cross-process persistence; durable drop guards/delivery reconciliation
