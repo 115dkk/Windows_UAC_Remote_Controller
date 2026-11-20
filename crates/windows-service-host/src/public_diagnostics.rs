@@ -12,6 +12,7 @@ use std::{
 use windows_prompt_probe::supervision::RefusalReason;
 
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -468,7 +469,7 @@ struct Record {
 /// recovery of authority, interpretation of old contents or service failure.
 fn append(file: &mut File, record: &Record) -> io::Result<()> {
     let mut line = serde_json::to_vec(record)?;
-    if line.len() > 512 {
+    if line.len() > MAX_RECORD_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
     line.push(b'\n');
@@ -532,6 +533,215 @@ mod tests {
             pid: 7,
             event,
         }
+    }
+
+    fn maximum_row(event: Event) -> Record {
+        Record {
+            schema: u8::MAX,
+            version: env!("CARGO_PKG_VERSION"),
+            unix_millis: Some(u64::MAX),
+            pid: u32::MAX,
+            event,
+        }
+    }
+
+    fn maximum_relay_report() -> RelayWorkerReport {
+        RelayWorkerReport {
+            accepted: u64::MAX,
+            accept_failures: u64::MAX,
+            rejected_capacity: u64::MAX,
+            rejected_waiting_rooms: u64::MAX,
+            paired: u64::MAX,
+            invalid_registrations: u64::MAX,
+            header_timeouts: u64::MAX,
+            waiting_timeouts: u64::MAX,
+            rendezvous_timeouts: u64::MAX,
+            idle_timeouts: u64::MAX,
+            absolute_timeouts: u64::MAX,
+            disconnected: u64::MAX,
+            io_failures: u64::MAX,
+            cancelled: u64::MAX,
+            task_failures: u64::MAX,
+            peak_connections: usize::MAX,
+            peak_waiting_rooms: usize::MAX,
+            remaining_connections: usize::MAX,
+        }
+    }
+
+    fn maximum_events() -> Vec<Event> {
+        let maximum_program = "\u{10ffff}".repeat(64);
+        assert!(windows_port_owner::valid_image_name(&maximum_program));
+        vec![
+            Event::Activity {
+                event: ActivityEvent::Request(
+                    activity_journal::RequestOutcome::DecisionSentToWindows {
+                        decision: activity_journal::Decision::Approve,
+                    },
+                ),
+            },
+            Event::StartupFailure {
+                stage: u8::MAX,
+                code: u32::MAX,
+            },
+            Event::JournalRecovered {
+                fault: JournalFault::UnexpectedLockContent,
+                action: JournalRecovery::DiscardedStaging,
+            },
+            Event::JournalUnusable {
+                fault: JournalFault::UnexpectedLockContent,
+                io_step: Some(JournalIoStep::InspectDirectory),
+            },
+            Event::JournalAppendFailed {
+                fault: JournalFault::UnexpectedLockContent,
+            },
+            Event::JournalPurgeFailed {
+                fault: JournalFault::UnexpectedLockContent,
+            },
+            Event::StartupGuard {
+                phase: u8::MAX,
+                policy: u8::MAX,
+                code: u32::MAX,
+            },
+            Event::PromptRefused {
+                reason: PromptRefusal::UnrecognizedButtons,
+            },
+            Event::ConfigurationIgnored { stage: u8::MAX },
+            Event::RelayListenerChanged {
+                fault: Some(crate::management_protocol::ListenerFault::InUse {
+                    pid: u32::MAX,
+                    program: Some(maximum_program),
+                }),
+            },
+            Event::RelayAbuse {
+                evicted_pairs: u64::MAX,
+                rejected_duplicates: u64::MAX,
+                rejected_pc_sources: u64::MAX,
+                rejected_evictions: u64::MAX,
+            },
+            Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean {
+                    report: maximum_relay_report(),
+                },
+            },
+            Event::PeerWorkerExited {
+                cause: crate::peer_runtime::PeerExitCause::ProtocolViolation,
+                count: u64::MAX,
+            },
+            Event::ManagementListenerCreationFailed {
+                error: ManagementListenerFailure::Native {
+                    stage: u8::MAX,
+                    code: u32::MAX,
+                },
+            },
+            Event::HintsRefreshed {
+                reason: HintRefresh::WithoutExternal,
+            },
+            Event::WatcherStartFailed {
+                error: ProbeSupervisorError::Native {
+                    stage: crate::SupervisorStage::ServiceConfiguration,
+                    hresult: i32::MIN,
+                },
+            },
+            Event::LanAnnounceFailed { code: u32::MAX },
+            Event::RuntimeFailure {
+                step: u8::MAX,
+                cause: RuntimeFailureCause::CleanupPending,
+                panicked: true,
+                code: u32::MAX,
+            },
+            Event::DecisionRejected {
+                reason: DecisionRejectionReason::UnknownOrCompleted,
+            },
+        ]
+    }
+
+    fn event_kind(event: &Event) -> &'static str {
+        match event {
+            Event::Activity { .. } => "activity",
+            Event::StartupFailure { .. } => "startup_failure",
+            Event::JournalRecovered { .. } => "journal_recovered",
+            Event::JournalUnusable { .. } => "journal_unusable",
+            Event::JournalAppendFailed { .. } => "journal_append_failed",
+            Event::JournalPurgeFailed { .. } => "journal_purge_failed",
+            Event::StartupGuard { .. } => "startup_guard",
+            Event::PromptRefused { .. } => "prompt_refused",
+            Event::ConfigurationIgnored { .. } => "configuration_ignored",
+            Event::RelayListenerChanged { .. } => "relay_listener_changed",
+            Event::RelayAbuse { .. } => "relay_abuse",
+            Event::RelayWorkerStopped { .. } => "relay_worker_stopped",
+            Event::PeerWorkerExited { .. } => "peer_worker_exited",
+            Event::ManagementListenerCreationFailed { .. } => "management_listener_creation_failed",
+            Event::HintsRefreshed { .. } => "hints_refreshed",
+            Event::WatcherStartFailed { .. } => "watcher_start_failed",
+            Event::LanAnnounceFailed { .. } => "lan_announce_failed",
+            Event::RuntimeFailure { .. } => "runtime_failure",
+            Event::DecisionRejected { .. } => "decision_rejected",
+        }
+    }
+
+    #[test]
+    fn every_event_variant_fits_the_record_limit_at_maximum_width() {
+        let events = maximum_events();
+        assert_eq!(events.len(), 19);
+        let mut kinds = std::collections::BTreeSet::new();
+        for event in events {
+            let kind = event_kind(&event);
+            assert!(kinds.insert(kind), "duplicate maximum row for {kind}");
+            let record = maximum_row(event);
+            let size = serde_json::to_vec(&record).unwrap().len();
+            let mut file = tempfile::tempfile().unwrap();
+            append(&mut file, &record).unwrap_or_else(|error| {
+                panic!(
+                    "{kind} serialized to {size} bytes; record limit is {MAX_RECORD_BYTES}: {error}"
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn ordinary_relay_worker_report_serializes_to_514_bytes_and_fits() {
+        let report = RelayWorkerReport {
+            accepted: 200_000,
+            paired: 100_000,
+            disconnected: 100_000,
+            peak_connections: 2,
+            peak_waiting_rooms: 1,
+            ..RelayWorkerReport {
+                accepted: 0,
+                accept_failures: 0,
+                rejected_capacity: 0,
+                rejected_waiting_rooms: 0,
+                paired: 0,
+                invalid_registrations: 0,
+                header_timeouts: 0,
+                waiting_timeouts: 0,
+                rendezvous_timeouts: 0,
+                idle_timeouts: 0,
+                absolute_timeouts: 0,
+                disconnected: 0,
+                io_failures: 0,
+                cancelled: 0,
+                task_failures: 0,
+                peak_connections: 0,
+                peak_waiting_rooms: 0,
+                remaining_connections: 0,
+            }
+        };
+        let record = Record {
+            schema: 1,
+            version: "1.14.1",
+            unix_millis: Some(1_700_000_000_000),
+            pid: 1234,
+            event: Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean { report },
+            },
+        };
+        let size = serde_json::to_vec(&record).unwrap().len();
+        assert_eq!(size, 514);
+        let mut file = tempfile::tempfile().unwrap();
+        append(&mut file, &record).unwrap_or_else(|error| {
+            panic!("relay_worker_stopped serialized to {size} bytes: {error}")
+        });
     }
 
     #[test]

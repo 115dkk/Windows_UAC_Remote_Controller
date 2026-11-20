@@ -54,11 +54,14 @@ Explorer or relaunch the app without administrator elevation.
 - File IO failure, lock contention or unsafe preexisting paths drop a diagnostic
   only; they do not grant authority, recreate keys or restart the service.
 
-The file is capped at1MiB. When the next record would exceed the cap, it restarts
-from that new record. This is a bounded troubleshooting log, not a tamper-proof
-audit archive. Copy relevant records before rollover. The protected activity
-journal retains its own independent retention policy. Ordinary users cannot
-delete or edit the shared log; automatic rollover limits disk usage.
+The file is capped at1MiB, and `MAX_RECORD_BYTES` caps each compact JSON record
+at1,024 bytes before its newline. Every fixed record schema is tested at maximum
+numeric widths against that limit. When the next record would exceed the file
+cap, it restarts from that new record. This is a bounded troubleshooting log,
+not a tamper-proof audit archive. Copy relevant records before rollover. The
+protected activity journal retains its own independent retention policy.
+Ordinary users cannot delete or edit the shared log; automatic rollover limits
+disk usage.
 
 PowerShell read example (normal user, no GUI):
 
