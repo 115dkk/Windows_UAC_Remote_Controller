@@ -200,8 +200,10 @@ export function useController(bridge: ControllerBridge) {
   }, []);
 
   const publish = useCallback((next: ViewState) => {
-    current.current = next;
-    setState(next);
+    const visible = document.visibilityState === 'visible';
+    const presentation = !visible && next.snapshot ? { ...next, snapshot: withoutRequestBodies(next.snapshot) } : next;
+    current.current = presentation;
+    setState(presentation);
   }, []);
 
   const refresh = useCallback(async (announce = false) => {
@@ -348,7 +350,7 @@ export function useController(bridge: ControllerBridge) {
         if (command.kind === 'lock-settings') await bridge.openLockSettings();
         else await bridge.openNotificationSettings();
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        publish({ ...previous, refreshing: false, busy: null, notice: ko.returnFromSettings });
+        publish({ ...current.current, refreshing: false, busy: null, notice: ko.returnFromSettings });
         return null;
       }
       if (command.kind === 'diagnostics-export' || command.kind === 'diagnostics-save') {
@@ -380,7 +382,7 @@ export function useController(bridge: ControllerBridge) {
         await bridge.openDiagnosticsFolder();
         console.info('UAC_DIAGNOSTIC_FOLDER_V1 outcome=accepted');
         if (liveOwner.current !== bridge || attempt !== revision.current) return null;
-        publish({ ...previous, refreshing: false, busy: null, error: null, notice: null });
+        publish({ ...current.current, refreshing: false, busy: null, error: null, notice: null });
         return null;
       }
       if (ownerRead) {
@@ -511,7 +513,7 @@ export function useController(bridge: ControllerBridge) {
         // Closed diagnosis only: no path, exception text or arbitrary native code.
         console.info(`UAC_DIAGNOSTIC_FOLDER_V1 outcome=failed category=${category}${numeric}`);
         // A failed shell handoff does not invalidate an otherwise usable snapshot.
-        publish({ ...previous, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
+        publish({ ...current.current, refreshing: false, busy: null, error: generic(ko.diagnosticsFolderFailure), notice: null });
         return null;
       }
       if (command.kind === 'scan_pairing' && !scannerOpened) {
