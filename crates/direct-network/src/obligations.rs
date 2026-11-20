@@ -10,7 +10,7 @@ use std::{
 
 use super::{
     CancellationToken, CandidateSource, DirectFailure, LEASE_SECONDS, Network, global, igd,
-    lease::Lease, pcp,
+    lease::{Lease, ProductionRouter, RouterAdapter},
 };
 
 const MAX_OBLIGATIONS: usize = 4;
@@ -90,32 +90,40 @@ impl MappingObligations {
         stop: &CancellationToken,
         nonce: [u8; 12],
     ) {
-        self.select_path(network, Instant::now());
+        let mut router = ProductionRouter;
+        self.poll_with(network, stop, nonce, &mut router).await;
+    }
+
+    async fn poll_with<A: RouterAdapter>(
+        &mut self,
+        network: Option<&Network>,
+        stop: &CancellationToken,
+        nonce: [u8; 12],
+        router: &mut A,
+    ) {
+        self.select_path(network, router.now());
         let Some(network) = network else {
             return;
         };
-        if let Some((_, mapping)) = self.active.as_mut()
-            && mapping.is_candidate()
-            && mapping.remaining() <= LEASE_SECONDS / 2
-            && mapping.renew(network, stop).await.is_err()
-        {
-            // An uncertain renewal never erases the cleanup obligation.
-            mapping.require_cleanup();
+        if let Some((_, mapping)) = self.active.as_mut() {
+            let now = router.now();
+            if mapping.is_candidate_at(now)
+                && mapping.remaining_at(now) <= LEASE_SECONDS / 2
+                && router.renew(mapping, network, stop).await.is_err()
+            {
+                // An uncertain renewal never erases the cleanup obligation.
+                mapping.require_cleanup();
+            }
         }
-        if self.can_map(stop, Instant::now()) {
-            // PCP first; consumer routers that ignore it usually speak UPnP IGD.
-            let mapped = match pcp::map(network, stop, nonce).await {
-                Ok(lease) => Ok(Lease::Pcp(lease)),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
-                Err(_) => igd::map(network, stop).await.map(Lease::Igd),
-            };
-            self.mapping_finished(network, mapped, Instant::now());
+        if self.can_map(stop, router.now()) {
+            let mapped = router.map(network, stop, nonce).await;
+            self.mapping_finished(network, mapped, router.now());
         }
         if let Some((_, mapping)) = self.active.as_mut()
-            && !mapping.is_candidate()
+            && !mapping.is_candidate_at(router.now())
         {
-            let confirmed = mapping.cleanup(network).await;
-            self.cleanup_finished(confirmed, Instant::now());
+            let confirmed = router.cleanup(mapping, network).await;
+            self.cleanup_finished(confirmed, router.now());
         }
     }
 
@@ -129,7 +137,7 @@ impl MappingObligations {
             Ok(mapping) => {
                 // A grant outside candidate policy is still owned for cleanup;
                 // a non-global external address means another NAT sits above.
-                self.failure = if mapping.is_candidate() {
+                self.failure = if mapping.is_candidate_at(now) {
                     None
                 } else if global(mapping.external().ip()) {
                     Some(DirectFailure::NoMappingProtocol)
@@ -171,11 +179,16 @@ impl MappingObligations {
         self.active.take()
     }
 
-    pub(super) async fn shutdown(mut self, network: Option<&Network>) {
-        if let Some((network, lease)) = self.take_final(network, Instant::now()) {
+    pub(super) async fn shutdown(self, network: Option<&Network>) {
+        let mut router = ProductionRouter;
+        self.shutdown_with(network, &mut router).await;
+    }
+
+    async fn shutdown_with<A: RouterAdapter>(mut self, network: Option<&Network>, router: &mut A) {
+        if let Some((network, lease)) = self.take_final(network, router.now()) {
             // Exactly one bounded attempt, including a restored displaced
             // path. Silence does not establish that the router deleted it.
-            lease.release(&network).await;
+            router.release(lease, &network).await;
         }
     }
 }
@@ -185,6 +198,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
+    use crate::pcp;
 
     fn network(gateway: u8) -> Network {
         Network {
@@ -369,5 +383,133 @@ mod tests {
         }
         let mut owner = owner_on(&path, now);
         assert!(owner.take_final(Some(&path), now).is_none());
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum RouterCall {
+        Map(Instant),
+        Renew(Instant),
+        Cleanup(Instant),
+        Release(Instant),
+    }
+
+    struct FakeRouter {
+        now: Instant,
+        grant: bool,
+        calls: Vec<RouterCall>,
+    }
+
+    impl FakeRouter {
+        fn new(now: Instant, grant: bool) -> Self {
+            Self {
+                now,
+                grant,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl crate::lease::RouterAdapter for FakeRouter {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        async fn map(
+            &mut self,
+            _network: &Network,
+            _stop: &CancellationToken,
+            _nonce: [u8; 12],
+        ) -> io::Result<Lease> {
+            self.calls.push(RouterCall::Map(self.now));
+            if self.grant {
+                Ok(lease(self.now + Duration::from_secs(LEASE_SECONDS.into())))
+            } else {
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            }
+        }
+
+        async fn renew(
+            &mut self,
+            lease: &mut Lease,
+            _network: &Network,
+            _stop: &CancellationToken,
+        ) -> io::Result<()> {
+            self.calls.push(RouterCall::Renew(self.now));
+            if let Lease::Pcp(lease) = lease {
+                lease.expires = self.now + Duration::from_secs(LEASE_SECONDS.into());
+            }
+            Ok(())
+        }
+
+        async fn cleanup(&mut self, _lease: &mut Lease, _network: &Network) -> bool {
+            self.calls.push(RouterCall::Cleanup(self.now));
+            true
+        }
+
+        async fn release(&mut self, _lease: Lease, _network: &Network) {
+            self.calls.push(RouterCall::Release(self.now));
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_renews_an_obtained_mapping_before_expiry() {
+        let mapped_at = Instant::now();
+        let expires = mapped_at + Duration::from_secs(LEASE_SECONDS.into());
+        let path = network(1);
+        let stop = CancellationToken::new();
+        let mut router = FakeRouter::new(mapped_at, true);
+        let mut owner = MappingObligations::new();
+        owner.next_probe = mapped_at;
+
+        owner
+            .poll_with(Some(&path), &stop, [1; 12], &mut router)
+            .await;
+        router.now = expires - Duration::from_secs(u64::from(LEASE_SECONDS / 2));
+        owner
+            .poll_with(Some(&path), &stop, [1; 12], &mut router)
+            .await;
+
+        assert_eq!(
+            router.calls,
+            [RouterCall::Map(mapped_at), RouterCall::Renew(router.now)]
+        );
+        assert!(router.now < expires);
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_an_obtained_mapping() {
+        let now = Instant::now();
+        let path = network(1);
+        let stop = CancellationToken::new();
+        let mut router = FakeRouter::new(now, true);
+        let mut owner = MappingObligations::new();
+        owner.next_probe = now;
+
+        owner
+            .poll_with(Some(&path), &stop, [2; 12], &mut router)
+            .await;
+        owner.shutdown_with(Some(&path), &mut router).await;
+
+        assert_eq!(
+            router.calls,
+            [RouterCall::Map(now), RouterCall::Release(now)]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_release_a_mapping_that_was_never_obtained() {
+        let now = Instant::now();
+        let path = network(1);
+        let stop = CancellationToken::new();
+        let mut router = FakeRouter::new(now, false);
+        let mut owner = MappingObligations::new();
+        owner.next_probe = now;
+
+        owner
+            .poll_with(Some(&path), &stop, [3; 12], &mut router)
+            .await;
+        owner.shutdown_with(Some(&path), &mut router).await;
+
+        assert_eq!(router.calls, [RouterCall::Map(now)]);
     }
 }

@@ -89,14 +89,20 @@ pub(super) struct Lease {
 }
 
 impl Lease {
+    #[cfg(test)]
     pub(super) fn is_candidate(&self) -> bool {
-        !self.cleanup_only && self.remaining() > 0
+        self.is_candidate_at(Instant::now())
+    }
+
+    pub(super) fn is_candidate_at(&self, now: Instant) -> bool {
+        !self.cleanup_only && self.expires.saturating_duration_since(now).as_secs() > 0
     }
 
     pub(super) fn require_cleanup(&mut self) {
         self.cleanup_only = true;
     }
 
+    #[cfg(test)]
     pub(super) fn remaining(&self) -> u32 {
         u32::try_from(
             self.expires
