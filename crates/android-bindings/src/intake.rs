@@ -219,6 +219,10 @@ impl IntakeOwner {
         })
     }
     #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(crate) fn waiting_admission_for_tests(&self) -> bool {
+        self.waiting_admission.load(Ordering::Acquire)
+    }
+    #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(crate) fn join_completed_for_tests(&self) {
         let runtime = self.inner.lock().unwrap().runtime.take();
         if let Some(runtime) = runtime {
@@ -591,9 +595,18 @@ impl PeerCompletion {
             self.cause = Some(PeerCompletionCause::from_error(error));
         }
     }
+
+    fn observe_local_stop(&mut self) {
+        if self.cause.is_none() {
+            self.cause = Some(PeerCompletionCause::LocalStop);
+        }
+    }
 }
 impl Drop for PeerCompletion {
     fn drop(&mut self) {
+        if self.control.stop.is_cancelled() || self.intake.stop.is_cancelled() {
+            self.observe_local_stop();
+        }
         if let (Some(generation), Some(cause)) = (self.scheduler_generation, self.cause) {
             self.connectivity
                 .record_peer_completion(self.control.reference, generation, cause);
@@ -896,8 +909,18 @@ fn wait_peer(mut owned: PeerOwned) -> impl std::future::Future<Output = ParkedPe
     async move {
         let work = tokio::select! {
             biased;
-            _ = stop.cancelled() => PeerWork::Stop,
-            command = owned.commands.recv() => match command { Some(PeerCommand::Decision(value)) => PeerWork::Decision(value), Some(PeerCommand::Probe) => PeerWork::Probe, None => PeerWork::Stop },
+            _ = stop.cancelled() => {
+                owned.completion.observe_local_stop();
+                PeerWork::Stop
+            },
+            command = owned.commands.recv() => match command {
+                Some(PeerCommand::Decision(value)) => PeerWork::Decision(value),
+                Some(PeerCommand::Probe) => PeerWork::Probe,
+                None => {
+                    owned.completion.observe_local_stop();
+                    PeerWork::Stop
+                }
+            },
             event = owned.socket.next_event() => {
                 owned.completion.observe_event(&event);
                 PeerWork::Event(event)

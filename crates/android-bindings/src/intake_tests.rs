@@ -728,6 +728,13 @@ impl Fixture {
                 .expect("bounded peer completion progress");
         }
     }
+    fn wait_for_reactor_admission(&self) {
+        let end = Instant::now() + LIMIT;
+        while !self.controller.intake.waiting_admission_for_tests() {
+            assert!(Instant::now() < end, "bounded reactor admission wait");
+            std::thread::yield_now();
+        }
+    }
     fn projection(&self) -> Arc<NativePendingRequest> {
         self.projection_with(NativeRequestPresentation::Fresh, true)
     }
@@ -939,6 +946,122 @@ fn peer_completion_records_transport_error_separately_from_orderly_close() {
         )
     );
     error_fixture.cleanup();
+}
+
+#[test]
+fn peer_completion_records_local_stop_without_overwriting_transport_error() {
+    let _serial = crate::tests::SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    const GENERATION: u64 = 10;
+    let seed_scheduler = |fixture: &Fixture| {
+        fixture
+            .controller
+            .connectivity
+            .states
+            .lock()
+            .unwrap()
+            .insert(
+                crate::connectivity::ConnectivityOwner::key(fixture.reference),
+                crate::connectivity::DialState {
+                    generation: GENERATION,
+                    in_flight: true,
+                    failures: 2,
+                    candidate_cursor: 3,
+                    retry_at: Some(Instant::now() + Duration::from_secs(20)),
+                    hint_backoff_shortened: false,
+                    prioritized_hint: None,
+                    failure: Some(crate::NativeDialFailure::NoAnswer),
+                },
+            );
+    };
+    let scheduler_state = |fixture: &Fixture| {
+        let key = crate::connectivity::ConnectivityOwner::key(fixture.reference);
+        let state = fixture.controller.connectivity.states.lock().unwrap()[&key];
+        let completion = fixture
+            .controller
+            .connectivity
+            .peer_completions
+            .lock()
+            .unwrap()
+            .get(&key)
+            .copied()
+            .map(|(_, cause)| cause);
+        (
+            completion,
+            state.in_flight,
+            state.failures,
+            state.candidate_cursor,
+            state.retry_at,
+            state.failure,
+        )
+    };
+
+    let stopped_fixture = fixture();
+    seed_scheduler(&stopped_fixture);
+    let stopped_peer = stopped_fixture.connect_scheduled(GENERATION);
+    let stopped_before = scheduler_state(&stopped_fixture);
+    let admission = stopped_fixture.controller.enter().unwrap();
+    stopped_peer.send_parked_prompts(parked_notice(epoch(), 1, 0));
+    stopped_fixture.wait_for_reactor_admission();
+    stopped_fixture.controller.stop_intake();
+    drop(admission);
+    stopped_fixture.cleanup();
+    let stopped_after = scheduler_state(&stopped_fixture);
+    assert_eq!(
+        stopped_after.0,
+        Some(crate::intake::PeerCompletionCause::LocalStop)
+    );
+    assert_eq!(
+        (
+            stopped_after.1,
+            stopped_after.2,
+            stopped_after.3,
+            stopped_after.4,
+            stopped_after.5,
+        ),
+        (
+            stopped_before.1,
+            stopped_before.2,
+            stopped_before.3,
+            stopped_before.4,
+            stopped_before.5,
+        )
+    );
+    drop(stopped_peer);
+    drop(stopped_fixture);
+
+    let error_fixture = fixture();
+    seed_scheduler(&error_fixture);
+    let error_peer = error_fixture.connect_scheduled(GENERATION);
+    let error_before = scheduler_state(&error_fixture);
+    let admission = error_fixture.controller.enter().unwrap();
+    drop(error_peer);
+    error_fixture.wait_for_reactor_admission();
+    error_fixture.controller.stop_intake();
+    drop(admission);
+    error_fixture.cleanup();
+    let error_after = scheduler_state(&error_fixture);
+    assert_eq!(
+        error_after.0,
+        Some(crate::intake::PeerCompletionCause::TransportError)
+    );
+    assert_eq!(
+        (
+            error_after.1,
+            error_after.2,
+            error_after.3,
+            error_after.4,
+            error_after.5,
+        ),
+        (
+            error_before.1,
+            error_before.2,
+            error_before.3,
+            error_before.4,
+            error_before.5,
+        )
+    );
 }
 
 #[test]
