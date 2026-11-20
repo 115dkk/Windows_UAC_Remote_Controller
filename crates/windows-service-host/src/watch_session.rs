@@ -240,7 +240,7 @@ impl WatchMachine {
                 self.enqueue(WatchObservation::Event(WatchEvent::ParkedChanged { count }))
             }
         }?;
-        self.last_message = now;
+        self.last_message = self.last_message.max(now);
         self.failures = 0;
         if heartbeat && !self.run_has_heartbeat {
             self.run_has_heartbeat = true;

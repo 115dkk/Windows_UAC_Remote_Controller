@@ -1177,6 +1177,27 @@ mod tests {
     }
 
     #[test]
+    fn first_launch_message_does_not_move_heartbeat_before_launch_completion() {
+        let began = Instant::now();
+        let state = TestWatchState {
+            launches: [Ok(())].into(),
+            launch_finished: [began + Duration::from_secs(16)].into(),
+            polls: [Ok(heartbeat())].into(),
+            ..TestWatchState::default()
+        };
+        let (mut watch, state) = test_watch(began, state);
+
+        watch.poll(began).unwrap();
+        assert!(
+            watch
+                .poll(began + Duration::from_millis(16_025))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.borrow().fail_calls, 0);
+    }
+
+    #[test]
     fn first_alive_observation_follows_the_complete_message_batch() {
         let began = Instant::now();
         let state = TestWatchState {
