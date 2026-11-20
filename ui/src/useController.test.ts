@@ -3,6 +3,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AppSnapshot, ControllerBridge, RequestDetailsView } from './contracts';
+import { ko } from './messages.ko';
 import { createQaBridge, qaCase } from './qa-fixtures';
 import { useController } from './useController';
 
@@ -54,54 +55,101 @@ describe('controller admission and publication', () => {
   });
 
   it('lets a kept decision precede queued details and coalesces refresh wakes', async () => {
-    const snapshot = qaCase('phone-pending').snapshot;
-    const first = deferred<RequestDetailsView>();
-    const order: string[] = [];
-    const requestDetails = vi.fn<ControllerBridge['requestDetails']>((id) => {
-      order.push(id);
-      return id === 'first' ? first.promise : Promise.resolve(details(id));
-    });
-    const read = vi.fn<ControllerBridge['snapshot']>(() => { order.push('read'); return Promise.resolve(snapshot); });
-    const decide = vi.fn<ControllerBridge['decide']>(() => { order.push('decision'); return Promise.resolve(snapshot); });
-    const { result } = await ready({ ...createQaBridge(snapshot), snapshot: read, requestDetails, decide });
-    order.length = 0;
-    let one!: Promise<RequestDetailsView>;
-    let two!: Promise<unknown>;
-    let denied!: Promise<AppSnapshot | null>;
-    act(() => {
-      one = result.current.readDetails('first');
-      two = result.current.readDetails('second').catch(() => null);
-      void result.current.refresh();
-      void result.current.refresh();
-      denied = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
-    });
-    expect(order).toEqual(['first']);
-    await act(async () => { first.resolve(details('first')); await one.catch(() => null); await denied; await two; });
-    expect(order).toEqual(['first', 'decision', 'read']);
-    expect(decide).toHaveBeenCalledExactlyOnceWith(snapshot.requests[0]!.id, 'deny');
-  });
-
-  it('does not send a kept decision after its display lease ends behind a details read', async () => {
-    let now = 0;
-    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
     try {
       const snapshot = qaCase('phone-pending').snapshot;
+      const first = deferred<RequestDetailsView>();
+      const order: string[] = [];
+      let held = false;
+      const requestDetails = vi.fn<ControllerBridge['requestDetails']>((id) => {
+        order.push(id);
+        held = true;
+        return first.promise.finally(() => { held = false; });
+      });
+      const read = vi.fn<ControllerBridge['snapshot']>(() => { order.push('read'); return Promise.resolve(snapshot); });
+      const decide = vi.fn<ControllerBridge['decide']>(() => {
+        order.push('decision');
+        return held ? Promise.reject(Object.assign(new Error('synthetic busy'), { code: 'app_busy' })) : Promise.resolve(snapshot);
+      });
+      const bridge = { ...createQaBridge(snapshot), snapshot: read, requestDetails, decide };
+      const { result } = renderHook(() => useController(bridge));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      order.length = 0;
+      let one!: Promise<unknown>;
+      let two!: Promise<unknown>;
+      let denied!: Promise<AppSnapshot | null>;
+      act(() => {
+        one = result.current.readDetails('first').catch(() => null);
+        two = result.current.readDetails('second').catch(() => null);
+        void result.current.refresh();
+        void result.current.refresh();
+        denied = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(order).toEqual(['first', 'decision']);
+      await act(async () => { first.resolve(details('first')); await one; await vi.advanceTimersByTimeAsync(60); await denied; await two; });
+      expect(order).toEqual(['first', 'decision', 'decision', 'read']);
+      expect(decide.mock.calls).toEqual([[snapshot.requests[0]!.id, 'deny'], [snapshot.requests[0]!.id, 'deny']]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not retry a refused decision after its display lease ends during a details read', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+    try {
+      const pending = qaCase('phone-pending').snapshot;
+      const snapshot = { ...pending, requests: pending.requests.map((request) => ({ ...request, refreshAfterMillis: 1300 })) };
       const response = deferred<RequestDetailsView>();
       const requestDetails = vi.fn<ControllerBridge['requestDetails']>().mockReturnValue(response.promise);
-      const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
-      const { result } = await ready({ ...createQaBridge(snapshot), requestDetails, decide });
+      const decide = vi.fn<ControllerBridge['decide']>().mockRejectedValue({ code: 'app_busy' });
+      const bridge = { ...createQaBridge(snapshot), requestDetails, decide };
+      const { result } = renderHook(() => useController(bridge));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       let body!: Promise<unknown>;
       let denied!: Promise<AppSnapshot | null>;
       act(() => {
         body = result.current.readDetails(snapshot.requests[0]!.id).catch(() => null);
         denied = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
       });
-      expect(decide).not.toHaveBeenCalled();
-      now = 30001;
-      await act(async () => { response.resolve(details(snapshot.requests[0]!.id)); await body; await denied; });
-      expect(decide).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+      expect(decide).toHaveBeenCalledTimes(5);
+      await act(async () => { response.resolve(details(snapshot.requests[0]!.id)); await body; await vi.advanceTimersByTimeAsync(130); await denied; });
+      expect(decide).toHaveBeenCalledTimes(5);
       expect(result.current.busy).toBeNull();
-    } finally { clock.mockRestore(); }
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('finishes the busy retries without waiting for a details read that never settles', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+    try {
+      const snapshot = qaCase('phone-pending').snapshot;
+      const requestDetails = vi.fn<ControllerBridge['requestDetails']>().mockReturnValue(new Promise(() => undefined));
+      const decide = vi.fn<ControllerBridge['decide']>().mockRejectedValue({ code: 'app_busy' });
+      const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValue(snapshot);
+      const bridge = { ...createQaBridge(snapshot), snapshot: read, requestDetails, decide };
+      const { result } = renderHook(() => useController(bridge));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      let denied!: Promise<AppSnapshot | null>;
+      act(() => {
+        void result.current.readDetails(snapshot.requests[0]!.id).catch(() => null);
+        denied = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1430); });
+      expect(result.current.busy).toBeNull();
+      expect(result.current.error?.message).toBe(ko.actionFailure);
+      expect(result.current.stale).toBe(false);
+      expect(await denied).toBeNull();
+      expect(decide).toHaveBeenCalledTimes(6);
+      await act(async () => { await result.current.refresh(); await vi.advanceTimersByTimeAsync(15000); });
+      expect(read).toHaveBeenCalledOnce();
+      expect(requestDetails).toHaveBeenCalledOnce();
+      expect(decide).toHaveBeenCalledTimes(6);
+      await act(async () => {
+        denied = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
+        await vi.advanceTimersByTimeAsync(1430);
+        await denied;
+      });
+      expect(decide).toHaveBeenCalledTimes(12);
+    } finally { vi.useRealTimers(); }
   });
 
   it('waits for a snapshot before reading original details', async () => {
@@ -161,8 +209,79 @@ describe('controller admission and publication', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
       expect(openLockSettings).not.toHaveBeenCalled();
       expect(read).toHaveBeenCalledTimes(2);
-      await act(async () => { response.resolve(source); await opened; });
+      expect(result.current.busy).toBeNull();
+      expect(result.current.stale).toBe(true);
+      expect(result.current.error?.message).toBe(ko.actionFailure);
+      expect(await opened).toBeNull();
+      await act(async () => { await result.current.refresh(); await vi.advanceTimersByTimeAsync(15000); });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(openLockSettings).not.toHaveBeenCalled();
+      await act(async () => { response.resolve(source); await vi.advanceTimersByTimeAsync(0); });
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(openLockSettings).not.toHaveBeenCalled();
+      expect(result.current.stale).toBe(false);
+      await act(async () => { await result.current.run({ kind: 'lock-settings' }); });
       expect(openLockSettings).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['approve', 'deny'] as const)('gives up %s after 15 seconds behind a stuck snapshot and never submits that tap later', async (decision) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+    try {
+      const snapshot = qaCase('phone-pending').snapshot;
+      const response = deferred<AppSnapshot>();
+      const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(snapshot).mockReturnValueOnce(response.promise).mockResolvedValue(snapshot);
+      const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
+      const bridge = { ...createQaBridge(snapshot), snapshot: read, decide };
+      const { result } = renderHook(() => useController(bridge));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      let decided!: Promise<AppSnapshot | null>;
+      act(() => {
+        void result.current.refresh();
+        decided = result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision });
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(14999); });
+      expect(result.current.busy).toBe('decision');
+      expect(decide).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(result.current.busy).toBeNull();
+      expect(result.current.stale).toBe(true);
+      expect(result.current.error?.message).toBe(ko.actionFailure);
+      expect(result.current.snapshot?.requests).toHaveLength(0);
+      expect(await decided).toBeNull();
+      await act(async () => { await result.current.refresh(); await vi.advanceTimersByTimeAsync(15000); });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(decide).not.toHaveBeenCalled();
+      await act(async () => { response.resolve(snapshot); await vi.advanceTimersByTimeAsync(0); });
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(result.current.stale).toBe(false);
+      expect(decide).not.toHaveBeenCalled();
+      await act(async () => { await result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision }); });
+      expect(decide).toHaveBeenCalledExactlyOnceWith(snapshot.requests[0]!.id, decision);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('recovers on a replacement bridge while the old timed-out read remains pending', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+    try {
+      const snapshot = qaCase('phone-pending').snapshot;
+      const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValueOnce(snapshot).mockReturnValue(new Promise(() => undefined));
+      const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
+      const old: ControllerBridge = { ...createQaBridge(snapshot), snapshot: read, decide };
+      const hook = renderHook(({ owner }: { owner: ControllerBridge }) => useController(owner), { initialProps: { owner: old } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      act(() => {
+        void hook.result.current.refresh();
+        void hook.result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' });
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+      expect(hook.result.current.busy).toBeNull();
+      const freshDecide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
+      hook.rerender({ owner: { ...createQaBridge(snapshot), decide: freshDecide } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await hook.result.current.run({ kind: 'decision', requestId: snapshot.requests[0]!.id, decision: 'deny' }); });
+      expect(decide).not.toHaveBeenCalled();
+      expect(freshDecide).toHaveBeenCalledExactlyOnceWith(snapshot.requests[0]!.id, 'deny');
     } finally { vi.useRealTimers(); }
   });
 

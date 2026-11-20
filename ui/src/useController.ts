@@ -108,9 +108,9 @@ class ControllerWork {
   visibility = 0;
   command: WorkTicket | null = null;
   read: { owner: ControllerBridge; promise: Promise<AppSnapshot> } | null = null;
-  private active: object | null = null;
+  private readonly active = new Set<{ kind: 'read' | 'details' | 'command' }>();
   private admissionOwner: ControllerBridge | null = null;
-  private readonly queued: { kind: 'read' | 'details' | 'command'; start: () => void }[] = [];
+  private readonly queued: { ticket: WorkTicket; kind: 'read' | 'details' | 'command'; start: () => void; reject: (failure: unknown) => void }[] = [];
 
   settled: () => void = () => undefined;
 
@@ -119,7 +119,7 @@ class ControllerWork {
     // the old promise still settles, but cannot release the new owner's slot.
     if (this.admissionOwner !== owner) {
       this.admissionOwner = owner;
-      this.active = null;
+      this.active.clear();
     }
     this.owner = owner;
     this.read = null;
@@ -145,20 +145,25 @@ class ControllerWork {
     return !this.visible(ticket) && next.snapshot ? { ...next, snapshot: withoutRequestBodies(next.snapshot) } : next;
   }
 
-  get hasCalls(): boolean { return this.active !== null || this.queued.length > 0; }
+  get hasCalls(): boolean { return this.active.size > 0 || this.queued.length > 0; }
   get occupied(): boolean { return this.hasCalls || this.command !== null; }
 
   finishCommand(ticket: WorkTicket) {
     if (this.command === ticket) this.command = null;
+    // Giving up a reservation must not leave work that can run after its timeout.
+    // The native promises already in flight keep their admission until they settle.
+    for (let index = this.queued.length - 1; index >= 0; index -= 1) {
+      if (this.queued[index]?.ticket === ticket) this.queued.splice(index, 1)[0]?.reject(new Error('superseded'));
+    }
     this.drain();
     this.settled();
   }
 
   call<T>(ticket: WorkTicket, kind: 'read' | 'details' | 'command', action: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queued.push({ kind, start: () => {
-        const active = {};
-        this.active = active;
+      this.queued.push({ ticket, kind, reject, start: () => {
+        const active = { kind };
+        this.active.add(active);
         const run = async () => {
           if (!this.current(ticket) || (kind === 'details' && !this.visible(ticket))) throw new Error('superseded');
           const answer = await action();
@@ -166,8 +171,7 @@ class ControllerWork {
           return answer;
         };
         void run().then(resolve, reject).finally(() => {
-          if (this.active !== active) return;
-          this.active = null;
+          if (!this.active.delete(active)) return;
           this.drain();
           this.settled();
         });
@@ -177,8 +181,13 @@ class ControllerWork {
   }
 
   private drain() {
-    if (this.active) return;
     const next = this.command === null ? 0 : this.queued.findIndex((item) => item.kind === 'command');
+    // Commands may meet an in-flight details read at native admission, which
+    // refuses them as app_busy before doing work. Decisions already retry that
+    // refusal within their display lease (ADR 0048). Reads still wait, and a JS
+    // snapshot timeout never permits a second call past that snapshot's holder.
+    if (this.active.size > 0 && (this.queued[next]?.kind !== 'command'
+      || [...this.active].some((call) => call.kind !== 'details'))) return;
     if (next >= 0) this.queued.splice(next, 1)[0]?.start();
   }
 
@@ -192,17 +201,20 @@ class ControllerWork {
   }
 }
 
-async function readSnapshot(response: Promise<AppSnapshot>, started: number): Promise<AppSnapshot> {
+async function waitForResponse<T>(response: Promise<T>): Promise<T> {
   let timer: number | undefined;
   try {
-    const snapshot = await Promise.race([
+    return await Promise.race([
       response,
-      new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => { reject(new Error('snapshot_timeout')); }, 15000); }),
+      new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => { reject(new Error('response_timeout')); }, 15000); }),
     ]);
-    return ageRequestPresentation(snapshot, performance.now() - started);
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+async function readSnapshot(response: Promise<AppSnapshot>, started: number): Promise<AppSnapshot> {
+  return ageRequestPresentation(await waitForResponse(response), performance.now() - started);
 }
 
 /** The relay and external-access settings share one installed-helper owner. */
@@ -386,10 +398,12 @@ export function useController(bridge: ControllerBridge) {
     readPending.current = false;
     post({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
     let scannerOpened = false;
+    let reserved = false;
     try {
-      // Reserve the next turn for this one explicit command, not a FIFO of
-      // stale taps. All command kinds wait for the actual admission holder.
-      if (work.current.hasCalls) await invoke(() => Promise.resolve());
+      // Give up this tap after the same bounded wait as a snapshot read. Only
+      // the reservation expires: the native holder is not cancelled or released.
+      if (work.current.hasCalls) await waitForResponse(invoke(() => Promise.resolve()));
+      reserved = true;
       if (!work.current.current(attempt)) return null;
       const observed = observation ? await observation : undefined;
       if (!work.current.current(attempt)) return null;
@@ -570,7 +584,9 @@ export function useController(bridge: ControllerBridge) {
         scannerReturn.current = { pending: false, opened: false, wake: false };
         const error = generic(scannerFailure(failure, command.transport));
         let snapshot: AppSnapshot | null = null;
-        try { snapshot = await work.current.snapshot(attempt, 'command'); } catch { /* Keep recovery, never raw native errors. */ }
+        if (reserved) {
+          try { snapshot = await work.current.snapshot(attempt, 'command'); } catch { /* Keep recovery, never raw native errors. */ }
+        }
         if (!work.current.current(attempt)) return null;
         const latest = current.current;
         post({ ...latest, snapshot: snapshot ?? (latest.snapshot ? withoutRequestBodies(latest.snapshot) : null),
