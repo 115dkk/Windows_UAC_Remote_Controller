@@ -191,10 +191,13 @@ Both PR and main jobs have read-only repository permission. Checkout does not
 persist credentials. Dependency/build caches are not shared with privileged
 release jobs. The four Android gate workflows restore a Gradle dependency cache
 (`~/.gradle/caches/modules-2` and the Gradle distribution, never build output)
-because the Gradle repositories intermittently answer "not found" for artifacts
-that exist; only runs on `main` save it, pull requests only restore it, and the
-Release workflow's jobs restore nothing and instead repeat the Android build
-after a pause. No `pull_request_target` or ignored failure is used.
+because Maven Central answers 429 to CI runners; only runs on `main` save it,
+pull requests only restore it, and the Release workflow's jobs restore nothing.
+For the same reason the Gradle builds list Google's Maven Central mirror
+(`maven-central.storage-download.googleapis.com/maven2`) before Maven Central,
+including for the `kotlin-dsl` plugin of `buildSrc`, whose dependencies would
+otherwise resolve through the Gradle Plugin Portal's redirect to Maven Central.
+A retry inside the same job did not help: the refusal is per runner. No `pull_request_target` or ignored failure is used.
 
 ## Release gate triggers
 
