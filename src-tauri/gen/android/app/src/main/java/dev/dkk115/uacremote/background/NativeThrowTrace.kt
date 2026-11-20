@@ -58,6 +58,16 @@ internal object NativeThrowTrace {
         return "UAC_NATIVE_VALUE_V1 site=$site name=$name value=$value"
     }
 
+    internal fun keyFailure(operation: String, code: String, rollback: String) {
+        val line = keyFailureLine(operation, code, rollback) ?: return
+        try { AndroidDiagnosticStore.record(TAG, line) } catch (_: Throwable) { }
+    }
+
+    internal fun keyFailureLine(operation: String, code: String, rollback: String): String? {
+        if (!token(operation, 32) || !token(code, 48) || !token(rollback, 16)) return null
+        return "UAC_NATIVE_KEY_FAILURE_V1 operation=$operation code=$code rollback=$rollback"
+    }
+
     /** Separate from [named] so the formatting is testable without throwing. */
     internal fun note(site: String, failure: Throwable) {
         val line = line(site, failure) ?: return

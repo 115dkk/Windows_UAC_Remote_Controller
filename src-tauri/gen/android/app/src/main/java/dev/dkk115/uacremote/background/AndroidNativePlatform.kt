@@ -361,13 +361,14 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
             val original = request.takeInput()
             input = original
             if (!NativeCreationEvidence.validInput(original)) throw BridgeException.InvalidObservation()
-            val creation = keyValue(KeyCreationRequest.fromTrustedRust(original.handle, original.challenge, request::checkCurrent))
+            val creation = keyValue(NativeKeyOperation.CREATE_REQUEST,
+                KeyCreationRequest.fromTrustedRust(original.handle, original.challenge, request::checkCurrent))
             request.checkCurrent()
-            val created = keyValue(keyStore.createKeySet(creation))
+            val created = keyValue(NativeKeyOperation.CREATE_SET, keyStore.createKeySet(creation))
             // Only re-inspect the exact just-created registered references.
             // No reopen/create/retry fallback, and no native wrapper in reply.
             val material = DeviceKeyRole.values().associateWith { role ->
-                keyValue(keyStore.inspectPublicMaterial(created.reference(role)))
+                keyValue(NativeKeyOperation.INSPECT_PUBLIC, keyStore.inspectPublicMaterial(created.reference(role)))
             }
             request.checkCurrent()
             return NativeCreationEvidence.copyObserved(original, created.registration.descriptor, material)
@@ -392,15 +393,17 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         // This is committed LOCAL metadata, not paired-device authorization.
         // Copy/validate the whole tuple list before any reference publication.
         val descriptors = keys.map { key ->
-            keyValue(ReopenKeySetDescriptor.fromTrustedStorage(
+            keyValue(NativeKeyOperation.READ_DESCRIPTOR, ReopenKeySetDescriptor.fromTrustedStorage(
                 key.handle, key.approvalSpki, key.denialSpki, key.transportSpki,
             ))
         }
         val handles = descriptors.map { it.copyHandle() }
         try {
-            keyValue(keyStore.validateRecordedNamespace(handles))
-            for (descriptor in descriptors) keyValue(keyStore.reopenExistingKeySet(descriptor))
-            keyValue(keyStore.validateRecordedNamespace(handles))
+            keyValue(NativeKeyOperation.VALIDATE_NAMESPACE, keyStore.validateRecordedNamespace(handles))
+            for (descriptor in descriptors) {
+                keyValue(NativeKeyOperation.REOPEN_SET, keyStore.reopenExistingKeySet(descriptor))
+            }
+            keyValue(NativeKeyOperation.VALIDATE_NAMESPACE, keyStore.validateRecordedNamespace(handles))
         } catch (_: Exception) {
             // Close this adapter's references only. A failed close remains
             // retryable through the Application-retained adapter; never touch
@@ -424,7 +427,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
             throw BridgeException.LocalKeysUnavailable()
         }
         try {
-            keyValue(keyStore.discardPreparedNamespace(handles, retained))
+            keyValue(NativeKeyOperation.DISCARD_PREPARED, keyStore.discardPreparedNamespace(handles, retained))
         } catch (_: Exception) {
             // A refused deletion is its own state, not the dead end this exists
             // to end: the rows stay committed and the next open tries again.
@@ -440,7 +443,7 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
             throw BridgeException.NativeUnavailable()
         }
         closeAllTransportSigners()
-        keyValue(keyStore.closeReferences())
+        keyValue(NativeKeyOperation.CLOSE_REFERENCES, keyStore.closeReferences())
     }
 
     /** Only the Application's existing EXPLICIT shutdown/retry branch calls
@@ -449,9 +452,13 @@ internal class AndroidNativePlatform(application: Application) : NativePlatform 
         return CreationArgumentCleanupPolicy.retryExplicitly(creationActive, creationArguments)
     }
 
-    private fun <T> keyValue(result: KeyStoreOutcome<T>): T = when (result) {
+    private fun <T> keyValue(operation: NativeKeyOperation, result: KeyStoreOutcome<T>): T = when (result) {
         is KeyStoreOutcome.Value -> result.value
-        is KeyStoreOutcome.Failure -> throw BridgeException.LocalKeysUnavailable()
+        is KeyStoreOutcome.Failure -> {
+            val mapped = NativeKeyFailureMapping.map(operation, result)
+            mapped.record()
+            throw mapped.bridgeException()
+        }
     }
 
     override fun unixMillis(): ULong {
