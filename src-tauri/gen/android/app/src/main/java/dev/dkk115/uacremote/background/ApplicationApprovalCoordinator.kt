@@ -259,7 +259,7 @@ internal class ApplicationApprovalCoordinator(
             Phase.SIGNED -> if (session.move(Phase.SIGNED, Phase.FINISHING)) {
                 // A separate FIFO worker job: pending PC/domain changes can run
                 // after crypto and before finish. Never finish inline in sign.
-                work(session) { finish(session) }
+                if (!session.decision.start()) cancel(session, NativeApprovalReply.Unavailable)
             }
             else -> Unit
         }
@@ -282,47 +282,49 @@ internal class ApplicationApprovalCoordinator(
         when (val signed = operation.complete(attempt)) {
             is ApprovalOperationOutcome.Value -> {
                 if (session.cancelled.get()) signed.value.fill(0)
-                else {
-                    session.der.set(signed.value)
-                    if (session.move(Phase.SIGNING, Phase.SIGNED)) post(session) { advance(session) }
-                    else session.der.getAndSet(null)?.fill(0)
+                else if (session.move(Phase.SIGNING, Phase.SIGNED) && session.decision.accept(signed.value)) {
+                    post(session) { advance(session) }
+                } else {
+                    signed.value.fill(0)
+                    cancel(session, NativeApprovalReply.Unavailable)
                 }
             }
             is ApprovalOperationOutcome.Failure -> cancel(session, keyFailure(signed.keyError))
         }
     }
 
-    private fun finish(session: Session) {
-        if (denialBlocked(session.selection)) { cancel(session, NativeApprovalReply.Cancelled); return }
-        if (!session.lease.mayComplete(session.host)) {
-            session.move(Phase.FINISHING, Phase.SIGNED); post(session) { advance(session) }; return
+    private fun finishPrepared(session: Session, submission: NativeApprovalSubmission): Boolean {
+        if (session.cancelled.get() || !session.lease.isCurrent(session.host) || submission.isCancelled()) {
+            cancel(session, NativeApprovalReply.Cancelled, decisionWillCleanup = true)
+            return false
         }
-        val der = session.der.getAndSet(null) ?: throw IllegalStateException("Native result unavailable")
-        var retained = false
-        try {
-            val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
-            val attempt = session.attempt ?: throw IllegalStateException("Native claim unavailable")
-            val submission = try { controller.finishApproval(attempt, der) }
-            catch (busy: BridgeException.Busy) {
-                // The owner was held and never saw this signature. Put it back
-                // for the same job to hand over again; cancellation still finds
-                // and clears it there, and a cancelled session takes it back now.
-                session.der.set(der); retained = true
-                if (session.cancelled.get() && session.der.compareAndSet(der, null)) retained = false
-                throw busy
-            }
-            if (session.cancelled.get() || !session.lease.isCurrent(session.host) || submission.isCancelled()) {
-                submission.close(); cancel(session, NativeApprovalReply.Cancelled); return
-            }
-            when (session.operation?.releaseAfterFinish()) {
-                is ApprovalOperationOutcome.Value -> {
-                    session.submission.set(submission)
-                    if (session.move(Phase.FINISHING, Phase.COMPLETED)) post(session) { advance(session) }
-                    else session.submission.getAndSet(null)?.close()
+        return when (session.operation?.releaseAfterFinish()) {
+            is ApprovalOperationOutcome.Value -> {
+                session.submission.set(submission)
+                if (session.move(Phase.FINISHING, Phase.COMPLETED)) {
+                    post(session) { advance(session) }
+                    true
+                } else {
+                    session.submission.compareAndSet(submission, null)
+                    false
                 }
-                else -> { submission.close(); cancel(session, NativeApprovalReply.Unavailable) }
             }
-        } finally { if (!retained) der.fill(0) }
+            else -> {
+                cancel(session, NativeApprovalReply.Unavailable, decisionWillCleanup = true)
+                false
+            }
+        }
+    }
+
+    private fun finishFailed(session: Session, failure: Throwable) {
+        rethrowFatal(failure)
+        val reply = when {
+            failure is BridgeException.Busy -> NativeApprovalReply.Busy
+            RequestActionFailurePolicy.requestLocal(failure) -> NativeApprovalReply.Cancelled
+            else -> NativeApprovalReply.Unavailable
+        }
+        cancel(session, reply, decisionWillCleanup = true)
+        if (RequestActionFailurePolicy.approvalRetiresOwner(failure)) ownerFailed(failure)
     }
 
     private fun work(session: Session, action: () -> Unit): Boolean {
@@ -365,7 +367,12 @@ internal class ApplicationApprovalCoordinator(
         return main.postDelayed({ if (!session.cancelled.get() && current.get() === session) work(session, action) }, delay)
     }
 
-    private fun cancel(session: Session, reply: NativeApprovalReply, explicitRetry: Boolean = false) {
+    private fun cancel(
+        session: Session,
+        reply: NativeApprovalReply,
+        explicitRetry: Boolean = false,
+        decisionWillCleanup: Boolean = false,
+    ) {
         val changed = !session.cancelled.getAndSet(true)
         session.lease.invalidate()
         // Both are downward-only. Rust invalidation precedes OS cancellation.
@@ -374,12 +381,11 @@ internal class ApplicationApprovalCoordinator(
             catch (failure: Throwable) { rethrowFatal(failure); session.cancellationUncertain.set(true) }
         }
         if (!session.cancellationUncertain.get() || explicitRetry || changed) session.operation?.cancel()
-        session.der.getAndSet(null)?.fill(0)
         // A retained prepared wrapper is closed by the worker cursor; a failed
         // close must not disappear because getAndSet(null) ran first.
         session.terminate()
         deliver(session, reply)
-        cleanup(session)
+        if (!decisionWillCleanup && !session.decision.cancel()) cleanup(session)
         if (changed) nativeProgress()
     }
 
@@ -544,8 +550,28 @@ internal class ApplicationApprovalCoordinator(
         val cancellationUncertain = AtomicBoolean(false)
         val prepared = AtomicBoolean(false)
         val jobs = AtomicInteger(0)
-        val der = AtomicReference<ByteArray?>(null)
         val submission = AtomicReference<NativeApprovalSubmission?>(null)
+        val decision = ApprovalDecisionCoordinator(
+            platform = object : ApprovalDecisionPlatform<NativeApprovalSubmission> {
+                override fun finish(signedDecision: ByteArray): NativeApprovalSubmission {
+                    if (denialBlocked(selection)) throw BridgeException.RequestUnavailable()
+                    val controller = owner() ?: throw IllegalStateException("Native owner unavailable")
+                    val claimed = attempt ?: throw IllegalStateException("Native claim unavailable")
+                    return controller.finishApproval(claimed, signedDecision)
+                }
+                override fun close(submission: NativeApprovalSubmission) = submission.close()
+                override fun busy(failure: Throwable): Boolean = failure is BridgeException.Busy
+            },
+            enqueue = enqueue,
+            defer = { delay, action -> main.postDelayed(action, delay) },
+            onPrepared = { finishPrepared(this, it) },
+            onFailure = { finishFailed(this, it) },
+            cleanup = { cleanup(this) },
+            ready = { lease.mayComplete(host) },
+            onDeferred = {
+                if (move(Phase.FINISHING, Phase.SIGNED)) post(this) { advance(this) }
+            },
+        )
         val handleLock = Any()
         val handleCleanup = ApprovalHandleCleanup()
         @Volatile var deadlineNanos = 0L

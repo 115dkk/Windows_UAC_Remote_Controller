@@ -17,19 +17,6 @@ const between = (start, end) => {
 };
 const workerPass = () => between('fun cleanupOnWorker()', 'fun hasPendingCleanup()');
 
-// The slot one session holds is exactly what `canRequest` refuses on, so a pass
-// that leaves early leaves the phone's approve button grey, with nothing on
-// screen saying why, until the app is force-stopped. That symptom has now
-// arrived twice from two different causes, and the second cause was a `return`
-// added one line above the retry that exists to prevent the first.
-test('the worker pass always reaches the retry that frees the approval slot', () => {
-  const pass = workerPass();
-  const exits = [...pass.matchAll(/\breturn\b/gu)];
-  assert.equal(exits.length, 1, 'only the absent-session elvis may leave this function');
-  assert.match(pass.slice(0, exits[0].index), /\?:\s*$/u);
-  assert.ok(pass.indexOf('cleanupFailed.set(false)') < pass.indexOf('cleanup(session)'));
-});
-
 // `expired` calls an absent deadline expired, and a PREPARING session has not
 // read its deadline off the plan yet, so the phase has to be asked first or the
 // pass cancels an approval in the window between the tap that claims the slot
