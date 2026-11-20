@@ -12,22 +12,77 @@ import java.net.InetAddress
 import java.util.concurrent.Executor
 
 /** Counts registered callbacks until Android confirms release or absence. */
-internal class LanRegistrationAccounting(private val limit: Int) {
-    init { require(limit > 0) }
+internal class LanRegistrationAccounting(
+    private val limit: Int,
+    private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val initialRetryMillis: Long = 15_000L,
+    private val maxRetryMillis: Long = 120_000L,
+) {
+    init {
+        require(limit > 0)
+        require(initialRetryMillis > 0 && maxRetryMillis >= initialRetryMillis)
+    }
+
+    internal enum class ReleaseDecision { ATTEMPT, WAIT, COMPLETE }
+
     private var occupied = 0
 
     internal inner class Lease internal constructor() {
         private var complete = false
+        private var releasePending = false
+        private var attemptInProgress = false
+        private var retryAtMillis: Long? = null
+        private var retryMillis = initialRetryMillis
 
         /** Release was requested, but the callback still occupies its slot. */
-        fun beginRelease() = Unit
+        @Synchronized fun beginRelease(): ReleaseDecision {
+            if (complete) return ReleaseDecision.COMPLETE
+            if (!releasePending) {
+                releasePending = true
+                retryAtMillis = nowMillis()
+            }
+            return takeDueAttempt()
+        }
+
+        @Synchronized fun retryRelease(): ReleaseDecision = takeDueAttempt()
+
+        /** Keeps one bounded retry pending after an unregister attempt returns. */
+        @Synchronized fun unregisterAttemptFinished(): Long? {
+            if (complete || !releasePending || !attemptInProgress) return null
+            attemptInProgress = false
+            val delay = retryMillis
+            val now = nowMillis()
+            retryAtMillis = if (now > Long.MAX_VALUE - delay) Long.MAX_VALUE else now + delay
+            retryMillis = delay + minOf(delay, maxRetryMillis - delay)
+            return delay
+        }
+
+        @Synchronized fun delayUntilRetry(): Long? {
+            if (complete || !releasePending || attemptInProgress) return null
+            val retryAt = retryAtMillis ?: return null
+            val now = nowMillis()
+            return if (now >= retryAt) 0L else retryAt - now
+        }
 
         fun released() = finish()
         fun registrationAbsent() = finish()
 
+        @Synchronized private fun takeDueAttempt(): ReleaseDecision {
+            if (complete) return ReleaseDecision.COMPLETE
+            if (!releasePending || attemptInProgress) return ReleaseDecision.WAIT
+            val retryAt = retryAtMillis ?: return ReleaseDecision.WAIT
+            if (nowMillis() < retryAt) return ReleaseDecision.WAIT
+            retryAtMillis = null
+            attemptInProgress = true
+            return ReleaseDecision.ATTEMPT
+        }
+
         @Synchronized private fun finish() {
             if (complete) return
             complete = true
+            releasePending = false
+            attemptInProgress = false
+            retryAtMillis = null
             releaseOne()
         }
     }
@@ -58,7 +113,11 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
     // API 31-33 cannot cancel a resolve. Retain its slot across stop/start until its terminal callback.
     private var resolving: Entry? = null
     private val queue = ArrayDeque<Entry>()
-    private val registrations = LanRegistrationAccounting(MAX_SERVICES)
+    private val registrations = LanRegistrationAccounting(
+        limit = MAX_SERVICES,
+        initialRetryMillis = CLEANUP_RETRY_MILLIS,
+        maxRetryMillis = MAX_CLEANUP_RETRY_MILLIS,
+    )
 
     fun setWanted(value: Boolean) {
         check(Looper.myLooper() == main.looper)
@@ -184,27 +243,74 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
 
     @TargetApi(34)
     private fun watch(entry: Entry) {
+        val registration = checkNotNull(entry.registration)
         val callback = object : NsdManager.ServiceInfoCallback {
-            private var unregistering = false
             private var registered = true
-            private val retry = Runnable { unregister() }
+            private val retry = Runnable { retryUnregister() }
+
             fun unregister() {
-                if (!registered || unregistering) return
+                if (!registered) return
                 main.removeCallbacks(retry)
-                try {
-                    manager?.unregisterServiceInfoCallback(this)
-                    unregistering = true
-                    entry.registration?.beginRelease()
-                } catch (_: IllegalArgumentException) {
-                    registered = false
-                    entry.registration?.registrationAbsent()
-                } catch (_: Exception) { main.postDelayed(retry, CLEANUP_RETRY_MILLIS) }
+                reconcile(registration.beginRelease())
             }
+
+            private fun retryUnregister() {
+                if (!registered) return
+                reconcile(registration.retryRelease())
+            }
+
+            private fun reconcile(decision: LanRegistrationAccounting.ReleaseDecision) {
+                when (decision) {
+                    LanRegistrationAccounting.ReleaseDecision.ATTEMPT -> attemptUnregister()
+                    LanRegistrationAccounting.ReleaseDecision.WAIT -> schedulePendingRetry()
+                    LanRegistrationAccounting.ReleaseDecision.COMPLETE -> {
+                        registered = false
+                        main.removeCallbacks(retry)
+                    }
+                }
+            }
+
+            private fun attemptUnregister() {
+                val currentManager = manager
+                if (currentManager == null) {
+                    confirmAbsent()
+                    return
+                }
+                try {
+                    currentManager.unregisterServiceInfoCallback(this)
+                } catch (_: IllegalArgumentException) {
+                    confirmAbsent()
+                    return
+                } catch (_: Exception) {
+                    scheduleAfterAttempt()
+                    return
+                }
+                scheduleAfterAttempt()
+            }
+
+            private fun scheduleAfterAttempt() {
+                val delay = registration.unregisterAttemptFinished() ?: return
+                if (!registered) return
+                main.removeCallbacks(retry)
+                main.postDelayed(retry, delay)
+            }
+
+            private fun schedulePendingRetry() {
+                val delay = registration.delayUntilRetry() ?: return
+                if (!registered) return
+                main.removeCallbacks(retry)
+                main.postDelayed(retry, delay)
+            }
+
+            private fun confirmAbsent() {
+                registered = false
+                main.removeCallbacks(retry)
+                registration.registrationAbsent()
+            }
+
             override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
                 main.post {
-                    registered = false
-                    main.removeCallbacks(retry)
-                    entry.registration?.registrationAbsent()
+                    confirmAbsent()
                     if (entry.current()) entry.owner.entries.remove(entry.instance)
                 }
             }
@@ -216,7 +322,7 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
                 main.post {
                     registered = false
                     main.removeCallbacks(retry)
-                    entry.registration?.released()
+                    registration.released()
                 }
             }
         }
@@ -269,5 +375,6 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
         private const val MAX_SERVICES = 32
         private const val MAX_ADDRESSES = 8
         private const val CLEANUP_RETRY_MILLIS = 15_000L
+        private const val MAX_CLEANUP_RETRY_MILLIS = 120_000L
     }
 }

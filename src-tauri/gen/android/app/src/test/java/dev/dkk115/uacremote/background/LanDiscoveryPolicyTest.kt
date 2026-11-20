@@ -62,14 +62,78 @@ class LanDiscoveryPolicyTest {
         assertTrue(accounting.acquire() != null)
     }
 
-    @Test fun confirmedRegistrationAbsenceReturnsExactlyOneSlot() {
-        val accounting = LanRegistrationAccounting(1)
+    @Test fun missingReleaseCallbackRetriesWithBoundedBackoffAndKeepsTheCapOccupied() {
+        var now = 100L
+        val accounting = LanRegistrationAccounting(
+            limit = 1,
+            nowMillis = { now },
+            initialRetryMillis = 10L,
+            maxRetryMillis = 40L,
+        )
         val lease = requireNotNull(accounting.acquire())
+
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.beginRelease())
+        assertEquals(10L, lease.unregisterAttemptFinished())
+        assertEquals(1, accounting.occupied())
+        assertNull(accounting.acquire())
+
+        now += 9L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.WAIT, lease.retryRelease())
+        assertEquals(1L, lease.delayUntilRetry())
+        now += 1L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.retryRelease())
+        assertEquals(20L, lease.unregisterAttemptFinished())
+
+        now += 20L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.retryRelease())
+        assertEquals(40L, lease.unregisterAttemptFinished())
+        now += 40L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.retryRelease())
+        assertEquals(40L, lease.unregisterAttemptFinished())
+        assertEquals(1, accounting.occupied())
+        assertNull(accounting.acquire())
+    }
+
+    @Test fun confirmationAtARetryReturnsExactlyOneSlotAndDuplicatesAreIdempotent() {
+        var now = 0L
+        val accounting = LanRegistrationAccounting(1, { now }, 10L, 20L)
+        val lease = requireNotNull(accounting.acquire())
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.beginRelease())
+        assertEquals(10L, lease.unregisterAttemptFinished())
+
+        now = 10L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, lease.retryRelease())
         lease.registrationAbsent()
         lease.registrationAbsent()
         lease.released()
 
         assertEquals(0, accounting.occupied())
-        assertTrue(accounting.acquire() != null)
+        val replacement = requireNotNull(accounting.acquire())
+        assertEquals(1, accounting.occupied())
+        lease.released()
+        assertEquals(1, accounting.occupied())
+        replacement.registrationAbsent()
+        assertEquals(0, accounting.occupied())
+    }
+
+    @Test fun discoveryRestartRetainsPendingReleaseAndDoesNotDoubleRelease() {
+        var now = 0L
+        val accounting = LanRegistrationAccounting(1, { now }, 10L, 20L)
+        val oldSession = requireNotNull(accounting.acquire())
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, oldSession.beginRelease())
+        assertEquals(10L, oldSession.unregisterAttemptFinished())
+
+        // A replacement discovery session shares this owner-wide accounting.
+        assertNull(accounting.acquire())
+        now = 10L
+        assertEquals(LanRegistrationAccounting.ReleaseDecision.ATTEMPT, oldSession.retryRelease())
+        oldSession.released()
+
+        val newSession = requireNotNull(accounting.acquire())
+        oldSession.registrationAbsent()
+        oldSession.released()
+        assertEquals(1, accounting.occupied())
+        newSession.registrationAbsent()
+        assertEquals(0, accounting.occupied())
     }
 }
