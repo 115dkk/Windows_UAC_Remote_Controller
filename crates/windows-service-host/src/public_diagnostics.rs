@@ -92,6 +92,25 @@ pub(crate) enum Event {
         panicked: bool,
         code: u32,
     },
+    // A signed phone decision was refused before any Windows action. The reason
+    // is a closed category with no request, device, key or signature material.
+    DecisionRejected {
+        reason: DecisionRejectionReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DecisionRejectionReason {
+    Clock,
+    WrongPc,
+    WrongEpoch,
+    UnknownOrCompleted,
+    Expired,
+    BindingMismatch,
+    NotEligible,
+    EnrollmentChanged,
+    InvalidSignature,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -375,6 +394,9 @@ mod tests {
                 panicked: false,
                 code: 1,
             },
+            Event::DecisionRejected {
+                reason: DecisionRejectionReason::InvalidSignature,
+            },
         ];
         for event in events {
             let value = serde_json::to_value(row(event)).unwrap();
@@ -405,6 +427,44 @@ mod tests {
                 ]
                 .contains(&key.as_str())
             }));
+        }
+    }
+
+    #[test]
+    fn signed_decision_rejections_have_distinct_closed_reason_names() {
+        let reasons = [
+            (DecisionRejectionReason::Clock, "clock"),
+            (DecisionRejectionReason::WrongPc, "wrong_pc"),
+            (DecisionRejectionReason::WrongEpoch, "wrong_epoch"),
+            (
+                DecisionRejectionReason::UnknownOrCompleted,
+                "unknown_or_completed",
+            ),
+            (DecisionRejectionReason::Expired, "expired"),
+            (DecisionRejectionReason::BindingMismatch, "binding_mismatch"),
+            (DecisionRejectionReason::NotEligible, "not_eligible"),
+            (
+                DecisionRejectionReason::EnrollmentChanged,
+                "enrollment_changed",
+            ),
+            (
+                DecisionRejectionReason::InvalidSignature,
+                "invalid_signature",
+            ),
+        ];
+
+        for (reason, name) in reasons {
+            assert_eq!(
+                serde_json::to_value(row(Event::DecisionRejected { reason })).unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "decision_rejected",
+                    "reason": name,
+                })
+            );
         }
     }
 

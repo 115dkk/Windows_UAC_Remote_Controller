@@ -21,6 +21,7 @@ use activity_journal::{
     ActivityEvent, Decision, FailureKind, Journal, JournalError, Limits, RequestOutcome,
     ServiceOutcome, UnixMillis,
 };
+use approval_core::DecisionError;
 use std::{
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread::{self, JoinHandle},
@@ -113,6 +114,62 @@ fn now() -> Result<UnixMillis, ServiceError> {
 }
 
 const JOURNAL_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const DECISION_REJECTION_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug)]
+struct DecisionRejectionReport {
+    reason: crate::public_diagnostics::DecisionRejectionReason,
+    at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct DecisionRejectionReports {
+    rows: Vec<DecisionRejectionReport>,
+}
+
+impl DecisionRejectionReports {
+    fn should_record(
+        &mut self,
+        reason: crate::public_diagnostics::DecisionRejectionReason,
+        at: Instant,
+    ) -> bool {
+        if let Some(previous) = self.rows.iter_mut().find(|row| row.reason == reason) {
+            if at.saturating_duration_since(previous.at) < DECISION_REJECTION_REPORT_INTERVAL {
+                return false;
+            }
+            previous.at = at;
+        } else {
+            self.rows.push(DecisionRejectionReport { reason, at });
+        }
+        true
+    }
+
+    fn record(&mut self, error: DecisionError, at: Instant) {
+        let reason = decision_rejection_reason(error);
+        if self.should_record(reason, at) {
+            crate::public_diagnostics::record(crate::public_diagnostics::Event::DecisionRejected {
+                reason,
+            });
+        }
+    }
+}
+
+fn decision_rejection_reason(
+    error: DecisionError,
+) -> crate::public_diagnostics::DecisionRejectionReason {
+    use crate::public_diagnostics::DecisionRejectionReason as Reason;
+    match error {
+        DecisionError::Clock(_) => Reason::Clock,
+        DecisionError::WrongPc => Reason::WrongPc,
+        DecisionError::WrongEpoch => Reason::WrongEpoch,
+        DecisionError::UnknownOrCompleted => Reason::UnknownOrCompleted,
+        DecisionError::Expired => Reason::Expired,
+        DecisionError::BindingMismatch => Reason::BindingMismatch,
+        DecisionError::NotEligible => Reason::NotEligible,
+        DecisionError::EnrollmentChanged => Reason::EnrollmentChanged,
+        DecisionError::InvalidSignature => Reason::InvalidSignature,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum JournalOperation {
@@ -321,6 +378,7 @@ fn run(
     let mut supervisor_initialization_failed = None;
     let mut watch = None;
     let mut journal_failures = JournalFailureReports::default();
+    let mut decision_rejections = DecisionRejectionReports::default();
     // The fixed step a failure after Ready came from, for public diagnostics.
     let mut step = RuntimeStep::Ready;
     // Keep session OUTSIDE this unwind boundary: every returned error or unwind
@@ -498,6 +556,9 @@ fn run(
                     None => session.process_one(),
                 };
                 match processed.map_err(session_error)? {
+                    SessionProgress::DecisionRejected(error) => {
+                        decision_rejections.record(error, iteration_now);
+                    }
                     SessionProgress::AuthorizedButNotApplied(reason) => {
                         let failure = match reason {
                             crate::peer_runtime::NotAppliedReason::PlatformUnavailable => {
@@ -1046,6 +1107,64 @@ mod tests {
         );
         assert_eq!(reports.rows.len(), 3);
         assert_eq!(reports.rows[0].at, began + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn decision_rejection_mapping_is_complete_and_rows_are_rate_limited_by_reason() {
+        use crate::public_diagnostics::DecisionRejectionReason;
+        use approval_core::{ClockError, DecisionError};
+
+        let cases = [
+            (
+                DecisionError::Clock(ClockError::WentBackwards),
+                DecisionRejectionReason::Clock,
+            ),
+            (DecisionError::WrongPc, DecisionRejectionReason::WrongPc),
+            (
+                DecisionError::WrongEpoch,
+                DecisionRejectionReason::WrongEpoch,
+            ),
+            (
+                DecisionError::UnknownOrCompleted,
+                DecisionRejectionReason::UnknownOrCompleted,
+            ),
+            (DecisionError::Expired, DecisionRejectionReason::Expired),
+            (
+                DecisionError::BindingMismatch,
+                DecisionRejectionReason::BindingMismatch,
+            ),
+            (
+                DecisionError::NotEligible,
+                DecisionRejectionReason::NotEligible,
+            ),
+            (
+                DecisionError::EnrollmentChanged,
+                DecisionRejectionReason::EnrollmentChanged,
+            ),
+            (
+                DecisionError::InvalidSignature,
+                DecisionRejectionReason::InvalidSignature,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(decision_rejection_reason(error), expected);
+        }
+
+        let began = Instant::now();
+        let mut reports = DecisionRejectionReports::default();
+        assert!(reports.should_record(DecisionRejectionReason::Expired, began));
+        assert!(!reports.should_record(
+            DecisionRejectionReason::Expired,
+            began + Duration::from_secs(59)
+        ));
+        assert!(reports.should_record(
+            DecisionRejectionReason::BindingMismatch,
+            began + Duration::from_secs(59)
+        ));
+        assert!(reports.should_record(
+            DecisionRejectionReason::Expired,
+            began + Duration::from_secs(60)
+        ));
     }
 
     #[test]
