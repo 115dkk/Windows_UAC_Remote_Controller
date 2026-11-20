@@ -151,21 +151,27 @@ jobs:
           [[ ${#unsigned[@]} -eq 1 ]] || { echo "expected exactly one unsigned release APK, found ${#unsigned[@]}" >&2; exit 1; }
           mkdir -p release-out
           keystore="$RUNNER_TEMP/release.jks"
+          # The keystore is readable by this user only and is removed however the
+          # step ends. Passwords reach keytool and apksigner through the
+          # environment, never on a command line another process can list.
+          trap 'rm -f "$keystore" release-out/aligned.apk' EXIT
           if [[ -n "${ANDROID_KEYSTORE_BASE64}" ]]; then
-            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+            (umask 077; printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore")
             alias="$ANDROID_KEY_ALIAS"; kspass="$ANDROID_KEYSTORE_PASSWORD"; keypass="$ANDROID_KEY_PASSWORD"
+            export APK_KS_PASS="$kspass" APK_KEY_PASS="$keypass"
             source="repository-secret"
           else
             # No release keystore is configured. Sign with a fresh key that lives only in this run so the
             # APK installs; the next release will NOT update over this install (different signer).
             kspass="$(head -c 24 /dev/urandom | base64 | tr -d '=+/')"; keypass="$kspass"; alias="uac-ephemeral"
-            keytool -genkeypair -keystore "$keystore" -storepass "$kspass" -keypass "$keypass" -alias "$alias" \
+            export APK_KS_PASS="$kspass" APK_KEY_PASS="$keypass"
+            (umask 077; keytool -genkeypair -keystore "$keystore" -storepass:env APK_KS_PASS -keypass:env APK_KEY_PASS -alias "$alias" \
               -keyalg EC -groupname secp256r1 -sigalg SHA256withECDSA -validity 90 \
-              -dname "CN=uac-remote-controller ephemeral prerelease signer" >/dev/null
+              -dname "CN=uac-remote-controller ephemeral prerelease signer" >/dev/null)
             source="ephemeral-this-run-only"
           fi
           "$tools/zipalign" -p -f 4 "${unsigned[0]}" release-out/aligned.apk
-          "$tools/apksigner" sign --ks "$keystore" --ks-pass "pass:$kspass" --key-pass "pass:$keypass" --ks-key-alias "$alias" \
+          "$tools/apksigner" sign --ks "$keystore" --ks-pass env:APK_KS_PASS --key-pass env:APK_KEY_PASS --ks-key-alias "$alias" \
             --v2-signing-enabled true --v3-signing-enabled true --out "release-out/uac-remote-controller-android-arm64.apk" release-out/aligned.apk
           rm -f release-out/aligned.apk "$keystore"
           "$tools/apksigner" verify --print-certs release-out/uac-remote-controller-android-arm64.apk > release-out/apk-signer.txt
