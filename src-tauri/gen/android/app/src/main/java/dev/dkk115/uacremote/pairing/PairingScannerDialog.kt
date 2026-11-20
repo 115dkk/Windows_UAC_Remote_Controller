@@ -28,7 +28,6 @@ import dev.dkk115.uacremote.AppLanguage
 import dev.dkk115.uacremote.R
 import dev.dkk115.uacremote.background.ApplicationPolicyActor
 import dev.dkk115.uacremote.nativecore.NativeCeremonyStatus
-import dev.dkk115.uacremote.nativecore.NativeCeremonyFailure
 
 /** One native window/input lifetime, bound to the ORIGINAL Activity and actor. */
 internal class PairingScannerDialog(
@@ -227,17 +226,12 @@ internal class PairingScannerDialog(
             OfflineQrResult.Invalid -> terminal(PairingScannerState.INVALID)
             is OfflineQrResult.Text -> {
                 render(PairingScannerState.READING)
-                actor.acceptPairingInvitation(ticket, result.value) { value ->
+                actor.acceptPairingInvitation(ticket, result.value, ::live, ::onCeremony) { value ->
                     if (!live()) { close(); return@acceptPairingInvitation }
                     when (value) {
                         PairingScanRead.READ -> {
                             if (ticket.isCancelled()) terminal(PairingScannerState.UNAVAILABLE)
-                            else {
-                                render(PairingScannerState.CONNECTING)
-                                if (!actor.beginPairingCeremony(ticket, ::onCeremony)) {
-                                    terminal(PairingScannerState.FAILED, PairingCeremonyRules.failureDetail(NativeCeremonyFailure.UNAVAILABLE))
-                                }
-                            }
+                            else render(PairingScannerState.CONNECTING)
                         }
                         PairingScanRead.INVALID -> terminal(PairingScannerState.INVALID)
                         PairingScanRead.UNAVAILABLE -> terminal(PairingScannerState.UNAVAILABLE)
