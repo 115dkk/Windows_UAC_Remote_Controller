@@ -5,7 +5,11 @@
 // it for the shared WatchSession type without ever constructing it.
 #![cfg_attr(not(all(windows, target_pointer_width = "64")), allow(dead_code))]
 
-use crate::{ProbeSupervisorError, WatchEvent};
+use crate::{
+    ProbeSupervisorError, WatchEvent,
+    management_protocol::{WatcherHealth, WatcherRefusal},
+    probe_supervisor::{WatchLifecycle, WatchObservation},
+};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -15,15 +19,17 @@ use windows_prompt_probe::supervision::{
 };
 
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_EVENTS: usize = 64;
-const MAX_POLL_EVENTS: usize = 16;
+const MAX_OBSERVATIONS: usize = 64;
+const MAX_POLL_OBSERVATIONS: usize = 16;
 const MAX_CONSECUTIVE_FAILURES: u32 = 8;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FailureDisposition {
-    Retry { at: Instant },
-    Unavailable,
-}
+const FIRST_START_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MessageError {
@@ -39,37 +45,104 @@ struct TrackedTarget {
 }
 
 pub(crate) struct WatchMachine {
-    events: VecDeque<WatchEvent>,
+    observations: VecDeque<WatchObservation>,
     tracked: Option<TrackedTarget>,
     last_sequence: u32,
     last_message: Instant,
     failures: u32,
+    first_start_failures: usize,
     retry_at: Option<Instant>,
+    cleanup_pending: bool,
     running: bool,
     unavailable: bool,
     shutting_down: bool,
-    heartbeats: u32,
+    ever_started: bool,
+    run_has_heartbeat: bool,
+    alive_recorded: bool,
+    health: Option<WatcherHealth>,
+    reported_start_error: Option<ProbeSupervisorError>,
+    initial_unavailable_recorded: bool,
 }
 
 impl WatchMachine {
     pub(crate) fn new(now: Instant) -> Self {
         Self {
-            events: VecDeque::new(),
+            observations: VecDeque::new(),
             tracked: None,
             last_sequence: 0,
             last_message: now,
             failures: 0,
-            retry_at: None,
-            running: true,
+            first_start_failures: 0,
+            retry_at: Some(now),
+            cleanup_pending: false,
+            running: false,
             unavailable: false,
             shutting_down: false,
-            heartbeats: 0,
+            ever_started: false,
+            run_has_heartbeat: false,
+            alive_recorded: false,
+            health: None,
+            reported_start_error: None,
+            initial_unavailable_recorded: false,
         }
     }
 
-    /// Accepted heartbeats since the watcher started (saturating).
-    pub(crate) fn heartbeats(&self) -> u32 {
-        self.heartbeats
+    pub(crate) fn launched(&mut self, now: Instant) -> Result<(), MessageError> {
+        if self.unavailable || self.shutting_down || self.running || self.retry_at.is_none() {
+            return Err(MessageError::Protocol);
+        }
+        self.running = true;
+        self.cleanup_pending = false;
+        self.retry_at = None;
+        self.last_message = now;
+        self.run_has_heartbeat = false;
+        self.observe_health(WatcherHealth::Starting)?;
+        if self.ever_started {
+            self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Restarted))?;
+            self.enqueue(WatchObservation::Event(WatchEvent::HelperRestarted {
+                attempt: self.failures,
+            }))?;
+        } else {
+            self.ever_started = true;
+            self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Started))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn launch_refused(
+        &mut self,
+        error: ProbeSupervisorError,
+        retained: bool,
+        now: Instant,
+    ) -> Result<(), MessageError> {
+        self.running = false;
+        self.clear_run_state();
+        self.cleanup_pending = retained;
+        if !self.ever_started && !retained {
+            let delay =
+                FIRST_START_DELAYS[self.first_start_failures.min(FIRST_START_DELAYS.len() - 1)];
+            self.first_start_failures = self.first_start_failures.saturating_add(1);
+            self.retry_at = Some(now.checked_add(delay).unwrap_or(now));
+            self.observe_health(WatcherHealth::Unavailable(classify(error)))?;
+            self.record_initial_refusal(error)?;
+            return Ok(());
+        }
+
+        let exhausted = if error == ProbeSupervisorError::NoInteractiveSession && !retained {
+            self.retry_at = Some(now.checked_add(Duration::from_secs(60)).unwrap_or(now));
+            false
+        } else {
+            self.schedule_failure(now)
+        };
+        self.observe_health(WatcherHealth::Unavailable(classify(error)))?;
+        if !self.ever_started {
+            self.record_initial_refusal(error)?;
+        }
+        if exhausted {
+            self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Unavailable))?;
+            self.enqueue(WatchObservation::Event(WatchEvent::HelperUnavailable))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn ingest(
@@ -81,6 +154,7 @@ impl WatchMachine {
         if !self.running || self.unavailable || self.shutting_down || session == 0 {
             return Err(MessageError::Protocol);
         }
+        let heartbeat = matches!(message, HelperMessage::Heartbeat { .. });
         match message {
             HelperMessage::Appeared { target, report } => {
                 if self.tracked.is_some()
@@ -95,18 +169,18 @@ impl WatchMachine {
                     applied: false,
                     replied: false,
                 });
-                self.enqueue(WatchEvent::Appeared {
+                self.enqueue(WatchObservation::Event(WatchEvent::Appeared {
                     target,
                     report,
                     session,
-                })
+                }))
             }
             HelperMessage::Gone { target, reason } => {
                 if self.tracked.map(|tracked| tracked.identity) != Some(target) {
                     return Err(MessageError::Protocol);
                 }
                 self.tracked = None;
-                self.enqueue(WatchEvent::Gone { target, reason })
+                self.enqueue(WatchObservation::Event(WatchEvent::Gone { target, reason }))
             }
             HelperMessage::Applied { target, outcome } => {
                 if !matches!(
@@ -124,7 +198,10 @@ impl WatchMachine {
                 } else if let Some(tracked) = &mut self.tracked {
                     tracked.replied = true;
                 }
-                self.enqueue(WatchEvent::Applied { target, outcome })
+                self.enqueue(WatchObservation::Event(WatchEvent::Applied {
+                    target,
+                    outcome,
+                }))
             }
             HelperMessage::Heartbeat { sequence } => {
                 let expected = self
@@ -133,13 +210,12 @@ impl WatchMachine {
                 if sequence != expected {
                     return Err(MessageError::Protocol);
                 }
-                self.heartbeats = self.heartbeats.saturating_add(1);
                 // The helper emits this only after a fresh, double-captured
                 // same-content census. Never renew a consumed/applying target.
                 if let Some(tracked) = self.tracked.filter(|tracked| !tracked.applied) {
-                    self.enqueue(WatchEvent::StillPresent {
+                    self.enqueue(WatchObservation::Event(WatchEvent::StillPresent {
                         target: tracked.identity,
-                    })
+                    }))
                 } else {
                     Ok(())
                 }
@@ -148,11 +224,19 @@ impl WatchMachine {
                 if count > MAX_PARKED_PROMPTS {
                     return Err(MessageError::Protocol);
                 }
-                self.enqueue(WatchEvent::ParkedChanged { count })
+                self.enqueue(WatchObservation::Event(WatchEvent::ParkedChanged { count }))
             }
         }?;
         self.last_message = now;
         self.failures = 0;
+        if heartbeat && !self.run_has_heartbeat {
+            self.run_has_heartbeat = true;
+            self.observe_health(WatcherHealth::Running)?;
+            if !self.alive_recorded {
+                self.alive_recorded = true;
+                self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Alive))?;
+            }
+        }
         Ok(())
     }
 
@@ -178,40 +262,33 @@ impl WatchMachine {
             && now.saturating_duration_since(self.last_message) >= HEARTBEAT_TIMEOUT
     }
 
-    pub(crate) fn failed(&mut self, now: Instant) -> FailureDisposition {
-        self.running = false;
-        self.tracked = None;
-        self.last_sequence = 0;
-        self.retry_at = None;
+    pub(crate) fn failed(&mut self, now: Instant, cleanup_pending: bool) {
         if self.unavailable || self.shutting_down {
-            return FailureDisposition::Unavailable;
+            return;
         }
-        self.failures = self.failures.saturating_add(1);
-        if self.failures == MAX_CONSECUTIVE_FAILURES.saturating_add(1)
-            && self.events.len() < MAX_EVENTS
-        {
-            // Preserve the existing one-time exhaustion observation while the
-            // machine continues retrying at the capped interval.
-            self.events.push_back(WatchEvent::HelperUnavailable);
+        self.running = false;
+        self.clear_run_state();
+        self.cleanup_pending = cleanup_pending;
+        let exhausted = self.schedule_failure(now);
+        let _ = self.observe_health(WatcherHealth::Unavailable(WatcherRefusal::HelperFailed));
+        if exhausted {
+            let _ = self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Unavailable));
+            let _ = self.enqueue(WatchObservation::Event(WatchEvent::HelperUnavailable));
         }
-        let shift = self.failures.saturating_sub(1).min(4);
-        let seconds = 5_u64.checked_shl(shift).unwrap_or(60).min(60);
-        let at = now.checked_add(Duration::from_secs(seconds)).unwrap_or(now);
-        self.retry_at = Some(at);
-        FailureDisposition::Retry { at }
     }
 
-    pub(crate) fn retry_without_failure(&mut self, now: Instant) -> FailureDisposition {
-        self.running = false;
-        self.tracked = None;
-        self.last_sequence = 0;
-        self.retry_at = None;
-        if self.unavailable || self.shutting_down {
-            return FailureDisposition::Unavailable;
-        }
-        let at = now.checked_add(Duration::from_secs(60)).unwrap_or(now);
-        self.retry_at = Some(at);
-        FailureDisposition::Retry { at }
+    pub(crate) fn defer_cleanup(&mut self, now: Instant) {
+        let delay = failure_delay(self.failures.max(1));
+        self.retry_at = Some(now.checked_add(delay).unwrap_or(now));
+        self.cleanup_pending = true;
+    }
+
+    pub(crate) fn cleanup_confirmed(&mut self) {
+        self.cleanup_pending = false;
+    }
+
+    pub(crate) fn cleanup_pending(&self) -> bool {
+        self.cleanup_pending
     }
 
     pub(crate) fn retry_due(&self, now: Instant) -> bool {
@@ -220,38 +297,20 @@ impl WatchMachine {
             && self.retry_at.is_some_and(|deadline| now >= deadline)
     }
 
-    pub(crate) fn relaunched(&mut self, now: Instant) -> Result<(), MessageError> {
-        if self.unavailable || self.shutting_down || self.running || self.retry_at.is_none() {
-            return Err(MessageError::Protocol);
+    pub(crate) fn drain(&mut self) -> Vec<WatchObservation> {
+        let count = self.observations.len().min(MAX_POLL_OBSERVATIONS);
+        self.observations.drain(..count).collect()
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) -> bool {
+        if self.shutting_down {
+            return false;
         }
-        let attempt = self.failures;
-        self.running = true;
-        self.retry_at = None;
-        self.last_message = now;
-        self.enqueue(WatchEvent::HelperRestarted { attempt })
-    }
-
-    pub(crate) fn drain(&mut self) -> Vec<WatchEvent> {
-        let count = self.events.len().min(MAX_POLL_EVENTS);
-        self.events.drain(..count).collect()
-    }
-
-    pub(crate) fn make_unavailable(&mut self) {
-        self.running = false;
-        self.unavailable = true;
-        self.tracked = None;
-        self.last_sequence = 0;
-        self.retry_at = None;
-        self.events.clear();
-        self.events.push_back(WatchEvent::HelperUnavailable);
-    }
-
-    pub(crate) fn begin_shutdown(&mut self) {
         self.shutting_down = true;
         self.running = false;
-        self.tracked = None;
-        self.last_sequence = 0;
+        self.clear_run_state();
         self.retry_at = None;
+        true
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
@@ -266,13 +325,78 @@ impl WatchMachine {
         self.unavailable
     }
 
-    fn enqueue(&mut self, event: WatchEvent) -> Result<(), MessageError> {
-        if self.events.len() >= MAX_EVENTS {
+    fn schedule_failure(&mut self, now: Instant) -> bool {
+        self.failures = self.failures.saturating_add(1);
+        let delay = failure_delay(self.failures);
+        self.retry_at = Some(now.checked_add(delay).unwrap_or(now));
+        self.failures == MAX_CONSECUTIVE_FAILURES.saturating_add(1)
+    }
+
+    fn record_initial_refusal(&mut self, error: ProbeSupervisorError) -> Result<(), MessageError> {
+        if self.reported_start_error.replace(error) != Some(error) {
+            self.enqueue(WatchObservation::StartFailed(error))?;
+        }
+        if !self.initial_unavailable_recorded {
+            self.initial_unavailable_recorded = true;
+            self.enqueue(WatchObservation::Lifecycle(WatchLifecycle::Unavailable))?;
+        }
+        Ok(())
+    }
+
+    fn observe_health(&mut self, health: WatcherHealth) -> Result<(), MessageError> {
+        if self.health == Some(health) {
+            return Ok(());
+        }
+        self.health = Some(health);
+        self.enqueue(WatchObservation::Health(health))
+    }
+
+    fn clear_run_state(&mut self) {
+        self.tracked = None;
+        self.last_sequence = 0;
+        self.run_has_heartbeat = false;
+    }
+
+    fn enqueue(&mut self, observation: WatchObservation) -> Result<(), MessageError> {
+        if self.observations.len() >= MAX_OBSERVATIONS {
             self.make_unavailable();
             return Err(MessageError::Overflow);
         }
-        self.events.push_back(event);
+        self.observations.push_back(observation);
         Ok(())
+    }
+
+    fn make_unavailable(&mut self) {
+        self.running = false;
+        self.unavailable = true;
+        self.cleanup_pending = true;
+        self.clear_run_state();
+        self.retry_at = None;
+        self.health = Some(WatcherHealth::Unavailable(WatcherRefusal::HelperFailed));
+        self.observations.clear();
+        self.observations
+            .push_back(WatchObservation::Health(WatcherHealth::Unavailable(
+                WatcherRefusal::HelperFailed,
+            )));
+        self.observations
+            .push_back(WatchObservation::Lifecycle(WatchLifecycle::Unavailable));
+        self.observations
+            .push_back(WatchObservation::Event(WatchEvent::HelperUnavailable));
+    }
+}
+
+fn failure_delay(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(4);
+    Duration::from_secs(5_u64.checked_shl(shift).unwrap_or(60).min(60))
+}
+
+fn classify(error: ProbeSupervisorError) -> WatcherRefusal {
+    match error {
+        ProbeSupervisorError::NoInteractiveSession
+        | ProbeSupervisorError::SessionChanged
+        | ProbeSupervisorError::AmbiguousSessions => WatcherRefusal::NoSignedInUser,
+        ProbeSupervisorError::HelperDamaged => WatcherRefusal::HelperDamaged,
+        _ => WatcherRefusal::HelperFailed,
     }
 }
 
@@ -318,14 +442,32 @@ mod tests {
         .unwrap()
     }
 
+    fn running_machine(now: Instant) -> WatchMachine {
+        let mut machine = WatchMachine::new(now);
+        machine.launched(now).unwrap();
+        machine.drain();
+        machine
+    }
+
+    fn drain_events(machine: &mut WatchMachine) -> Vec<WatchEvent> {
+        machine
+            .drain()
+            .into_iter()
+            .filter_map(|observation| match observation {
+                WatchObservation::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn fresh_heartbeat_only_renews_an_unconsumed_tracked_target() {
         let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         machine
             .ingest(HelperMessage::Heartbeat { sequence: 0 }, 4, now)
             .unwrap();
-        assert!(machine.drain().is_empty());
+        assert!(drain_events(&mut machine).is_empty());
         machine
             .ingest(
                 HelperMessage::Appeared {
@@ -336,31 +478,31 @@ mod tests {
                 now,
             )
             .unwrap();
-        machine.drain();
+        drain_events(&mut machine);
         machine
             .ingest(HelperMessage::Heartbeat { sequence: 1 }, 4, now)
             .unwrap();
         assert_eq!(
-            machine.drain(),
+            drain_events(&mut machine),
             vec![WatchEvent::StillPresent { target: target(1) }]
         );
         machine.reserve_apply(target(1)).unwrap();
         machine
             .ingest(HelperMessage::Heartbeat { sequence: 1 }, 4, now)
             .unwrap();
-        assert!(machine.drain().is_empty());
+        assert!(drain_events(&mut machine).is_empty());
     }
 
     #[test]
     fn parked_changes_enqueue_without_touching_prompt_tracking_and_refresh_liveness() {
         let began = Instant::now();
         let now = began + Duration::from_secs(14);
-        let mut machine = WatchMachine::new(began);
+        let mut machine = running_machine(began);
         machine
             .ingest(HelperMessage::Parked { count: 3 }, 4, now)
             .unwrap();
         assert_eq!(
-            machine.drain(),
+            drain_events(&mut machine),
             vec![WatchEvent::ParkedChanged { count: 3 }]
         );
         assert!(!machine.heartbeat_expired(now + Duration::from_secs(14)));
@@ -382,7 +524,7 @@ mod tests {
     #[test]
     fn appeared_rejects_an_empty_native_identity() {
         let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         assert_eq!(
             machine.ingest(
                 HelperMessage::Appeared {
@@ -397,14 +539,14 @@ mod tests {
             ),
             Err(MessageError::Protocol)
         );
-        assert!(machine.drain().is_empty());
+        assert!(drain_events(&mut machine).is_empty());
     }
 
     #[test]
     fn sequence_must_advance_and_heartbeat_must_match() {
         let now = Instant::now();
         let current = target(1);
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         machine
             .ingest(
                 HelperMessage::Appeared {
@@ -449,7 +591,7 @@ mod tests {
     #[test]
     fn malformed_message_does_not_refresh_heartbeat_or_reset_failures() {
         let began = Instant::now();
-        let mut machine = WatchMachine::new(began);
+        let mut machine = running_machine(began);
         machine.failures = 3;
         machine.running = true;
         assert_eq!(
@@ -468,118 +610,72 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_expires_at_the_exact_fifteen_second_boundary() {
-        let began = Instant::now();
-        let machine = WatchMachine::new(began);
-        assert!(machine.is_running());
-        assert!(!machine.heartbeat_expired(began + Duration::from_millis(14_999)));
-        assert!(machine.heartbeat_expired(began + Duration::from_secs(15)));
-    }
-
-    #[test]
-    fn backoff_doubles_then_stays_at_sixty_seconds_without_becoming_unavailable() {
-        let began = Instant::now();
-        let mut failed_at = began;
-        let mut machine = WatchMachine::new(began);
-        let mut exhaustion_rows = 0;
-        for attempt in 1_u32..=12 {
-            let seconds = match attempt {
-                1 => 5,
-                2 => 10,
-                3 => 20,
-                4 => 40,
-                _ => 60,
-            };
-            let retry_at = failed_at + Duration::from_secs(seconds);
-            assert_eq!(
-                machine.failed(failed_at),
-                FailureDisposition::Retry { at: retry_at }
-            );
-            assert!(!machine.is_unavailable());
-            exhaustion_rows += machine
-                .drain()
-                .into_iter()
-                .filter(|event| matches!(event, WatchEvent::HelperUnavailable))
-                .count();
-            assert!(machine.retry_due(retry_at));
-            machine.relaunched(retry_at).unwrap();
-            assert!(matches!(
-                machine.drain().as_slice(),
-                [WatchEvent::HelperRestarted { attempt: actual }] if *actual == attempt
-            ));
-            failed_at = retry_at + Duration::from_secs(1);
-        }
-        assert_eq!(exhaustion_rows, 1);
-    }
-
-    #[test]
-    fn valid_message_resets_the_consecutive_failure_count() {
+    fn queue_returns_oldest_sixteen_observations_per_poll() {
         let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
-        machine.failures = 3;
-        machine
-            .ingest(HelperMessage::Heartbeat { sequence: 0 }, 4, now)
-            .unwrap();
-        assert_eq!(machine.failures, 0);
-        assert_eq!(
-            machine.failed(now),
-            FailureDisposition::Retry {
-                at: now + Duration::from_secs(5),
-            }
-        );
-    }
-
-    #[test]
-    fn queue_returns_oldest_sixteen_events_per_poll() {
-        let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         for attempt in 1..=20 {
             machine
-                .enqueue(WatchEvent::HelperRestarted { attempt })
+                .enqueue(WatchObservation::Event(WatchEvent::HelperRestarted {
+                    attempt,
+                }))
                 .unwrap();
         }
         let first = machine.drain();
         assert_eq!(first.len(), 16);
         assert!(matches!(
             first.first(),
-            Some(WatchEvent::HelperRestarted { attempt: 1 })
+            Some(WatchObservation::Event(WatchEvent::HelperRestarted {
+                attempt: 1
+            }))
         ));
         assert!(matches!(
             first.last(),
-            Some(WatchEvent::HelperRestarted { attempt: 16 })
+            Some(WatchObservation::Event(WatchEvent::HelperRestarted {
+                attempt: 16
+            }))
         ));
         let second = machine.drain();
         assert_eq!(second.len(), 4);
         assert!(matches!(
             second.first(),
-            Some(WatchEvent::HelperRestarted { attempt: 17 })
+            Some(WatchObservation::Event(WatchEvent::HelperRestarted {
+                attempt: 17
+            }))
         ));
     }
 
     #[test]
-    fn queue_overflow_replaces_stale_events_with_unavailable() {
+    fn queue_overflow_replaces_stale_observations_with_unavailable() {
         let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         for attempt in 1..=64 {
             machine
-                .enqueue(WatchEvent::HelperRestarted { attempt })
+                .enqueue(WatchObservation::Event(WatchEvent::HelperRestarted {
+                    attempt,
+                }))
                 .unwrap();
         }
         assert_eq!(
-            machine.enqueue(WatchEvent::HelperRestarted { attempt: 65 }),
+            machine.enqueue(WatchObservation::Event(WatchEvent::HelperRestarted {
+                attempt: 65,
+            })),
             Err(MessageError::Overflow)
         );
-        assert!(matches!(
-            machine.drain().as_slice(),
-            [WatchEvent::HelperUnavailable]
-        ));
+        assert_eq!(
+            machine.drain(),
+            vec![
+                WatchObservation::Health(WatcherHealth::Unavailable(WatcherRefusal::HelperFailed,)),
+                WatchObservation::Lifecycle(WatchLifecycle::Unavailable),
+                WatchObservation::Event(WatchEvent::HelperUnavailable),
+            ]
+        );
     }
 
     #[test]
     fn apply_is_reserved_once_for_only_the_current_target() {
         let now = Instant::now();
         let current = target(1);
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         machine
             .ingest(
                 HelperMessage::Appeared {
@@ -617,7 +713,7 @@ mod tests {
         let now = Instant::now();
         let first = target(1);
         let next = target(2);
-        let mut machine = WatchMachine::new(now);
+        let mut machine = running_machine(now);
         machine
             .ingest(
                 HelperMessage::Appeared {
@@ -661,7 +757,7 @@ mod tests {
         ] {
             let now = Instant::now();
             let current = target(1);
-            let mut machine = WatchMachine::new(now);
+            let mut machine = running_machine(now);
             machine
                 .ingest(
                     HelperMessage::Appeared {
@@ -699,66 +795,5 @@ mod tests {
                 Ok(())
             );
         }
-    }
-
-    #[test]
-    fn restart_forgets_target_and_reports_attempt_after_relaunch() {
-        let now = Instant::now();
-        let current = target(1);
-        let mut machine = WatchMachine::new(now);
-        machine
-            .ingest(
-                HelperMessage::Appeared {
-                    target: current,
-                    report: report(),
-                },
-                4,
-                now,
-            )
-            .unwrap();
-        let retry = now + Duration::from_secs(5);
-        assert_eq!(machine.failed(now), FailureDisposition::Retry { at: retry });
-        assert_eq!(
-            machine.reserve_apply(current),
-            Err(ProbeSupervisorError::ApplyRefused)
-        );
-        assert!(machine.retry_due(retry));
-        machine.relaunched(retry).unwrap();
-        assert_eq!(
-            machine.ingest(HelperMessage::Heartbeat { sequence: 0 }, 4, retry),
-            Ok(())
-        );
-        assert_eq!(
-            machine.ingest(
-                HelperMessage::Appeared {
-                    target: current,
-                    report: report(),
-                },
-                4,
-                retry,
-            ),
-            Ok(())
-        );
-        let events = machine.drain();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(
-            events.get(1),
-            Some(WatchEvent::HelperRestarted { attempt: 1 })
-        ));
-        assert!(matches!(
-            events.last(),
-            Some(WatchEvent::Appeared { target, .. }) if *target == current
-        ));
-    }
-
-    #[test]
-    fn shutdown_is_idempotent_and_disables_heartbeat_and_retry() {
-        let now = Instant::now();
-        let mut machine = WatchMachine::new(now);
-        machine.begin_shutdown();
-        machine.begin_shutdown();
-        assert!(machine.is_shutting_down());
-        assert!(!machine.heartbeat_expired(now + Duration::from_secs(30)));
-        assert!(!machine.retry_due(now + Duration::from_secs(30)));
     }
 }
