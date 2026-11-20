@@ -16,6 +16,12 @@ use std::{
 
 const FORWARD_ORIGIN_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExitReporting {
+    Record,
+    Discard,
+}
+
 pub(super) trait Worker {
     fn cancel(&mut self);
     fn drain(&mut self) -> bool;
@@ -613,7 +619,7 @@ impl<P: Platform> Network<P> {
             self.pending = Some(pending);
             return Ok(None);
         }
-        if self.relay_host.is_some() && !self.drain_relay() {
+        if self.relay_host.is_some() && !self.drain_relay(ExitReporting::Record) {
             self.pending = Some(pending);
             return Ok(None);
         }
@@ -653,7 +659,7 @@ impl<P: Platform> Network<P> {
             .is_some_and(|host| !host.is_running())
         {
             self.withdraw(invalidate);
-            if !self.drain_relay() {
+            if !self.drain_relay(ExitReporting::Record) {
                 return Ok(());
             }
             self.relay_host = None;
@@ -781,14 +787,16 @@ impl<P: Platform> Network<P> {
         }
     }
     /// Consume each worker's exit after successful drain, before releasing it.
-    fn drain_relay(&mut self) -> bool {
+    fn drain_relay(&mut self, reporting: ExitReporting) -> bool {
         let Some(relay) = self.relay_host.as_mut() else {
             return false;
         };
         if !relay.drain() {
             return false;
         }
-        if let Some(exit) = relay.take_exit() {
+        if let Some(exit) = relay.take_exit()
+            && reporting == ExitReporting::Record
+        {
             self.platform
                 .record(crate::public_diagnostics::Event::RelayWorkerStopped {
                     outcome: exit.into(),
@@ -859,6 +867,14 @@ impl<P: Platform> Network<P> {
             dialer.release(device);
         }
     }
+    /// Drop must reach the owner invariant even if the diagnostics volume is
+    /// stalled. Clear the fault without its ordinary change row (audit #33 R-11).
+    pub(super) fn prepare_drop(&mut self) {
+        self.closing = true;
+        self.listener_fault = None;
+        self.owner_lookup = None;
+    }
+
     /// The session shuts down ceremony/management between these two calls.
     pub(super) fn prepare_shutdown(&mut self) {
         self.closing = true;
@@ -884,8 +900,17 @@ impl<P: Platform> Network<P> {
     /// Both explicit shutdown polls and the session Drop fallback retain and
     /// drain the same objects, with the original gateway/relay/dialer ordering.
     pub(super) fn drain_shutdown(&mut self) {
+        self.drain_network(ExitReporting::Record);
+    }
+
+    pub(super) fn drain_for_drop(&mut self) {
+        // Consume take_exit without a synchronous file write (audit #33 R-11).
+        self.drain_network(ExitReporting::Discard);
+    }
+
+    fn drain_network(&mut self, reporting: ExitReporting) {
         self.drain_gateway();
-        self.drain_relay();
+        self.drain_relay(reporting);
         if let Some(dialer) = self.dialer.as_mut() {
             dialer.drain();
         }

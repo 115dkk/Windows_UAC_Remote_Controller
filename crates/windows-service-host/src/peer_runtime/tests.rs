@@ -728,7 +728,7 @@ fn exercise(
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
-fn network_relay_exit_is_recorded_once_by_actual_shutdown_poll_and_session_drop() {
+fn network_shutdown_records_exits_but_session_drop_does_not_write_diagnostics() {
     for drop_only in [false, true] {
         let key = Identity::new();
         let mut session = ServiceSession::new(
@@ -751,6 +751,10 @@ fn network_relay_exit_is_recorded_once_by_actual_shutdown_poll_and_session_drop(
             },
         );
         let rows = session.network.record_fixture();
+        let peer_rows = Rc::new(RefCell::new(Vec::new()));
+        session.peer_worker_exit_fixture = Some(peer_rows.clone());
+        session.peer_worker_exit_pending[PeerExitCause::Timeout as usize] = 2;
+        session.peer_worker_exits[PeerExitCause::Timeout as usize] = 3;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if drop_only {
                 let end = Instant::now() + TEST_LIMIT;
@@ -773,10 +777,21 @@ fn network_relay_exit_is_recorded_once_by_actual_shutdown_poll_and_session_drop(
             std::panic::resume_unwind(panic);
         }
         let rows = rows.borrow();
-        assert_eq!(rows.len(), 1, "drop_only={drop_only}");
-        let row = serde_json::to_value(&rows[0]).unwrap();
-        assert_eq!(row["kind"], "relay_worker_stopped");
-        assert_eq!(row["outcome"]["status"], "clean");
+        let expected = usize::from(!drop_only);
+        assert_eq!(
+            (rows.len(), peer_rows.borrow().len()),
+            (expected, expected),
+            "drop_only={drop_only}"
+        );
+        if !drop_only {
+            let row = serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(row["kind"], "relay_worker_stopped");
+            assert_eq!(row["outcome"]["status"], "clean");
+            assert_eq!(
+                serde_json::to_value(&peer_rows.borrow()[0]).unwrap()["count"],
+                5
+            );
+        }
     }
 }
 

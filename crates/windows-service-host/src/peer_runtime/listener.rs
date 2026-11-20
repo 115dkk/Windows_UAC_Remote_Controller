@@ -98,13 +98,22 @@ pub(super) fn fault_for_failure(
 impl ServiceSession<'_> {
     pub(super) fn observe_peer_worker_exits(&mut self, now: Instant, flush: bool) {
         let exits = self.take_peer_worker_exits();
+        #[cfg(test)]
+        let recorded = self.peer_worker_exit_fixture.clone();
         observe_peer_worker_exits_with(
             exits,
             &mut self.peer_worker_exit_pending,
             &mut self.peer_worker_exit_reported_at,
             now,
             flush,
-            crate::public_diagnostics::record,
+            |event| {
+                #[cfg(test)]
+                if let Some(recorded) = &recorded {
+                    recorded.borrow_mut().push(event);
+                    return;
+                }
+                crate::public_diagnostics::record(event);
+            },
         );
     }
 }

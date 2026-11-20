@@ -649,6 +649,9 @@ pub struct ServiceSession<'key> {
     peer_worker_exit_pending: [u64; 8],
     #[cfg(all(windows, target_pointer_width = "64"))]
     peer_worker_exit_reported_at: [Option<Instant>; 8],
+    #[cfg(all(windows, target_pointer_width = "64", test))]
+    peer_worker_exit_fixture:
+        Option<std::rc::Rc<std::cell::RefCell<Vec<crate::public_diagnostics::Event>>>>,
     next_response: u64,
     cursor: usize,
     closing: bool,
@@ -766,6 +769,8 @@ impl<'key> ServiceSession<'key> {
             peer_worker_exit_pending: [0; 8],
             #[cfg(all(windows, target_pointer_width = "64"))]
             peer_worker_exit_reported_at: [None; 8],
+            #[cfg(all(windows, target_pointer_width = "64", test))]
+            peer_worker_exit_fixture: None,
             next_response: 1,
             cursor: 0,
             closing: false,
@@ -2594,15 +2599,20 @@ impl<'key> ServiceSession<'key> {
 }
 impl Drop for ServiceSession<'_> {
     fn drop(&mut self) {
+        // The fallback must not wait on diagnostic storage before checking the
+        // remaining owners. Explicit shutdown still reports exits (audit #33 R-11).
+        #[cfg(all(windows, target_pointer_width = "64"))]
+        self.network.prepare_drop();
         self.begin_shutdown();
         self.reap_finished();
-        #[cfg(all(windows, target_pointer_width = "64"))]
-        self.observe_peer_worker_exits(Instant::now(), true);
+        self.peer_worker_exits = [0; 8];
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
+            self.peer_worker_exit_pending = [0; 8];
+            self.peer_worker_exit_reported_at = [None; 8];
             self.pairing.poll_shutdown();
             self.management.drain();
-            self.network.drain_shutdown();
+            self.network.drain_for_drop();
         }
         if !self.peers.is_empty()
             || self.pairing_owners() != 0

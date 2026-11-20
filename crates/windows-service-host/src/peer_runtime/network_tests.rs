@@ -421,7 +421,7 @@ fn external_change_keeps_relay_and_drains_mapping_obligation_before_starting_ano
 }
 
 #[test]
-fn each_relay_drain_path_records_the_original_worker_once() {
+fn three_relay_drain_paths_record_once_and_drop_consumes_without_recording() {
     for path in 0..4 {
         let (mut owner, control, now) = active();
         match path {
@@ -458,8 +458,8 @@ fn each_relay_drain_path_records_the_original_worker_once() {
                     ],
                 );
             }
-            _ => {
-                // explicit shutdown and ServiceSession's Drop cleanup use the same drain operation
+            2 => {
+                // Explicit shutdown retains the ordinary exit row.
                 owner.prepare_shutdown();
                 control
                     .borrow_mut()
@@ -483,7 +483,28 @@ fn each_relay_drain_path_records_the_original_worker_once() {
                     ],
                 );
             }
+            _ => {
+                owner.prepare_drop();
+                owner.prepare_shutdown();
+                owner.begin_shutdown();
+                owner.drain_for_drop();
+                owner.drain_for_drop();
+                assert_order(
+                    &control.borrow().trace,
+                    &["drain-gateway", "drain-relay", "drain-dialer"],
+                );
+            }
         }
+        assert_eq!(
+            control
+                .borrow()
+                .trace
+                .iter()
+                .filter(|s| s.starts_with("exit-"))
+                .count(),
+            1
+        );
+        let expected = usize::from(path != 3);
         assert_eq!(
             control
                 .borrow()
@@ -491,11 +512,50 @@ fn each_relay_drain_path_records_the_original_worker_once() {
                 .iter()
                 .filter(|s| s.as_str() == "record-relay_worker_stopped")
                 .count(),
-            1,
+            expected,
             "path {path}"
         );
         finish(&mut owner, &control);
+        assert_eq!(
+            control
+                .borrow()
+                .trace
+                .iter()
+                .filter(|s| s.as_str() == "record-relay_worker_stopped")
+                .count(),
+            expected
+        );
     }
+}
+
+#[test]
+fn drop_discards_a_listener_fault_without_a_diagnostic_write() {
+    let control = Rc::new(RefCell::new(Control {
+        fail_relay: true,
+        ..Control::default()
+    }));
+    let now = Instant::now();
+    let mut owner = Network::new(FakePlatform(control.clone()), now);
+    owner
+        .configure_after_ready(None, now, &mut invalidator(&control))
+        .unwrap();
+    assert!(matches!(
+        owner.listener_status(),
+        ManagementResponse::ListenerStatus { fault: Some(_), .. }
+    ));
+    control.borrow_mut().trace.clear();
+    owner.prepare_drop();
+    owner.prepare_shutdown();
+    owner.begin_shutdown();
+    owner.drain_for_drop();
+    assert!(
+        !control
+            .borrow()
+            .trace
+            .iter()
+            .any(|s| s.starts_with("record-"))
+    );
+    assert_eq!(owner.remaining_owners(), 0);
 }
 
 #[test]
