@@ -371,6 +371,75 @@ Pairing remains the trusted `TrustedEnrollment` premise; its new
 commitment-and-reveal exchange (ADR 0053) is in no bound file and is not
 modelled. No theorem, rule, canary, proof budget or expected verdict changed.
 
+### Audit #33 source binding review (2026-11-20)
+
+`peer_runtime.rs` and `watch.rs` changed while the findings of audit issue #33
+were resolved, and `watch_transition.rs` is a new bound file.
+
+`watch.rs` and `watch_transition.rs`. The decision of what the watch helper
+publishes moved out of `watch.rs` into the pure state machine in
+`watch_transition.rs`: whether an observed prompt is the tracked one, whether
+its content changed, when a new sequence number is allocated, when a prompt is
+withdrawn and with which reason, when a heartbeat or a parked count is sent,
+and the settle gate after a content change. `watch.rs` gathers observations and
+writes what the transition returns, and it commits the returned state only
+after the write succeeded. That is why the new file is bound: a change to the
+publication rules now lands there. The native identity capture, the checks
+before a button press, the apply path and the outcome observation in `watch.rs`
+are byte-identical to the previous revision. A cross-model review compared the
+old loop with the transition case by case (sequence allocation at publish,
+every Gone reason including a reused window handle with another process, the
+settle gate, desktop faults, withdrawal before the parked census, an oversized
+frame, heartbeat timing, a failed write) and found the message sequence
+unchanged.
+
+`peer_runtime.rs`, by commit:
+
+- Peer worker exit causes (`PeerExitCause`) are classified where a worker is
+  reaped and counted; only a thread panic marks cleanup as failed, and a peer's
+  failure still does not end the session. The counts are written to public
+  diagnostics from the session poll, not from `Drop`.
+- The pairing `Commit` action carries the relay, route, verified material and
+  the original acceptance fields together. Enrollment is still reported only
+  when acceptance drained, the rollback paths are unchanged, and an
+  original-material error fails at the same point as before.
+- The embedded relay worker's exit result and a management-pipe creation
+  failure are written to public diagnostics; the session continues.
+- The four places that enqueue a peer response and update the ledger call one
+  function, `enqueue_peer_response`. The checks before each enqueue (liveness,
+  capacity, deadline, `check_peer`, signature) and the state updates after a
+  successful send stay at the call sites in the same order.
+- `revalidate_peers` reads the registry checkpoint and the transport keys of
+  the connected peers once per pass, after one service-identity check, instead
+  of once per peer. Every condition that retired a peer or ended the session
+  before does so now with the same result. `binding` and `check_peer`, which
+  the decision path uses, are unchanged and still read fresh values; the
+  existing test that a decision expiring during peer validation is rejected
+  without consuming its authorization passes unmodified.
+- The network configuration (relay, gateway, dialer, LAN announcement, pending
+  replacement) moved into the private module `peer_runtime/network.rs`. The
+  session keeps peer retirement and ceremony rejection and performs them at the
+  same two points of a withdrawal. The seven conditions that decide whether an
+  address is reported, signed, offered in an invitation or announced keep their
+  different conditions; none was merged. The only bound hunk at a ceremony
+  start is the invitation's address list, which now comes from that module's
+  observation with the same condition as before.
+
+Compared function by function with the previously bound revision, `dispatch`,
+`check_peer`, `peer_live`, `current_registry_checkpoint` and
+`signed_event_bytes` are textually identical, and `binding` gained a comment
+only. `respond_clock`, `queue_signed_event` and `queue_signed_notice` changed
+only in that their final enqueue goes through `enqueue_peer_response`;
+`process_enrollment` changed only in consuming the `Commit` bundle;
+`reap_finished` and `attach_carrier` changed only for the exit causes. Decision
+verification, authorization consumption, the liveness check immediately before
+the hand-over to Windows and the hand-over itself are in `dispatch` and
+`peer_runtime/prompt.rs`, which did not change.
+
+None of this changes a message, a signature domain, peer admission, the
+decision checks, request authorization or lease renewal. No theorem, rule,
+canary, proof budget or expected verdict changed.
+
 | Model operation | Existing implementation boundary |
 | --- | --- |
 | Exact peer pin and role-bound transcript verification | `crates/secure-channel/src/config.rs`: `PinnedPeer::check_key`, `check_signature`; `src/identity.rs`: `CertificateVerifyInput`, `BoundSigningKey::sign` |
