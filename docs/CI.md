@@ -215,7 +215,7 @@ without path filters, plus `workflow_dispatch`. None of them runs on `push`.
 `tools/release-version.test.mjs` fails if a gate regains a push trigger or a
 path filter.
 
-## Incomplete release work
+## Release automation and verification scope
 
 The user's September11 instruction replaces bespoke license checks/collection
 with Cargo Deny. Additional original-material searches and collection are stopped.
@@ -224,14 +224,14 @@ reference material, but are not default CI gates. Cargo Deny is a policy check,
 not a notice archive or a corresponding-source publisher. See
 [Rust license checks](RUST_NOTICE_MATERIALS.md) for the current command and scope.
 
-The current tree contains the native presentation shell and service foundations,
-not a functioning installable remote UAC controller.
-No release is published from these libraries as though it were the product.
-The main-push installer build/automatic release workflow remains required and
-will be added with the Windows/Android applications, source bundle and signing
-contract. Feature-branch CI has run; actual PR/main events and release execution
-remain separate requirements. Repository branch-protection settings have not
-been changed by writing these workflows.
+Main pushes already start `main-release.yml`: it prepares version metadata,
+dispatches the release gates for that exact commit, then creates a stable tag and
+dispatches `release.yml` only after those gates pass. Release independently checks
+the gates and publishes the Windows installer, Android APK and relay binaries.
+See [stable releases](stable-release.md) for retry and publication rules. A
+workflow definition or passing unit test is not evidence of a published release
+or native Windows/Android acceptance; retain the exact run and artifact results
+and the remaining native checks in [release verification](release-verification.md).
 
 ## Current local environment limitations
 
