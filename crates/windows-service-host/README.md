@@ -87,12 +87,12 @@ the ACL checks.
 An existing SCM registration must match the exact quoted fixed executable plus
 `service`, Korean display name, own-process LocalSystem identity, supported start
 type, normal error control and empty dependencies/load-order group. Collisions
-are never overwritten or removed. The service object owner/DACL and Restricted
+are never overwritten or removed. The service object owner/DACL and Unrestricted
 service SID are checked before existing-service mutations. Ordinary authenticated
 users receive only query-config/query-status service access, not start, stop,
 custom controls, deletion or security changes.
 
-Installation creates a disabled registration, restricts its SID, sets its service
+Installation creates a disabled registration, sets an Unrestricted SID and its service
 DACL, provisions private activity storage, then switches to automatic start. It
 does not start implicitly. A provisioning/hardening failure explicitly reports a
 disabled partial registration; it does not broadly delete files or conceal the
@@ -108,7 +108,7 @@ Only explicit elevated install provisions the fixed native ProgramData paths
 `휴대폰 승인` and `휴대폰 승인\activity`. Each new directory
 is created atomically with Administrators ownership and a protected inheritable
 DACL granting SYSTEM, Administrators and `NT SERVICE\UacRemoteController` full
-control. This is needed for the service's Restricted SID write check. Existing
+control. The service SID remains an enabled token group for ACL checks. Existing
 directories are validated, never taken over or cleared. An attacker-precreated,
 user-owned, permissive or reparse-point directory causes installation failure.
 
@@ -186,7 +186,7 @@ run the retained probe supervisor; it does not activate a prompt/action owner.
 Future transport and native prompt workers belong
 at the trusted Rust initialization/cancellation seam in `runtime::run`, not in
 Tauri. The identity adapter's descriptor grants the service SID explicit rights
-for the Restricted-token access check; actual provider behavior is an OS gate.
+for ACL checks; actual provider behavior is an OS gate.
 
 ## Verification boundary
 
@@ -198,7 +198,7 @@ partial repair and timeout scenarios need isolated Windows QA with explicit
 permission. No Secure Desktop, UAC, LSA, firewall or other protection is disabled.
 This includes launching the helper/SCM image while read-only file pins remain
 open, installer write-handle closure before helper launch, key-provider
-initialization under the Restricted SID, and ordinary Program Files/ProgramData
+initialization under the Unrestricted SID, and ordinary Program Files/ProgramData
 ACL layouts. Do not add write/delete sharing merely to make packaging pass.
 The installer must separately establish package/dependency provenance; a fixed
 path and ACL are not code-signature or loaded-module attestation.
@@ -210,7 +210,7 @@ administration, while explicitly defending against unelevated local malware.
 `ServiceProbeSupervisor::for_running_service()` is an OS/SCM-guarded, thread-affine
 owner. `probe_once(&mut self)` accepts **no path, session, command or target**.
 The installed `probe-once` CLI validates actual elevation, its own protected file
-identity, the service configuration/DACL/Restricted SID and a Running PID before
+identity, the service configuration/DACL/Unrestricted SID and a Running PID before
 sending fixed user-defined control128. It confirms the same Running PID after
 SCM accepts the control. The existing service DACL grants full control only to
 SYSTEM/Administrators; ordinary users have query rights, not user-defined control.
@@ -231,8 +231,11 @@ require ROOT's verification and the user's current native-experiment authority.
 
 The supported subset requires an actual native64 Session0 LocalSystem/system-IL
 process matching the fixed running OWN_PROCESS SCM registration and its protected
-service executable. The SCM service must have Restricted SID configuration;
-its SID must be enabled in the actual token and present in its restricting SIDs.
+service executable. The SCM service must have Unrestricted SID configuration
+(ADR 0028); other SID types return `ConfigurationConflict` on control operations.
+Its SID must be an enabled, non-deny-only group in the actual token. An empty
+restricting-SID list is expected; if nonempty, it must include the service SID.
+The service DACL and protected installed-file checks remain required.
 Impersonation query failures are failures; only ERROR_NO_TOKEN proves absence.
 Every run rechecks token, configuration, session and retained installation pins.
 
