@@ -167,6 +167,7 @@ export function useController(bridge: ControllerBridge) {
   const [state, setState] = useState<ViewState>(() => emptyState(bridge));
   const current = useRef<ViewState>(state);
   const revision = useRef(0);
+  const visibilityRevision = useRef(0);
   const liveOwner = useRef<ControllerBridge | null>(null);
   const readPending = useRef(false);
   const activeRead = useRef<{ owner: ControllerBridge; promise: Promise<AppSnapshot> } | null>(null);
@@ -308,6 +309,7 @@ export function useController(bridge: ControllerBridge) {
     else dismissScannerReturnFocus(); // A new explicit task supersedes old modal-return focus.
     readPending.current = false;
     const attempt = ++revision.current; // A command supersedes an older snapshot request.
+    const visibilityAttempt = visibilityRevision.current;
     publish({ ...previous, refreshing: false, busy: command.kind, error: null, notice: null });
     let scannerOpened = false;
     try {
@@ -408,7 +410,7 @@ export function useController(bridge: ControllerBridge) {
       }
       if (command.kind === 'decision') {
         const superseded = () => liveOwner.current !== bridge || attempt !== revision.current;
-        const visible = () => document.visibilityState === 'visible';
+        const visible = () => document.visibilityState === 'visible' && visibilityAttempt === visibilityRevision.current;
         // The request as it is on screen now, while its display lease holds. A
         // page that went to the background has already withdrawn it.
         const shown = (): boolean => {
@@ -442,6 +444,7 @@ export function useController(bridge: ControllerBridge) {
             publish({ ...current.current, snapshot: fresh, refreshing: false, busy: 'decision', stale: false, error: null, notice: null, requestObservedAt: performance.now() });
           } else if (!shown()) return withdrawn();
         }
+        if (!shown()) return withdrawn();
         for (let tries = 0; ; tries += 1) {
           const started = performance.now();
           let answer: AppSnapshot | null = null;
@@ -603,6 +606,7 @@ export function useController(bridge: ControllerBridge) {
         void refresh();
       }
       else {
+        visibilityRevision.current += 1;
         if (scannerReturn.current.pending && !scannerReturn.current.opened) dismissScannerReturnFocus();
         if (current.current.snapshot) publish({ ...current.current, snapshot: withoutRequestBodies(current.current.snapshot) });
       }

@@ -22,6 +22,38 @@ function visibilityChange() {
   act(() => { document.dispatchEvent(new Event('visibilitychange')); });
 }
 
+describe('decision intent lifetime', () => {
+  it.each(['read', 'refused decision'] as const)('gives up a denial across leaving and returning during a %s', async (held) => {
+    const snapshot = qaCase('phone-pending').snapshot;
+    const request = snapshot.requests[0]!;
+    const response = deferred<AppSnapshot>();
+    const read = vi.fn<ControllerBridge['snapshot']>().mockResolvedValue(snapshot);
+    const decide = vi.fn<ControllerBridge['decide']>().mockResolvedValue(snapshot);
+    const { result } = await ready({ ...createQaBridge(snapshot), snapshot: read, decide });
+    if (held === 'read') {
+      read.mockReturnValueOnce(response.promise);
+      act(() => { void result.current.refresh(); });
+    } else decide.mockReturnValueOnce(response.promise);
+    let denied!: Promise<AppSnapshot | null>;
+    act(() => { denied = result.current.run({ kind: 'decision', requestId: request.id, decision: 'deny' }); });
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      visibilityChange();
+      visibility.mockReturnValue('visible');
+      visibilityChange();
+      await act(async () => {
+        response.resolve(held === 'read' ? snapshot : { ...snapshot,
+          issue: { code: 'request_action_busy', message: '앱이 다른 작업을 처리하는 중입니다.', nextAction: null } });
+        await denied;
+      });
+      expect(decide).toHaveBeenCalledTimes(held === 'read' ? 0 : 1);
+      expect(result.current.busy).toBeNull();
+      await waitFor(() => expect(result.current.refreshing).toBe(false));
+      expect(result.current.snapshot?.requests).toHaveLength(1);
+    } finally { visibility.mockRestore(); }
+  });
+});
+
 describe('controller response publication', () => {
   it('does not restore request bodies when a refresh finishes on a hidden page', async () => {
     const snapshot = qaCase('phone-pending').snapshot;
