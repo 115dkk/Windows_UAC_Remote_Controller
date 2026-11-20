@@ -10,7 +10,7 @@ use android_controller::{
 use approval_protocol::{DeviceId, PcIdentity};
 use p256::{PublicKey, ecdsa::SigningKey, pkcs8::EncodePublicKey};
 use secure_channel::TlsPublicKey;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 const HEADER_BYTES: usize = 24;
 const LEGACY_RECORD_BYTES: usize = 278;
@@ -479,6 +479,19 @@ fn relay_constructor_rejects_zero_port_and_route() {
         descriptor(1, 1).with_relay(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1), [0; 32]),
         Err(PeerAssociationError::InvalidRelayRoute)
     );
+}
+
+#[test]
+fn relay_constructor_rejects_ipv6_fields_the_codec_cannot_store() {
+    for address in [
+        SocketAddrV6::new(Ipv6Addr::LOCALHOST, 443, 1, 0),
+        SocketAddrV6::new(Ipv6Addr::LOCALHOST, 443, 0, 1),
+    ] {
+        assert_eq!(
+            descriptor(1, 1).with_relay(SocketAddr::V6(address), [1; 32]),
+            Err(PeerAssociationError::InvalidRelayEncoding)
+        );
+    }
 }
 
 #[test]

@@ -476,6 +476,11 @@ fn validate_relay(address: SocketAddr, route: &[u8; 32]) -> Result<(), PeerAssoc
     if address.port() == 0 {
         return Err(PeerAssociationError::InvalidRelayPort);
     }
+    if let SocketAddr::V6(address) = address
+        && (address.flowinfo() != 0 || address.scope_id() != 0)
+    {
+        return Err(PeerAssociationError::InvalidRelayEncoding);
+    }
     if route.iter().all(|byte| *byte == 0) {
         return Err(PeerAssociationError::InvalidRelayRoute);
     }
