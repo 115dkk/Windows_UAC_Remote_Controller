@@ -32,13 +32,26 @@ for transaction, maintenance and native-proof limitations.
   Its successful JSON reply is `{"status":"requested","service_pid":...}`:
   accepted by SCM's one-slot handler, not probe completion or Windows approval.
 
-`uac-service` with no arguments runs `status`. Accepted explicit commands are
-`status`, `service`, `install`, `start`, `stop`, `restart`, `uninstall`,
-`probe-once` and `help`.
-Other/extra arguments are discarded without echoing them. There are no caller-
-supplied service names, accounts, executables, paths, credentials or arguments.
-Non-Windows operations return `UnsupportedPlatform`; native 64-bit Windows is
-the supported installation target.
+`uac-service` with no arguments runs `status`. Operational commands are
+`status`, `relay-status`, `install`, `repair`, `start`, `stop`, `restart`,
+`uninstall`, `probe-once`, `remove <device-id>`, `relay <numeric-IP:port>`,
+`relay-auto`, `external auto`, `external forward <port>`,
+`external fixed <public-IP:port>` and `help` (`--help` or `-h`). Device IDs are
+32 lowercase hexadecimal characters and must not be all zero. Relay endpoints
+are validated numeric socket addresses, not hostnames.
+
+`service` is the SCM entry point. Internal pairing entry points are
+`pair <pending-id>`, `pair-renderer <pending-id> <display-id>`,
+`pair-inspector <pipe-token>` and `usb-bootstrap`, not general management commands.
+Pending/display IDs are nonzero 64-character lowercase hexadecimal values and
+must differ for `pair-renderer`; the pipe token is 32 lowercase hexadecimal
+characters. These correlations do not authorize a ceremony or replace native
+peer authentication.
+
+Unknown commands, malformed values and extra arguments return `InvalidArguments`
+without echoing them. No command accepts a caller-selected service name, account,
+executable path or credential. Non-Windows operations return `UnsupportedPlatform`;
+native 64-bit Windows is the supported installation target.
 
 ### Startup diagnostic metadata
 
