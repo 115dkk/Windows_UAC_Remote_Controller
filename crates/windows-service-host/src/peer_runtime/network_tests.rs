@@ -39,6 +39,8 @@ struct Control {
     endpoint: Option<SocketAddr>,
     next_id: usize,
     snapshot_reads: usize,
+    listener_owner: Option<windows_port_owner::ListenerOwner>,
+    owner_lookups: usize,
     abuse: relay_service::RelayAbuseCounters,
 }
 impl Default for Control {
@@ -54,6 +56,8 @@ impl Default for Control {
             endpoint: Some(address(LAN)),
             next_id: 0,
             snapshot_reads: 0,
+            listener_owner: None,
+            owner_lookups: 0,
             abuse: relay_service::RelayAbuseCounters::default(),
         }
     }
@@ -202,7 +206,9 @@ impl Platform for FakePlatform {
         self.0.borrow_mut().trace.push("drop-lan".into());
     }
     fn listener_owner(&self) -> Option<windows_port_owner::ListenerOwner> {
-        None
+        let mut control = self.0.borrow_mut();
+        control.owner_lookups += 1;
+        control.listener_owner.clone()
     }
     fn record(&mut self, event: crate::public_diagnostics::Event) {
         let kind = serde_json::to_value(event).unwrap()["kind"]
@@ -932,6 +938,10 @@ fn listener_fault_clears_on_external_mode_and_on_shutdown() {
     for shutdown in [false, true] {
         let control = Rc::new(RefCell::new(Control {
             fail_relay: true,
+            listener_owner: Some(windows_port_owner::ListenerOwner {
+                pid: 1234,
+                image_name: Some("fixture.exe".into()),
+            }),
             ..Control::default()
         }));
         let now = Instant::now();
@@ -943,6 +953,26 @@ fn listener_fault_clears_on_external_mode_and_on_shutdown() {
             owner.listener_status(),
             ManagementResponse::ListenerStatus { fault: Some(_), .. }
         ));
+        assert!(owner.listener_owner_cached_fixture());
+        assert_eq!(control.borrow().owner_lookups, 1);
+        assert_eq!(
+            owner.listener_status(),
+            ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: Some(crate::management_protocol::ListenerFault::InUse {
+                    pid: 1234,
+                    program: Some("fixture.exe".into())
+                })
+            }
+        );
+        owner
+            .poll(now + Duration::from_secs(1), &mut invalidator(&control))
+            .unwrap();
+        assert_eq!(
+            control.borrow().owner_lookups,
+            1,
+            "cached owner should be reused"
+        );
         if shutdown {
             owner.prepare_shutdown();
         } else {
@@ -950,6 +980,7 @@ fn listener_fault_clears_on_external_mode_and_on_shutdown() {
                 .configure_after_ready(Some(address(EXTERNAL)), now, &mut invalidator(&control))
                 .unwrap();
         }
+        assert!(!owner.listener_owner_cached_fixture());
         assert!(matches!(
             owner.listener_status(),
             ManagementResponse::ListenerStatus { fault: None, .. }

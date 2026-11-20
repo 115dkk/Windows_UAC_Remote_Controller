@@ -945,7 +945,45 @@ impl<P: Platform> Network<P> {
 // Existing real TCP/signature tests need controlled gateway publications, not
 // access to the production owner's mutable configuration or worker handles.
 #[cfg(test)]
+impl<P: Platform> Network<P> {
+    pub(super) fn listener_owner_cached_fixture(&self) -> bool {
+        self.owner_lookup.is_some()
+    }
+}
+
+#[cfg(test)]
 impl Network<Native> {
+    pub(super) fn listener_failure_fixture(
+        &mut self,
+        owner: windows_port_owner::ListenerOwner,
+        now: Instant,
+    ) {
+        self.embedded = true;
+        self.owner_lookup = Some((now, Some(owner)));
+        self.observe_listener_failure(&io::Error::from_raw_os_error(10048), now);
+    }
+
+    pub(super) fn start_real_gateway_fixture(&mut self, internal: SocketAddr) {
+        self.embedded = true;
+        self.relay_host =
+            Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
+        self.relay = Some(internal);
+        self.gateway_fixture = None;
+        self.poll_gateway(Some(internal));
+    }
+
+    pub(super) fn poll_real_gateway_fixture(&mut self, internal: SocketAddr) {
+        self.poll_gateway(Some(internal));
+    }
+
+    pub(super) fn real_gateway_snapshot_fixture(
+        &self,
+    ) -> Option<direct_network::DirectGatewaySnapshot> {
+        self.gateway
+            .as_ref()
+            .map(direct_network::DirectGatewayOwner::snapshot)
+    }
+
     pub(super) fn record_fixture(
         &mut self,
     ) -> std::rc::Rc<std::cell::RefCell<Vec<crate::public_diagnostics::Event>>> {
@@ -954,8 +992,8 @@ impl Network<Native> {
         recorded
     }
 
-    // Leave the joined result unconsumed so the actual session Drop path must
-    // record it. Tests wait for completion before entering the fail-fast Drop.
+    // Leave the joined result for the actual session Drop to consume without
+    // recording. Wait for completion before entering the fail-fast Drop.
     pub(super) fn finish_relay_fixture(&mut self) -> bool {
         self.relay_host
             .as_mut()

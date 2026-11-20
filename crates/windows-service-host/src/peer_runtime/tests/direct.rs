@@ -285,6 +285,176 @@ fn routing_mode_withdrawal_retires_output_guards_and_status_contains_no_coordina
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
+fn listener_dispatch_preserves_client_policy_and_clears_the_cached_owner() {
+    use crate::{
+        ffi::ManagementClientClass,
+        management_protocol::{ListenerFault, ManagementRequest, ManagementResponse},
+    };
+    exercise(|session, _, _, _| {
+        let owner = windows_port_owner::ListenerOwner {
+            pid: 1234,
+            image_name: Some("fixture.exe".into()),
+        };
+        session
+            .network
+            .listener_failure_fixture(owner.clone(), Instant::now());
+        assert!(session.network.listener_owner_cached_fixture());
+        let expected = ManagementResponse::ListenerStatus {
+            port: 7443,
+            fault: Some(ListenerFault::InUse {
+                pid: owner.pid,
+                program: owner.image_name.clone(),
+            }),
+        };
+        // Both authenticated classes may query. Only the elevated CLI may mutate.
+        for class in [
+            ManagementClientClass::GuiMedium,
+            ManagementClientClass::CliElevated,
+        ] {
+            assert_eq!(
+                session
+                    .handle_management(class, ManagementRequest::QueryListener)
+                    .unwrap(),
+                Some(expected.clone())
+            );
+        }
+        assert!(matches!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::UseEmbeddedRelay
+                )
+                .unwrap(),
+            Some(ManagementResponse::Refused(_))
+        ));
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryListener
+                )
+                .unwrap(),
+            Some(expected)
+        );
+        session
+            .configure_relay_after_ready(Some("127.0.0.1:9443".parse().unwrap()))
+            .unwrap();
+        assert!(
+            !session.network.listener_owner_cached_fixture(),
+            "external mode kept the listener-owner cache"
+        );
+        assert_eq!(
+            session
+                .handle_management(
+                    ManagementClientClass::GuiMedium,
+                    ManagementRequest::QueryListener
+                )
+                .unwrap(),
+            Some(ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: None
+            })
+        );
+        session
+            .network
+            .listener_failure_fixture(owner, Instant::now());
+        assert!(session.network.listener_owner_cached_fixture());
+        session.begin_shutdown();
+        assert!(
+            !session.network.listener_owner_cached_fixture(),
+            "close kept the listener-owner cache"
+        );
+        assert_eq!(
+            session.network.listener_status(),
+            ManagementResponse::ListenerStatus {
+                port: 7443,
+                fault: None
+            }
+        );
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn real_gateway_adapter_replacement_preserves_source_and_failure() {
+    use crate::{ffi::ManagementClientClass, management_protocol::ManagementResponse};
+    use direct_network::{DirectGatewayState, ExternalAccess};
+    exercise(|session, _, _, _| {
+        // Not an address of this host. Fixed mode sends no router/STUN traffic.
+        let internal = "192.0.2.77:7443".parse().unwrap();
+        let first = ExternalAccess::Fixed {
+            address: "93.184.216.34:7443".parse().unwrap(),
+        };
+        let second = ExternalAccess::Fixed {
+            address: "[2606:4700::1111]:8443".parse().unwrap(),
+        };
+        session.use_external_access(crate::external_access::ExternalAccessSetting {
+            access: first,
+            forward_origin: None,
+        });
+        session.network.start_real_gateway_fixture(internal);
+        let before = session.network.observe();
+        assert_eq!(before.internal, Some(internal));
+        assert_eq!(before.gateway.unwrap().access, first);
+        session.network.poll_real_gateway_fixture(internal);
+        assert_eq!(session.network.observe().gateway.unwrap().access, first);
+        session.use_external_access(crate::external_access::ExternalAccessSetting {
+            access: second,
+            forward_origin: None,
+        });
+        assert!(
+            matches!(external_status(session, ManagementClientClass::GuiMedium), ManagementResponse::ExternalStatus { access, external: None, source: None, failure: None, .. } if access == second)
+        );
+        let end = Instant::now() + TEST_LIMIT;
+        loop {
+            assert!(
+                Instant::now() < end,
+                "real gateway replacement did not settle"
+            );
+            session.network.poll_real_gateway_fixture(internal);
+            let observation = session.network.observe();
+            if observation.gateway.as_ref().is_some_and(|reading| {
+                reading.access == second && reading.state == DirectGatewayState::Unavailable
+            }) {
+                break;
+            }
+            thread::yield_now();
+        }
+        let raw = session.network.real_gateway_snapshot_fixture().unwrap();
+        let observed = session.network.observe();
+        let reading = observed.gateway.as_ref().unwrap();
+        assert_eq!(reading.access, second);
+        assert_eq!(reading.state, raw.state);
+        assert_eq!(reading.candidates, raw.candidates());
+        assert_eq!(reading.validity_seconds, raw.remaining_validity_seconds());
+        assert_eq!(
+            (reading.external, reading.source, reading.failure),
+            (raw.external(), raw.source(), raw.failure()),
+            "native gateway metadata was not copied"
+        );
+        assert_eq!(observed.internal, Some(internal));
+        let status = external_status(session, ManagementClientClass::GuiMedium);
+        assert_eq!(
+            status,
+            ManagementResponse::ExternalStatus {
+                access: second,
+                external: raw.external(),
+                source: raw.source(),
+                failure: raw.failure(),
+                lan: Some(internal),
+                forward_origin: None
+            }
+        );
+        crate::management_protocol::encode_response(&status).unwrap();
+        // Exercise the real cancellation/drain/owner-count adapter at close too.
+        drain(session);
+        assert_eq!(session.network.remaining_owners(), 0);
+        assert!(session.network.real_gateway_snapshot_fixture().is_none());
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
 fn watcher_read_is_a_medium_client_query_of_current_health() {
     use crate::{
         ffi::ManagementClientClass,

@@ -785,8 +785,35 @@ fn network_shutdown_records_exits_but_session_drop_does_not_write_diagnostics() 
         );
         if !drop_only {
             let row = serde_json::to_value(&rows[0]).unwrap();
-            assert_eq!(row["kind"], "relay_worker_stopped");
-            assert_eq!(row["outcome"]["status"], "clean");
+            assert_eq!(
+                row,
+                serde_json::json!({
+                    "kind": "relay_worker_stopped",
+                    "outcome": {
+                        "status": "clean",
+                        "report": {
+                            "accepted": 0,
+                            "accept_failures": 0,
+                            "rejected_capacity": 0,
+                            "rejected_waiting_rooms": 0,
+                            "paired": 0,
+                            "invalid_registrations": 0,
+                            "header_timeouts": 0,
+                            "waiting_timeouts": 0,
+                            "rendezvous_timeouts": 0,
+                            "idle_timeouts": 0,
+                            "absolute_timeouts": 0,
+                            "disconnected": 0,
+                            "io_failures": 0,
+                            "cancelled": 0,
+                            "task_failures": 0,
+                            "peak_connections": 0,
+                            "peak_waiting_rooms": 0,
+                            "remaining_connections": 0
+                        }
+                    }
+                })
+            );
             assert_eq!(
                 serde_json::to_value(&peer_rows.borrow()[0]).unwrap()["count"],
                 5
