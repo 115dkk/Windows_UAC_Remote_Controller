@@ -37,7 +37,13 @@ jobs:
         run: |
           if ($env:SOURCE_RUN -notmatch '^[0-9]+$' -or $env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid producer coordinates' }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_SHA -or $run.name -ne 'Windows package' -or $run.head_branch -ne 'codex/native-runtime' -or $run.event -ne 'push') { throw 'Unexpected package producer' }
+          # Production package runs come from pull requests of this repository
+          # and from the release gate's dispatch; the push trigger this check
+          # once required no longer exists. A fork's run is never a producer.
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_SHA -or $run.name -ne 'Windows package' -or
+              $run.conclusion -ne 'success' -or $run.event -notin @('pull_request', 'workflow_dispatch') -or
+              $run.repository.full_name -ne $env:GITHUB_REPOSITORY -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) { throw 'Unexpected package producer' }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           github-token: ${{ github.token }}
