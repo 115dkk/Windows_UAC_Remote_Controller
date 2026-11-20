@@ -713,6 +713,145 @@ fn exercise(
     }
 }
 
+fn finished_peer_worker(
+    session: &mut ServiceSession<'_>,
+    task: impl FnOnce() -> Result<PeerExitCause, PeerExitCause> + Send + 'static,
+) {
+    let state = Arc::new(PeerState {
+        owner: Arc::clone(&session.identity),
+        epoch: session.engine.boot_epoch(),
+        binding: session.binding(device(1)).unwrap(),
+        active: AtomicBool::new(true),
+        stop: CancellationToken::new(),
+        hold_response: AtomicBool::new(false),
+        hold_exit: AtomicBool::new(false),
+    });
+    let (_, events) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+    let (responses, _) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+    let worker = thread::spawn(task);
+    let end = Instant::now() + TEST_LIMIT;
+    while !worker.is_finished() {
+        assert!(Instant::now() < end);
+        thread::yield_now();
+    }
+    session.peers.push(PeerSlot {
+        state,
+        events,
+        responses,
+        thread: Some(worker),
+        ready: false,
+        protocol: None,
+        clock_served: false,
+        opened_sent: None,
+        responses_in_flight: VecDeque::new(),
+        address_query_after: None,
+        clock_since: None,
+        advertised: None,
+        query_lapsed: false,
+        deferred_query: None,
+    });
+}
+
+#[test]
+fn reap_records_each_closed_cause_once_and_only_panic_marks_cleanup_failed() {
+    use framed_transport::{SocketError, TransportError};
+    use secure_channel::ChannelError;
+
+    exercise(|session, _, _, _| {
+        let errors = [
+            (
+                SocketError::Transport(TransportError::Channel(ChannelError::TlsRejected)),
+                PeerExitCause::TlsFailure,
+            ),
+            (
+                SocketError::Transport(TransportError::Channel(ChannelError::HandshakeExpired)),
+                PeerExitCause::Timeout,
+            ),
+            (SocketError::IdleDeadline, PeerExitCause::Timeout),
+            (
+                SocketError::Transport(TransportError::ProtocolRejected),
+                PeerExitCause::ProtocolViolation,
+            ),
+            (SocketError::ClockRegressed, PeerExitCause::ClockFailure),
+            (SocketError::Io, PeerExitCause::IoFailure),
+        ];
+        for (error, expected) in errors {
+            finished_peer_worker(session, move || Err(error.into()));
+            assert_eq!(session.reap_finished(), 1);
+            assert_eq!(session.reap_finished(), 0);
+            let exits = session.take_peer_worker_exits();
+            assert_eq!(
+                exits.iter().find(|(cause, _)| *cause == expected),
+                Some(&(expected, 1))
+            );
+            assert_eq!(exits.iter().map(|(_, count)| count).sum::<u64>(), 1);
+            assert!(!session.io_failed);
+            assert!(!session.closing);
+        }
+        for cause in [PeerExitCause::LocallyClosed, PeerExitCause::PeerClosed] {
+            finished_peer_worker(session, move || Ok(cause));
+        }
+        finished_peer_worker(session, || panic!("synthetic peer worker panic"));
+        assert_eq!(session.reap_finished(), 3);
+        let exits = session.take_peer_worker_exits();
+        for expected in [
+            PeerExitCause::LocallyClosed,
+            PeerExitCause::PeerClosed,
+            PeerExitCause::Panic,
+        ] {
+            assert_eq!(
+                exits.iter().find(|(cause, _)| *cause == expected),
+                Some(&(expected, 1))
+            );
+        }
+        assert_eq!(exits.iter().map(|(_, count)| count).sum::<u64>(), 3);
+        assert!(session.io_failed);
+        assert!(!session.closing);
+        assert!(
+            session
+                .take_peer_worker_exits()
+                .iter()
+                .all(|(_, count)| *count == 0)
+        );
+    });
+}
+
+#[test]
+fn reap_preserves_tls_failure_without_closing_the_session() {
+    exercise(|session, key, _, clients| {
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 8, Vec::new()));
+        let end = Instant::now() + TEST_LIMIT;
+        while !session.peers.is_empty() {
+            session.process_one().unwrap();
+            assert!(Instant::now() < end, "peer worker did not finish");
+            thread::yield_now();
+        }
+        let exits = session.take_peer_worker_exits();
+        assert_eq!(
+            exits
+                .iter()
+                .find(|(cause, _)| *cause == PeerExitCause::TlsFailure),
+            Some(&(PeerExitCause::TlsFailure, 1)),
+            "the reap seam discarded the peer worker's TLS failure"
+        );
+        assert!(!session.closing);
+        assert!(!session.io_failed);
+        assert!(
+            session
+                .take_peer_worker_exits()
+                .iter()
+                .all(|(_, count)| *count == 0)
+        );
+    });
+}
+
 #[test]
 fn parked_notice_is_v3_only_edge_triggered_and_sent_to_a_new_ready_peer() {
     exercise(|session, key, _, clients| {

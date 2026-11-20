@@ -103,6 +103,83 @@ pub enum PeerRuntimeError {
     Signing(TlsSigningBridgeError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerExitCause {
+    LocallyClosed,
+    PeerClosed,
+    TlsFailure,
+    Timeout,
+    ProtocolViolation,
+    ClockFailure,
+    IoFailure,
+    Panic,
+}
+
+impl From<framed_transport::TransportError> for PeerExitCause {
+    fn from(error: framed_transport::TransportError) -> Self {
+        use framed_transport::TransportError;
+        use secure_channel::ChannelError;
+        match error {
+            TransportError::Channel(error) => match error {
+                ChannelError::HandshakeExpired => Self::Timeout,
+                ChannelError::ClockWentBackwards | ChannelError::ClockRange => Self::ClockFailure,
+                ChannelError::PeerClosed => Self::PeerClosed,
+                ChannelError::Closed => Self::LocallyClosed,
+                ChannelError::Configuration
+                | ChannelError::WrongIdentityRole
+                | ChannelError::KeyReuse
+                | ChannelError::TlsRejected
+                | ChannelError::NegotiationRejected
+                | ChannelError::Truncated => Self::TlsFailure,
+                ChannelError::IngressTooLarge
+                | ChannelError::PlaintextTooLarge
+                | ChannelError::BufferLimit
+                | ChannelError::Backpressure
+                | ChannelError::NotReady
+                | ChannelError::ReadinessRejected => Self::ProtocolViolation,
+                ChannelError::Failed => Self::IoFailure,
+            },
+            TransportError::ReceiveDeadline | TransportError::SendDeadline => Self::Timeout,
+            TransportError::ClockRange => Self::ClockFailure,
+            TransportError::PeerClosed => Self::PeerClosed,
+            TransportError::Closed => Self::LocallyClosed,
+            TransportError::Frame(_)
+            | TransportError::NotReady
+            | TransportError::Busy
+            | TransportError::InvalidOutboundFrame
+            | TransportError::RateExceeded
+            | TransportError::DecoderStalled
+            | TransportError::ProtocolRejected => Self::ProtocolViolation,
+            TransportError::Budget(_) | TransportError::Failed => Self::IoFailure,
+        }
+    }
+}
+
+impl From<framed_transport::SocketError> for PeerExitCause {
+    fn from(error: framed_transport::SocketError) -> Self {
+        use framed_transport::SocketError;
+        match error {
+            SocketError::Transport(error) => error.into(),
+            SocketError::IdleDeadline
+            | SocketError::AbsoluteDeadline
+            | SocketError::SendDeadline
+            | SocketError::InputDeadline
+            | SocketError::WriteDeadline => Self::Timeout,
+            SocketError::ClockUnavailable
+            | SocketError::ClockRegressed
+            | SocketError::ClockRange => Self::ClockFailure,
+            SocketError::Cancelled
+            | SocketError::Aborted
+            | SocketError::OutboundRevoked
+            | SocketError::Closing
+            | SocketError::Closed => Self::LocallyClosed,
+            SocketError::InvalidTransportState => Self::ProtocolViolation,
+            SocketError::Io | SocketError::WriteZero | SocketError::Failed => Self::IoFailure,
+        }
+    }
+}
+
 /// These are in-process observations, never Windows or remote delivery results.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionProgress {
@@ -213,7 +290,7 @@ struct PeerSlot {
     state: Arc<PeerState>,
     events: async_mpsc::Receiver<PeerEvent>,
     responses: async_mpsc::Sender<Response>,
-    thread: Option<JoinHandle<Result<(), PeerRuntimeError>>>,
+    thread: Option<JoinHandle<Result<PeerExitCause, PeerExitCause>>>,
     ready: bool,
     protocol: Option<secure_channel::ControlProtocol>,
     /// This connection has drained at least one clock response. The phone
@@ -571,6 +648,7 @@ pub struct ServiceSession<'key> {
     signing_worker: ServiceTlsSigningWorker<'key>,
     budget: Arc<ConnectionBudget>,
     peers: Vec<PeerSlot>,
+    peer_worker_exits: [u64; 8],
     next_response: u64,
     cursor: usize,
     closing: bool,
@@ -700,6 +778,7 @@ impl<'key> ServiceSession<'key> {
                 ConnectionBudget::new(MAX_PEERS).map_err(|_| PeerRuntimeError::Capacity)?,
             ),
             peers: Vec::new(),
+            peer_worker_exits: [0; 8],
             next_response: 1,
             cursor: 0,
             closing: false,
@@ -1466,25 +1545,25 @@ impl<'key> ServiceSession<'key> {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|_| PeerRuntimeError::Io)?;
+                    .map_err(|_| PeerExitCause::IoFailure)?;
                 #[cfg(test)]
                 let exit_state = Arc::clone(&thread_state);
                 let result = runtime.block_on(async move {
                     carrier
                         .stream
                         .set_nonblocking(true)
-                        .map_err(|_| PeerRuntimeError::Io)?;
+                        .map_err(|_| PeerExitCause::IoFailure)?;
                     let socket = tokio::net::TcpStream::from_std(carrier.stream)
-                        .map_err(|_| PeerRuntimeError::Io)?;
+                        .map_err(|_| PeerExitCause::IoFailure)?;
                     let identity = TlsIdentity::from_trusted_host(EndpointRole::Server, signer)
-                        .map_err(|_| PeerRuntimeError::Identity)?;
+                        .map_err(|_| PeerExitCause::TlsFailure)?;
                     let transport = PeerTransport::server(
                         budget,
                         identity,
                         thread_state.binding.transport.clone(),
-                        clock.now().map_err(|_| PeerRuntimeError::Clock)?,
+                        clock.now().map_err(|_| PeerExitCause::ClockFailure)?,
                     )
-                    .map_err(|_| PeerRuntimeError::Io)?;
+                    .map_err(PeerExitCause::from)?;
                     let driver = SocketDriver::new(
                         socket,
                         transport,
@@ -1492,7 +1571,7 @@ impl<'key> ServiceSession<'key> {
                         SocketLimits::default(),
                         thread_state.stop.clone(),
                     )
-                    .map_err(|_| PeerRuntimeError::Io)?;
+                    .map_err(PeerExitCause::from)?;
                     EnrolledPeerSocket {
                         driver,
                         state: thread_state,
@@ -2519,6 +2598,23 @@ impl<'key> ServiceSession<'key> {
         }
         Ok(())
     }
+    /// Bounded, identity-free counts of joined peer workers, cleared on read.
+    /// They are observations only and do not affect retirement or cleanup.
+    pub fn take_peer_worker_exits(&mut self) -> [(PeerExitCause, u64); 8] {
+        let counts = std::mem::take(&mut self.peer_worker_exits);
+        [
+            PeerExitCause::LocallyClosed,
+            PeerExitCause::PeerClosed,
+            PeerExitCause::TlsFailure,
+            PeerExitCause::Timeout,
+            PeerExitCause::ProtocolViolation,
+            PeerExitCause::ClockFailure,
+            PeerExitCause::IoFailure,
+            PeerExitCause::Panic,
+        ]
+        .map(|cause| (cause, counts[cause as usize]))
+    }
+
     fn reap_finished(&mut self) -> usize {
         let mut index = 0;
         let mut count = 0;
@@ -2532,11 +2628,17 @@ impl<'key> ServiceSession<'key> {
                 let device = peer.state.binding.device;
                 peer.state.retire();
                 if let Some(thread) = peer.thread.take() {
-                    // Peer protocol/TLS rejection is a normal retired owner;
-                    // an actual thread unwind remains a cleanup failure signal.
-                    if thread.join().is_err() {
-                        self.io_failed = true;
-                    }
+                    // Peer failures remain local; only an unwind affects cleanup.
+                    // Count every joined result before dropping the original owner.
+                    let cause = match thread.join() {
+                        Ok(Ok(cause) | Err(cause)) => cause,
+                        Err(_) => {
+                            self.io_failed = true;
+                            PeerExitCause::Panic
+                        }
+                    };
+                    let count = &mut self.peer_worker_exits[cause as usize];
+                    *count = count.saturating_add(1);
                 }
                 #[cfg(all(windows, target_pointer_width = "64"))]
                 if let Some(dialer) = self.dialer.as_mut() {
@@ -2787,13 +2889,13 @@ struct EnrolledPeerSocket {
     response: Option<(u64, ResponseKind)>,
 }
 impl EnrolledPeerSocket {
-    async fn emit(&mut self, mut event: PeerEvent) -> Result<(), PeerRuntimeError> {
+    async fn emit(&mut self, mut event: PeerEvent) -> Result<(), PeerExitCause> {
         let end = self
             .clock
             .now()
-            .map_err(|_| PeerRuntimeError::Clock)?
+            .map_err(|_| PeerExitCause::ClockFailure)?
             .checked_add(EVENT_LIFETIME)
-            .ok_or(PeerRuntimeError::Clock)?;
+            .ok_or(PeerExitCause::ClockFailure)?;
         loop {
             if !self.state.live() {
                 return Ok(());
@@ -2805,25 +2907,25 @@ impl EnrolledPeerSocket {
             }
             self.driver
                 .observe_liveness()
-                .map_err(|_| PeerRuntimeError::Io)?;
-            if self.clock.now().map_err(|_| PeerRuntimeError::Clock)? >= end {
-                return Err(PeerRuntimeError::Protocol);
+                .map_err(PeerExitCause::from)?;
+            if self.clock.now().map_err(|_| PeerExitCause::ClockFailure)? >= end {
+                return Err(PeerExitCause::Timeout);
             }
             tokio::time::sleep(POLL).await;
         }
     }
-    async fn run(mut self) -> Result<(), PeerRuntimeError> {
+    async fn run(mut self) -> Result<PeerExitCause, PeerExitCause> {
         loop {
             tokio::select! {
                 biased;
-                _ = self.state.stop.cancelled() => { self.driver.abort(); return Ok(()); }
+                _ = self.state.stop.cancelled() => { self.driver.abort(); return Ok(PeerExitCause::LocallyClosed); }
                 response = self.responses.recv(), if self.response.is_none() => {
-                    let Some(response) = response else { self.driver.abort(); return Ok(()); };
+                    let Some(response) = response else { self.driver.abort(); return Ok(PeerExitCause::LocallyClosed); };
                     #[cfg(test)]
                     while self.state.hold_response.load(Ordering::Acquire) && self.state.live() {
                         self.driver
                             .observe_liveness()
-                            .map_err(|_| PeerRuntimeError::Io)?;
+                            .map_err(PeerExitCause::from)?;
                         tokio::time::sleep(POLL).await;
                     }
                     if !self.ready
@@ -2831,32 +2933,31 @@ impl EnrolledPeerSocket {
                         || !Arc::ptr_eq(&response.source, &self.state)
                     {
                         self.driver.abort();
-                        return Err(PeerRuntimeError::Protocol);
+                        return Err(PeerExitCause::ProtocolViolation);
                     }
                     let guard: Arc<dyn OutboundFrameGuard> = self.state.clone();
                     self.driver
                         .queue_guarded_frame(response.bytes, response.deadline, guard)
-                        .map_err(|_| PeerRuntimeError::Io)?;
+                        .map_err(PeerExitCause::from)?;
                     self.response = Some((response.id, response.kind));
                 }
                 event = self.driver.next_event() => {
                     let event = match event {
                         Ok(event) => event,
-                        Err(_) if !self.state.live() => return Ok(()),
-                        Err(_) => return Err(PeerRuntimeError::Io),
+                        Err(error) => return Err(error.into()),
                     };
                     match event {
                         SocketEvent::Ready => {
                             self.ready = true;
                             let protocol = self.driver.negotiated_protocol()
-                                .ok_or(PeerRuntimeError::Protocol)?;
+                                .ok_or(PeerExitCause::ProtocolViolation)?;
                             self.emit(PeerEvent::Ready(protocol)).await?;
                         }
                         SocketEvent::Frame(frame) => {
                             if !self.ready || !self.state.live() {
-                                return Err(PeerRuntimeError::Protocol);
+                                return Err(PeerExitCause::ProtocolViolation);
                             }
-                            let received = self.clock.now().map_err(|_| PeerRuntimeError::Clock)?;
+                            let received = self.clock.now().map_err(|_| PeerExitCause::ClockFailure)?;
                             self.emit(PeerEvent::Frame(PeerFrame {
                                 source: Arc::clone(&self.state),
                                 frame,
@@ -2866,10 +2967,11 @@ impl EnrolledPeerSocket {
                         }
                         SocketEvent::OutboundDrained => {
                             let (id, kind) =
-                                self.response.take().ok_or(PeerRuntimeError::Protocol)?;
+                                self.response.take().ok_or(PeerExitCause::ProtocolViolation)?;
                             self.emit(PeerEvent::Drained { id, kind }).await?;
                         }
-                        SocketEvent::PeerClosed | SocketEvent::LocallyClosed => return Ok(()),
+                        SocketEvent::PeerClosed => return Ok(PeerExitCause::PeerClosed),
+                        SocketEvent::LocallyClosed => return Ok(PeerExitCause::LocallyClosed),
                     }
                 }
             }
