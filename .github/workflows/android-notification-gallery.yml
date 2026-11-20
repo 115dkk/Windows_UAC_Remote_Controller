@@ -33,6 +33,32 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      # Downloaded Gradle dependencies and the Gradle distribution only, never build output. The
+      # repositories answered "not found" for artifacts that exist four times in two days and failed
+      # gates and a release. Only runs on main save; pull requests only restore, and the Release
+      # workflow restores nothing (docs/CI.md), so a branch cannot reach a release build through it.
+      - name: Restore and save the Gradle dependency cache (main)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+            !~/.gradle/caches/modules-2/modules-2.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: gradle-deps-v1-android-notification-gallery-${{ hashFiles('src-tauri/gen/android/**/*.gradle*', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties', 'src-tauri/gen/android/buildSrc/src/**', 'tools/android-notification-gallery/**/*.gradle*') }}
+          restore-keys: gradle-deps-v1-android-notification-gallery-
+      - name: Restore the Gradle dependency cache
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5, Node24
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+            !~/.gradle/caches/modules-2/modules-2.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: gradle-deps-v1-android-notification-gallery-${{ hashFiles('src-tauri/gen/android/**/*.gradle*', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties', 'src-tauri/gen/android/buildSrc/src/**', 'tools/android-notification-gallery/**/*.gradle*') }}
+          restore-keys: gradle-deps-v1-android-notification-gallery-
       - name: Test evidence and emulator-only restrictions
         run: node --test tools/android-notification-gallery.test.mjs
       - name: Install Android build inputs on disposable CI only
