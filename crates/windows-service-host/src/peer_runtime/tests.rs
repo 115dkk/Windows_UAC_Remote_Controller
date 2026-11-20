@@ -914,6 +914,7 @@ fn reap_records_each_closed_cause_once_and_only_panic_marks_cleanup_failed() {
     });
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
 fn reap_preserves_tls_failure_without_closing_the_session() {
     exercise(|session, key, _, clients| {
