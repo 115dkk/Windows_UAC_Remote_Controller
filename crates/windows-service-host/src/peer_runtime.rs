@@ -1847,10 +1847,18 @@ impl<'key> ServiceSession<'key> {
                 }
                 Ok(None)
             }
-            pairing::CeremonyAction::Commit { relay, route } => {
-                let verified = self.pairing.take_verified();
-                let ((proof, status), summary) = match self.enrollment_step(verified) {
-                    Ok(verified) => verified,
+            pairing::CeremonyAction::Commit(commit) => {
+                let pairing::EnrollmentCommit {
+                    relay,
+                    route,
+                    material,
+                    original,
+                } = *commit;
+                let enrollment::CommitMaterial {
+                    verified: (proof, status),
+                    summary,
+                } = match self.enrollment_step(material) {
+                    Ok(material) => material,
                     Err(progress) => return Ok(Some(progress)),
                 };
                 let approval = match self.enrollment_step(
@@ -1892,16 +1900,16 @@ impl<'key> ServiceSession<'key> {
                     .map_err(|_| PeerRuntimeError::Registry)?;
                 self.current_registry_checkpoint()?;
                 self.pairing.record_committed(summary.device);
-                let pc_transport_key = self.pairing.original_pc_key()?;
+                let original = original?;
                 let unsigned = UnsignedEnrollmentAcceptance::new(EnrollmentAcceptanceFields {
-                    ceremony_nonce: self.pairing.original_nonce()?,
-                    attestation_challenge: self.pairing.original_challenge()?,
+                    ceremony_nonce: original.nonce,
+                    attestation_challenge: original.challenge,
                     pc: self.engine.pc_identity(),
                     recipient_device: summary.device,
                     registry_revision: receipt.registry_revision(),
                     phone_keys: summary.phone_keys,
                     pc_signing_key: self.pc_key.clone(),
-                    pc_transport_key,
+                    pc_transport_key: original.pc_key,
                 })
                 .map_err(|_| PeerRuntimeError::Protocol)?;
                 let acceptance = self.key.sign_acceptance(unsigned)?;

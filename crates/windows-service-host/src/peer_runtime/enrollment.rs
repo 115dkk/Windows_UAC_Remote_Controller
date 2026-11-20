@@ -49,6 +49,11 @@ const POLL: Duration = Duration::from_millis(25);
 
 pub(super) type VerifiedMaterial = (VerifiedKeyBundle, TrustedStatusSnapshot);
 
+pub(super) struct CommitMaterial {
+    pub(super) verified: VerifiedMaterial,
+    pub(super) summary: CandidateSummary,
+}
+
 #[derive(Clone)]
 pub(super) struct ExpectedOriginal {
     pub(super) nonce: PairingNonce,
@@ -517,16 +522,14 @@ impl EnrollmentCarrier {
         Ok(())
     }
 
-    pub(super) fn take_verified(
-        &mut self,
-    ) -> Result<(VerifiedMaterial, CandidateSummary), EnrollmentError> {
+    pub(super) fn take_verified(&mut self) -> Result<CommitMaterial, EnrollmentError> {
         if !self.ready_to_commit() {
             return Err(EnrollmentError::Protocol);
         }
-        Ok((
-            self.verified.take().ok_or(EnrollmentError::Protocol)?,
-            self.summary.take().ok_or(EnrollmentError::Protocol)?,
-        ))
+        Ok(CommitMaterial {
+            verified: self.verified.take().ok_or(EnrollmentError::Protocol)?,
+            summary: self.summary.take().ok_or(EnrollmentError::Protocol)?,
+        })
     }
 
     pub(super) fn send_acceptance(
@@ -1527,7 +1530,7 @@ pub(super) mod tests {
         wait_progress(&mut carrier, &mut worker, |progress, carrier| {
             matches!(progress, EnrollmentProgress::AwaitingPcDecision) && carrier.ready_to_commit()
         });
-        let (_, summary) = carrier.take_verified().unwrap();
+        let CommitMaterial { summary, .. } = carrier.take_verified().unwrap();
         let keys = DeviceKeys::new(
             decision_key(&summary.approval_key),
             decision_key(&summary.denial_key),

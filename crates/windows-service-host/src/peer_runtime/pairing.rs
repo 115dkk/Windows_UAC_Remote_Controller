@@ -116,14 +116,25 @@ enum ContentAction {
 
 pub(super) enum CeremonyAction {
     SignFrozen(Box<service_protocol::UnsignedFrozenCandidate>),
-    Commit {
-        relay: std::net::SocketAddr,
-        route: RouteId,
-    },
+    Commit(Box<EnrollmentCommit>),
     Enrolled(DeviceId),
     Rollback(DeviceId),
     Failed,
 }
+pub(super) struct AcceptanceOriginal {
+    pub(super) nonce: service_protocol::PairingNonce,
+    pub(super) challenge: service_protocol::PairingChallenge,
+    pub(super) pc_key: TlsPublicKey,
+}
+
+pub(super) struct EnrollmentCommit {
+    pub(super) relay: std::net::SocketAddr,
+    pub(super) route: RouteId,
+    pub(super) material: Result<super::enrollment::CommitMaterial, Failure>,
+    // Preserve the original failure point after registry commit (audit #33 B-7).
+    pub(super) original: Result<AcceptanceOriginal, super::PeerRuntimeError>,
+}
+
 pub(super) struct RendererRun {
     request: RendererRequest,
     pipe: PairingPipe,
@@ -1392,7 +1403,19 @@ impl ServicePairing {
                         let (relay, route) = self.enrollment_route.ok_or(Failure::Protocol)?;
                         self.commit_requested = true;
                         self.commit_authorized = true;
-                        return Ok(Some(CeremonyAction::Commit { relay, route }));
+                        let material = self
+                            .enrollment
+                            .as_mut()
+                            .ok_or(Failure::Protocol)?
+                            .take_verified()
+                            .map_err(|_| Failure::Enrollment);
+                        let original = self.original_acceptance();
+                        return Ok(Some(CeremonyAction::Commit(Box::new(EnrollmentCommit {
+                            relay,
+                            route,
+                            material,
+                            original,
+                        }))));
                     }
                 }
                 EnrollmentProgress::Accepted => {
@@ -1531,57 +1554,17 @@ impl ServicePairing {
             .map_err(|_| Failure::Enrollment)
     }
 
-    pub(super) fn original_nonce(
-        &self,
-    ) -> Result<service_protocol::PairingNonce, super::PeerRuntimeError> {
+    fn original_acceptance(&self) -> Result<AcceptanceOriginal, super::PeerRuntimeError> {
         self.preparation
             .as_ref()
             .ok_or(super::PeerRuntimeError::Protocol)?
             .prepared()
-            .map(|original| original.nonce)
+            .map(|original| AcceptanceOriginal {
+                nonce: original.nonce,
+                challenge: original.challenge,
+                pc_key: original.pc_key,
+            })
             .map_err(|_| super::PeerRuntimeError::Protocol)
-    }
-
-    pub(super) fn original_challenge(
-        &self,
-    ) -> Result<service_protocol::PairingChallenge, super::PeerRuntimeError> {
-        self.preparation
-            .as_ref()
-            .ok_or(super::PeerRuntimeError::Protocol)?
-            .prepared()
-            .map(|original| original.challenge)
-            .map_err(|_| super::PeerRuntimeError::Protocol)
-    }
-
-    pub(super) fn original_pc_key(&self) -> Result<TlsPublicKey, super::PeerRuntimeError> {
-        self.preparation
-            .as_ref()
-            .ok_or(super::PeerRuntimeError::Protocol)?
-            .prepared()
-            .map(|original| original.pc_key)
-            .map_err(|_| super::PeerRuntimeError::Protocol)
-    }
-
-    pub(super) fn take_verified(
-        &mut self,
-    ) -> Result<
-        (
-            (
-                android_attestation::VerifiedKeyBundle,
-                android_attestation::TrustedStatusSnapshot,
-            ),
-            super::enrollment::CandidateSummary,
-        ),
-        Failure,
-    > {
-        if !self.commit_requested {
-            return Err(Failure::Protocol);
-        }
-        self.enrollment
-            .as_mut()
-            .ok_or(Failure::Protocol)?
-            .take_verified()
-            .map_err(|_| Failure::Enrollment)
     }
 
     pub(super) fn send_acceptance(
