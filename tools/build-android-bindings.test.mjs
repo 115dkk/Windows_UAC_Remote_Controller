@@ -449,7 +449,11 @@ test('Gradle source contract uses the same closed tuples, immutable selection an
   assert.ok(app.includes('generated/controllerUniffi/$variant/${controllerSelectedAbi.abi}/kotlin'));
   assert.ok(app.includes('${controllerSelectedAbi.rustTarget}/$variant/libuac_android_controller.so'));
   assert.ok(app.includes('generated/controllerNative/$variant/${controllerSelectedAbi.abi}'));
-  assert.ok(app.includes('controllerRepository.resolve("tools/android-abi.mjs")'));
+  // The Rust inputs are one tree: the ABI helper is in it, and Cargo, not Gradle's own input list,
+  // decides whether the library is rebuilt (audit #33 TD-27).
+  assert.ok(app.includes('"tools/build-android-bindings.mjs", "tools/android-core-check.mjs", "tools/android-abi.mjs",'));
+  assert.ok(app.includes('inputs.files(controllerRustInputs)'));
+  assert.ok(app.includes('outputs.upToDateWhen { false }'));
   assert.ok(app.includes('testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"'));
   for (const dependency of ['androidx.test:core:1.7.0', 'androidx.test:runner:1.7.0', 'androidx.test.ext:junit:1.3.0']) assert.ok(app.includes(dependency));
   assert.ok(app.includes('getByName("release")'));

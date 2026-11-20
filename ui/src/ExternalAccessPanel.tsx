@@ -15,7 +15,7 @@ import {
   addressDiff, addressMovedText, forwardAddressMoved,
   addressInvalidText, addressUnreachableText, DEFAULT_RELAY_PORT, draftChanged, draftFromView, failureText, FIXED_ADDRESS_EXAMPLE,
   inputFromDraft, lanEndpoint, modeText, parsePort, portChangeHint, portInvalidText, portSuggestHint, portSuggestText, sourceText,
-  suggestExternalPort,
+  sameFixedAddress, suggestExternalPort,
 } from './externalAccess';
 import type { ExternalAccessDraft } from './externalAccess';
 
@@ -24,7 +24,7 @@ const modes: readonly ExternalAccessMode[] = ['automatic', 'router_forward', 'fi
 function confirms(view: ExternalAccessView | null | undefined, input: ExternalAccessInput): boolean {
   if (!view || view.mode !== input.mode) return false;
   if (input.mode === 'router_forward') return view.externalPort === input.externalPort;
-  if (input.mode === 'fixed') return view.fixedAddress === input.fixedAddress;
+  if (input.mode === 'fixed') return view.fixedAddress !== null && sameFixedAddress(view.fixedAddress, input.fixedAddress);
   return true;
 }
 

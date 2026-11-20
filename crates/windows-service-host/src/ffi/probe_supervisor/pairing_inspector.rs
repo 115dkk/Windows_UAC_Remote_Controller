@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! One service-created, nonvisual SYSTEM child in the registered renderer's
 //! session. Independent lease: the existing consent watcher stays alive.
+use super::io::Completed;
 use super::*;
 use crate::ffi::pairing_peer::renderer;
 use windows_prompt_probe::pairing_inspection::{Binding, Reply, Request};
@@ -39,12 +40,12 @@ impl Owner {
             if preflight.session.id != session {
                 return Err(crate::PairingPeerError::Rejected);
             }
-            owner.run = Some(ActiveRun::prepare(preflight).map_err(mapped)?);
+            owner.run =
+                Some(ActiveRun::prepare_inspection(preflight, binding.cutoff).map_err(mapped)?);
             let run = owner
                 .run
                 .as_mut()
                 .ok_or(crate::PairingPeerError::InvalidPhase)?;
-            run.inspection = Some(binding.cutoff);
             run.launch_watch().map_err(mapped)?;
             if !matches!(owner.await_operation()?, Completed::Count(0)) {
                 return Err(crate::PairingPeerError::Malformed);
@@ -83,35 +84,8 @@ impl Owner {
                 .run
                 .as_mut()
                 .ok_or(crate::PairingPeerError::InvalidPhase)?;
-            let wait = run.budget().map_err(mapped)?.min(25);
-            let pipe = run.pipe().map_err(mapped)?;
-            let operation = run
-                .operation
-                .as_mut()
-                .ok_or(crate::PairingPeerError::InvalidPhase)?;
-            if let Some(done) = operation.poll(pipe).map_err(mapped)? {
-                run.operation = None;
+            if let Some(done) = run.poll_inspection_operation().map_err(mapped)? {
                 return Ok(done);
-            }
-            // SAFETY: only the owned, live operation event; original ceremony
-            // and short operation deadlines and service stop rechecked per slice.
-            match unsafe { WaitForSingleObject(operation.event(), wait) } {
-                WAIT_OBJECT_0 | WAIT_TIMEOUT => (),
-                _ => return Err(mapped(native(Stage::ReportRead, WinError::from_thread()))),
-            }
-            if exited(run.process().map_err(mapped)?, 0).map_err(mapped)? {
-                let pipe = run.pipe().map_err(mapped)?;
-                if let Some(done) = run
-                    .operation
-                    .as_mut()
-                    .ok_or(crate::PairingPeerError::InvalidPhase)?
-                    .poll(pipe)
-                    .map_err(mapped)?
-                {
-                    run.operation = None;
-                    return Ok(done);
-                }
-                return Err(crate::PairingPeerError::Rejected);
             }
         }
     }
@@ -124,17 +98,7 @@ impl Owner {
             .run
             .as_mut()
             .ok_or(crate::PairingPeerError::InvalidPhase)?;
-        run.authenticate_pipe().map_err(mapped)?;
-        run.began = Instant::now(); // Per-operation budget; never replaces cutoff.
-        run.operation = Some(
-            PendingIo::start(
-                run.pipe().map_err(mapped)?,
-                Kind::Write(&bytes),
-                Stage::ChallengeWrite,
-                run.began,
-            )
-            .map_err(mapped)?,
-        );
+        run.begin_inspection_write(&bytes).map_err(mapped)?;
         if !matches!(self.await_operation()?, Completed::Count(count) if count == bytes.len()) {
             return Err(crate::PairingPeerError::Malformed);
         }
@@ -142,15 +106,11 @@ impl Owner {
             .run
             .as_mut()
             .ok_or(crate::PairingPeerError::InvalidPhase)?;
-        run.operation = Some(
-            PendingIo::start(
-                run.pipe().map_err(mapped)?,
-                Kind::Read(windows_prompt_probe::pairing_inspection::MAX_BYTES),
-                Stage::ReportRead,
-                run.began,
-            )
-            .map_err(mapped)?,
-        );
+        run.begin_inspection_read(
+            windows_prompt_probe::pairing_inspection::MAX_BYTES,
+            Stage::ReportRead,
+        )
+        .map_err(mapped)?;
         let Completed::Bytes(bytes) = self.await_operation()? else {
             return Err(crate::PairingPeerError::Malformed);
         };
@@ -217,15 +177,8 @@ impl Owner {
             .run
             .as_mut()
             .ok_or(crate::PairingPeerError::InvalidPhase)?;
-        run.operation = Some(
-            PendingIo::start(
-                run.pipe().map_err(mapped)?,
-                Kind::Read(1),
-                Stage::EofRead,
-                run.began,
-            )
-            .map_err(mapped)?,
-        );
+        run.begin_inspection_read(1, Stage::EofRead)
+            .map_err(mapped)?;
         if !matches!(self.await_operation()?, Completed::Eof) {
             #[cfg(all(windows, feature = "lab-software-identity"))]
             crate::lab::record_note("inspector cleanup: close reply was not end of stream");
@@ -235,30 +188,7 @@ impl Owner {
             .run
             .as_mut()
             .ok_or(crate::PairingPeerError::InvalidPhase)?;
-        while !exited(
-            run.process().map_err(mapped)?,
-            run.budget().map_err(mapped)?.min(25),
-        )
-        .map_err(mapped)?
-        {}
-        let code = exit_code(run.process().map_err(mapped)?).map_err(mapped)?;
-        // A signalled process object does not yet prove the job has released
-        // it: the accounting still counted the exited child on the first query.
-        // Give that disassociation the same bounded budget the forceful path
-        // uses, so a normal cleanup is not reported as an uncertain one.
-        let began = Instant::now();
-        let mut empty = run.job_empty().map_err(mapped)?;
-        while !empty && began.elapsed() < CLEANUP_BUDGET {
-            std::thread::sleep(Duration::from_millis(5));
-            empty = run.job_empty().map_err(mapped)?;
-        }
-        if code != 0 || !empty {
-            #[cfg(all(windows, feature = "lab-software-identity"))]
-            crate::lab::record_note(&format!(
-                "inspector cleanup: exit={code:#010x} job_empty={empty}"
-            ));
-            return Err(crate::PairingPeerError::CleanupUnconfirmed);
-        }
+        run.finish_inspection().map_err(mapped)?;
         self.run = None;
         if CLOSE_FAILURE.load(Ordering::Acquire) != 0 {
             #[cfg(all(windows, feature = "lab-software-identity"))]
@@ -308,9 +238,7 @@ impl Drop for Owner {
         if let Some(mut run) = self.run.take()
             && !matches!(run.cleanup_with_budget(CLEANUP_BUDGET), Ok(true))
         {
-            run.job.close();
-            run.job_closed = true;
-            mem::forget(run);
+            run.retain_uncertain();
             crate::ffi::pairing_peer::quarantine_boundary();
             return;
         }

@@ -1,20 +1,26 @@
-# Read-only Windows consent-UI capability probe
+# Windows consent-UI probe and supervised watch helper
 
-This crate is a **diagnostic probe, not a request identity or approval adapter**.
-The safe outward API is `probe_once() -> Result<ProbeReport, ProbeError>`, with no
+The one-shot `probe_once() -> Result<ProbeReport, ProbeError>` API is read-only, with no
 caller-selected process, HWND, path, session, desktop, property, input or action.
 The helper binary `uac-prompt-probe` accepts exactly one pipe token (32 lowercase
 hexadecimal characters), optionally preceded by `watch`. The token only names the
 service's pipe; it authorizes nothing. Other arguments fail without echoing them. It now requires the authenticated private service pipe;
 there is no unsupervised stdout fallback. No installation, elevation, SCM
-registration, token adjustment, policy change, network or user-input endpoint
-is implemented in this crate.
+registration, token adjustment, policy change, network or generic user-input
+endpoint is implemented in this crate.
 
-`windows-service-host` now contains a dormant fixed-helper supervisor. ROOT must
-review and integrate that service-internal path, and separately provision the
-protected installed helper, before privileged use. No workspace executable is
-automatically installed or launched by this crate. A Session-0 service does not
-become a per-session SYSTEM UI process merely because the service is Running.
+Watch mode accepts `Apply` only over the authenticated service channel. It
+matches the retained target, rechecks the input desktop and process identity,
+recaptures the content and compares its digest, then locates the selected consent
+button twice before one UIA `Invoke` attempt. It observes whether the target
+remains or disappears and reports the outcome; it does not retry the action or
+synthesize input.
+
+`windows-service-host` starts and supervises the installed watch helper. No
+workspace executable is automatically installed or launched by this crate. A
+Session-0 service does not become a per-session SYSTEM UI process merely because
+the service is Running. The observation details below describe `probe_once`;
+watch mode adds the authenticated action handling described above.
 
 ## Exact supported observation profile
 
@@ -48,8 +54,8 @@ observations and multiple candidates fail rather than guessing.
 **This path comparison assumes the intact OS/system directory. It is not a full
 mapped-image hash/Authenticode proof. The consent UI process is not the executable
 being elevated. These checks do not provide atomic elevation-request identity,
-an immutable original command, or a race-free later action target.** The future
-launcher must independently prove the intended session and protected helper.
+an immutable original command, or a race-free later action target.** The service
+supervisor independently checks the intended session and protected helper.
 
 ## UIA, bounds and prohibited data/actions
 
@@ -60,7 +66,7 @@ each to 1,000ms. Traversal allows at most 128 inspected elements and depth 16
 are skipped. Edit controls and controls offering ValuePattern also exclude their
 entire subtree from content capture. Other reads are fixed control type, owner PID, native HWND,
 enabled/offscreen flags and three pattern-availability booleans (Invoke, Value,
-legacy accessibility). No actual action-pattern interface is obtained.
+legacy accessibility). One-shot observation obtains no action-pattern interface.
 
 The retained root must be an onscreen nonpassword window element belonging to
 the candidate HWND. Its UIA Name supplies the caption (including an actual empty
@@ -83,7 +89,8 @@ by an application. Do not log, publish or treat it as inherently non-sensitive.
 
 There is **no TextPattern/Value or credential-value read**, AutomationId dump,
 process command-line query, screenshot, clipboard, ValuePattern write, window
-activation, Invoke, BM_CLICK, WM_COMMAND, SendInput or arbitrary-message API.
+activation, BM_CLICK, WM_COMMAND, SendInput or arbitrary-message API. `Invoke`
+is limited to the checked consent button in watch mode.
 Desktop/window-station object names are private prerequisites. Only fixed
 failure categories/numeric HRESULTs appear in errors, never provider strings.
 
@@ -118,7 +125,9 @@ the library does not replace a host panic hook. Windows/API/worker failures retu
 nonzero; argument rejection returns 2. Successful metadata is not authorization.
 
 `supervision::run_supervised_helper()` takes no caller-selected target. Before probing, it checks
-the actual own SYSTEM/system-IL/session/restricted-service-SID token, opens only
+the actual own SYSTEM/system-IL/session token and its enabled service SID group (the
+restricting-SID list is expected to be empty, and a nonempty one must name the service
+SID; ADR 0028), opens only
 the local pipe named by its token (`PromptProbe.v4.<token>`, created by the service
 before the helper exists; ADR 0052), uses identification-only security QoS, and
 matches the pipe server to the running fixed SCM service. A retained server
@@ -153,7 +162,8 @@ native capability or privileged launch has been exercised by the child.
 
 ROOT owns Cargo integration, formatting, all-target/all-feature Clippy with
 `-D warnings`, actual Rust Analyzer, tests and independent static FFI review.
-Native privileged launch/UAC remains user-deferred. No service launch is wired.
+The service runtime is wired to launch the watch helper. Source and unit-test
+checks do not establish native privileged launch or UAC behavior.
 
 Source basis: the existing
 `.superloopy/evidence/secure-desktop-next-probe.md` design and installed

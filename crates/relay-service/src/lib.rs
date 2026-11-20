@@ -23,7 +23,7 @@ pub(crate) use config::{
     EVICTION_RECORDS_PER_WAITING_ROOM, MAX_CONSECUTIVE_ACCEPT_FAILURES, MAX_TASK_FAILURES,
     SHORT_LIVED,
 };
-pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay};
+pub use hosted::{EMBEDDED_RELAY_PORT, HostedRelay, HostedRelayExit};
 pub use relay::{run, run_with_policy};
 pub use tokio_util::sync::CancellationToken;
 pub use wire::{

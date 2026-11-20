@@ -167,7 +167,7 @@ pub(super) async fn request(
                 return Err(invalid_response());
             }
             // Some routers ignore `Connection: close`; a complete body ends the read.
-            if framed_length(&received).is_some_and(|total| received.len() >= total) {
+            if response_frame(&received)? == ResponseFrame::Complete {
                 break;
             }
         }
@@ -175,25 +175,117 @@ pub(super) async fn request(
     }).await
 }
 
-fn framed_length(bytes: &[u8]) -> Option<usize> {
-    let split = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
-    let headers = std::str::from_utf8(&bytes[..split]).ok()?;
-    let length = headers.split("\r\n").skip(1).find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if !name.eq_ignore_ascii_case("content-length") {
-            return None;
-        }
-        value.trim().parse::<usize>().ok()
-    })?;
-    split.checked_add(4)?.checked_add(length)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseFrame {
+    Complete,
+    NeedsMore,
 }
 
-fn decode(bytes: &[u8]) -> io::Result<String> {
-    let split = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(invalid_response)?;
-    if split > MAX_HEADERS || bytes.len() > MAX_RESPONSE {
+#[derive(Clone, Copy)]
+enum BodyFraming {
+    ContentLength(usize),
+    Chunked,
+    UntilEof,
+}
+
+#[derive(Clone, Copy)]
+struct ParsedHeaders {
+    split: usize,
+    code: u16,
+    body: BodyFraming,
+}
+
+fn response_frame(bytes: &[u8]) -> io::Result<ResponseFrame> {
+    if bytes.len() > MAX_RESPONSE {
+        return Err(invalid_response());
+    }
+    let Some(headers) = parse_headers(bytes)? else {
+        return Ok(ResponseFrame::NeedsMore);
+    };
+    let body = &bytes[headers.split + 4..];
+    match headers.body {
+        BodyFraming::ContentLength(length) => {
+            let total = headers
+                .split
+                .checked_add(4)
+                .and_then(|header_length| header_length.checked_add(length))
+                .filter(|total| *total <= MAX_RESPONSE)
+                .ok_or_else(invalid_response)?;
+            if bytes.len() < total {
+                Ok(ResponseFrame::NeedsMore)
+            } else if bytes.len() == total {
+                Ok(ResponseFrame::Complete)
+            } else {
+                Err(invalid_response())
+            }
+        }
+        BodyFraming::Chunked => chunk_frame(body),
+        BodyFraming::UntilEof => Ok(ResponseFrame::NeedsMore),
+    }
+}
+
+fn chunk_frame(mut bytes: &[u8]) -> io::Result<ResponseFrame> {
+    let mut decoded = 0_usize;
+    for _ in 0..512 {
+        let Some(split) = bytes.windows(2).position(|window| window == b"\r\n") else {
+            let digits = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+            if digits.len() > 8 || digits.iter().any(|byte| !byte.is_ascii_hexdigit()) {
+                return Err(invalid_response());
+            }
+            return Ok(ResponseFrame::NeedsMore);
+        };
+        if split == 0 || split > 8 {
+            return Err(invalid_response());
+        }
+        let text = std::str::from_utf8(&bytes[..split]).map_err(|_| invalid_response())?;
+        if !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid_response());
+        }
+        let size = usize::from_str_radix(text, 16).map_err(|_| invalid_response())?;
+        if size > MAX_RESPONSE {
+            return Err(invalid_response());
+        }
+        bytes = &bytes[split + 2..];
+        if size == 0 {
+            return match bytes {
+                b"" | b"\r" => Ok(ResponseFrame::NeedsMore),
+                b"\r\n" => Ok(ResponseFrame::Complete),
+                _ => Err(invalid_response()),
+            };
+        }
+        decoded = decoded.checked_add(size).ok_or_else(invalid_response)?;
+        if decoded > MAX_RESPONSE {
+            return Err(invalid_response());
+        }
+        if bytes.len() < size {
+            return Ok(ResponseFrame::NeedsMore);
+        }
+        if bytes.len() == size {
+            return Ok(ResponseFrame::NeedsMore);
+        }
+        if bytes.len() == size + 1 {
+            return if bytes[size] == b'\r' {
+                Ok(ResponseFrame::NeedsMore)
+            } else {
+                Err(invalid_response())
+            };
+        }
+        if &bytes[size..size + 2] != b"\r\n" {
+            return Err(invalid_response());
+        }
+        bytes = &bytes[size + 2..];
+    }
+    Err(invalid_response())
+}
+
+fn parse_headers(bytes: &[u8]) -> io::Result<Option<ParsedHeaders>> {
+    let Some(split) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        if bytes.len() > MAX_HEADERS {
+            return Err(invalid_response());
+        }
+        return Ok(None);
+    };
+    if split > MAX_HEADERS {
         return Err(invalid_response());
     }
     let headers = std::str::from_utf8(&bytes[..split]).map_err(|_| invalid_response())?;
@@ -226,19 +318,38 @@ fn decode(bytes: &[u8]) -> io::Result<String> {
             chunked = true;
         }
     }
-    let body = &bytes[split + 4..];
+    if chunked && length.is_some() {
+        return Err(invalid_response());
+    }
     let body = if chunked {
-        if length.is_some() {
-            return Err(invalid_response());
-        }
-        decode_chunks(body)?
+        BodyFraming::Chunked
+    } else if let Some(length) = length {
+        BodyFraming::ContentLength(length)
     } else {
-        if length.is_some_and(|length| length != body.len()) {
-            return Err(invalid_response());
-        }
-        String::from_utf8(body.to_vec()).map_err(|_| invalid_response())?
+        BodyFraming::UntilEof
     };
-    if code == 500 {
+    Ok(Some(ParsedHeaders { split, code, body }))
+}
+
+fn decode(bytes: &[u8]) -> io::Result<String> {
+    if bytes.len() > MAX_RESPONSE {
+        return Err(invalid_response());
+    }
+    let headers = parse_headers(bytes)?.ok_or_else(invalid_response)?;
+    let body = &bytes[headers.split + 4..];
+    let body = match headers.body {
+        BodyFraming::Chunked => decode_chunks(body)?,
+        BodyFraming::ContentLength(length) => {
+            if length != body.len() {
+                return Err(invalid_response());
+            }
+            String::from_utf8(body.to_vec()).map_err(|_| invalid_response())?
+        }
+        BodyFraming::UntilEof => {
+            String::from_utf8(body.to_vec()).map_err(|_| invalid_response())?
+        }
+    };
+    if headers.code == 500 {
         return Err(fault(&body));
     }
     Ok(body)
@@ -410,10 +521,50 @@ mod tests {
     #[test]
     fn content_length_frames_a_reply_from_a_router_that_keeps_the_socket_open() {
         let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
-        assert_eq!(framed_length(&reply[..reply.len() - 1]), Some(reply.len()));
-        assert_eq!(framed_length(reply), Some(reply.len()));
-        assert_eq!(framed_length(b"HTTP/1.1 200 OK\r\n\r\nok"), None);
-        assert_eq!(framed_length(b"HTTP/1.1 200 OK\r\nContent-Length: 2"), None);
+        assert_eq!(
+            response_frame(&reply[..reply.len() - 1]).unwrap(),
+            ResponseFrame::NeedsMore
+        );
+        assert_eq!(response_frame(reply).unwrap(), ResponseFrame::Complete);
+        assert_eq!(
+            response_frame(b"HTTP/1.1 200 OK\r\n\r\nok").unwrap(),
+            ResponseFrame::NeedsMore
+        );
+        assert_eq!(
+            response_frame(b"HTTP/1.1 200 OK\r\nContent-Length: 2").unwrap(),
+            ResponseFrame::NeedsMore
+        );
+    }
+
+    #[test]
+    fn chunked_response_framing_distinguishes_complete_partial_and_malformed() {
+        let complete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n";
+        assert_eq!(response_frame(complete).unwrap(), ResponseFrame::Complete);
+        for partial in [
+            &complete[..complete.len() - 1],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\no".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+        ] {
+            assert_eq!(response_frame(partial).unwrap(), ResponseFrame::NeedsMore);
+        }
+        for malformed in [
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\ng\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nokX\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            assert!(response_frame(malformed).is_err());
+        }
+
+        let oversized_header = vec![b'a'; MAX_HEADERS + 1];
+        assert!(response_frame(&oversized_header).is_err());
+        let oversized_chunk = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_RESPONSE + 1
+        );
+        assert!(response_frame(oversized_chunk.as_bytes()).is_err());
+        let oversized_response = vec![b'a'; MAX_RESPONSE + 1];
+        assert!(response_frame(&oversized_response).is_err());
     }
 
     #[tokio::test]

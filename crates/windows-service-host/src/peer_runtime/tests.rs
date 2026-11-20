@@ -119,9 +119,21 @@ pub(super) struct RegistryFixture {
     pub(super) relay: Option<std::net::SocketAddr>,
     pub(super) routes: BTreeMap<DeviceId, (std::net::SocketAddr, relay_service::RouteId)>,
     after_checkpoint: RefCell<Option<Box<dyn FnMut()>>>,
+    identity_checks: Cell<usize>,
 }
 impl RegistryFixture {
+    // Mirrors the native registry's healthy() check at each read boundary.
+    pub(super) fn verify_identity(&self) {
+        self.identity_checks.set(self.identity_checks.get() + 1);
+    }
+
+    pub(super) fn read_transport(&self, device: DeviceId) -> Option<TlsPublicKey> {
+        self.verify_identity();
+        self.transport.get(&device).cloned()
+    }
+
     pub(super) fn read_checkpoint(&self) -> RegistryCheckpoint {
+        self.verify_identity();
         let checkpoint = self.checkpoint.clone();
         // Test-only time advancement after the actual typed snapshot read. The
         // hook must not borrow this registry again or manufacture peer evidence.
@@ -153,6 +165,7 @@ fn registry() -> Rc<RefCell<RegistryFixture>> {
         relay: None,
         routes: BTreeMap::new(),
         after_checkpoint: RefCell::new(None),
+        identity_checks: Cell::new(0),
     }))
 }
 fn replace_first(registry: &Rc<RefCell<RegistryFixture>>) {
@@ -711,6 +724,327 @@ fn exercise(
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn network_shutdown_records_exits_but_session_drop_does_not_write_diagnostics() {
+    for drop_only in [false, true] {
+        let key = Identity::new();
+        let mut session = ServiceSession::new(
+            RegistryOwner::Fixture(registry(), PhantomData),
+            SessionKey::Fixture(&key),
+            Instant::now(),
+            Arc::new(ServiceClock),
+        )
+        .unwrap();
+        session.network.embed_fixture(
+            "192.168.1.50:7443".parse().unwrap(),
+            network::GatewayReading {
+                access: direct_network::ExternalAccess::Automatic,
+                state: direct_network::DirectGatewayState::Discovering,
+                candidates: Vec::new(),
+                validity_seconds: 0,
+                external: None,
+                source: None,
+                failure: None,
+            },
+        );
+        let rows = session.network.record_fixture();
+        let peer_rows = Rc::new(RefCell::new(Vec::new()));
+        session.peer_worker_exit_fixture = Some(peer_rows.clone());
+        session.peer_worker_exit_pending[PeerExitCause::Timeout as usize] = 2;
+        session.peer_worker_exits[PeerExitCause::Timeout as usize] = 3;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if drop_only {
+                let end = Instant::now() + TEST_LIMIT;
+                while !session.network.finish_relay_fixture() {
+                    assert!(Instant::now() < end, "relay did not finish before Drop");
+                    thread::yield_now();
+                }
+                assert!(rows.borrow().is_empty());
+            } else {
+                drain(&mut session);
+                session.poll_shutdown();
+                assert_eq!(rows.borrow().len(), 1);
+            }
+        }));
+        if result.is_err() {
+            drain(&mut session);
+        }
+        drop(session);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        let rows = rows.borrow();
+        let expected = usize::from(!drop_only);
+        assert_eq!(
+            (rows.len(), peer_rows.borrow().len()),
+            (expected, expected),
+            "drop_only={drop_only}"
+        );
+        if !drop_only {
+            let row = serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(
+                row,
+                serde_json::json!({
+                    "kind": "relay_worker_stopped",
+                    "outcome": {
+                        "status": "clean",
+                        "report": {
+                            "accepted": 0,
+                            "accept_failures": 0,
+                            "rejected_capacity": 0,
+                            "rejected_waiting_rooms": 0,
+                            "paired": 0,
+                            "invalid_registrations": 0,
+                            "header_timeouts": 0,
+                            "waiting_timeouts": 0,
+                            "rendezvous_timeouts": 0,
+                            "idle_timeouts": 0,
+                            "absolute_timeouts": 0,
+                            "disconnected": 0,
+                            "io_failures": 0,
+                            "cancelled": 0,
+                            "task_failures": 0,
+                            "peak_connections": 0,
+                            "peak_waiting_rooms": 0,
+                            "remaining_connections": 0
+                        }
+                    }
+                })
+            );
+            assert_eq!(
+                serde_json::to_value(&peer_rows.borrow()[0]).unwrap()["count"],
+                5
+            );
+        }
+    }
+}
+
+fn finished_peer_worker(
+    session: &mut ServiceSession<'_>,
+    task: impl FnOnce() -> Result<PeerExitCause, PeerExitCause> + Send + 'static,
+) {
+    let state = Arc::new(PeerState {
+        owner: Arc::clone(&session.identity),
+        epoch: session.engine.boot_epoch(),
+        binding: session.binding(device(1)).unwrap(),
+        active: AtomicBool::new(true),
+        stop: CancellationToken::new(),
+        hold_response: AtomicBool::new(false),
+        hold_exit: AtomicBool::new(false),
+    });
+    let (_, events) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+    let (responses, _) = async_mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+    let worker = thread::spawn(task);
+    let end = Instant::now() + TEST_LIMIT;
+    while !worker.is_finished() {
+        assert!(Instant::now() < end);
+        thread::yield_now();
+    }
+    session.peers.push(PeerSlot {
+        state,
+        events,
+        responses,
+        thread: Some(worker),
+        ready: false,
+        protocol: None,
+        clock_served: false,
+        opened_sent: None,
+        responses_in_flight: VecDeque::new(),
+        address_query_after: None,
+        clock_since: None,
+        advertised: None,
+        query_lapsed: false,
+        deferred_query: None,
+    });
+}
+
+// These peers have no transport or decision provenance. Only the idle registry
+// pass is exercised; real decision tests continue to use TCP/TLS frames.
+fn idle_revalidation_fixture(
+    count: u8,
+    test: impl FnOnce(&mut ServiceSession<'_>, &Rc<RefCell<RegistryFixture>>),
+) {
+    let key = Identity::new();
+    let registry = registry();
+    {
+        let mut fixture = registry.borrow_mut();
+        let entries = (1..=count)
+            .map(|id| {
+                let seed = 40 + id * 3;
+                fixture.transport.insert(device(id), public(seed + 2));
+                RegistryCheckpointEntry::new(
+                    device(id),
+                    u64::from(id),
+                    DeviceKeys::new(decision_key(seed), decision_key(seed + 1)).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        fixture.checkpoint = RegistryCheckpoint::new(32, u64::from(count) + 1, entries).unwrap();
+    }
+    let mut session = ServiceSession::new(
+        RegistryOwner::Fixture(Rc::clone(&registry), PhantomData),
+        SessionKey::Fixture(&key),
+        Instant::now(),
+        Arc::new(ServiceClock),
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for id in 1..=count {
+            finished_peer_worker(&mut session, || Ok(PeerExitCause::LocallyClosed));
+            let binding = session.binding(device(id)).unwrap();
+            Arc::get_mut(&mut session.peers.last_mut().unwrap().state)
+                .unwrap()
+                .binding = binding;
+        }
+        registry.borrow().identity_checks.set(0);
+        test(&mut session, &registry);
+    }));
+    drain(&mut session);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn idle_revalidation_checks_identity_once_for_zero_one_and_thirty_two_peers() {
+    let mut checks = Vec::new();
+    for count in [0, 1, 32] {
+        idle_revalidation_fixture(count, |session, registry| {
+            session.revalidate_peers().unwrap();
+            checks.push(registry.borrow().identity_checks.get());
+            assert!(session.peers.iter().all(|peer| peer.state.live()));
+        });
+    }
+    assert_eq!(checks, [1, 1, 1], "identity checks for 0, 1, 32 peers");
+}
+
+#[test]
+fn idle_revalidation_reads_registry_changes_on_the_next_pass() {
+    idle_revalidation_fixture(2, |session, registry| {
+        session.revalidate_peers().unwrap();
+        replace_first(registry);
+        assert_eq!(session.revalidate_peers(), Err(PeerRuntimeError::Registry));
+    });
+}
+
+#[test]
+fn idle_revalidation_retires_only_the_peer_with_a_changed_transport_key() {
+    idle_revalidation_fixture(2, |session, registry| {
+        session.revalidate_peers().unwrap();
+        registry
+            .borrow_mut()
+            .transport
+            .insert(device(1), public(150));
+        session.revalidate_peers().unwrap();
+        assert!(!session.peers[0].state.live());
+        assert!(session.peers[1].state.live());
+        assert!(!session.closing);
+    });
+}
+
+#[test]
+fn reap_records_each_closed_cause_once_and_only_panic_marks_cleanup_failed() {
+    use framed_transport::{SocketError, TransportError};
+    use secure_channel::ChannelError;
+
+    exercise(|session, _, _, _| {
+        let errors = [
+            (
+                SocketError::Transport(TransportError::Channel(ChannelError::TlsRejected)),
+                PeerExitCause::TlsFailure,
+            ),
+            (
+                SocketError::Transport(TransportError::Channel(ChannelError::HandshakeExpired)),
+                PeerExitCause::Timeout,
+            ),
+            (SocketError::IdleDeadline, PeerExitCause::Timeout),
+            (
+                SocketError::Transport(TransportError::ProtocolRejected),
+                PeerExitCause::ProtocolViolation,
+            ),
+            (SocketError::ClockRegressed, PeerExitCause::ClockFailure),
+            (SocketError::Io, PeerExitCause::IoFailure),
+        ];
+        for (error, expected) in errors {
+            finished_peer_worker(session, move || Err(error.into()));
+            assert_eq!(session.reap_finished(), 1);
+            assert_eq!(session.reap_finished(), 0);
+            let exits = session.take_peer_worker_exits();
+            assert_eq!(
+                exits.iter().find(|(cause, _)| *cause == expected),
+                Some(&(expected, 1))
+            );
+            assert_eq!(exits.iter().map(|(_, count)| count).sum::<u64>(), 1);
+            assert!(!session.io_failed);
+            assert!(!session.closing);
+        }
+        for cause in [PeerExitCause::LocallyClosed, PeerExitCause::PeerClosed] {
+            finished_peer_worker(session, move || Ok(cause));
+        }
+        finished_peer_worker(session, || panic!("synthetic peer worker panic"));
+        assert_eq!(session.reap_finished(), 3);
+        let exits = session.take_peer_worker_exits();
+        for expected in [
+            PeerExitCause::LocallyClosed,
+            PeerExitCause::PeerClosed,
+            PeerExitCause::Panic,
+        ] {
+            assert_eq!(
+                exits.iter().find(|(cause, _)| *cause == expected),
+                Some(&(expected, 1))
+            );
+        }
+        assert_eq!(exits.iter().map(|(_, count)| count).sum::<u64>(), 3);
+        assert!(session.io_failed);
+        assert!(!session.closing);
+        assert!(
+            session
+                .take_peer_worker_exits()
+                .iter()
+                .all(|(_, count)| *count == 0)
+        );
+    });
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn reap_preserves_tls_failure_without_closing_the_session() {
+    exercise(|session, key, _, clients| {
+        let (server, client) = streams();
+        session
+            .attach_carrier(ServicePeerCarrier {
+                stream: server,
+                device: device(1),
+            })
+            .unwrap();
+        clients.push(raw_client(client, key.public.clone(), 8, Vec::new()));
+        let end = Instant::now() + TEST_LIMIT;
+        while !session.peers.is_empty() {
+            session.process_one().unwrap();
+            assert!(Instant::now() < end, "peer worker did not finish");
+            thread::yield_now();
+        }
+        assert!(
+            session.peer_worker_exit_reported_at[PeerExitCause::TlsFailure as usize].is_some(),
+            "the poll seam did not report the peer worker's TLS failure"
+        );
+        assert_eq!(
+            session.peer_worker_exit_pending[PeerExitCause::TlsFailure as usize],
+            0
+        );
+        assert!(!session.closing);
+        assert!(!session.io_failed);
+        assert!(
+            session
+                .take_peer_worker_exits()
+                .iter()
+                .all(|(_, count)| *count == 0)
+        );
+    });
 }
 
 #[test]

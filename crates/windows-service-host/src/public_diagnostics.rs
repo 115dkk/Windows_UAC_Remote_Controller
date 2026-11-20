@@ -12,6 +12,9 @@ use std::{
 use windows_prompt_probe::supervision::RefusalReason;
 
 pub(crate) const MAX_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 1024;
+
+static RECORD_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -72,6 +75,22 @@ pub(crate) enum Event {
         rejected_pc_sources: u64,
         rejected_evictions: u64,
     },
+    // One embedded relay worker finished. Its report omits the four counters in
+    // `relay_abuse`; all fields are aggregate counts with no address or route.
+    RelayWorkerStopped {
+        outcome: RelayWorkerOutcome,
+    },
+    // Joined peer workers grouped by a closed cause. Counts accumulated during
+    // the reporting interval contain no device or connection identity.
+    PeerWorkerExited {
+        cause: crate::peer_runtime::PeerExitCause,
+        count: u64,
+    },
+    // A management pipe listener could not be recreated. The service session
+    // continues and retries; only closed categories and numeric codes leave it.
+    ManagementListenerCreationFailed {
+        error: ManagementListenerFailure,
+    },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
     HintsRefreshed {
@@ -89,9 +108,214 @@ pub(crate) enum Event {
     // this fixed step. `code` is the SCM diagnostic code; 0 for a panic.
     RuntimeFailure {
         step: u8,
+        cause: RuntimeFailureCause,
         panicked: bool,
         code: u32,
     },
+    // A signed phone decision was refused before any Windows action. The reason
+    // is a closed category with no request, device, key or signature material.
+    DecisionRejected {
+        reason: DecisionRejectionReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ManagementListenerFailure {
+    Busy,
+    Closed,
+    InvalidPhase,
+    InvalidMessage,
+    InvalidDeadline,
+    DeadlineElapsed,
+    Cancelled,
+    EndOfStream,
+    Rejected,
+    Malformed,
+    CleanupUnconfirmed,
+    Service { code: u32 },
+    Native { stage: u8, code: u32 },
+}
+
+// Native peer types exist only on 64-bit Windows; the diagnostic schema is portable.
+#[cfg(all(windows, target_pointer_width = "64"))]
+impl From<crate::PairingPeerError> for ManagementListenerFailure {
+    fn from(error: crate::PairingPeerError) -> Self {
+        match error {
+            crate::PairingPeerError::Busy => Self::Busy,
+            crate::PairingPeerError::Closed => Self::Closed,
+            crate::PairingPeerError::InvalidPhase => Self::InvalidPhase,
+            crate::PairingPeerError::InvalidMessage => Self::InvalidMessage,
+            crate::PairingPeerError::InvalidDeadline => Self::InvalidDeadline,
+            crate::PairingPeerError::DeadlineElapsed => Self::DeadlineElapsed,
+            crate::PairingPeerError::Cancelled => Self::Cancelled,
+            crate::PairingPeerError::EndOfStream => Self::EndOfStream,
+            crate::PairingPeerError::Rejected => Self::Rejected,
+            crate::PairingPeerError::Malformed => Self::Malformed,
+            crate::PairingPeerError::CleanupUnconfirmed => Self::CleanupUnconfirmed,
+            crate::PairingPeerError::Service(error) => Self::Service {
+                code: error.service_diagnostic_code(),
+            },
+            crate::PairingPeerError::Native { stage, hresult } => Self::Native {
+                stage: pairing_peer_stage_code(stage),
+                code: hresult as u32,
+            },
+        }
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+const fn pairing_peer_stage_code(stage: crate::PairingPeerStage) -> u8 {
+    match stage {
+        crate::PairingPeerStage::CreateEndpoint => 1,
+        crate::PairingPeerStage::CreateEvent => 2,
+        crate::PairingPeerStage::Connect => 3,
+        crate::PairingPeerStage::Read => 4,
+        crate::PairingPeerStage::Write => 5,
+        crate::PairingPeerStage::PollIo => 6,
+        crate::PairingPeerStage::CancelIo => 7,
+        crate::PairingPeerStage::QueryPeer => 8,
+        crate::PairingPeerStage::QueryProcess => 9,
+        crate::PairingPeerStage::QueryToken => 10,
+        crate::PairingPeerStage::QuerySession => 11,
+        crate::PairingPeerStage::QueryUacPolicy => 12,
+        crate::PairingPeerStage::WatchUacPolicy => 13,
+        crate::PairingPeerStage::CloseUacPolicy => 14,
+        crate::PairingPeerStage::OpenStarterProcess => 15,
+        crate::PairingPeerStage::OpenHelperProcess => 16,
+        crate::PairingPeerStage::OpenManagementProcess => 17,
+        crate::PairingPeerStage::QueryProcessTimes => 18,
+        crate::PairingPeerStage::QueryPeerImage => 19,
+        crate::PairingPeerStage::QueryManagementImage => 20,
+        crate::PairingPeerStage::QueryStarterImage => 21,
+        crate::PairingPeerStage::QueryHelperImage => 22,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum RelayWorkerOutcome {
+    Clean { report: RelayWorkerReport },
+    Error { error: RelayWorkerError },
+    Panicked,
+}
+
+// Only the 64-bit Windows listener converts the embedded worker's joined result.
+#[cfg(all(windows, target_pointer_width = "64"))]
+impl From<relay_service::HostedRelayExit> for RelayWorkerOutcome {
+    fn from(exit: relay_service::HostedRelayExit) -> Self {
+        match exit {
+            relay_service::HostedRelayExit::Clean(report) => Self::Clean {
+                report: report.into(),
+            },
+            relay_service::HostedRelayExit::Error(error) => Self::Error {
+                error: error.into(),
+            },
+            relay_service::HostedRelayExit::Panicked => Self::Panicked,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RelayWorkerError {
+    AcceptFailed,
+    TaskFailed,
+    IdentifierExhausted,
+    ShutdownIncomplete,
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+impl From<relay_service::RelayError> for RelayWorkerError {
+    fn from(error: relay_service::RelayError) -> Self {
+        match error {
+            relay_service::RelayError::AcceptFailed => Self::AcceptFailed,
+            relay_service::RelayError::TaskFailed => Self::TaskFailed,
+            relay_service::RelayError::IdentifierExhausted => Self::IdentifierExhausted,
+            relay_service::RelayError::ShutdownIncomplete => Self::ShutdownIncomplete,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct RelayWorkerReport {
+    pub(crate) accepted: u64,
+    pub(crate) accept_failures: u64,
+    pub(crate) rejected_capacity: u64,
+    pub(crate) rejected_waiting_rooms: u64,
+    pub(crate) paired: u64,
+    pub(crate) invalid_registrations: u64,
+    pub(crate) header_timeouts: u64,
+    pub(crate) waiting_timeouts: u64,
+    pub(crate) rendezvous_timeouts: u64,
+    pub(crate) idle_timeouts: u64,
+    pub(crate) absolute_timeouts: u64,
+    pub(crate) disconnected: u64,
+    pub(crate) io_failures: u64,
+    pub(crate) cancelled: u64,
+    pub(crate) task_failures: u64,
+    pub(crate) peak_connections: usize,
+    pub(crate) peak_waiting_rooms: usize,
+    pub(crate) remaining_connections: usize,
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+impl From<relay_service::RelayReport> for RelayWorkerReport {
+    fn from(report: relay_service::RelayReport) -> Self {
+        Self {
+            accepted: report.accepted,
+            accept_failures: report.accept_failures,
+            rejected_capacity: report.rejected_capacity,
+            rejected_waiting_rooms: report.rejected_waiting_rooms,
+            paired: report.paired,
+            invalid_registrations: report.invalid_registrations,
+            header_timeouts: report.header_timeouts,
+            waiting_timeouts: report.waiting_timeouts,
+            rendezvous_timeouts: report.rendezvous_timeouts,
+            idle_timeouts: report.idle_timeouts,
+            absolute_timeouts: report.absolute_timeouts,
+            disconnected: report.disconnected,
+            io_failures: report.io_failures,
+            cancelled: report.cancelled,
+            task_failures: report.task_failures,
+            peak_connections: report.peak_connections,
+            peak_waiting_rooms: report.peak_waiting_rooms,
+            remaining_connections: report.remaining_connections,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeFailureCause {
+    Service,
+    SessionClosed,
+    Registry,
+    PeerChanged,
+    Identity,
+    Clock,
+    Capacity,
+    Protocol,
+    Io,
+    Panicked,
+    CleanupPending,
+    Signing,
+    Watcher,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DecisionRejectionReason {
+    Clock,
+    WrongPc,
+    WrongEpoch,
+    UnknownOrCompleted,
+    Expired,
+    BindingMismatch,
+    NotEligible,
+    EnrollmentChanged,
+    InvalidSignature,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -119,6 +343,8 @@ pub(crate) enum JournalFault {
     EncodingFailed,
     /// An append timestamp preceded the persisted clock observation.
     ClockRollback,
+    /// The bounded journal-worker queue was full; this operation was dropped.
+    QueueFull,
     /// A filesystem operation failed.
     Io,
 }
@@ -245,7 +471,7 @@ struct Record {
 /// recovery of authority, interpretation of old contents or service failure.
 fn append(file: &mut File, record: &Record) -> io::Result<()> {
     let mut line = serde_json::to_vec(record)?;
-    if line.len() > 512 {
+    if line.len() > MAX_RECORD_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
     line.push(b'\n');
@@ -270,30 +496,44 @@ fn append(file: &mut File, record: &Record) -> io::Result<()> {
     result.and(unlocked)
 }
 
-#[cfg(windows)]
-pub(crate) fn record(event: Event) {
-    // Unit tests reach this through the refusal and startup paths; the
-    // installed product's journal in ProgramData is not theirs to append to.
-    if cfg!(test) {
-        return;
-    }
-    let Ok(mut opened) = crate::ffi::public_diagnostics::open_file() else {
-        return;
-    };
+fn record_with(event: Event, write: impl FnOnce(&Record) -> bool) -> bool {
+    // File locks still reject a concurrent process without waiting. Threads in
+    // this process wait for at most one bounded open/write/sync, the same IO cost
+    // already paid by a service thread writing its own synchronous diagnostic.
+    let _guard = RECORD_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unix_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|value| u64::try_from(value.as_millis()).ok());
-    let _ = append(
-        &mut opened.file,
-        &Record {
-            schema: 1,
-            version: env!("CARGO_PKG_VERSION"),
-            unix_millis,
-            pid: std::process::id(),
-            event,
-        },
-    );
+    write(&Record {
+        schema: 1,
+        version: env!("CARGO_PKG_VERSION"),
+        unix_millis,
+        pid: std::process::id(),
+        event,
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn try_record(event: Event) -> bool {
+    // Unit tests reach this through the refusal and startup paths; the
+    // installed product's journal in ProgramData is not theirs to append to.
+    if cfg!(test) {
+        return false;
+    }
+    record_with(event, |record| {
+        let Ok(mut opened) = crate::ffi::public_diagnostics::open_file() else {
+            return false;
+        };
+        append(&mut opened.file, record).is_ok()
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn record(event: Event) {
+    let _ = try_record(event);
 }
 
 #[cfg(test)]
@@ -309,6 +549,215 @@ mod tests {
             pid: 7,
             event,
         }
+    }
+
+    fn maximum_row(event: Event) -> Record {
+        Record {
+            schema: u8::MAX,
+            version: env!("CARGO_PKG_VERSION"),
+            unix_millis: Some(u64::MAX),
+            pid: u32::MAX,
+            event,
+        }
+    }
+
+    fn maximum_relay_report() -> RelayWorkerReport {
+        RelayWorkerReport {
+            accepted: u64::MAX,
+            accept_failures: u64::MAX,
+            rejected_capacity: u64::MAX,
+            rejected_waiting_rooms: u64::MAX,
+            paired: u64::MAX,
+            invalid_registrations: u64::MAX,
+            header_timeouts: u64::MAX,
+            waiting_timeouts: u64::MAX,
+            rendezvous_timeouts: u64::MAX,
+            idle_timeouts: u64::MAX,
+            absolute_timeouts: u64::MAX,
+            disconnected: u64::MAX,
+            io_failures: u64::MAX,
+            cancelled: u64::MAX,
+            task_failures: u64::MAX,
+            peak_connections: usize::MAX,
+            peak_waiting_rooms: usize::MAX,
+            remaining_connections: usize::MAX,
+        }
+    }
+
+    fn maximum_events() -> Vec<Event> {
+        let maximum_program = "\u{10ffff}".repeat(64);
+        assert!(windows_port_owner::valid_image_name(&maximum_program));
+        vec![
+            Event::Activity {
+                event: ActivityEvent::Request(
+                    activity_journal::RequestOutcome::DecisionSentToWindows {
+                        decision: activity_journal::Decision::Approve,
+                    },
+                ),
+            },
+            Event::StartupFailure {
+                stage: u8::MAX,
+                code: u32::MAX,
+            },
+            Event::JournalRecovered {
+                fault: JournalFault::UnexpectedLockContent,
+                action: JournalRecovery::DiscardedStaging,
+            },
+            Event::JournalUnusable {
+                fault: JournalFault::UnexpectedLockContent,
+                io_step: Some(JournalIoStep::InspectDirectory),
+            },
+            Event::JournalAppendFailed {
+                fault: JournalFault::UnexpectedLockContent,
+            },
+            Event::JournalPurgeFailed {
+                fault: JournalFault::UnexpectedLockContent,
+            },
+            Event::StartupGuard {
+                phase: u8::MAX,
+                policy: u8::MAX,
+                code: u32::MAX,
+            },
+            Event::PromptRefused {
+                reason: PromptRefusal::UnrecognizedButtons,
+            },
+            Event::ConfigurationIgnored { stage: u8::MAX },
+            Event::RelayListenerChanged {
+                fault: Some(crate::management_protocol::ListenerFault::InUse {
+                    pid: u32::MAX,
+                    program: Some(maximum_program),
+                }),
+            },
+            Event::RelayAbuse {
+                evicted_pairs: u64::MAX,
+                rejected_duplicates: u64::MAX,
+                rejected_pc_sources: u64::MAX,
+                rejected_evictions: u64::MAX,
+            },
+            Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean {
+                    report: maximum_relay_report(),
+                },
+            },
+            Event::PeerWorkerExited {
+                cause: crate::peer_runtime::PeerExitCause::ProtocolViolation,
+                count: u64::MAX,
+            },
+            Event::ManagementListenerCreationFailed {
+                error: ManagementListenerFailure::Native {
+                    stage: u8::MAX,
+                    code: u32::MAX,
+                },
+            },
+            Event::HintsRefreshed {
+                reason: HintRefresh::WithoutExternal,
+            },
+            Event::WatcherStartFailed {
+                error: ProbeSupervisorError::Native {
+                    stage: crate::SupervisorStage::ServiceConfiguration,
+                    hresult: i32::MIN,
+                },
+            },
+            Event::LanAnnounceFailed { code: u32::MAX },
+            Event::RuntimeFailure {
+                step: u8::MAX,
+                cause: RuntimeFailureCause::CleanupPending,
+                panicked: true,
+                code: u32::MAX,
+            },
+            Event::DecisionRejected {
+                reason: DecisionRejectionReason::UnknownOrCompleted,
+            },
+        ]
+    }
+
+    fn event_kind(event: &Event) -> &'static str {
+        match event {
+            Event::Activity { .. } => "activity",
+            Event::StartupFailure { .. } => "startup_failure",
+            Event::JournalRecovered { .. } => "journal_recovered",
+            Event::JournalUnusable { .. } => "journal_unusable",
+            Event::JournalAppendFailed { .. } => "journal_append_failed",
+            Event::JournalPurgeFailed { .. } => "journal_purge_failed",
+            Event::StartupGuard { .. } => "startup_guard",
+            Event::PromptRefused { .. } => "prompt_refused",
+            Event::ConfigurationIgnored { .. } => "configuration_ignored",
+            Event::RelayListenerChanged { .. } => "relay_listener_changed",
+            Event::RelayAbuse { .. } => "relay_abuse",
+            Event::RelayWorkerStopped { .. } => "relay_worker_stopped",
+            Event::PeerWorkerExited { .. } => "peer_worker_exited",
+            Event::ManagementListenerCreationFailed { .. } => "management_listener_creation_failed",
+            Event::HintsRefreshed { .. } => "hints_refreshed",
+            Event::WatcherStartFailed { .. } => "watcher_start_failed",
+            Event::LanAnnounceFailed { .. } => "lan_announce_failed",
+            Event::RuntimeFailure { .. } => "runtime_failure",
+            Event::DecisionRejected { .. } => "decision_rejected",
+        }
+    }
+
+    #[test]
+    fn every_event_variant_fits_the_record_limit_at_maximum_width() {
+        let events = maximum_events();
+        assert_eq!(events.len(), 19);
+        let mut kinds = std::collections::BTreeSet::new();
+        for event in events {
+            let kind = event_kind(&event);
+            assert!(kinds.insert(kind), "duplicate maximum row for {kind}");
+            let record = maximum_row(event);
+            let size = serde_json::to_vec(&record).unwrap().len();
+            let mut file = tempfile::tempfile().unwrap();
+            append(&mut file, &record).unwrap_or_else(|error| {
+                panic!(
+                    "{kind} serialized to {size} bytes; record limit is {MAX_RECORD_BYTES}: {error}"
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn ordinary_relay_worker_report_serializes_to_514_bytes_and_fits() {
+        let report = RelayWorkerReport {
+            accepted: 200_000,
+            paired: 100_000,
+            disconnected: 100_000,
+            peak_connections: 2,
+            peak_waiting_rooms: 1,
+            ..RelayWorkerReport {
+                accepted: 0,
+                accept_failures: 0,
+                rejected_capacity: 0,
+                rejected_waiting_rooms: 0,
+                paired: 0,
+                invalid_registrations: 0,
+                header_timeouts: 0,
+                waiting_timeouts: 0,
+                rendezvous_timeouts: 0,
+                idle_timeouts: 0,
+                absolute_timeouts: 0,
+                disconnected: 0,
+                io_failures: 0,
+                cancelled: 0,
+                task_failures: 0,
+                peak_connections: 0,
+                peak_waiting_rooms: 0,
+                remaining_connections: 0,
+            }
+        };
+        let record = Record {
+            schema: 1,
+            version: "1.14.1",
+            unix_millis: Some(1_700_000_000_000),
+            pid: 1234,
+            event: Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean { report },
+            },
+        };
+        let size = serde_json::to_vec(&record).unwrap().len();
+        assert_eq!(size, 514);
+        let mut file = tempfile::tempfile().unwrap();
+        append(&mut file, &record).unwrap_or_else(|error| {
+            panic!("relay_worker_stopped serialized to {size} bytes: {error}")
+        });
     }
 
     #[test]
@@ -354,6 +803,16 @@ mod tests {
                 rejected_pc_sources: 1,
                 rejected_evictions: 4,
             },
+            Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Panicked,
+            },
+            Event::PeerWorkerExited {
+                cause: crate::peer_runtime::PeerExitCause::Timeout,
+                count: 2,
+            },
+            Event::ManagementListenerCreationFailed {
+                error: ManagementListenerFailure::Native { stage: 1, code: 5 },
+            },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -372,8 +831,12 @@ mod tests {
             Event::LanAnnounceFailed { code: 5 },
             Event::RuntimeFailure {
                 step: 4,
+                cause: RuntimeFailureCause::Service,
                 panicked: false,
                 code: 1,
+            },
+            Event::DecisionRejected {
+                reason: DecisionRejectionReason::InvalidSignature,
             },
         ];
         for event in events {
@@ -394,6 +857,7 @@ mod tests {
                     "reason",
                     "error",
                     "step",
+                    "cause",
                     "panicked",
                     "fault",
                     "action",
@@ -402,10 +866,429 @@ mod tests {
                     "rejected_duplicates",
                     "rejected_pc_sources",
                     "rejected_evictions",
+                    "outcome",
+                    "count",
                 ]
                 .contains(&key.as_str())
             }));
         }
+    }
+
+    #[test]
+    fn management_listener_failures_have_closed_fixed_schema() {
+        for (error, expected) in [
+            (
+                ManagementListenerFailure::Busy,
+                serde_json::json!({"kind": "busy"}),
+            ),
+            (
+                ManagementListenerFailure::Closed,
+                serde_json::json!({"kind": "closed"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidPhase,
+                serde_json::json!({"kind": "invalid_phase"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidMessage,
+                serde_json::json!({"kind": "invalid_message"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidDeadline,
+                serde_json::json!({"kind": "invalid_deadline"}),
+            ),
+            (
+                ManagementListenerFailure::DeadlineElapsed,
+                serde_json::json!({"kind": "deadline_elapsed"}),
+            ),
+            (
+                ManagementListenerFailure::Cancelled,
+                serde_json::json!({"kind": "cancelled"}),
+            ),
+            (
+                ManagementListenerFailure::EndOfStream,
+                serde_json::json!({"kind": "end_of_stream"}),
+            ),
+            (
+                ManagementListenerFailure::Rejected,
+                serde_json::json!({"kind": "rejected"}),
+            ),
+            (
+                ManagementListenerFailure::Malformed,
+                serde_json::json!({"kind": "malformed"}),
+            ),
+            (
+                ManagementListenerFailure::CleanupUnconfirmed,
+                serde_json::json!({"kind": "cleanup_unconfirmed"}),
+            ),
+            (
+                ManagementListenerFailure::Service { code: 6 },
+                serde_json::json!({"kind": "service", "code": 6}),
+            ),
+            (
+                ManagementListenerFailure::Native {
+                    stage: 1,
+                    code: 0x8007_0005,
+                },
+                serde_json::json!({"kind": "native", "stage": 1, "code": 0x8007_0005_u32}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed { error }))
+                    .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": expected,
+                })
+            );
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[test]
+    fn management_listener_native_errors_have_closed_fixed_schema() {
+        for (error, name) in [
+            (crate::PairingPeerError::Busy, "busy"),
+            (crate::PairingPeerError::Closed, "closed"),
+            (crate::PairingPeerError::InvalidPhase, "invalid_phase"),
+            (crate::PairingPeerError::InvalidMessage, "invalid_message"),
+            (crate::PairingPeerError::InvalidDeadline, "invalid_deadline"),
+            (crate::PairingPeerError::DeadlineElapsed, "deadline_elapsed"),
+            (crate::PairingPeerError::Cancelled, "cancelled"),
+            (crate::PairingPeerError::EndOfStream, "end_of_stream"),
+            (crate::PairingPeerError::Rejected, "rejected"),
+            (crate::PairingPeerError::Malformed, "malformed"),
+            (
+                crate::PairingPeerError::CleanupUnconfirmed,
+                "cleanup_unconfirmed",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                    error: error.into(),
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": {"kind": name},
+                })
+            );
+        }
+
+        assert_eq!(
+            serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                error: crate::PairingPeerError::Service(crate::ServiceError::Timeout).into(),
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "management_listener_creation_failed",
+                "error": {"kind": "service", "code": 6},
+            })
+        );
+
+        for (stage, fixed) in [
+            (crate::PairingPeerStage::CreateEndpoint, 1),
+            (crate::PairingPeerStage::CreateEvent, 2),
+            (crate::PairingPeerStage::Connect, 3),
+            (crate::PairingPeerStage::Read, 4),
+            (crate::PairingPeerStage::Write, 5),
+            (crate::PairingPeerStage::PollIo, 6),
+            (crate::PairingPeerStage::CancelIo, 7),
+            (crate::PairingPeerStage::QueryPeer, 8),
+            (crate::PairingPeerStage::QueryProcess, 9),
+            (crate::PairingPeerStage::QueryToken, 10),
+            (crate::PairingPeerStage::QuerySession, 11),
+            (crate::PairingPeerStage::QueryUacPolicy, 12),
+            (crate::PairingPeerStage::WatchUacPolicy, 13),
+            (crate::PairingPeerStage::CloseUacPolicy, 14),
+            (crate::PairingPeerStage::OpenStarterProcess, 15),
+            (crate::PairingPeerStage::OpenHelperProcess, 16),
+            (crate::PairingPeerStage::OpenManagementProcess, 17),
+            (crate::PairingPeerStage::QueryProcessTimes, 18),
+            (crate::PairingPeerStage::QueryPeerImage, 19),
+            (crate::PairingPeerStage::QueryManagementImage, 20),
+            (crate::PairingPeerStage::QueryStarterImage, 21),
+            (crate::PairingPeerStage::QueryHelperImage, 22),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed {
+                    error: crate::PairingPeerError::Native {
+                        stage,
+                        hresult: 0x8007_0005_u32 as i32,
+                    }
+                    .into(),
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": {
+                        "kind": "native",
+                        "stage": fixed,
+                        "code": 0x8007_0005_u32,
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn peer_worker_exit_rows_have_fixed_cause_names_and_counts() {
+        for (cause, name) in [
+            (
+                crate::peer_runtime::PeerExitCause::LocallyClosed,
+                "locally_closed",
+            ),
+            (
+                crate::peer_runtime::PeerExitCause::PeerClosed,
+                "peer_closed",
+            ),
+            (
+                crate::peer_runtime::PeerExitCause::TlsFailure,
+                "tls_failure",
+            ),
+            (crate::peer_runtime::PeerExitCause::Timeout, "timeout"),
+            (
+                crate::peer_runtime::PeerExitCause::ProtocolViolation,
+                "protocol_violation",
+            ),
+            (
+                crate::peer_runtime::PeerExitCause::ClockFailure,
+                "clock_failure",
+            ),
+            (crate::peer_runtime::PeerExitCause::IoFailure, "io_failure"),
+            (crate::peer_runtime::PeerExitCause::Panic, "panic"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::PeerWorkerExited { cause, count: 7 })).unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "peer_worker_exited",
+                    "cause": name,
+                    "count": 7,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn relay_worker_outcomes_have_closed_fixed_schema() {
+        let report = RelayWorkerReport {
+            accepted: 1,
+            accept_failures: 2,
+            rejected_capacity: 3,
+            rejected_waiting_rooms: 4,
+            paired: 5,
+            invalid_registrations: 6,
+            header_timeouts: 7,
+            waiting_timeouts: 8,
+            rendezvous_timeouts: 9,
+            idle_timeouts: 10,
+            absolute_timeouts: 11,
+            disconnected: 12,
+            io_failures: 13,
+            cancelled: 14,
+            task_failures: 15,
+            peak_connections: 16,
+            peak_waiting_rooms: 17,
+            remaining_connections: 18,
+        };
+        assert_eq!(
+            serde_json::to_value(row(Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean { report },
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "relay_worker_stopped",
+                "outcome": {
+                    "status": "clean",
+                    "report": {
+                        "accepted": 1,
+                        "accept_failures": 2,
+                        "rejected_capacity": 3,
+                        "rejected_waiting_rooms": 4,
+                        "paired": 5,
+                        "invalid_registrations": 6,
+                        "header_timeouts": 7,
+                        "waiting_timeouts": 8,
+                        "rendezvous_timeouts": 9,
+                        "idle_timeouts": 10,
+                        "absolute_timeouts": 11,
+                        "disconnected": 12,
+                        "io_failures": 13,
+                        "cancelled": 14,
+                        "task_failures": 15,
+                        "peak_connections": 16,
+                        "peak_waiting_rooms": 17,
+                        "remaining_connections": 18,
+                    },
+                },
+            })
+        );
+
+        for (error, name) in [
+            (RelayWorkerError::AcceptFailed, "accept_failed"),
+            (RelayWorkerError::TaskFailed, "task_failed"),
+            (
+                RelayWorkerError::IdentifierExhausted,
+                "identifier_exhausted",
+            ),
+            (RelayWorkerError::ShutdownIncomplete, "shutdown_incomplete"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::RelayWorkerStopped {
+                    outcome: RelayWorkerOutcome::Error { error },
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "relay_worker_stopped",
+                    "outcome": {"status": "error", "error": name},
+                })
+            );
+        }
+
+        assert_eq!(
+            serde_json::to_value(row(Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Panicked,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "relay_worker_stopped",
+                "outcome": {"status": "panicked"},
+            })
+        );
+    }
+
+    #[test]
+    fn signed_decision_rejections_have_distinct_closed_reason_names() {
+        let reasons = [
+            (DecisionRejectionReason::Clock, "clock"),
+            (DecisionRejectionReason::WrongPc, "wrong_pc"),
+            (DecisionRejectionReason::WrongEpoch, "wrong_epoch"),
+            (
+                DecisionRejectionReason::UnknownOrCompleted,
+                "unknown_or_completed",
+            ),
+            (DecisionRejectionReason::Expired, "expired"),
+            (DecisionRejectionReason::BindingMismatch, "binding_mismatch"),
+            (DecisionRejectionReason::NotEligible, "not_eligible"),
+            (
+                DecisionRejectionReason::EnrollmentChanged,
+                "enrollment_changed",
+            ),
+            (
+                DecisionRejectionReason::InvalidSignature,
+                "invalid_signature",
+            ),
+        ];
+
+        for (reason, name) in reasons {
+            assert_eq!(
+                serde_json::to_value(row(Event::DecisionRejected { reason })).unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "decision_rejected",
+                    "reason": name,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_failure_causes_have_distinct_closed_names() {
+        for (cause, name) in [
+            (RuntimeFailureCause::Service, "service"),
+            (RuntimeFailureCause::SessionClosed, "session_closed"),
+            (RuntimeFailureCause::Registry, "registry"),
+            (RuntimeFailureCause::PeerChanged, "peer_changed"),
+            (RuntimeFailureCause::Identity, "identity"),
+            (RuntimeFailureCause::Clock, "clock"),
+            (RuntimeFailureCause::Capacity, "capacity"),
+            (RuntimeFailureCause::Protocol, "protocol"),
+            (RuntimeFailureCause::Io, "io"),
+            (RuntimeFailureCause::Panicked, "panicked"),
+            (RuntimeFailureCause::CleanupPending, "cleanup_pending"),
+            (RuntimeFailureCause::Signing, "signing"),
+            (RuntimeFailureCause::Watcher, "watcher"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::RuntimeFailure {
+                    step: 5,
+                    cause,
+                    panicked: cause == RuntimeFailureCause::Panicked,
+                    code: 0,
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "runtime_failure",
+                    "step": 5,
+                    "cause": name,
+                    "panicked": cause == RuntimeFailureCause::Panicked,
+                    "code": 0,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_failure_row_names_the_fixed_cause_and_caught_panic() {
+        assert_eq!(
+            serde_json::to_value(row(Event::RuntimeFailure {
+                step: 5,
+                cause: RuntimeFailureCause::Panicked,
+                panicked: true,
+                code: 0,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "runtime_failure",
+                "step": 5,
+                "cause": "panicked",
+                "panicked": true,
+                "code": 0,
+            })
+        );
     }
 
     #[test]
@@ -505,6 +1388,20 @@ mod tests {
             })
         );
         assert_eq!(
+            serde_json::to_value(row(Event::JournalAppendFailed {
+                fault: JournalFault::QueueFull,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_append_failed",
+                "fault": "queue_full"
+            })
+        );
+        assert_eq!(
             serde_json::to_value(row(Event::JournalPurgeFailed {
                 fault: JournalFault::CorruptStorage,
             }))
@@ -555,5 +1452,47 @@ mod tests {
             .is_err()
         );
         assert_eq!(first.metadata().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn concurrent_in_process_record_writers_lose_no_rows() {
+        const WRITES_PER_THREAD: usize = 16;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.jsonl");
+        File::create(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let written = std::sync::atomic::AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                let written = &written;
+                scope.spawn(move || {
+                    for _ in 0..WRITES_PER_THREAD {
+                        barrier.wait();
+                        if record_with(Event::StartupFailure { stage: 7, code: 5 }, |record| {
+                            let Ok(mut file) = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&path)
+                            else {
+                                return false;
+                            };
+                            append(&mut file, record).is_ok()
+                        }) {
+                            written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            written.load(std::sync::atomic::Ordering::SeqCst),
+            2 * WRITES_PER_THREAD
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 2 * WRITES_PER_THREAD);
     }
 }

@@ -2,7 +2,7 @@
 //! Diagnostic-only listener state. No owner is stopped or granted authority.
 
 use super::ServiceSession;
-use crate::management_protocol::{ListenerFault, ManagementResponse};
+use crate::management_protocol::ListenerFault;
 use std::{
     io,
     time::{Duration, Instant},
@@ -11,10 +11,11 @@ use windows_port_owner::ListenerOwner;
 
 const OWNER_LOOKUP_INTERVAL: Duration = Duration::from_secs(5);
 const RELAY_ABUSE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const PEER_WORKER_EXIT_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Whether the embedded relay's counters are due for a diagnostics row: they
 /// moved since the last row, and that row is at least a minute old.
-fn relay_abuse_due(
+pub(super) fn relay_abuse_due(
     current: relay_service::RelayAbuseCounters,
     reported: Option<(Instant, relay_service::RelayAbuseCounters)>,
     now: Instant,
@@ -27,7 +28,44 @@ fn relay_abuse_due(
     }
 }
 
-fn fault_for_failure(
+fn observe_peer_worker_exits_with(
+    exits: [(super::PeerExitCause, u64); 8],
+    pending: &mut [u64; 8],
+    reported: &mut [Option<Instant>; 8],
+    now: Instant,
+    flush: bool,
+    mut record: impl FnMut(crate::public_diagnostics::Event),
+) {
+    for (cause, count) in exits {
+        let pending = &mut pending[cause as usize];
+        *pending = pending.saturating_add(count);
+    }
+    for cause in [
+        super::PeerExitCause::LocallyClosed,
+        super::PeerExitCause::PeerClosed,
+        super::PeerExitCause::TlsFailure,
+        super::PeerExitCause::Timeout,
+        super::PeerExitCause::ProtocolViolation,
+        super::PeerExitCause::ClockFailure,
+        super::PeerExitCause::IoFailure,
+        super::PeerExitCause::Panic,
+    ] {
+        let index = cause as usize;
+        if pending[index] == 0
+            || (!flush
+                && reported[index].is_some_and(|at| {
+                    now.saturating_duration_since(at) < PEER_WORKER_EXIT_REPORT_INTERVAL
+                }))
+        {
+            continue;
+        }
+        let count = std::mem::take(&mut pending[index]);
+        reported[index] = Some(now);
+        record(crate::public_diagnostics::Event::PeerWorkerExited { cause, count });
+    }
+}
+
+pub(super) fn fault_for_failure(
     error: &io::Error,
     now: Instant,
     cache: &mut Option<(Instant, Option<ListenerOwner>)>,
@@ -58,68 +96,121 @@ fn fault_for_failure(
 }
 
 impl ServiceSession<'_> {
-    pub(super) fn observe_listener_failure(&mut self, error: &io::Error, now: Instant) {
-        let fault = fault_for_failure(error, now, &mut self.relay_owner_lookup, || {
-            windows_port_owner::listener_owner(relay_service::EMBEDDED_RELAY_PORT)
-                .ok()
-                .flatten()
-        });
-        self.set_listener_fault(fault);
-    }
-
-    fn set_listener_fault(&mut self, fault: Option<ListenerFault>) {
-        if self.relay_listener_fault != fault {
-            crate::public_diagnostics::record(
-                crate::public_diagnostics::Event::RelayListenerChanged {
-                    fault: fault.clone(),
-                },
-            );
-            self.relay_listener_fault = fault;
-        }
-    }
-
-    /// Makes route abuse at the embedded relay visible in public diagnostics.
-    /// A restarted relay counts from zero again, which also reads as a change.
-    pub(super) fn observe_relay_abuse(&mut self, now: Instant) {
-        let Some(current) = self
-            .embedded_relay
-            .as_ref()
-            .map(relay_service::HostedRelay::abuse_counters)
-        else {
-            return;
-        };
-        if !relay_abuse_due(current, self.relay_abuse_reported, now) {
-            return;
-        }
-        crate::public_diagnostics::record(crate::public_diagnostics::Event::RelayAbuse {
-            evicted_pairs: current.evicted_pairs,
-            rejected_duplicates: current.rejected_duplicates,
-            rejected_pc_sources: current.rejected_pc_sources,
-            rejected_evictions: current.rejected_evictions,
-        });
-        self.relay_abuse_reported = Some((now, current));
-    }
-
-    pub(super) fn clear_listener_fault(&mut self) {
-        self.set_listener_fault(None);
-        self.relay_owner_lookup = None;
-    }
-
-    pub(super) fn listener_status(&self) -> ManagementResponse {
-        ManagementResponse::ListenerStatus {
-            port: relay_service::EMBEDDED_RELAY_PORT,
-            fault: if self.embedded_mode && !self.closing && self.pending_relay.is_none() {
-                self.relay_listener_fault.clone()
-            } else {
-                None
+    pub(super) fn observe_peer_worker_exits(&mut self, now: Instant, flush: bool) {
+        let exits = self.take_peer_worker_exits();
+        #[cfg(test)]
+        let recorded = self.peer_worker_exit_fixture.clone();
+        observe_peer_worker_exits_with(
+            exits,
+            &mut self.peer_worker_exit_pending,
+            &mut self.peer_worker_exit_reported_at,
+            now,
+            flush,
+            |event| {
+                #[cfg(test)]
+                if let Some(recorded) = &recorded {
+                    recorded.borrow_mut().push(event);
+                    return;
+                }
+                crate::public_diagnostics::record(event);
             },
-        }
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_worker_exit_rows_accumulate_until_due_and_flush_at_shutdown() {
+        use crate::peer_runtime::PeerExitCause;
+
+        fn exits(values: &[(PeerExitCause, u64)]) -> [(PeerExitCause, u64); 8] {
+            let mut counts = [0_u64; 8];
+            for (cause, count) in values {
+                counts[*cause as usize] = *count;
+            }
+            [
+                PeerExitCause::LocallyClosed,
+                PeerExitCause::PeerClosed,
+                PeerExitCause::TlsFailure,
+                PeerExitCause::Timeout,
+                PeerExitCause::ProtocolViolation,
+                PeerExitCause::ClockFailure,
+                PeerExitCause::IoFailure,
+                PeerExitCause::Panic,
+            ]
+            .map(|cause| (cause, counts[cause as usize]))
+        }
+
+        let start = Instant::now();
+        let mut pending = [0_u64; 8];
+        let mut reported = [None; 8];
+        let mut rows = Vec::new();
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 2)]),
+            &mut pending,
+            &mut reported,
+            start,
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 3), (PeerExitCause::PeerClosed, 1)]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(10),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(59),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 4)]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(60),
+            false,
+            |event| rows.push(event),
+        );
+        observe_peer_worker_exits_with(
+            exits(&[(PeerExitCause::Timeout, 5)]),
+            &mut pending,
+            &mut reported,
+            start + Duration::from_secs(61),
+            true,
+            |event| rows.push(event),
+        );
+
+        let values: Vec<_> = rows
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("timeout", 2),
+                ("peer_closed", 1),
+                ("timeout", 7),
+                ("timeout", 5),
+            ]
+            .map(|(cause, count)| {
+                serde_json::json!({
+                    "kind": "peer_worker_exited",
+                    "cause": cause,
+                    "count": count,
+                })
+            })
+        );
+        assert!(pending.iter().all(|count| *count == 0));
+    }
 
     #[test]
     fn relay_abuse_is_reported_on_change_and_at_most_once_a_minute() {

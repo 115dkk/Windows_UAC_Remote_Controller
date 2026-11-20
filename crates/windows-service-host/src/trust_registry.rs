@@ -87,7 +87,29 @@ impl fmt::Debug for ServiceRegistry<'_> {
     }
 }
 
+#[cfg(any(windows, test))]
+pub(crate) struct PeerRegistrySnapshot {
+    pub(crate) checkpoint: RegistryCheckpoint,
+    pub(crate) transport_keys: Vec<(DeviceId, Option<TlsPublicKey>)>,
+}
+
 impl ServiceRegistry<'_> {
+    /// One identity check for one peer revalidation pass, never a cached grant.
+    #[cfg(windows)]
+    pub(crate) fn checkpoint_and_transport_keys(
+        &mut self,
+        devices: &[DeviceId],
+    ) -> Result<PeerRegistrySnapshot, RegistryError> {
+        let document = &self.healthy()?.document;
+        Ok(PeerRegistrySnapshot {
+            checkpoint: document.core.clone(),
+            transport_keys: devices
+                .iter()
+                .map(|device| (*device, document.transport(*device).cloned()))
+                .collect(),
+        })
+    }
+
     pub fn checkpoint_for_engine(&mut self) -> Result<RegistryCheckpoint, RegistryError> {
         #[cfg(windows)]
         {

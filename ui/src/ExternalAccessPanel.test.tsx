@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { AppSnapshot, ControllerBridge, ExternalAccessFailure, ExternalAccessInput, ExternalCandidateSource } from './contracts';
 import { ExternalAccessPanel } from './ExternalAccessPanel';
-import { addressDiff, checkFixedAddress, forwardAddressMoved, parseFixedAddress, parsePort, suggestExternalPort } from './externalAccess';
+import { addressDiff, checkFixedAddress, draftChanged, forwardAddressMoved, parseFixedAddress, parsePort, suggestExternalPort } from './externalAccess';
 import { locales, setPreviewLanguage, tr } from './i18n';
 import { ko } from './messages';
 import { createQaBridge, qaCase } from './qa-fixtures';
@@ -118,6 +118,28 @@ describe('external access status', () => {
 });
 
 describe('external access form', () => {
+  it.each([
+    ['[2606:4700:0000:0000:0000:0000:0000:1111]:7443', '[2606:4700::1111]:7443'],
+    ['[2606:4700::1111]:07443', '[2606:4700::1111]:7443'],
+    ['1.2.3.4:07443', '1.2.3.4:7443'],
+  ])('recognizes the native canonical setting for %s and clears the saved draft', async (entered, canonical) => {
+    const source = qaCase('desktop-network-auto-no-mapping').snapshot;
+    const saved: AppSnapshot = { ...source, externalAccess: { ...source.externalAccess!, mode: 'fixed', fixedAddress: canonical } };
+    const draft = { mode: 'fixed' as const, address: entered, port: '' };
+    expect(draftChanged(draft, saved.externalAccess)).toBe(false);
+    expect(draftChanged({ ...draft, address: '1.2.3.5:7443' }, saved.externalAccess)).toBe(true);
+    expect(draftChanged(draft, null)).toBe(true);
+    const user = userEvent.setup();
+    const setExternalAccess = vi.fn<ControllerBridge['setExternalAccess']>().mockResolvedValue(saved);
+    render(<App bridge={{ ...createQaBridge(source), setExternalAccess }} initialPage="network" />);
+    await user.click(await screen.findByRole('radio', { name: fixedTitle }));
+    fireEvent.change(screen.getByRole('textbox', { name: '외부 주소' }), { target: { value: entered } });
+    await user.click(methodSave());
+    expect(setExternalAccess).toHaveBeenCalledExactlyOnceWith({ mode: 'fixed', fixedAddress: entered });
+    expect(screen.getByRole('textbox', { name: '외부 주소' })).toHaveValue(canonical);
+    expect(methodSave()).toBeDisabled();
+  });
+
   it('shows the field that belongs to the selected option', async () => {
     const user = userEvent.setup();
     panel(qaCase('desktop-network-auto-no-mapping').snapshot);

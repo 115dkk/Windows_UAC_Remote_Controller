@@ -77,8 +77,10 @@ is held to every key check a locked phone passes (ADR 0049).
 Shared libraries, actual local TCP/TLS test paths, Android Application policy and
 history ownership, and hosted Windows/Linux/Android quality builds have been
 implemented and verified by root. The product remains in development. The Windows
-observer/probe and dormant service supervisor do not implement request-bound UAC
-approval. Enrolled-key initialization interfaces are trusted-host interfaces, not
+service activates pairing, relay transport and the prompt watcher after SCM Ready;
+it passes verified request-bound decisions to the watcher for checked consent-button
+invocation and observes the Windows outcome. This implementation status does not
+establish native acceptance for the current build. Enrolled-key initialization interfaces are trusted-host interfaces, not
 public IPC. No real Windows approval/credential-entry adapter, native phone
 authentication/notification journey, trusted QR enrollment, or deployed cross-device
 transport has yet been proven. ABI8 now composes a Rust-only provisioned socket,

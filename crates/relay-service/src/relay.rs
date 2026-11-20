@@ -361,15 +361,19 @@ fn cooldown_for_strikes(strikes: u8) -> Duration {
         .min(EVICTION_COOLDOWN_MAX)
 }
 
-struct AdmissionState {
+struct RouteRegistry {
+    routes: BTreeMap<RouteId, RouteState>,
+    limits: RelayLimits,
     policy: RelayPolicy,
     evictions: EvictionTracker,
     abuse: Arc<RelayAbuseCounterStore>,
 }
 
-impl AdmissionState {
+impl RouteRegistry {
     fn new(limits: RelayLimits, policy: RelayPolicy, abuse: Arc<RelayAbuseCounterStore>) -> Self {
         Self {
+            routes: BTreeMap::new(),
+            limits,
             policy,
             evictions: EvictionTracker::new(limits),
             abuse,
@@ -394,6 +398,10 @@ impl AdmissionState {
     fn count_eviction_rejection(&self, report: &mut RelayReport) {
         report.rejected_evictions = report.rejected_evictions.saturating_add(1);
         self.abuse.count_rejected_eviction();
+    }
+
+    fn clear(&mut self) {
+        self.routes.clear();
     }
 }
 
@@ -452,9 +460,8 @@ async fn run_loop(
     let permits = Arc::new(Semaphore::new(limits.connections));
     let (mailbox, mut receiver) = mpsc::channel::<Register>(limits.connections);
     let mut tasks = JoinSet::new();
-    let mut routes = BTreeMap::new();
+    let mut routes = RouteRegistry::new(limits, policy, abuse);
     let mut report = RelayReport::default();
-    let mut admission = AdmissionState::new(limits, policy, abuse);
     let mut next_id = 0_u64;
     // Cleared by one accepted connection, so only an unbroken run of refusals
     // counts. `accept_backoff` disables the accept branch instead of awaiting
@@ -470,7 +477,7 @@ async fn run_loop(
                 match result {
                     Some(Ok(exit)) => {
                         if let Err(error) =
-                            finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
+                            routes.finish_task(exit, &mut report)
                         {
                             break Some(error);
                         }
@@ -495,13 +502,7 @@ async fn run_loop(
             }
             registration = receiver.recv() => {
                 if let Some(registration) = registration {
-                    register_with_admission(
-                        registration,
-                        &mut routes,
-                        &mut report,
-                        limits,
-                        &mut admission,
-                    );
+                    routes.register(registration, &mut report);
                 }
             }
             accepted = listener.accept(), if accept_backoff.is_none() => {
@@ -584,9 +585,7 @@ async fn run_loop(
     while !tasks.is_empty() {
         match timeout_at(graceful_deadline, tasks.join_next()).await {
             Ok(Some(Ok(exit))) => {
-                if let Err(error) =
-                    finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
-                {
+                if let Err(error) = routes.finish_task(exit, &mut report) {
                     failure = Some(error);
                 }
             }
@@ -601,9 +600,7 @@ async fn run_loop(
     while !tasks.is_empty() {
         match timeout_at(final_deadline, tasks.join_next()).await {
             Ok(Some(Ok(exit))) => {
-                if let Err(error) =
-                    finish_task_with_admission(exit, &mut routes, &mut report, &mut admission)
-                {
+                if let Err(error) = routes.finish_task(exit, &mut report) {
                     failure = Some(error);
                 }
             }
@@ -656,169 +653,159 @@ fn is_loopback_source(source: SocketAddr) -> bool {
     }
 }
 
-fn register_with_admission(
-    incoming: Register,
-    routes: &mut BTreeMap<RouteId, RouteState>,
-    report: &mut RelayReport,
-    limits: RelayLimits,
-    admission: &mut AdmissionState,
-) {
-    let now = Instant::now();
-    if !pc_source_is_allowed(
-        admission.policy.pc_role_source(),
-        incoming.registration,
-        incoming.source,
-    ) {
-        admission.count_pc_source_rejection(report);
-        let _ = incoming.assignment.send(Assignment::Reject);
-        return;
-    }
-
-    // Only stale waiting assignments are removed here. A live duplicate never
-    // overwrites or kicks a participant that is still waiting in its role.
-    let stale_waiters: Vec<_> = routes
-        .iter()
-        .filter_map(|(route, state)| match state {
-            RouteState::Waiting(waiter)
-                if waiter.deadline <= now || waiter.assignment.is_closed() =>
-            {
-                Some((*route, waiter.id))
-            }
-            _ => None,
-        })
-        .collect();
-    for (route, id) in stale_waiters {
-        routes.remove(&route);
-        admission.evictions.waiting_evictor_ended(route, id, now);
-    }
-    if incoming.deadline <= now || incoming.assignment.is_closed() {
-        return;
-    }
-    let route = incoming.registration.route();
-    match routes.get(&route) {
-        Some(RouteState::Active { leader, .. }) => {
-            let leader = *leader;
-            // A fresh registration still replaces a silent pair immediately so
-            // an endpoint that changed networks is not held until inactivity.
-            // Source and room admission happen first. Before eviction, charge a
-            // still-short-lived pair formed by the previous evictor. The first
-            // consecutive strike has no cooldown; the second starts at thirty
-            // seconds, then doubles to five minutes. A cooldown rejection leaves
-            // the active pair alone, and its later completion cannot charge it
-            // twice. A pair that survives ten seconds clears the history.
-            // Endpoint identity remains the pinned inner TLS peer.
-            if waiting_rooms(routes) >= limits.waiting_rooms {
-                report.rejected_waiting_rooms = report.rejected_waiting_rooms.saturating_add(1);
-                let _ = incoming.assignment.send(Assignment::Reject);
-                return;
-            }
-            admission
-                .evictions
-                .account_pair_before_eviction(route, leader, now);
-            if admission.evictions.is_cooling_down(route, now) {
-                admission.count_eviction_rejection(report);
-                let _ = incoming.assignment.send(Assignment::Reject);
-                return;
-            }
-            evict(route, routes);
-            admission.count_eviction(report);
-            admission.evictions.start_evictor(route, incoming.id, now);
-        }
-        Some(RouteState::Waiting(waiter))
-            if waiter.registration.role() == incoming.registration.role() =>
-        {
-            admission.count_duplicate(report);
+impl RouteRegistry {
+    fn register(&mut self, incoming: Register, report: &mut RelayReport) {
+        let now = Instant::now();
+        if !pc_source_is_allowed(
+            self.policy.pc_role_source(),
+            incoming.registration,
+            incoming.source,
+        ) {
+            self.count_pc_source_rejection(report);
             let _ = incoming.assignment.send(Assignment::Reject);
             return;
         }
-        _ => (),
-    }
-    if let Some(RouteState::Waiting(waiter)) = routes.remove(&route) {
-        let (handoff, counterpart) = oneshot::channel();
-        let leader = waiter.id;
-        let follower = incoming.id;
-        let eviction = CancellationToken::new();
-        if waiter
-            .assignment
-            .send(Assignment::Lead {
-                counterpart,
-                paired_at: now,
-                eviction: eviction.clone(),
+
+        // Only stale waiting assignments are removed here. A live duplicate never
+        // overwrites or kicks a participant that is still waiting in its role.
+        let stale_waiters: Vec<_> = self
+            .routes
+            .iter()
+            .filter_map(|(route, state)| match state {
+                RouteState::Waiting(waiter)
+                    if waiter.deadline <= now || waiter.assignment.is_closed() =>
+                {
+                    Some((*route, waiter.id))
+                }
+                _ => None,
             })
-            .is_ok()
-        {
-            routes.insert(
-                route,
-                RouteState::Active {
-                    leader,
-                    follower,
-                    retired_follower: None,
-                    eviction: eviction.clone(),
-                },
-            );
-            if incoming
+            .collect();
+        for (route, id) in stale_waiters {
+            self.routes.remove(&route);
+            self.evictions.waiting_evictor_ended(route, id, now);
+        }
+        if incoming.deadline <= now || incoming.assignment.is_closed() {
+            return;
+        }
+        let route = incoming.registration.route();
+        match self.routes.get(&route) {
+            Some(RouteState::Active { leader, .. }) => {
+                let leader = *leader;
+                // A fresh registration still replaces a silent pair immediately so
+                // an endpoint that changed networks is not held until inactivity.
+                // Source and room admission happen first. Before eviction, charge a
+                // still-short-lived pair formed by the previous evictor. The first
+                // consecutive strike has no cooldown; the second starts at thirty
+                // seconds, then doubles to five minutes. A cooldown rejection leaves
+                // the active pair alone, and its later completion cannot charge it
+                // twice. A pair that survives ten seconds clears the history.
+                // Endpoint identity remains the pinned inner TLS peer.
+                if self.waiting_rooms() >= self.limits.waiting_rooms {
+                    report.rejected_waiting_rooms = report.rejected_waiting_rooms.saturating_add(1);
+                    let _ = incoming.assignment.send(Assignment::Reject);
+                    return;
+                }
+                self.evictions
+                    .account_pair_before_eviction(route, leader, now);
+                if self.evictions.is_cooling_down(route, now) {
+                    self.count_eviction_rejection(report);
+                    let _ = incoming.assignment.send(Assignment::Reject);
+                    return;
+                }
+                self.evict(route);
+                self.count_eviction(report);
+                self.evictions.start_evictor(route, incoming.id, now);
+            }
+            Some(RouteState::Waiting(waiter))
+                if waiter.registration.role() == incoming.registration.role() =>
+            {
+                self.count_duplicate(report);
+                let _ = incoming.assignment.send(Assignment::Reject);
+                return;
+            }
+            _ => (),
+        }
+        if let Some(RouteState::Waiting(waiter)) = self.routes.remove(&route) {
+            let (handoff, counterpart) = oneshot::channel();
+            let leader = waiter.id;
+            let follower = incoming.id;
+            let eviction = CancellationToken::new();
+            if waiter
                 .assignment
-                .send(Assignment::Follow {
-                    handoff,
+                .send(Assignment::Lead {
+                    counterpart,
                     paired_at: now,
-                    eviction,
+                    eviction: eviction.clone(),
                 })
                 .is_ok()
             {
-                admission
-                    .evictions
-                    .pair_formed(route, leader, follower, now);
-                report.paired = report.paired.saturating_add(1);
-            } else {
-                admission
-                    .evictions
-                    .waiting_evictor_ended(route, follower, now);
+                self.routes.insert(
+                    route,
+                    RouteState::Active {
+                        leader,
+                        follower,
+                        retired_follower: None,
+                        eviction: eviction.clone(),
+                    },
+                );
+                if incoming
+                    .assignment
+                    .send(Assignment::Follow {
+                        handoff,
+                        paired_at: now,
+                        eviction,
+                    })
+                    .is_ok()
+                {
+                    self.evictions.pair_formed(route, leader, follower, now);
+                    report.paired = report.paired.saturating_add(1);
+                } else {
+                    self.evictions.waiting_evictor_ended(route, follower, now);
+                }
+                // A failed follower assignment drops the one-shot sender. The
+                // leader then closes under its bounded rendezvous deadline.
+                return;
             }
-            // A failed follower assignment drops the one-shot sender. The
-            // leader then closes under its bounded rendezvous deadline.
-            return;
+            self.evictions.waiting_evictor_ended(route, leader, now);
+            // The previous waiter has actually gone away; retain the new arrival as
+            // an ordinary waiter instead of pairing it with an abandoned socket.
         }
-        admission
-            .evictions
-            .waiting_evictor_ended(route, leader, now);
-        // The previous waiter has actually gone away; retain the new arrival as
-        // an ordinary waiter instead of pairing it with an abandoned socket.
+        let waiting = self.waiting_rooms();
+        if waiting >= self.limits.waiting_rooms {
+            report.rejected_waiting_rooms = report.rejected_waiting_rooms.saturating_add(1);
+            let _ = incoming.assignment.send(Assignment::Reject);
+        } else {
+            self.routes.insert(route, RouteState::Waiting(incoming));
+            report.peak_waiting_rooms = report.peak_waiting_rooms.max(waiting + 1);
+        }
     }
-    let waiting = waiting_rooms(routes);
-    if waiting >= limits.waiting_rooms {
-        report.rejected_waiting_rooms = report.rejected_waiting_rooms.saturating_add(1);
-        let _ = incoming.assignment.send(Assignment::Reject);
-    } else {
-        routes.insert(route, RouteState::Waiting(incoming));
-        report.peak_waiting_rooms = report.peak_waiting_rooms.max(waiting + 1);
+
+    fn waiting_rooms(&self) -> usize {
+        self.routes
+            .values()
+            .filter(|state| matches!(state, RouteState::Waiting(_)))
+            .count()
     }
-}
 
-fn waiting_rooms(routes: &BTreeMap<RouteId, RouteState>) -> usize {
-    routes
-        .values()
-        .filter(|state| matches!(state, RouteState::Waiting(_)))
-        .count()
-}
-
-/// Retire one active generation for a fresh registration on its route.
-///
-/// The entry leaves the map before anything closes, so the same ordering holds
-/// as for an ordinary retirement: no remote EOF precedes it, and a party that
-/// reconnects on that EOF meets the replacement, never the dead pair. The
-/// retained follower, if any, is owned by this entry alone and closes here. The
-/// leader, and a follower that has not yet claimed its assignment, observe the
-/// cancelled token and return their sockets; `finish_task` then drops them,
-/// because their identifiers no longer match anything on the route.
-fn evict(route: RouteId, routes: &mut BTreeMap<RouteId, RouteState>) {
-    if let Some(RouteState::Active {
-        retired_follower,
-        eviction,
-        ..
-    }) = routes.remove(&route)
-    {
-        eviction.cancel();
-        drop(retired_follower);
+    /// Retire one active generation for a fresh registration on its route.
+    ///
+    /// The entry leaves the map before anything closes, so the same ordering holds
+    /// as for an ordinary retirement: no remote EOF precedes it, and a party that
+    /// reconnects on that EOF meets the replacement, never the dead pair. The
+    /// retained follower, if any, is owned by this entry alone and closes here. The
+    /// leader, and a follower that has not yet claimed its assignment, observe the
+    /// cancelled token and return their sockets; `finish_task` then drops them,
+    /// because their identifiers no longer match anything on the route.
+    fn evict(&mut self, route: RouteId) {
+        if let Some(RouteState::Active {
+            retired_follower,
+            eviction,
+            ..
+        }) = self.routes.remove(&route)
+        {
+            eviction.cancel();
+            drop(retired_follower);
+        }
     }
 }
 
@@ -1141,122 +1128,113 @@ fn ended(route: Option<RouteId>, reason: EndReason) -> (Option<RouteId>, EndReas
     (route, reason)
 }
 
-fn finish_task_with_admission(
-    mut exit: TaskExit,
-    routes: &mut BTreeMap<RouteId, RouteState>,
-    report: &mut RelayReport,
-    admission: &mut AdmissionState,
-) -> Result<(), RelayError> {
-    if let Some(route) = exit.route {
-        let now = Instant::now();
-        admission
-            .evictions
-            .waiting_evictor_ended(route, exit.id, now);
-        // Every task of an evicted generation lands in the last arm: the route
-        // now holds nothing, or a replacement whose connection identifiers are
-        // all different from its own, because identifiers are never reused.
-        let malformed = match routes.get_mut(&route) {
-            Some(RouteState::Active {
-                leader,
-                follower,
-                retired_follower,
-                ..
-            }) if *follower == exit.id => {
-                if *leader == *follower
-                    || retired_follower.is_some()
-                    || exit.retired.first.is_none()
-                    || exit.retired.second.is_some()
-                {
-                    true
-                } else {
-                    // Only the registered follower for this exact active
-                    // generation may fill its single retained-socket slot.
-                    *retired_follower = exit.retired.first.take();
-                    false
+impl RouteRegistry {
+    fn finish_task(
+        &mut self,
+        mut exit: TaskExit,
+        report: &mut RelayReport,
+    ) -> Result<(), RelayError> {
+        if let Some(route) = exit.route {
+            let now = Instant::now();
+            self.evictions.waiting_evictor_ended(route, exit.id, now);
+            // Every task of an evicted generation lands in the last arm: the route
+            // now holds nothing, or a replacement whose connection identifiers are
+            // all different from its own, because identifiers are never reused.
+            let malformed = match self.routes.get_mut(&route) {
+                Some(RouteState::Active {
+                    leader,
+                    follower,
+                    retired_follower,
+                    ..
+                }) if *follower == exit.id => {
+                    if *leader == *follower
+                        || retired_follower.is_some()
+                        || exit.retired.first.is_none()
+                        || exit.retired.second.is_some()
+                    {
+                        true
+                    } else {
+                        // Only the registered follower for this exact active
+                        // generation may fill its single retained-socket slot.
+                        *retired_follower = exit.retired.first.take();
+                        false
+                    }
                 }
+                Some(RouteState::Active {
+                    leader,
+                    follower,
+                    retired_follower,
+                    ..
+                }) if *leader == exit.id => {
+                    *leader == *follower
+                        || exit.retired.first.is_none()
+                        || (retired_follower.is_some() && exit.retired.second.is_some())
+                }
+                Some(RouteState::Waiting(waiter)) if waiter.id == exit.id => {
+                    exit.retired.first.is_none() || exit.retired.second.is_some()
+                }
+                _ => false,
+            };
+            if malformed {
+                // Never overwrite a retained Peer or silently release conflicting
+                // ownership. Retire the matching generation before drops and make
+                // the coordinator stop accepting new sockets and shut down.
+                self.routes.remove(&route);
+                report.task_failures = report.task_failures.saturating_add(1);
+                return Err(RelayError::TaskFailed);
             }
-            Some(RouteState::Active {
-                leader,
-                follower,
-                retired_follower,
-                ..
-            }) if *leader == exit.id => {
-                *leader == *follower
-                    || exit.retired.first.is_none()
-                    || (retired_follower.is_some() && exit.retired.second.is_some())
+            let owns_waiting = matches!(
+                self.routes.get(&route),
+                Some(RouteState::Waiting(waiter)) if waiter.id == exit.id
+            );
+            if owns_waiting {
+                self.routes.remove(&route);
+            } else {
+                self.finish_active_generation(route, exit.id, now);
             }
-            Some(RouteState::Waiting(waiter)) if waiter.id == exit.id => {
-                exit.retired.first.is_none() || exit.retired.second.is_some()
-            }
-            _ => false,
+        }
+        let counter = match exit.reason {
+            EndReason::InvalidHeader => Some(&mut report.invalid_registrations),
+            EndReason::HeaderTimeout => Some(&mut report.header_timeouts),
+            EndReason::WaitingTimeout => Some(&mut report.waiting_timeouts),
+            EndReason::RendezvousTimeout => Some(&mut report.rendezvous_timeouts),
+            EndReason::IdleTimeout => Some(&mut report.idle_timeouts),
+            EndReason::AbsoluteTimeout => Some(&mut report.absolute_timeouts),
+            EndReason::Disconnected => Some(&mut report.disconnected),
+            EndReason::IoFailure => Some(&mut report.io_failures),
+            EndReason::Cancelled => Some(&mut report.cancelled),
+            // `register` counts one eviction per pair, not one per task.
+            EndReason::Evicted | EndReason::Rejected | EndReason::Transferred => None,
         };
-        if malformed {
-            // Never overwrite a retained Peer or silently release conflicting
-            // ownership. Retire the matching generation before drops and make
-            // the coordinator stop accepting new sockets and shut down.
-            routes.remove(&route);
-            report.task_failures = report.task_failures.saturating_add(1);
-            return Err(RelayError::TaskFailed);
+        if let Some(counter) = counter {
+            *counter = counter.saturating_add(1);
         }
-        let owns_waiting =
-            matches!(routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == exit.id);
-        let owns_active = matches!(routes.get(&route), Some(RouteState::Active { leader, .. }) if *leader == exit.id);
-        if owns_waiting || owns_active {
-            routes.remove(&route);
-            if owns_active {
-                admission.evictions.pair_ended(route, exit.id, now);
-            }
+        // This is intentionally after generation-safe route retirement. Clients
+        // observing our EOF can reconnect without racing a stale route/socket slot.
+        drop(exit.retired);
+        Ok(())
+    }
+
+    fn finish_active_generation(&mut self, route: RouteId, leader: u64, now: Instant) -> bool {
+        let owns_active = matches!(
+            self.routes.get(&route),
+            Some(RouteState::Active { leader: current, .. }) if *current == leader
+        );
+        if owns_active {
+            self.routes.remove(&route);
+            self.evictions.pair_ended(route, leader, now);
         }
+        owns_active
     }
-    let counter = match exit.reason {
-        EndReason::InvalidHeader => Some(&mut report.invalid_registrations),
-        EndReason::HeaderTimeout => Some(&mut report.header_timeouts),
-        EndReason::WaitingTimeout => Some(&mut report.waiting_timeouts),
-        EndReason::RendezvousTimeout => Some(&mut report.rendezvous_timeouts),
-        EndReason::IdleTimeout => Some(&mut report.idle_timeouts),
-        EndReason::AbsoluteTimeout => Some(&mut report.absolute_timeouts),
-        EndReason::Disconnected => Some(&mut report.disconnected),
-        EndReason::IoFailure => Some(&mut report.io_failures),
-        EndReason::Cancelled => Some(&mut report.cancelled),
-        // `register` counts one eviction per pair, not one per task.
-        EndReason::Evicted | EndReason::Rejected | EndReason::Transferred => None,
-    };
-    if let Some(counter) = counter {
-        *counter = counter.saturating_add(1);
-    }
-    // This is intentionally after generation-safe route retirement. Clients
-    // observing our EOF can reconnect without racing a stale route/socket slot.
-    drop(exit.retired);
-    Ok(())
 }
 
 #[cfg(test)]
-fn register(
-    incoming: Register,
-    routes: &mut BTreeMap<RouteId, RouteState>,
-    report: &mut RelayReport,
-    limits: RelayLimits,
-) {
-    let mut admission = AdmissionState::new(
+fn route_registry(limits: RelayLimits) -> RouteRegistry {
+    RouteRegistry::new(
         limits,
         RelayPolicy::default(),
         Arc::new(RelayAbuseCounterStore::default()),
-    );
-    register_with_admission(incoming, routes, report, limits, &mut admission);
-}
-
-#[cfg(test)]
-fn finish_task(
-    exit: TaskExit,
-    routes: &mut BTreeMap<RouteId, RouteState>,
-    report: &mut RelayReport,
-) -> Result<(), RelayError> {
-    let mut admission = AdmissionState::new(
-        RelayLimits::default(),
-        RelayPolicy::default(),
-        Arc::new(RelayAbuseCounterStore::default()),
-    );
-    finish_task_with_admission(exit, routes, report, &mut admission)
+    )
 }
 
 #[cfg(test)]
@@ -1350,8 +1328,8 @@ mod assignment_ownership_tests {
             handoff.send(follower).is_ok(),
             "follower must be queued in the unclaimed Lead"
         );
-        let mut routes = BTreeMap::new();
-        routes.insert(
+        let mut routes = route_registry(limits);
+        routes.routes.insert(
             route,
             RouteState::Active {
                 leader: 1,
@@ -1378,7 +1356,7 @@ mod assignment_ownership_tests {
             StagedAbort::Cancellation => cancellation.cancel(),
             // The real coordinator path: a fresh phone registration arrives
             // while the Lead, and the follower inside it, are still unclaimed.
-            StagedAbort::Eviction => register(
+            StagedAbort::Eviction => routes.register(
                 Register {
                     id: 3,
                     registration: Registration::new(Role::Phone, route),
@@ -1386,9 +1364,7 @@ mod assignment_ownership_tests {
                     deadline: Instant::now() + limits.waiting_timeout,
                     assignment: replacement,
                 },
-                &mut routes,
                 &mut report,
-                limits,
             ),
         }
         let exit = work.await;
@@ -1403,12 +1379,12 @@ mod assignment_ownership_tests {
         ));
         if abort == StagedAbort::Eviction {
             assert!(matches!(
-                routes.get(&route),
+                routes.routes.get(&route),
                 Some(RouteState::Waiting(waiter)) if waiter.id == 3
             ));
         } else {
             assert!(matches!(
-                routes.get(&route),
+                routes.routes.get(&route),
                 Some(RouteState::Active { leader: 1, .. })
             ));
         }
@@ -1429,16 +1405,18 @@ mod assignment_ownership_tests {
             Some(b'S')
         );
 
-        finish_task(exit, &mut routes, &mut report).expect("valid exact-generation retirement");
+        routes
+            .finish_task(exit, &mut report)
+            .expect("valid exact-generation retirement");
         if abort == StagedAbort::Eviction {
             // The evicted leader's exit leaves its replacement waiting.
             assert!(matches!(
-                routes.get(&route),
+                routes.routes.get(&route),
                 Some(RouteState::Waiting(waiter)) if waiter.id == 3
             ));
             assert_eq!(report.evicted_pairs, 1);
         } else {
-            assert!(!routes.contains_key(&route));
+            assert!(!routes.routes.contains_key(&route));
         }
         assert_eq!(report.task_failures, 0);
         assert_eq!(permits.available_permits(), 2);
@@ -1468,10 +1446,10 @@ mod assignment_ownership_tests {
         let (follower, mut follower_remote) = socket_owner(&permits, Some(b'F')).await;
         let route = RouteId::new([0x36; 32]).expect("synthetic route");
         let limits = RelayLimits::new(2, 1).expect("two fixture slots");
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let (leader_assignment, mut leader_assigned) = oneshot::channel();
-        register(
+        routes.register(
             Register {
                 id: 1,
                 registration: Registration::new(Role::Pc, route),
@@ -1479,9 +1457,7 @@ mod assignment_ownership_tests {
                 deadline: Instant::now() + limits.waiting_timeout,
                 assignment: leader_assignment,
             },
-            &mut routes,
             &mut report,
-            limits,
         );
 
         follower_remote
@@ -1506,7 +1482,7 @@ mod assignment_ownership_tests {
         };
         // Use the actual coordinator registration path to establish ownership;
         // do not hand-construct the Active variant or guess a follower identity.
-        register(incoming, &mut routes, &mut report, limits);
+        routes.register(incoming, &mut report);
         let (mut counterpart, paired_at) = match leader_assigned.try_recv() {
             Ok(Assignment::Lead {
                 counterpart,
@@ -1516,7 +1492,7 @@ mod assignment_ownership_tests {
             _ => panic!("coordinator did not assign the staged leader"),
         };
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active { leader: 1, .. })
         ));
         assert_eq!(permits.available_permits(), 0);
@@ -1541,9 +1517,11 @@ mod assignment_ownership_tests {
         ));
         assert_eq!(permits.available_permits(), 0);
 
-        finish_task(follower_exit, &mut routes, &mut report).expect("retained follower exit");
+        routes
+            .finish_task(follower_exit, &mut report)
+            .expect("retained follower exit");
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active { leader: 1, .. })
         ));
         assert_eq!(
@@ -1561,8 +1539,10 @@ mod assignment_ownership_tests {
                 second: None,
             },
         };
-        finish_task(leader_exit, &mut routes, &mut report).expect("leader retirement");
-        assert!(!routes.contains_key(&route));
+        routes
+            .finish_task(leader_exit, &mut report)
+            .expect("leader retirement");
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(permits.available_permits(), 2);
     }
 
@@ -1571,13 +1551,13 @@ mod assignment_ownership_tests {
         leader: u64,
         follower: u64,
         limits: RelayLimits,
-        routes: &mut BTreeMap<RouteId, RouteState>,
+        routes: &mut RouteRegistry,
         report: &mut RelayReport,
     ) -> (oneshot::Receiver<Assignment>, oneshot::Receiver<Assignment>) {
         let (first, first_receiver) = oneshot::channel();
         let (second, second_receiver) = oneshot::channel();
         for (id, role, assignment) in [(leader, Role::Pc, first), (follower, Role::Phone, second)] {
-            register(
+            routes.register(
                 Register {
                     id,
                     registration: Registration::new(role, route),
@@ -1585,9 +1565,7 @@ mod assignment_ownership_tests {
                     deadline: Instant::now() + limits.waiting_timeout,
                     assignment,
                 },
-                routes,
                 report,
-                limits,
             );
         }
         (first_receiver, second_receiver)
@@ -1611,35 +1589,29 @@ mod assignment_ownership_tests {
         let (leader, _leader_remote) = socket_owner(&permits, None).await;
         let (follower, _follower_remote) = socket_owner(&permits, Some(b'F')).await;
         let route = RouteId::new([0x37; 32]).expect("synthetic route");
-        let mut routes = BTreeMap::new();
+        let limits = RelayLimits::new(2, 1).unwrap();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
-        let _assignments = active_generation(
-            route,
-            1,
-            2,
-            RelayLimits::new(2, 1).unwrap(),
-            &mut routes,
-            &mut report,
-        );
-        finish_task(
-            exited_peer(1, route, leader, EndReason::Disconnected),
-            &mut routes,
-            &mut report,
-        )
-        .expect("leader retires its generation first");
-        assert!(!routes.contains_key(&route));
+        let _assignments = active_generation(route, 1, 2, limits, &mut routes, &mut report);
+        routes
+            .finish_task(
+                exited_peer(1, route, leader, EndReason::Disconnected),
+                &mut report,
+            )
+            .expect("leader retires its generation first");
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(
             permits.available_permits(),
             1,
             "parent still owns the late follower"
         );
-        finish_task(
-            exited_peer(2, route, follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("late follower belongs to the already-retired generation");
-        assert!(!routes.contains_key(&route));
+        routes
+            .finish_task(
+                exited_peer(2, route, follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("late follower belongs to the already-retired generation");
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(permits.available_permits(), 2);
     }
 
@@ -1650,27 +1622,27 @@ mod assignment_ownership_tests {
         let (old_follower, _old_follower_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x38; 32]).expect("synthetic reused route");
         let limits = RelayLimits::new(4, 1).unwrap();
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let old_assignments = active_generation(route, 1, 2, limits, &mut routes, &mut report);
-        finish_task(
-            exited_peer(1, route, old_leader, EndReason::Disconnected),
-            &mut routes,
-            &mut report,
-        )
-        .expect("old leader retirement");
+        routes
+            .finish_task(
+                exited_peer(1, route, old_leader, EndReason::Disconnected),
+                &mut report,
+            )
+            .expect("old leader retirement");
         drop(old_assignments);
         let (new_leader, _new_leader_remote) = socket_owner(&permits, None).await;
         let (new_follower, _new_follower_remote) = socket_owner(&permits, None).await;
         let _new_assignments = active_generation(route, 3, 4, limits, &mut routes, &mut report);
-        finish_task(
-            exited_peer(2, route, old_follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("stale follower cleanup");
+        routes
+            .finish_task(
+                exited_peer(2, route, old_follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("stale follower cleanup");
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active {
                 leader: 3,
                 follower: 4,
@@ -1683,20 +1655,20 @@ mod assignment_ownership_tests {
             2,
             "only the new generation's two sockets remain"
         );
-        finish_task(
-            exited_peer(4, route, new_follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("new matching follower is retained");
+        routes
+            .finish_task(
+                exited_peer(4, route, new_follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("new matching follower is retained");
         assert_eq!(permits.available_permits(), 2);
-        finish_task(
-            exited_peer(3, route, new_leader, EndReason::Disconnected),
-            &mut routes,
-            &mut report,
-        )
-        .expect("new leader retirement");
-        assert!(!routes.contains_key(&route));
+        routes
+            .finish_task(
+                exited_peer(3, route, new_leader, EndReason::Disconnected),
+                &mut report,
+            )
+            .expect("new leader retirement");
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(permits.available_permits(), 4);
     }
 
@@ -1706,22 +1678,16 @@ mod assignment_ownership_tests {
         let (leader, _leader_remote) = socket_owner(&permits, None).await;
         let (follower, _follower_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x39; 32]).expect("synthetic route");
-        let mut routes = BTreeMap::new();
+        let limits = RelayLimits::new(2, 1).unwrap();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
-        let _assignments = active_generation(
-            route,
-            1,
-            2,
-            RelayLimits::new(2, 1).unwrap(),
-            &mut routes,
-            &mut report,
-        );
-        finish_task(
-            exited_peer(2, route, follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("follower retained before shutdown");
+        let _assignments = active_generation(route, 1, 2, limits, &mut routes, &mut report);
+        routes
+            .finish_task(
+                exited_peer(2, route, follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("follower retained before shutdown");
         assert_eq!(permits.available_permits(), 0);
         // This is the coordinator's ownership cleanup step, not an assertion
         // that an unawaited run future or a TCP peer has already terminated.
@@ -1729,12 +1695,12 @@ mod assignment_ownership_tests {
         cancellation.cancel();
         routes.clear();
         assert_eq!(permits.available_permits(), 1);
-        finish_task(
-            exited_peer(1, route, leader, EndReason::Cancelled),
-            &mut routes,
-            &mut report,
-        )
-        .expect("leader cleanup after route clear");
+        routes
+            .finish_task(
+                exited_peer(1, route, leader, EndReason::Cancelled),
+                &mut report,
+            )
+            .expect("leader cleanup after route clear");
         assert_eq!(permits.available_permits(), 2);
         assert_eq!(report.task_failures, 0);
     }
@@ -1746,46 +1712,39 @@ mod assignment_ownership_tests {
         let (follower, _follower_remote) = socket_owner(&permits, None).await;
         let (conflicting_peer, _conflicting_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x3a; 32]).expect("synthetic route");
-        let mut routes = BTreeMap::new();
+        let limits = RelayLimits::new(3, 1).unwrap();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
-        let _assignments = active_generation(
-            route,
-            1,
-            2,
-            RelayLimits::new(3, 1).unwrap(),
-            &mut routes,
-            &mut report,
-        );
-        finish_task(
-            exited_peer(2, route, follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("first follower ownership");
+        let _assignments = active_generation(route, 1, 2, limits, &mut routes, &mut report);
+        routes
+            .finish_task(
+                exited_peer(2, route, follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("first follower ownership");
         assert_eq!(permits.available_permits(), 0);
         // Impossible with the normal unique task IDs/owned Peer handoff: inject
         // it only into the private seam to require explicit failure, not replacement.
         assert_eq!(
-            finish_task(
+            routes.finish_task(
                 exited_peer(2, route, conflicting_peer, EndReason::RendezvousTimeout),
-                &mut routes,
                 &mut report
             ),
             Err(RelayError::TaskFailed),
         );
-        assert!(!routes.contains_key(&route));
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(report.task_failures, 1);
         assert_eq!(
             permits.available_permits(),
             2,
             "conflicting peers drop only after route retirement"
         );
-        finish_task(
-            exited_peer(1, route, leader, EndReason::Cancelled),
-            &mut routes,
-            &mut report,
-        )
-        .expect("remaining leader cleanup");
+        routes
+            .finish_task(
+                exited_peer(1, route, leader, EndReason::Cancelled),
+                &mut report,
+            )
+            .expect("remaining leader cleanup");
         assert_eq!(permits.available_permits(), 3);
     }
 
@@ -1822,24 +1781,24 @@ mod assignment_ownership_tests {
         let (follower, _follower_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x3b; 32]).expect("synthetic route");
         let limits = RelayLimits::new(2, 1).unwrap();
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let (mut leader_assigned, _follower_assigned) =
             active_generation(route, 1, 2, limits, &mut routes, &mut report);
         let eviction = lead_eviction(&mut leader_assigned);
-        finish_task(
-            exited_peer(2, route, follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("follower retained by its generation");
+        routes
+            .finish_task(
+                exited_peer(2, route, follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("follower retained by its generation");
         assert_eq!(permits.available_permits(), 0);
 
         let (fresh, mut fresh_assigned) = fresh_registration(3, Role::Phone, route, limits);
-        register(fresh, &mut routes, &mut report, limits);
+        routes.register(fresh, &mut report);
         assert!(eviction.is_cancelled());
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 3
         ));
         assert!(
@@ -1857,14 +1816,14 @@ mod assignment_ownership_tests {
         assert_eq!(report.evicted_pairs, 1);
         assert_eq!(report.rejected_duplicates, 0);
 
-        finish_task(
-            exited_peer(1, route, leader, EndReason::Evicted),
-            &mut routes,
-            &mut report,
-        )
-        .expect("an evicted leader's exit is not malformed");
+        routes
+            .finish_task(
+                exited_peer(1, route, leader, EndReason::Evicted),
+                &mut report,
+            )
+            .expect("an evicted leader's exit is not malformed");
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 3
         ));
         assert_eq!(permits.available_permits(), 2);
@@ -1880,7 +1839,7 @@ mod assignment_ownership_tests {
         let (new_follower, _new_follower_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x3c; 32]).expect("synthetic route");
         let limits = RelayLimits::new(4, 1).unwrap();
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let (mut old_assigned, _old_follower_assigned) =
             active_generation(route, 1, 2, limits, &mut routes, &mut report);
@@ -1889,9 +1848,9 @@ mod assignment_ownership_tests {
         // both tasks of the old generation are still running.
         let _new_assignments = active_generation(route, 3, 4, limits, &mut routes, &mut report);
         assert!(old_eviction.is_cancelled());
-        let next_generation_untouched = |routes: &BTreeMap<RouteId, RouteState>| {
+        let next_generation_untouched = |routes: &RouteRegistry| {
             matches!(
-                routes.get(&route),
+                routes.routes.get(&route),
                 Some(RouteState::Active {
                     leader: 3,
                     follower: 4,
@@ -1907,22 +1866,22 @@ mod assignment_ownership_tests {
 
         // The old follower never handed over, so each old task returns its
         // own socket, and each arrives after the next generation is active.
-        finish_task(
-            exited_peer(2, route, old_follower, EndReason::Evicted),
-            &mut routes,
-            &mut report,
-        )
-        .expect("late evicted follower");
+        routes
+            .finish_task(
+                exited_peer(2, route, old_follower, EndReason::Evicted),
+                &mut report,
+            )
+            .expect("late evicted follower");
         assert!(
             next_generation_untouched(&routes),
             "an old follower never fills the next generation's slot"
         );
-        finish_task(
-            exited_peer(1, route, old_leader, EndReason::Evicted),
-            &mut routes,
-            &mut report,
-        )
-        .expect("late evicted leader");
+        routes
+            .finish_task(
+                exited_peer(1, route, old_leader, EndReason::Evicted),
+                &mut report,
+            )
+            .expect("late evicted leader");
         assert!(
             next_generation_untouched(&routes),
             "an old leader never retires the next generation"
@@ -1935,20 +1894,20 @@ mod assignment_ownership_tests {
         assert_eq!(report.task_failures, 0);
 
         // The next generation still retires by its own rules.
-        finish_task(
-            exited_peer(4, route, new_follower, EndReason::RendezvousTimeout),
-            &mut routes,
-            &mut report,
-        )
-        .expect("new follower retained");
+        routes
+            .finish_task(
+                exited_peer(4, route, new_follower, EndReason::RendezvousTimeout),
+                &mut report,
+            )
+            .expect("new follower retained");
         assert_eq!(permits.available_permits(), 2);
-        finish_task(
-            exited_peer(3, route, new_leader, EndReason::Disconnected),
-            &mut routes,
-            &mut report,
-        )
-        .expect("new leader retirement");
-        assert!(!routes.contains_key(&route));
+        routes
+            .finish_task(
+                exited_peer(3, route, new_leader, EndReason::Disconnected),
+                &mut report,
+            )
+            .expect("new leader retirement");
+        assert!(!routes.routes.contains_key(&route));
         assert_eq!(permits.available_permits(), 4);
         assert_eq!(report.task_failures, 0);
     }
@@ -1959,10 +1918,10 @@ mod assignment_ownership_tests {
         let (follower, mut follower_remote) = socket_owner(&permits, None).await;
         let route = RouteId::new([0x3d; 32]).expect("synthetic route");
         let limits = RelayLimits::new(2, 1).expect("two fixture slots");
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let (leader, mut leader_assigned) = fresh_registration(1, Role::Pc, route, limits);
-        register(leader, &mut routes, &mut report, limits);
+        routes.register(leader, &mut report);
         follower_remote
             .write_all(&Registration::new(Role::Phone, route).to_wire())
             .await
@@ -1983,7 +1942,7 @@ mod assignment_ownership_tests {
             _ = &mut work => panic!("follower ended before assignment staging"),
             _ = tokio::time::sleep(Duration::from_secs(1)) => panic!("follower setup did not finish"),
         };
-        register(incoming, &mut routes, &mut report, limits);
+        routes.register(incoming, &mut report);
         let mut counterpart = match leader_assigned.try_recv() {
             Ok(Assignment::Lead { counterpart, .. }) => counterpart,
             _ => panic!("coordinator did not assign the staged leader"),
@@ -1991,7 +1950,7 @@ mod assignment_ownership_tests {
 
         // Evict while the follower's Follow is queued but unclaimed.
         let (fresh, _fresh_assigned) = fresh_registration(3, Role::Phone, route, limits);
-        register(fresh, &mut routes, &mut report, limits);
+        routes.register(fresh, &mut report);
         let exit = work.await;
         assert!(matches!(exit.reason, EndReason::Evicted));
         assert!(
@@ -2007,10 +1966,11 @@ mod assignment_ownership_tests {
         );
         assert_eq!(permits.available_permits(), 0);
 
-        finish_task(exit, &mut routes, &mut report)
+        routes
+            .finish_task(exit, &mut report)
             .expect("an evicted follower's exit is not malformed");
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 3
         ));
         assert_eq!(permits.available_permits(), 1);
@@ -2022,20 +1982,20 @@ mod assignment_ownership_tests {
         let route = RouteId::new([0x3e; 32]).expect("synthetic route");
         let other = RouteId::new([0x3f; 32]).expect("synthetic route");
         let limits = RelayLimits::new(4, 1).expect("one waiting room");
-        let mut routes = BTreeMap::new();
+        let mut routes = route_registry(limits);
         let mut report = RelayReport::default();
         let (mut leader_assigned, _follower_assigned) =
             active_generation(route, 1, 2, limits, &mut routes, &mut report);
         let eviction = lead_eviction(&mut leader_assigned);
         let (occupant, _occupant_assigned) = fresh_registration(3, Role::Pc, other, limits);
-        register(occupant, &mut routes, &mut report, limits);
+        routes.register(occupant, &mut report);
 
         let (fresh, mut fresh_assigned) = fresh_registration(4, Role::Phone, route, limits);
-        register(fresh, &mut routes, &mut report, limits);
+        routes.register(fresh, &mut report);
         assert!(matches!(fresh_assigned.try_recv(), Ok(Assignment::Reject)));
         assert!(!eviction.is_cancelled());
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active {
                 leader: 1,
                 follower: 2,
@@ -2055,38 +2015,33 @@ mod mitigation_tests {
     fn state(
         limits: RelayLimits,
         policy: RelayPolicy,
-    ) -> (AdmissionState, Arc<RelayAbuseCounterStore>) {
+    ) -> (RouteRegistry, Arc<RelayAbuseCounterStore>) {
         let abuse = Arc::new(RelayAbuseCounterStore::default());
         (
-            AdmissionState::new(limits, policy, Arc::clone(&abuse)),
+            RouteRegistry::new(limits, policy, Arc::clone(&abuse)),
             abuse,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn admit(
         id: u64,
         role: Role,
         route: RouteId,
         source: SocketAddr,
-        limits: RelayLimits,
-        routes: &mut BTreeMap<RouteId, RouteState>,
+        routes: &mut RouteRegistry,
         report: &mut RelayReport,
-        admission: &mut AdmissionState,
     ) -> oneshot::Receiver<Assignment> {
         let (assignment, assigned) = oneshot::channel();
-        register_with_admission(
+        let deadline = Instant::now() + routes.limits.waiting_timeout;
+        routes.register(
             Register {
                 id,
                 registration: Registration::new(role, route),
                 source,
-                deadline: Instant::now() + limits.waiting_timeout,
+                deadline,
                 assignment,
             },
-            routes,
             report,
-            limits,
-            admission,
         );
         assigned
     }
@@ -2095,49 +2050,31 @@ mod mitigation_tests {
         route: RouteId,
         leader: u64,
         follower: u64,
-        limits: RelayLimits,
-        routes: &mut BTreeMap<RouteId, RouteState>,
+        routes: &mut RouteRegistry,
         report: &mut RelayReport,
-        admission: &mut AdmissionState,
     ) {
-        let first = admit(
-            leader,
-            Role::Pc,
-            route,
-            synthetic_source(),
-            limits,
-            routes,
-            report,
-            admission,
-        );
+        let first = admit(leader, Role::Pc, route, synthetic_source(), routes, report);
         let second = admit(
             follower,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             routes,
             report,
-            admission,
         );
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active { .. })
         ));
         drop((first, second));
     }
 
-    fn close_active(
-        route: RouteId,
-        routes: &mut BTreeMap<RouteId, RouteState>,
-        admission: &mut AdmissionState,
-    ) {
-        let Some(RouteState::Active { leader, .. }) = routes.remove(&route) else {
+    fn close_active(route: RouteId, routes: &mut RouteRegistry) {
+        let Some(RouteState::Active { leader, .. }) = routes.routes.get(&route) else {
             panic!("synthetic route was not active");
         };
-        admission
-            .evictions
-            .pair_ended(route, leader, Instant::now());
+        let leader = *leader;
+        assert!(routes.finish_active_generation(route, leader, Instant::now()));
     }
 
     #[test]
@@ -2165,20 +2102,11 @@ mod mitigation_tests {
     fn refused_remote_pc_neither_evicts_nor_waits() {
         let limits = RelayLimits::new(8, 4).unwrap();
         let policy = RelayPolicy::new(PcRoleSource::LoopbackOnly);
-        let (mut admission, abuse) = state(limits, policy);
-        let mut routes = BTreeMap::new();
+        let (mut routes, abuse) = state(limits, policy);
         let mut report = RelayReport::default();
         let route = RouteId::new([0x71; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
-        let eviction = match routes.get(&route) {
+        form_pair(route, 1, 2, &mut routes, &mut report);
+        let eviction = match routes.routes.get(&route) {
             Some(RouteState::Active { eviction, .. }) => eviction.clone(),
             _ => panic!("synthetic pair missing"),
         };
@@ -2187,15 +2115,13 @@ mod mitigation_tests {
             Role::Pc,
             route,
             "192.0.2.1:4000".parse().unwrap(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
         assert!(!eviction.is_cancelled());
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active { .. })
         ));
 
@@ -2205,13 +2131,11 @@ mod mitigation_tests {
             Role::Pc,
             other,
             "[2001:db8::1]:4000".parse().unwrap(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
-        assert!(!routes.contains_key(&other));
+        assert!(!routes.routes.contains_key(&other));
         assert_eq!(report.rejected_pc_sources, 2);
         assert_eq!(report.evicted_pairs, 0);
         assert_eq!(report.peak_waiting_rooms, 1);
@@ -2221,8 +2145,7 @@ mod mitigation_tests {
     #[test]
     fn duplicate_rejection_updates_the_shared_abuse_counter() {
         let limits = RelayLimits::new(4, 2).unwrap();
-        let (mut admission, abuse) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, abuse) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x73; 32]).unwrap();
         let _waiting = admit(
@@ -2230,20 +2153,16 @@ mod mitigation_tests {
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let mut rejected = admit(
             2,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
         assert_eq!(report.rejected_duplicates, 1);
@@ -2253,8 +2172,7 @@ mod mitigation_tests {
     #[test]
     fn any_policy_still_admits_a_remote_pc_source() {
         let limits = RelayLimits::new(2, 1).unwrap();
-        let (mut admission, _) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, _) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x73; 32]).unwrap();
         let _waiting = admit(
@@ -2262,51 +2180,39 @@ mod mitigation_tests {
             Role::Pc,
             route,
             "192.0.2.1:4000".parse().unwrap(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
-        assert!(matches!(routes.get(&route), Some(RouteState::Waiting(_))));
+        assert!(matches!(
+            routes.routes.get(&route),
+            Some(RouteState::Waiting(_))
+        ));
         assert_eq!(report.rejected_pc_sources, 0);
     }
 
     #[tokio::test(start_paused = true)]
     async fn repeated_evictions_of_open_short_lived_pairs_double_cooldown_to_the_cap() {
         let limits = RelayLimits::new(16, 4).unwrap();
-        let (mut admission, abuse) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, abuse) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x74; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
+        form_pair(route, 1, 2, &mut routes, &mut report);
 
         let first_evictor = admit(
             3,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let first_counterpart = admit(
             4,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
 
         // Registration #2 charges strike one before admission, but that first
@@ -2316,16 +2222,14 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 5
         ));
-        let first_strike = admission.evictions.records.get(&route).unwrap();
+        let first_strike = routes.evictions.records.get(&route).unwrap();
         assert_eq!(first_strike.strikes, 1);
         assert_eq!(first_strike.cooldown_until, None);
         let second_counterpart = admit(
@@ -2333,10 +2237,8 @@ mod mitigation_tests {
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         drop((first_evictor, first_counterpart));
 
@@ -2354,21 +2256,19 @@ mod mitigation_tests {
                 Role::Phone,
                 route,
                 synthetic_source(),
-                limits,
                 &mut routes,
                 &mut report,
-                &mut admission,
             );
             assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
             assert!(matches!(
-                routes.get(&route),
+                routes.routes.get(&route),
                 Some(RouteState::Active {
                     leader,
                     follower,
                     ..
                 }) if *leader == active_leader && *follower == active_follower
             ));
-            let record = admission.evictions.records.get(&route).unwrap();
+            let record = routes.evictions.records.get(&route).unwrap();
             assert_eq!(record.strikes, (index as u8 + 2).min(6));
             assert_eq!(
                 record.cooldown_until.unwrap() - Instant::now(),
@@ -2384,8 +2284,8 @@ mod mitigation_tests {
             ));
 
             drop(active_assignments.take());
-            close_active(route, &mut routes, &mut admission);
-            let record = admission.evictions.records.get(&route).unwrap();
+            close_active(route, &mut routes);
+            let record = routes.evictions.records.get(&route).unwrap();
             assert_eq!(
                 record.strikes,
                 (index as u8 + 2).min(6),
@@ -2398,30 +2298,24 @@ mod mitigation_tests {
                     route,
                     attack_id + 1,
                     attack_id + 2,
-                    limits,
                     &mut routes,
                     &mut report,
-                    &mut admission,
                 );
                 let evictor = admit(
                     attack_id + 3,
                     Role::Pc,
                     route,
                     synthetic_source(),
-                    limits,
                     &mut routes,
                     &mut report,
-                    &mut admission,
                 );
                 let counterpart = admit(
                     attack_id + 4,
                     Role::Phone,
                     route,
                     synthetic_source(),
-                    limits,
                     &mut routes,
                     &mut report,
-                    &mut admission,
                 );
                 active_leader = attack_id + 3;
                 active_follower = attack_id + 4;
@@ -2439,43 +2333,30 @@ mod mitigation_tests {
     #[tokio::test(start_paused = true)]
     async fn stale_and_late_pair_completions_cannot_change_or_double_the_strike() {
         let limits = RelayLimits::new(8, 2).unwrap();
-        let (mut admission, _) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, _) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x75; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
+        form_pair(route, 1, 2, &mut routes, &mut report);
         let first_evictor = admit(
             3,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let first_counterpart = admit(
             4,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
 
-        let current = *admission.evictions.records.get(&route).unwrap();
-        admission.evictions.pair_ended(route, 1, Instant::now());
-        let after_stale = *admission.evictions.records.get(&route).unwrap();
+        let current = *routes.evictions.records.get(&route).unwrap();
+        assert!(!routes.finish_active_generation(route, 1, Instant::now()));
+        let after_stale = *routes.evictions.records.get(&route).unwrap();
         assert_eq!(after_stale.stage, current.stage);
         assert_eq!(after_stale.strikes, current.strikes);
 
@@ -2484,16 +2365,14 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
-        let free_strike = *admission.evictions.records.get(&route).unwrap();
+        let free_strike = *routes.evictions.records.get(&route).unwrap();
         assert_eq!(free_strike.strikes, 1);
         assert_eq!(free_strike.cooldown_until, None);
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 5
         ));
         let second_counterpart = admit(
@@ -2501,10 +2380,8 @@ mod mitigation_tests {
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
 
         let mut rejected = admit(
@@ -2512,13 +2389,11 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
-        let charged = *admission.evictions.records.get(&route).unwrap();
+        let charged = *routes.evictions.records.get(&route).unwrap();
         assert_eq!(charged.strikes, 2);
         assert!(matches!(
             charged.stage,
@@ -2529,8 +2404,8 @@ mod mitigation_tests {
             }
         ));
 
-        admission.evictions.pair_ended(route, 3, Instant::now());
-        let after_stale = *admission.evictions.records.get(&route).unwrap();
+        assert!(!routes.finish_active_generation(route, 3, Instant::now()));
+        let after_stale = *routes.evictions.records.get(&route).unwrap();
         assert_eq!(after_stale.stage, charged.stage);
         assert_eq!(after_stale.strikes, charged.strikes);
         drop((
@@ -2539,9 +2414,9 @@ mod mitigation_tests {
             second_evictor,
             second_counterpart,
         ));
-        close_active(route, &mut routes, &mut admission);
-        admission.evictions.pair_ended(route, 5, Instant::now());
-        let after_late = admission.evictions.records.get(&route).unwrap();
+        close_active(route, &mut routes);
+        assert!(!routes.finish_active_generation(route, 5, Instant::now()));
+        let after_late = routes.evictions.records.get(&route).unwrap();
         assert_eq!(after_late.strikes, 2);
         assert_eq!(after_late.cooldown_until, charged.cooldown_until);
         assert_eq!(report.evicted_pairs, 2);
@@ -2551,19 +2426,10 @@ mod mitigation_tests {
     #[tokio::test(start_paused = true)]
     async fn a_long_lived_genuine_handover_never_strikes_or_rejects() {
         let limits = RelayLimits::new(8, 2).unwrap();
-        let (mut admission, _) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, _) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x76; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
+        form_pair(route, 1, 2, &mut routes, &mut report);
         tokio::time::advance(SHORT_LIVED + Duration::from_millis(1)).await;
 
         let handover = admit(
@@ -2571,23 +2437,19 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let counterpart = admit(
             4,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active {
                 leader: 3,
                 follower: 4,
@@ -2597,8 +2459,8 @@ mod mitigation_tests {
 
         tokio::time::advance(SHORT_LIVED + Duration::from_millis(1)).await;
         drop((handover, counterpart));
-        close_active(route, &mut routes, &mut admission);
-        assert!(!admission.evictions.records.contains_key(&route));
+        close_active(route, &mut routes);
+        assert!(!routes.evictions.records.contains_key(&route));
         assert_eq!(report.evicted_pairs, 1);
         assert_eq!(report.rejected_evictions, 0);
     }
@@ -2606,51 +2468,36 @@ mod mitigation_tests {
     #[tokio::test(start_paused = true)]
     async fn a_second_short_lived_evictor_pair_starts_cooldown_then_expiry_allows_eviction() {
         let limits = RelayLimits::new(16, 4).unwrap();
-        let (mut admission, abuse) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, abuse) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x74; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
+        form_pair(route, 1, 2, &mut routes, &mut report);
 
         let first_evictor = admit(
             3,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let first_counterpart = admit(
             4,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let second_evictor = admit(
             5,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
-        let first_strike = admission.evictions.records.get(&route).unwrap();
+        let first_strike = routes.evictions.records.get(&route).unwrap();
         assert_eq!(first_strike.strikes, 1);
         assert_eq!(first_strike.cooldown_until, None);
         let second_counterpart = admit(
@@ -2658,10 +2505,8 @@ mod mitigation_tests {
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
 
         let mut rejected = admit(
@@ -2669,21 +2514,19 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Active {
                 leader: 5,
                 follower: 6,
                 ..
             })
         ));
-        let second_strike = admission.evictions.records.get(&route).unwrap();
+        let second_strike = routes.evictions.records.get(&route).unwrap();
         assert_eq!(second_strike.strikes, 2);
         assert_eq!(
             second_strike.cooldown_until.unwrap() - Instant::now(),
@@ -2698,12 +2541,12 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
-        assert!(matches!(routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == 8));
+        assert!(
+            matches!(routes.routes.get(&route), Some(RouteState::Waiting(waiter)) if waiter.id == 8)
+        );
         drop((
             first_evictor,
             first_counterpart,
@@ -2718,71 +2561,52 @@ mod mitigation_tests {
     #[tokio::test(start_paused = true)]
     async fn a_pair_surviving_short_lived_clears_prior_strikes() {
         let limits = RelayLimits::new(16, 4).unwrap();
-        let (mut admission, _) = state(limits, RelayPolicy::default());
-        let mut routes = BTreeMap::new();
+        let (mut routes, _) = state(limits, RelayPolicy::default());
         let mut report = RelayReport::default();
         let route = RouteId::new([0x75; 32]).unwrap();
-        form_pair(
-            route,
-            1,
-            2,
-            limits,
-            &mut routes,
-            &mut report,
-            &mut admission,
-        );
+        form_pair(route, 1, 2, &mut routes, &mut report);
         let first_evictor = admit(
             3,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let first_counterpart = admit(
             4,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let second_evictor = admit(
             5,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let second_counterpart = admit(
             6,
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         let mut rejected = admit(
             7,
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(rejected.try_recv(), Ok(Assignment::Reject)));
-        assert_eq!(admission.evictions.records.get(&route).unwrap().strikes, 2);
+        assert_eq!(routes.evictions.records.get(&route).unwrap().strikes, 2);
 
         tokio::time::advance(EVICTION_COOLDOWN_INITIAL + Duration::from_millis(1)).await;
         let third_evictor = admit(
@@ -2790,12 +2614,10 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
-        let cleared = admission.evictions.records.get(&route).unwrap();
+        let cleared = routes.evictions.records.get(&route).unwrap();
         assert_eq!(cleared.strikes, 0);
         assert_eq!(cleared.cooldown_until, None);
         let third_counterpart = admit(
@@ -2803,10 +2625,8 @@ mod mitigation_tests {
             Role::Pc,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
 
         let _free_again = admit(
@@ -2814,16 +2634,14 @@ mod mitigation_tests {
             Role::Phone,
             route,
             synthetic_source(),
-            limits,
             &mut routes,
             &mut report,
-            &mut admission,
         );
         assert!(matches!(
-            routes.get(&route),
+            routes.routes.get(&route),
             Some(RouteState::Waiting(waiter)) if waiter.id == 10
         ));
-        let restarted = admission.evictions.records.get(&route).unwrap();
+        let restarted = routes.evictions.records.get(&route).unwrap();
         assert_eq!(restarted.strikes, 1);
         assert_eq!(restarted.cooldown_until, None);
         drop((

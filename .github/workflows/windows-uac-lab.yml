@@ -329,9 +329,14 @@ jobs:
             '  exit 3',
             '}'
           ) | Set-Content -Path $requestScript -Encoding ascii
+          # Evidence of this run only: the journal survives earlier steps and reruns on the same machine,
+          # so the observed record has to be newer than this instant.
+          $probeStartedUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          $requestStarted = $false
           try {
             $request = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $requestScript -Credential $labCredential -WorkingDirectory $publicDir -PassThru
             "secondary logon started powershell pid={0}" -f $request.Id | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
+            $requestStarted = $true
           } catch {
             "secondary logon failed: {0}" -f $_.Exception.Message | Tee-Object -FilePath "$env:LAB_EVIDENCE/secondary-logon.txt"
           }
@@ -357,14 +362,16 @@ jobs:
           # The running service owns the prompt watcher (probe-once answers Busy while it does). The
           # watcher journals fixed kinds only: watcher_started, watcher_alive (first heartbeat), then an
           # observed request when it saw the consent window. Only that observed record passes.
-          $observed = 'false'
+          # The verdict script accepts it only when the request was started here, consent.exe was seen
+          # here, and the record is not older than this run.
           $journal = Join-Path $env:ProgramData '휴대폰 승인\activity\activity.jsonl'
           if (Test-Path -LiteralPath $journal) {
-            $lines = Get-Content -LiteralPath $journal
-            $lines | Select-String -Pattern 'watcher_|"observed"|notification_sent|platform_unavailable' | ForEach-Object { Write-Output $_.Line }
-            if ($lines | Select-String -Pattern '"category":"request".*"observed"' -Quiet) { $observed = 'true' }
+            Get-Content -LiteralPath $journal | Select-String -Pattern 'watcher_|"observed"|notification_sent|platform_unavailable' | ForEach-Object { Write-Output $_.Line }
           } else { Write-Output 'no activity journal' }
-          "probe_observed=$observed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $verdict = & "$env:GITHUB_WORKSPACE/tools/windows-uac-probe-observation.ps1" -JournalPath $journal -StartedUnixMs $probeStartedUnixMs -RequestStarted:$requestStarted -ConsentObserved:([bool]$consent)
+          if ($verdict -notin @('probe_observed=true', 'probe_observed=false')) { throw "Unexpected probe verdict: $verdict" }
+          Write-Output "$verdict (started_unix_ms=$probeStartedUnixMs request_started=$requestStarted consent_observed=$([bool]$consent))"
+          $verdict | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Get-Process | Where-Object { $_.Name -in 'consent', 'cmd', 'powershell', 'uac-service', 'uac-prompt-probe' } | Select-Object Id, Name, SessionId, StartTime | Format-Table -AutoSize | Out-String | Set-Content -Path "$env:LAB_EVIDENCE/processes-after-probe.txt"
           # Dismiss the prompt without approving: end consent.exe (SYSTEM-owned; the runner holds SeDebugPrivilege).
           Get-Process -Name consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue

@@ -20,8 +20,6 @@ const HINT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 /// answered. The phone drops its query ten seconds after sending it and ends a
 /// connection that answers one it no longer holds, so this stays well inside.
 const DEFERRED_ANSWER_WINDOW: Duration = Duration::from_secs(6);
-#[cfg(all(windows, target_pointer_width = "64"))]
-const FORWARD_ORIGIN_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A query that arrived while the gateway owner was still discovering, kept to
 /// be answered once the owner settles. Without it a phone that reconnects right
@@ -32,18 +30,6 @@ pub(super) struct DeferredQuery {
     /// The frame's own lifetime; the answer must drain before it.
     deadline: Instant,
     answer_by: Instant,
-}
-
-/// One read of what the gateway owner publishes. Only a test can supply one
-/// in place of the owner.
-#[cfg(all(windows, target_pointer_width = "64"))]
-#[derive(Clone, Debug)]
-pub(super) struct GatewayReading {
-    pub(super) access: direct_network::ExternalAccess,
-    pub(super) state: direct_network::DirectGatewayState,
-    pub(super) candidates: Vec<SocketAddr>,
-    pub(super) validity_seconds: u32,
-    pub(super) external: Option<SocketAddr>,
 }
 
 impl ServiceSession<'_> {
@@ -72,17 +58,7 @@ impl ServiceSession<'_> {
         };
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            if self.pending_relay.is_some() {
-                return Ok(false);
-            }
-            if self.embedded_mode {
-                return Ok(self.relay.is_some()
-                    && self
-                        .embedded_relay
-                        .as_ref()
-                        .is_some_and(relay_service::HostedRelay::is_running));
-            }
-            Ok(self.relay == Some(*recorded))
+            Ok(self.network.observe().accepts_address_query(*recorded))
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
@@ -242,25 +218,10 @@ impl ServiceSession<'_> {
             return Ok(SessionProgress::PeerRejected);
         }
         let bytes = encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)?;
-        let id = self.next_response;
-        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        if self.peers[index]
-            .responses
-            .try_send(Response {
-                source: Arc::clone(&state),
-                id,
-                bytes,
-                deadline,
-                kind: ResponseKind::Addresses,
-            })
-            .is_err()
-        {
-            state.retire();
+        if !self.enqueue_peer_response(index, &state, bytes, deadline, ResponseKind::Addresses)? {
             return Ok(SessionProgress::PeerRejected);
         }
         let slot = &mut self.peers[index];
-        slot.responses_in_flight
-            .push_back((id, deadline, ResponseKind::Addresses));
         slot.advertised = Some(endpoints);
         slot.query_lapsed = false;
         Ok(SessionProgress::Idle)
@@ -269,89 +230,12 @@ impl ServiceSession<'_> {
     pub(super) fn current_direct_candidates(&self) -> (Vec<SocketAddr>, u32) {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            self.gateway_reading()
-                .map_or((Vec::new(), 0), |reading| self.publishable(&reading))
+            self.network.observe().signed_candidates()
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
             (Vec::new(), 0)
         }
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    fn gateway_reading(&self) -> Option<GatewayReading> {
-        #[cfg(test)]
-        {
-            if let Some(reading) = self.gateway_fixture.as_ref() {
-                return Some(reading.clone());
-            }
-        }
-        self.direct_gateway.as_ref().map(|gateway| {
-            let snapshot = gateway.snapshot();
-            GatewayReading {
-                access: gateway.access(),
-                state: snapshot.state,
-                candidates: snapshot.candidates().to_vec(),
-                validity_seconds: snapshot.remaining_validity_seconds(),
-                external: snapshot.external(),
-            }
-        })
-    }
-
-    /// The part of `reading` this listening relay may advertise, and for how long.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    fn publishable(&self, reading: &GatewayReading) -> (Vec<SocketAddr>, u32) {
-        let Some(host) = self
-            .embedded_relay
-            .as_ref()
-            .filter(|host| host.is_running())
-        else {
-            return (Vec::new(), 0);
-        };
-        if !self.embedded_mode
-            || self.closing
-            || self.pending_relay.is_some()
-            || self.direct_internal.is_none()
-            || self.direct_internal != self.relay
-        {
-            return (Vec::new(), 0);
-        }
-        let seconds = reading
-            .validity_seconds
-            .min(service_protocol::MAX_ADDRESS_VALIDITY_SECONDS);
-        if seconds == 0 {
-            return (Vec::new(), 0);
-        }
-        let candidates: Vec<_> = reading
-            .candidates
-            .iter()
-            .copied()
-            .filter(|address| address.is_ipv4() || host.supports_ipv6())
-            .take(service_protocol::MAX_ADDRESS_CANDIDATES)
-            .collect();
-        if candidates.is_empty() {
-            (Vec::new(), 0)
-        } else {
-            (candidates, seconds)
-        }
-    }
-
-    /// The external address a new connection would be told now, once the
-    /// owner of the configured mode has settled. `None` while there is none.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    fn settled_external(&self) -> Option<SocketAddr> {
-        use direct_network::DirectGatewayState as State;
-        let reading = self.gateway_reading()?;
-        if reading.access != self.external_access
-            || matches!(reading.state, State::Discovering | State::Stopped)
-        {
-            return None;
-        }
-        let external = reading.external?;
-        self.publishable(&reading)
-            .0
-            .contains(&external)
-            .then_some(external)
     }
 
     /// Ends, once per device and interval, the connection of a phone whose
@@ -367,7 +251,7 @@ impl ServiceSession<'_> {
             .retain(|_, at| now.saturating_duration_since(*at) < HINT_REFRESH_INTERVAL);
         // A phone deciding a live prompt keeps its connection; the refresh
         // waits for a later pass.
-        if !self.embedded_mode || self.closing || self.prompt.is_live() {
+        if !self.network.observe().embedded || self.closing || self.prompt.is_live() {
             return Vec::new();
         }
         // Only a connection whose phone asked can be helped: one that never
@@ -396,7 +280,7 @@ impl ServiceSession<'_> {
         }
         // Without an external address there is nothing to learn: a
         // withdrawal is not worth a reconnect.
-        let Some(external) = self.settled_external() else {
+        let Some(external) = self.network.observe().settled_external() else {
             return Vec::new();
         };
         let mut refreshed = Vec::new();
@@ -428,240 +312,14 @@ impl ServiceSession<'_> {
         refreshed
     }
 
-    /// The embedded relay keeps listening while its gateway owner has not
-    /// published yet, is momentarily unreadable, or is being replaced for a
-    /// new mode or endpoint. None of these is a reason to withdraw hints.
     fn direct_candidates_pending(&self) -> bool {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            use direct_network::DirectGatewayState as State;
-            let listening = self.embedded_mode
-                && !self.closing
-                && self.pending_relay.is_none()
-                && self
-                    .embedded_relay
-                    .as_ref()
-                    .is_some_and(relay_service::HostedRelay::is_running);
-            listening
-                && self.gateway_reading().is_none_or(|reading| {
-                    reading.access != self.external_access
-                        || matches!(reading.state, State::Discovering | State::Stopped)
-                })
+            self.network.observe().candidates_pending()
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
             false
-        }
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn cancel_direct_gateway(&mut self) {
-        self.direct_internal = None;
-        if let Some(gateway) = self.direct_gateway.as_ref() {
-            gateway.cancel();
-        }
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn drain_direct_gateway(&mut self) -> bool {
-        self.cancel_direct_gateway();
-        if self
-            .direct_gateway
-            .as_mut()
-            .is_some_and(|gateway| !gateway.drain())
-        {
-            return false;
-        }
-        self.direct_gateway = None;
-        true
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn poll_direct_gateway(&mut self, endpoint: Option<SocketAddr>) {
-        let desired = endpoint.filter(|_| {
-            self.embedded_mode
-                && !self.closing
-                && self.pending_relay.is_none()
-                && self
-                    .embedded_relay
-                    .as_ref()
-                    .is_some_and(relay_service::HostedRelay::is_running)
-        });
-        // A changed mode is handled exactly like a changed internal endpoint:
-        // drain the owner, then start one for the configured mode.
-        let other_mode = self
-            .direct_gateway
-            .as_ref()
-            .is_some_and(|gateway| gateway.access() != self.external_access);
-        if (self.direct_internal != desired
-            || (desired.is_none() && self.direct_gateway.is_some())
-            || other_mode)
-            && !self.drain_direct_gateway()
-        {
-            return;
-        }
-        if self.direct_gateway.is_none()
-            && let Some(internal) = desired
-            && let Ok(gateway) =
-                direct_network::DirectGatewayOwner::start(internal, self.external_access)
-        {
-            // Construction only starts a bounded background owner; no router
-            // discovery or router I/O runs on this service worker.
-            self.direct_gateway = Some(gateway);
-            self.direct_internal = Some(internal);
-        }
-    }
-
-    /// An old forward setting has no origin. Once its matching gateway owner is
-    /// running with a usable routed IPv4, adopt that address through the same
-    /// protected writer. A failed write is retried no sooner than one minute.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn adopt_forward_origin(&mut self, now: Instant) {
-        if !matches!(
-            self.external_access,
-            direct_network::ExternalAccess::RouterForward { .. }
-        ) || self.external_forward_origin.is_some()
-            || self.closing
-            || self.pending_relay.is_some()
-            || self
-                .forward_origin_retry_at
-                .is_some_and(|retry| now < retry)
-        {
-            return;
-        }
-        if !self
-            .direct_gateway
-            .as_ref()
-            .is_some_and(|gateway| gateway.access() == self.external_access)
-        {
-            return;
-        }
-        let Some(origin) = self.direct_internal.and_then(|internal| match internal {
-            SocketAddr::V4(address)
-                if crate::external_access::usable_forward_origin(*address.ip()) =>
-            {
-                Some(*address.ip())
-            }
-            _ => None,
-        }) else {
-            return;
-        };
-        let setting = crate::external_access::ExternalAccessSetting {
-            access: self.external_access,
-            forward_origin: Some(origin),
-        };
-        if crate::native::configure_external_access_for_running_service(setting).is_ok() {
-            self.external_forward_origin = Some(origin);
-            self.forward_origin_retry_at = None;
-        } else {
-            self.forward_origin_retry_at = Some(now + FORWARD_ORIGIN_RETRY_INTERVAL);
-        }
-    }
-
-    /// The configured mode and, when the current owner runs that mode, its
-    /// observation. Addresses go to local management clients of this PC only.
-    /// Every field is checked here so the reply always encodes.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn external_status(&self) -> crate::management_protocol::ManagementResponse {
-        let usable =
-            |address: &SocketAddr| crate::contract::validate_relay_endpoint(*address).is_ok();
-        let snapshot = self
-            .direct_gateway
-            .as_ref()
-            .filter(|gateway| {
-                !self.closing
-                    && self.direct_internal.is_some()
-                    && gateway.access() == self.external_access
-            })
-            .map(direct_network::DirectGatewayOwner::snapshot);
-        let (external, source) = match snapshot
-            .as_ref()
-            .map(|snapshot| (snapshot.external(), snapshot.source()))
-        {
-            Some((Some(external), Some(source))) if usable(&external) => {
-                (Some(external), Some(source))
-            }
-            _ => (None, None),
-        };
-        crate::management_protocol::ManagementResponse::ExternalStatus {
-            access: self.external_access,
-            external,
-            source,
-            failure: snapshot
-                .as_ref()
-                .filter(|_| external.is_none())
-                .and_then(direct_network::DirectGatewaySnapshot::failure),
-            lan: self
-                .direct_internal
-                .filter(|_| !self.closing && self.direct_gateway.is_some())
-                .filter(usable),
-            forward_origin: matches!(
-                self.external_access,
-                direct_network::ExternalAccess::RouterForward { .. }
-            )
-            .then_some(self.external_forward_origin)
-            .flatten(),
-        }
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pub(super) fn direct_status(&self) -> crate::management_protocol::ManagementResponse {
-        use crate::management_protocol::{DirectConnectionState as State, ManagementResponse};
-        let listening = self.embedded_mode
-            && !self.closing
-            && self.pending_relay.is_none()
-            && self
-                .embedded_relay
-                .as_ref()
-                .is_some_and(relay_service::HostedRelay::is_running);
-        let state = if self.closing || self.pending_relay.is_some() {
-            State::Stopped
-        } else if !self.embedded_mode {
-            State::Unknown
-        } else if !listening {
-            State::Unavailable
-        } else {
-            match self
-                .direct_gateway
-                .as_ref()
-                .map(|gateway| gateway.snapshot().state)
-            {
-                Some(direct_network::DirectGatewayState::PublicIpv4Candidate) => {
-                    if self.current_direct_candidates().0.is_empty() {
-                        State::Discovering
-                    } else {
-                        State::Candidate
-                    }
-                }
-                Some(direct_network::DirectGatewayState::LanOnly) => State::LanOnly,
-                Some(
-                    direct_network::DirectGatewayState::MappedCandidate
-                    | direct_network::DirectGatewayState::Ipv6Candidate,
-                ) => {
-                    let (candidates, _) = self.current_direct_candidates();
-                    if candidates.is_empty() {
-                        State::Discovering
-                    } else if candidates
-                        .iter()
-                        .any(|address| Some(*address) != self.relay)
-                        || self.relay.is_some_and(|address| address.is_ipv6())
-                    {
-                        State::Candidate
-                    } else {
-                        State::LanOnly
-                    }
-                }
-                Some(
-                    direct_network::DirectGatewayState::Unavailable
-                    | direct_network::DirectGatewayState::Stopped,
-                ) => State::Unavailable,
-                Some(direct_network::DirectGatewayState::Discovering) | None => State::Discovering,
-            }
-        };
-        ManagementResponse::DirectStatus {
-            embedded_relay: self.embedded_mode,
-            relay_listening: listening,
-            state,
         }
     }
 }

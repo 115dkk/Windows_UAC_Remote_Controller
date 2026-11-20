@@ -303,51 +303,33 @@ describe('native request presentation integration', () => {
   });
 
   it('asks once for a lease that ends with the request instead of reading until it does', async () => {
-    const initial = pending();
-    const started = performance.now();
-    // The same lease every time: it ends when the request does, 1500 ms in.
-    const until = (): AppSnapshot => ({ ...initial, requests: initial.requests.map((request) => ({
-      ...request, refreshAfterMillis: Math.max(0, 1500 - (performance.now() - started)) })) });
-    const reads = vi.fn<ControllerBridge['snapshot']>(() => Promise.resolve(until()));
-    view(until(), { snapshot: reads });
-    await screen.findByText('설정 도우미.exe');
-    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); }, { timeout: 1000 });
-    // The early read came back with the lease it already had. Asking again for
-    // it read the owner without pause for the last second of every request.
-    await act(() => new Promise((resolve) => { window.setTimeout(resolve, 700); }));
-    expect(reads).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
-  });
-
-  it('reads details after the snapshot read that holds the native admission instead of failing', async () => {
-    const shown = pending();
-    const original = createQaBridge(shown);
-    const { wake, watchRequests } = wakeable();
-    let holding = false;
-    let answer: (value: AppSnapshot) => void = () => {};
-    const reads = vi.fn<ControllerBridge['snapshot']>()
-      .mockResolvedValueOnce(shown)
-      .mockImplementationOnce(() => {
-        holding = true;
-        return new Promise<AppSnapshot>((resolve) => { answer = (value) => { holding = false; resolve(value); }; });
-      })
-      .mockResolvedValue(shown);
-    // The native command admission refuses a second command while a read holds it.
-    const requestDetails = vi.fn((id: string) => holding
-      ? Promise.reject(Object.assign(new Error('busy'), { code: 'app_busy' })) : original.requestDetails(id));
-    const user = userEvent.setup();
-    view(shown, { snapshot: reads, requestDetails, watchRequests });
-    await screen.findByRole('button', { name: ko.details });
-    await settled();
-    act(() => { wake.notify(); });
-    await waitFor(() => { expect(reads).toHaveBeenCalledTimes(2); });
-    await user.click(screen.getByRole('button', { name: ko.details }));
-    expect(await screen.findByText(ko.detailsLoading)).toBeInTheDocument();
-    expect(requestDetails).not.toHaveBeenCalled();
-    await act(async () => { answer(shown); await Promise.resolve(); });
-    expect(await screen.findByText(/화면 확인을 위한 예시 문자열/u)).toBeInTheDocument();
-    expect(requestDetails).toHaveBeenCalledExactlyOnceWith('synthetic-request-1');
-    expect(screen.queryByText(ko.detailsUnavailable)).not.toBeInTheDocument();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+    let rendered: ReturnType<typeof view> | undefined;
+    try {
+      const initial = pending();
+      const started = performance.now();
+      // The same lease every time: it ends when the request does, 1500 ms in.
+      const until = (): AppSnapshot => ({ ...initial, requests: initial.requests.map((request) => ({
+        ...request, refreshAfterMillis: Math.max(0, 1500 - (performance.now() - started)) })) });
+      const reads = vi.fn<ControllerBridge['snapshot']>(() => Promise.resolve(until()));
+      rendered = view(until(), { snapshot: reads });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+      expect(reads).toHaveBeenCalledOnce();
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(reads).toHaveBeenCalledTimes(2);
+      // The early read came back with the lease it already had. No repeated
+      // early reads, and the body remains until (but not at) the exact cutoff.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('설정 도우미.exe')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(reads).toHaveBeenCalledTimes(3);
+      expect(screen.queryByText('설정 도우미.exe')).not.toBeInTheDocument();
+    } finally {
+      rendered?.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('opens a notification review with its details once, while the next read still holds the admission', async () => {

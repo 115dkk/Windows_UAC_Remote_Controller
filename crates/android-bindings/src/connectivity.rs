@@ -92,6 +92,11 @@ pub(super) struct DialState {
 
 pub(crate) struct ConnectivityOwner {
     pub(super) states: Mutex<BTreeMap<(approval_protocol::PcIdentity, u64), DialState>>,
+    /// Fixed causes keyed only by association and network generation. No endpoint
+    /// or key material enters this diagnostic scheduler record.
+    pub(super) peer_completions: Mutex<
+        BTreeMap<(approval_protocol::PcIdentity, u64), (u64, crate::intake::PeerCompletionCause)>,
+    >,
     pub(super) lan: Mutex<LanHints>,
     network: Mutex<NetworkGeneration>,
     stop: CancellationToken,
@@ -107,6 +112,7 @@ impl Default for ConnectivityOwner {
     fn default() -> Self {
         Self {
             states: Mutex::new(BTreeMap::new()),
+            peer_completions: Mutex::new(BTreeMap::new()),
             lan: Mutex::new(LanHints::default()),
             network: Mutex::new(NetworkGeneration {
                 number: 0,
@@ -125,6 +131,28 @@ impl ConnectivityOwner {
 
     pub(super) fn key(reference: PeerAssociationRef) -> (approval_protocol::PcIdentity, u64) {
         (reference.pc(), reference.generation())
+    }
+
+    pub(crate) fn record_peer_completion(
+        &self,
+        reference: PeerAssociationRef,
+        generation: u64,
+        cause: crate::intake::PeerCompletionCause,
+    ) {
+        let states = self
+            .states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let key = Self::key(reference);
+        if states
+            .get(&key)
+            .is_some_and(|state| state.generation == generation)
+        {
+            self.peer_completions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key, (generation, cause));
+        }
     }
 
     fn complete(
@@ -230,6 +258,10 @@ impl ConnectivityOwner {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         states.retain(|(pc, _), _| *pc != reference.pc());
+        self.peer_completions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|(pc, _), _| *pc != reference.pc());
         let label = service_protocol::lan_instance_label(&reference.pc());
         self.lan
             .lock()
@@ -244,9 +276,14 @@ impl ConnectivityOwner {
         reference: PeerAssociationRef,
     ) -> Result<(), BridgeError> {
         let mut states = self.states.lock().map_err(|_| BridgeError::Closed)?;
-        if let Some(state) = states.get_mut(&Self::key(reference)) {
+        let key = Self::key(reference);
+        if let Some(state) = states.get_mut(&key) {
             state.hint_backoff_shortened = false;
             state.prioritized_hint = None;
+            self.peer_completions
+                .lock()
+                .map_err(|_| BridgeError::Closed)?
+                .remove(&key);
         }
         let label = service_protocol::lan_instance_label(&reference.pc());
         self.lan
@@ -531,6 +568,11 @@ impl MobileController {
             .map_err(|_| BridgeError::Closed)?
             .clear();
         self.connectivity
+            .peer_completions
+            .lock()
+            .map_err(|_| BridgeError::Closed)?
+            .clear();
+        self.connectivity
             .lan
             .lock()
             .map_err(|_| BridgeError::Closed)?
@@ -640,6 +682,11 @@ impl MobileController {
                     .iter()
                     .any(|(reference, _, _)| *key == ConnectivityOwner::key(*reference))
             });
+            self.connectivity
+                .peer_completions
+                .lock()
+                .map_err(|_| BridgeError::Closed)?
+                .retain(|key, _| states.contains_key(key));
             for (reference, endpoint, alternatives) in &associations {
                 let Some((address, route)) = endpoint else {
                     without_endpoint += 1;
@@ -864,6 +911,7 @@ fn attach(
             request.reference,
             stream,
             &request.network_stop,
+            request.generation,
             ready_sender,
         )?;
     Ok(AttachedCarrier { address, ready })

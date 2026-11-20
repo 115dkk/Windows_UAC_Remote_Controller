@@ -35,6 +35,16 @@ Explorer or relaunch the app without administrator elevation.
   registrations are recorded as `relay_abuse` when a count has moved, at most
   once a minute, without any address or route
   ([ADR0054](adr/0054-the-embedded-relay-limits-what-a-known-route-can-do.md)).
+  Each embedded relay worker exit is recorded once as `relay_worker_stopped`,
+  with a fixed clean, error or panic status. A clean exit includes aggregate
+  connection and timeout counts; the four abuse counts remain in `relay_abuse`.
+  Joined phone-connection workers are recorded as `peer_worker_exited` with a
+  fixed cause and aggregate count. Counts accumulate between rows; each cause
+  is normally written at most once a minute, and pending counts are written as
+  the service session finishes shutting down. A management pipe listener that
+  cannot be recreated is recorded once per outage as
+  `management_listener_creation_failed`, with a fixed failure name or numeric
+  service/native stage and code. The service keeps retrying the listener.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.
@@ -44,11 +54,14 @@ Explorer or relaunch the app without administrator elevation.
 - File IO failure, lock contention or unsafe preexisting paths drop a diagnostic
   only; they do not grant authority, recreate keys or restart the service.
 
-The file is capped at1MiB. When the next record would exceed the cap, it restarts
-from that new record. This is a bounded troubleshooting log, not a tamper-proof
-audit archive. Copy relevant records before rollover. The protected activity
-journal retains its own independent retention policy. Ordinary users cannot
-delete or edit the shared log; automatic rollover limits disk usage.
+The file is capped at1MiB, and `MAX_RECORD_BYTES` caps each compact JSON record
+at1,024 bytes before its newline. Every fixed record schema is tested at maximum
+numeric widths against that limit. When the next record would exceed the file
+cap, it restarts from that new record. This is a bounded troubleshooting log,
+not a tamper-proof audit archive. Copy relevant records before rollover. The
+protected activity journal retains its own independent retention policy.
+Ordinary users cannot delete or edit the shared log; automatic rollover limits
+disk usage.
 
 PowerShell read example (normal user, no GUI):
 

@@ -149,10 +149,12 @@ test('native PNG envelope checks exact bounds/dimensions but do not stand in for
 
 test('scanner extension is separate and never repeats original credential setup or repairs device state', () => {
   const source = readFileSync(new URL('./android-pairing-scan-ci.mjs', import.meta.url), 'utf8');
+  const runner = readFileSync(new URL('./android-bounded-evidence-runner.mjs', import.meta.url), 'utf8');
   assert.ok(!source.includes("'set-pin'") && !source.includes("'reboot'") && !source.includes("'force-stop'") && !source.includes("'install'"));
   assert.ok(source.includes('requireScannerPrerequisite(prior'));
   assert.ok(source.includes('result.deviceOperationMayContinue = true'));
   assert.ok(source.includes('SCANNER_COMMAND_BUDGET = 60 + SCANNER_IMAGES.length'));
-  assert.ok(source.includes('index < SCANNER_COMMAND_BUDGET'));
+  assert.ok(source.includes('commandLimit: () => SCANNER_COMMAND_BUDGET'));
+  assert.ok(runner.includes('commandIndex < limit'));
   assert.ok(source.includes('physicalCameraVerified: false'));
 });

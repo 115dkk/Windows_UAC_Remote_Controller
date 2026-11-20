@@ -102,18 +102,24 @@ val controllerCargoTarget = providers.environmentVariable("CARGO_TARGET_DIR").ma
     val selected = File(configured)
     (if (selected.isAbsolute) selected else controllerRepository.resolve(configured)).canonicalFile
 }.orElse(controllerRepository.resolve("target"))
+val controllerRustInputs = fileTree(controllerRepository) {
+    include(
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/**",
+        "crates/**", "vendor/**", "tools/controller-uniffi-bindgen/**",
+        "tools/build-android-bindings.mjs", "tools/android-core-check.mjs", "tools/android-abi.mjs",
+    )
+    exclude("**/target/**")
+}
 listOf("debug", "release").forEach { variant ->
     val title = variant.replaceFirstChar { it.uppercaseChar() }
     val generateControllerBindings = tasks.register<Exec>("generate${title}ControllerBindings") {
         workingDir(controllerRepository)
         commandLine("node", "tools/build-android-bindings.mjs", "--abi", controllerSelectedAbi.abi, "--variant", variant)
         inputs.property("controllerAbi", controllerSelectedAbi.abi)
-        inputs.files(fileTree(controllerRepository.resolve("crates")) { include("**/*.rs", "**/Cargo.toml") })
-        inputs.dir(controllerRepository.resolve("tools/controller-uniffi-bindgen/src"))
-        inputs.files(controllerRepository.resolve("Cargo.toml"), controllerRepository.resolve("Cargo.lock"),
-            controllerRepository.resolve("rust-toolchain.toml"),
-            controllerRepository.resolve("tools/build-android-bindings.mjs"), controllerRepository.resolve("tools/android-core-check.mjs"),
-            controllerRepository.resolve("tools/android-abi.mjs"))
+        inputs.files(controllerRustInputs)
+        // Cargo owns the exact source, configuration and environment fingerprint.
+        // Always invoke it rather than letting Gradle reuse a library from an incomplete second inventory.
+        outputs.upToDateWhen { false }
         outputs.dir(layout.buildDirectory.dir("generated/controllerUniffi/$variant/${controllerSelectedAbi.abi}/kotlin"))
         outputs.file(controllerCargoTarget.map { it.resolve("${controllerSelectedAbi.rustTarget}/$variant/libuac_android_controller.so") })
     }

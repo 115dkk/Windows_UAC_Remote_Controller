@@ -259,18 +259,45 @@ async fn run(
                     });
                     if let Some(entry) = current {
                         entry.dialing = false;
+                        let completed_at = Instant::now();
                         if message.stream.is_some() {
-                            entry.delivered = true;
                             entry.backoff = FIRST_BACKOFF;
+                            match results.try_send(message) {
+                                Ok(()) => entry.delivered = true,
+                                Err(std::sync::mpsc::TrySendError::Full(message)) => {
+                                    // The bounded handoff stays authoritative. Close this
+                                    // unowned stream and retry instead of losing it while
+                                    // permanently marking the device as delivered.
+                                    drop(message);
+                                    entry.delivered = false;
+                                    match retry_after(
+                                        completed_at,
+                                        entry.backoff,
+                                        Duration::ZERO,
+                                    ) {
+                                        Ok((next_attempt, next_backoff)) => {
+                                            entry.next_attempt = next_attempt;
+                                            entry.backoff = next_backoff;
+                                        }
+                                        Err(()) => {
+                                            entry.next_attempt = completed_at;
+                                            entry.backoff = MAX_BACKOFF;
+                                        }
+                                    }
+                                }
+                                Err(std::sync::mpsc::TrySendError::Disconnected(message)) => {
+                                    drop(message);
+                                    break;
+                                }
+                            }
                         } else if let Ok((next_attempt, next_backoff)) =
-                            retry_after(Instant::now(), entry.backoff, message.waited)
+                            retry_after(completed_at, entry.backoff, message.waited)
                         {
                             entry.next_attempt = next_attempt;
                             entry.backoff = next_backoff;
                         } else {
                             entry.delivered = true;
                         }
-                        let _ = results.try_send(message);
                     }
                 }
             }
@@ -516,6 +543,119 @@ mod tests {
             thread::yield_now();
         }
         let _kept_open_until_now = server.join().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn full_result_queue_closes_success_and_redials_after_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let relay = listener.local_addr().unwrap();
+        let route = RouteId::new([8; 32]).unwrap();
+        let expected = Registration::new(Role::Pc, route).to_wire();
+        let (accepted_sender, accepted) = sync_mpsc::channel();
+        let (closed_sender, first_closed) = sync_mpsc::channel();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut connections = 0;
+            let mut kept = Vec::new();
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut registration = vec![0; expected.len()];
+                        stream.read_exact(&mut registration).unwrap();
+                        assert_eq!(registration, expected);
+                        stream.write_all(relay_service::READY_MARKER).unwrap();
+                        connections += 1;
+                        accepted_sender.send(connections).unwrap();
+                        if connections == 1 {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
+                            let mut byte = [0_u8; 1];
+                            match stream.read(&mut byte) {
+                                Ok(0) => {}
+                                Err(error)
+                                    if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                                other => panic!("first full-queue stream stayed open: {other:?}"),
+                            }
+                            closed_sender.send(()).unwrap();
+                        } else {
+                            kept.push(stream);
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("loopback relay failed: {error}"),
+                }
+            }
+            kept
+        });
+
+        let (command_sender, commands) = mpsc::channel(MAX_DEVICES + 2);
+        let (result_sender, results) = std::sync::mpsc::sync_channel(1);
+        assert!(
+            result_sender
+                .try_send(ResultMessage {
+                    device: device(2),
+                    relay,
+                    route,
+                    generation: 1,
+                    stream: None,
+                    waited: Duration::ZERO,
+                })
+                .is_ok()
+        );
+        let stop = CancellationToken::new();
+        let worker_stop = stop.clone();
+        let worker = thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run(commands, result_sender, worker_stop));
+        });
+        assert!(
+            command_sender
+                .try_send(Command::Poll {
+                    routes: vec![(device(1), relay, route)],
+                    now: Instant::now(),
+                })
+                .is_ok()
+        );
+        assert_eq!(accepted.recv_timeout(Duration::from_secs(2)), Ok(1));
+        first_closed.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            results
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .stream
+                .is_none()
+        );
+
+        assert!(
+            command_sender
+                .try_send(Command::Poll {
+                    routes: vec![(device(1), relay, route)],
+                    now: Instant::now() + FIRST_BACKOFF + Duration::from_millis(1),
+                })
+                .is_ok()
+        );
+        let second = accepted.recv_timeout(Duration::from_secs(1));
+        let delivered =
+            (second == Ok(2)).then(|| results.recv_timeout(Duration::from_secs(1)).unwrap());
+        stop.cancel();
+        let _ = command_sender.try_send(Command::Cancel);
+        drop(command_sender);
+        worker.join().unwrap();
+        let kept = server.join().unwrap();
+
+        assert_eq!(second, Ok(2));
+        assert_eq!(delivered.unwrap().device, device(1));
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]

@@ -61,8 +61,10 @@ especially non-ASCII strings. This budget does not prove any OS capture path or
 define how a future adapter handles ill-formed UTF-16, publisher provenance or
 other metadata. Never silently truncate or normalize a request to fit.
 
-Name and path are nonempty; details may be empty; NUL is rejected. Total text
-payload is at most 294,912 bytes (288 KiB), plus allocation headers. Its digest
+Only the program name must be nonempty; path and details may be empty; NUL is
+rejected. MSI, COM elevation and packaged-app prompts may have no path. An absent
+path stays empty rather than being inferred or filled in. Total text payload is
+at most 294,912 bytes (288 KiB), plus allocation headers. Its digest
 covers a separate versioned domain, version, and each field's tag, u32 big-endian
 byte length, and bytes. Renaming the first field does not change its tag or the
 v1 canonical bytes. The decision wire record remains 217–281 bytes because it

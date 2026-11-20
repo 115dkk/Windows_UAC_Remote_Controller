@@ -31,18 +31,34 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify the artifact producer
+        id: producer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ($env:SOURCE_RUN -notmatch '^[0-9]+$' -or $env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid producer coordinates' }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_SHA -or $run.name -ne 'Windows package' -or $run.head_branch -ne 'codex/native-runtime' -or $run.event -ne 'push') { throw 'Unexpected package producer' }
+          # Production package runs come from pull requests of this repository
+          # and from the release gate's dispatch; the push trigger this check
+          # once required no longer exists. A fork's run is never a producer.
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_SHA -or $run.name -ne 'Windows package' -or
+              $run.conclusion -ne 'success' -or $run.event -notin @('pull_request', 'workflow_dispatch') -or
+              $run.repository.full_name -ne $env:GITHUB_REPOSITORY -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) { throw 'Unexpected package producer' }
+          # The producer names its artifact after github.sha. For a dispatch that is the head commit; for a
+          # pull request it is the merge commit GitHub built, not the head. So the name is read from the
+          # verified run itself, and that run must hold exactly one package.
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/artifacts" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Producer artifacts are unavailable' }
+          $packages = @($artifacts.artifacts | Where-Object { $_.name -cmatch '^windows-x64-package-[0-9a-f]{40}$' -and -not $_.expired })
+          if ($packages.Count -ne 1) { throw 'Producer run does not hold exactly one package' }
+          if ($run.event -eq 'workflow_dispatch' -and $packages[0].name -ne "windows-x64-package-$env:SOURCE_SHA") { throw 'Dispatched package is not named after its source' }
+          "artifact=$($packages[0].name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           github-token: ${{ github.token }}
           run-id: ${{ env.SOURCE_RUN }}
-          name: windows-x64-package-${{ env.SOURCE_SHA }}
+          name: ${{ steps.producer.outputs.artifact }}
           path: target/options-input
       - name: Check the built installer and exercise its pre-install UI
         shell: pwsh

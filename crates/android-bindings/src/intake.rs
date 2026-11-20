@@ -11,6 +11,7 @@ use crate::{
 };
 use android_controller::{
     AssociatedPcSocket, NativePeerLease, PcSocketEvent, PcSocketInputs, PeerAssociationRef,
+    PeerSocketError,
 };
 use approval_protocol::BootEpoch;
 use framed_transport::{ConnectionBudget, SocketLimits};
@@ -216,6 +217,10 @@ impl IntakeOwner {
                 && !peer.probe_pending.load(Ordering::Acquire))
             .then(|| peer.last_correlation.load(Ordering::Acquire))
         })
+    }
+    #[cfg(all(test, any(windows, target_os = "linux")))]
+    pub(crate) fn waiting_admission_for_tests(&self) -> bool {
+        self.waiting_admission.load(Ordering::Acquire)
     }
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(crate) fn join_completed_for_tests(&self) {
@@ -534,9 +539,33 @@ impl IntakeOwner {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PeerCompletionCause {
+    OrderlyClose,
+    TransportError,
+    PeerRejected,
+    LocalStop,
+}
+
+impl PeerCompletionCause {
+    fn from_error(error: &PeerSocketError) -> Self {
+        match error {
+            PeerSocketError::ConnectionClosed
+            | PeerSocketError::Socket(
+                framed_transport::SocketError::Cancelled | framed_transport::SocketError::Aborted,
+            ) => Self::LocalStop,
+            PeerSocketError::Socket(_) => Self::TransportError,
+            _ => Self::PeerRejected,
+        }
+    }
+}
+
 struct PeerCompletion {
     control: Arc<PeerControl>,
     intake: Arc<IntakeOwner>,
+    connectivity: Arc<crate::connectivity::ConnectivityOwner>,
+    scheduler_generation: Option<u64>,
+    cause: Option<PeerCompletionCause>,
     /// Present only for scheduler-created carriers. Dropping this before Ready
     /// reports a failed dial; sending it reports pinned secure-channel Ready.
     ready: Option<tokio::sync::oneshot::Sender<()>>,
@@ -547,9 +576,41 @@ impl PeerCompletion {
             let _ = ready.send(());
         }
     }
+
+    fn observe_event(&mut self, event: &Result<PcSocketEvent, PeerSocketError>) {
+        let cause = match event {
+            Ok(PcSocketEvent::PeerClosed | PcSocketEvent::LocallyClosed) => {
+                PeerCompletionCause::OrderlyClose
+            }
+            Err(error) => PeerCompletionCause::from_error(error),
+            Ok(_) => return,
+        };
+        if self.cause.is_none() {
+            self.cause = Some(cause);
+        }
+    }
+
+    fn observe_error(&mut self, error: &PeerSocketError) {
+        if self.cause.is_none() {
+            self.cause = Some(PeerCompletionCause::from_error(error));
+        }
+    }
+
+    fn observe_local_stop(&mut self) {
+        if self.cause.is_none() {
+            self.cause = Some(PeerCompletionCause::LocalStop);
+        }
+    }
 }
 impl Drop for PeerCompletion {
     fn drop(&mut self) {
+        if self.control.stop.is_cancelled() || self.intake.stop.is_cancelled() {
+            self.observe_local_stop();
+        }
+        if let (Some(generation), Some(cause)) = (self.scheduler_generation, self.cause) {
+            self.connectivity
+                .record_peer_completion(self.control.reference, generation, cause);
+        }
         self.intake.peer_closed(&self.control);
     }
 }
@@ -597,7 +658,7 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
     ) -> Result<IntakePeerId, BridgeError> {
-        self.attach_stream(association, stream, None, None)
+        self.attach_stream(association, stream, None, None, None)
     }
 
     pub(crate) fn attach_network_stream(
@@ -605,9 +666,16 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
         network_stop: &CancellationToken,
+        scheduler_generation: u64,
         ready: tokio::sync::oneshot::Sender<()>,
     ) -> Result<IntakePeerId, BridgeError> {
-        self.attach_stream(association, stream, Some(network_stop), Some(ready))
+        self.attach_stream(
+            association,
+            stream,
+            Some(network_stop),
+            Some(scheduler_generation),
+            Some(ready),
+        )
     }
 
     fn attach_stream(
@@ -615,6 +683,7 @@ impl MobileController {
         association: PeerAssociationRef,
         stream: std::net::TcpStream,
         network_stop: Option<&CancellationToken>,
+        scheduler_generation: Option<u64>,
         ready: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<IntakePeerId, BridgeError> {
         struct Carrier {
@@ -687,6 +756,9 @@ impl MobileController {
             completion: PeerCompletion {
                 control,
                 intake: Arc::clone(&self.intake),
+                connectivity: Arc::clone(&self.connectivity),
+                scheduler_generation,
+                cause: None,
                 ready,
             },
         };
@@ -837,9 +909,22 @@ fn wait_peer(mut owned: PeerOwned) -> impl std::future::Future<Output = ParkedPe
     async move {
         let work = tokio::select! {
             biased;
-            _ = stop.cancelled() => PeerWork::Stop,
-            command = owned.commands.recv() => match command { Some(PeerCommand::Decision(value)) => PeerWork::Decision(value), Some(PeerCommand::Probe) => PeerWork::Probe, None => PeerWork::Stop },
-            event = owned.socket.next_event() => PeerWork::Event(event),
+            _ = stop.cancelled() => {
+                owned.completion.observe_local_stop();
+                PeerWork::Stop
+            },
+            command = owned.commands.recv() => match command {
+                Some(PeerCommand::Decision(value)) => PeerWork::Decision(value),
+                Some(PeerCommand::Probe) => PeerWork::Probe,
+                None => {
+                    owned.completion.observe_local_stop();
+                    PeerWork::Stop
+                }
+            },
+            event = owned.socket.next_event() => {
+                owned.completion.observe_event(&event);
+                PeerWork::Event(event)
+            },
         };
         ParkedPeer { owned, work }
     }
@@ -1075,7 +1160,13 @@ fn observe_parked(
         let alive = match &mut parked[index] {
             Parked::Peer(peer) => {
                 preserve_drained(peer);
-                peer.owned.socket.observe_liveness().is_ok()
+                match peer.owned.socket.observe_liveness() {
+                    Ok(()) => true,
+                    Err(error) => {
+                        peer.owned.completion.observe_error(&error);
+                        false
+                    }
+                }
             }
             Parked::Attach(peer) => !peer.completion.control.stop.is_cancelled(),
         };
@@ -1170,7 +1261,8 @@ fn process_parked(
             }
             // A queued verified event is not permission to apply after the
             // original socket deadline. Observe BEFORE any intent/positive work.
-            if owned.socket.observe_liveness().is_err() {
+            if let Err(error) = owned.socket.observe_liveness() {
+                owned.completion.observe_error(&error);
                 return Ok(None);
             }
             match work {
@@ -1217,7 +1309,10 @@ fn process_parked(
                         Err(android_controller::PeerSocketError::Persistence(_)) => {
                             return Err(BridgeError::StorageUnavailable);
                         }
-                        Err(_) => return Ok(None),
+                        Err(error) => {
+                            owned.completion.observe_error(&error);
+                            return Ok(None);
+                        }
                     };
                     if let Some(received) = owned.socket.correlation_received_nanos() {
                         let control = &owned.completion.control;
@@ -1271,7 +1366,10 @@ fn process_parked(
                         Err(android_controller::PeerSocketError::Persistence(_)) => {
                             return Err(BridgeError::StorageUnavailable);
                         }
-                        Err(_) => return Ok(None),
+                        Err(error) => {
+                            owned.completion.observe_error(&error);
+                            return Ok(None);
+                        }
                     }
                 }
                 PeerWork::Event(Ok(PcSocketEvent::OutboundDrained)) => {
@@ -1323,9 +1421,13 @@ fn process_parked(
                         | framed_transport::TransportError::NotReady,
                     ),
                 )) => (),
-                Err(_) => return Ok(None),
+                Err(error) => {
+                    owned.completion.observe_error(&error);
+                    return Ok(None);
+                }
             }
-            if owned.socket.observe_liveness().is_err() {
+            if let Err(error) = owned.socket.observe_liveness() {
+                owned.completion.observe_error(&error);
                 return Ok(None);
             }
             Ok(Some(owned))
@@ -1392,6 +1494,9 @@ pub(crate) fn process_parked_message_for_test(
         completion: PeerCompletion {
             control,
             intake: Arc::clone(&owner.intake),
+            connectivity: Arc::clone(&owner.connectivity),
+            scheduler_generation: None,
+            cause: None,
             ready: None,
         },
     };

@@ -39,6 +39,7 @@ established session as evidence that enrollment is still current.
 | `read_plaintext(output, now) -> Result<PlaintextRead, ChannelError>` | Returns `Data(n)`, `WouldBlock` or authenticated `PeerClosed`. Never returns handshake/preface bytes. This is a stream, not complete application messages. |
 | `tick(now)` | Checks time and advances bounded internal readiness when no new relay bytes arrive. Required while handshaking; no sleeps/timers are created internally. |
 | `status`, `buffered_tls_bytes`, `buffered_plaintext_bytes`, `failure_reason` | Redacted/nonsecret state from the last observed operation. Status is not a user approval or live registry lookup. |
+| `negotiated_protocol()` | Returns the selected `ControlProtocol` only after authenticated readiness; returns `None` before readiness, on failure or after local close. |
 | `close(now)` | Immediate irreversible local abort; drops connection/buffers, including queued application data. Owner also closes transport. Suitable for revocation. |
 | `close_gracefully(now)` | Requires readiness and no queued TLS output. Enqueues authenticated close_notify and disables all application I/O. Only bounded TLS drain remains; it does not assert peer acknowledgment. On backpressure use immediate `close` if necessary. |
 | `transport_eof(now)` | Report actual relay EOF. Returns `AuthenticatedPeerClose` only after peer close_notify, `LocalAlreadyClosed` for a locally closed no-op (not authentication), otherwise fatal `Truncated`. An empty feed is not EOF. |
@@ -49,8 +50,11 @@ changes require exclusive `&mut` ownership.
 
 ## Authentication and readiness
 
-Only TLS 1.3, exact ALPN `wuac-control/1` and ECDSA_NISTP256_SHA256 handshake
-signatures are accepted. Both certificate verifiers require RFC 7250 raw keys,
+Only TLS 1.3 and ECDSA_NISTP256_SHA256 handshake signatures are accepted.
+Both peers offer ALPN `wuac-control/3`, `wuac-control/2`, `wuac-control/1` in
+that order; missing or unrelated ALPN is rejected. Application owners use
+`negotiated_protocol()` to gate features: signed address exchange requires V2
+or V3, and parked-prompt notices require V3 (ADR 0051). V1 peers receive neither. Both certificate verifiers require RFC 7250 raw keys,
 reject chains and compare the exact enrolled canonical SPKI. CertificateVerify
 is additionally checked with real P-256/SHA-256 verification and the correct TLS
 role frame. TLS 1.2 signature callbacks reject unconditionally. No CA or TOFU
