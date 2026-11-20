@@ -2,11 +2,11 @@
 // CI-only REAL PRODUCT lifecycle; not the isolated renderer and not authentication proof.
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
-import { runProver as runBoundedProcess } from './prover-process.mjs';
+import { commandEvidenceComplete, createBoundedEvidenceRunner } from './android-bounded-evidence-runner.mjs';
 import { onlyIsolatedEmulator, requireBroadcastBarrier, broadcastBarrierState } from './android-notification-gallery.mjs';
 import { inspectApk } from './verify-android-apk.mjs';
 import { inspectBootManifest } from './verify-android-boot-manifest.mjs';
@@ -68,10 +68,7 @@ export function requireSameBoot(expected, actual) {
     'Lifecycle observation crossed a kernel boot boundary.');
 }
 
-export function commandEvidenceComplete(value, transcript) {
-  return value?.status === 0 && !value.error && !value.signal && value.cancelled === false && value.cleanupIncomplete === false &&
-    transcript?.logUnavailable !== true && Number.isSafeInteger(transcript?.bytes) && transcript.bytes >= 0 && /^[0-9a-f]{64}$/.test(transcript?.sha256 ?? '');
-}
+export { commandEvidenceComplete };
 
 export function finalizeLifecycleResult(result, aborted) {
   result.cancelled ||= aborted;
@@ -266,22 +263,22 @@ export async function main(args = process.argv.slice(2)) {
   const result = { version: 1, classification: 'REAL_PRODUCT_EMULATOR_LIFECYCLE_AND_FIRST_UNLOCK', passed: false,
     firstUnlockVerified: false, physicalAuthenticationVerified: false, requestDeliveryVerified: false,
     phases: [], observations: [], commands: [], cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
-  let commandIndex = 0;
   let commandLimit = 400, diagnosticCommandLimit = 400;
+  const evidenceRunner = createBoundedEvidenceRunner({
+    root: ROOT,
+    directory,
+    result,
+    signal: controller.signal,
+    commandLimit: () => commandLimit,
+    maximumCommandLimit: MAX_LIFECYCLE_COMMANDS,
+    stoppedMessage: 'Cancelled/uncertain/bounded command sequence cannot continue.',
+    incompleteMessage: 'Bounded command or its retained transcript failed verification.',
+  });
   let firstUnlockDeviceRequired = false, protectedBoot = null;
   let readFailureDiagnostics = null;
   async function command(command, argv, timeoutMs = 15_000, mutatesDevice = false, maxOutputBytes = 512 * 1024, uiDumpPath = null) {
-    requireThat(!controller.signal.aborted && commandIndex < commandLimit && commandLimit <= MAX_LIFECYCLE_COMMANDS && !result.deviceOperationMayContinue, 'Cancelled/uncertain/bounded command sequence cannot continue.');
-    const name = `${String(++commandIndex).padStart(3, '0')}.log`;
-    const value = await runBoundedProcess(command, argv, { cwd: ROOT, logPath: join(directory, name), timeoutMs, maxOutputBytes, signal: controller.signal });
-    const transcript = await hashFile(join(directory, name), maxOutputBytes, true).catch(() => ({ logUnavailable: true }));
-    result.commands.push({ log: name, command: relative(ROOT, command), args: argv, status: value.status, signal: value.signal,
-      failed: Boolean(value.error), cancelled: value.cancelled, cleanupIncomplete: value.cleanupIncomplete,
-      ...transcript });
-    result.cancelled ||= value.cancelled; result.cleanupIncomplete ||= value.cleanupIncomplete;
     // Terminating the local adb process does NOT terminate/prove completion of its Android operation.
-    if (mutatesDevice && (value.error || value.cancelled || value.cleanupIncomplete || value.status !== 0)) result.deviceOperationMayContinue = true;
-    requireThat(commandEvidenceComplete(value, transcript), 'Bounded command or its retained transcript failed verification.');
+    const { value } = await evidenceRunner.run(command, argv, { timeoutMs, mutatesDevice, maxOutputBytes });
     if (uiDumpPath !== null) requireHierarchyCompletion(value.stdout, value.stderr, uiDumpPath);
     return value.stdout;
   }
@@ -328,7 +325,7 @@ export async function main(args = process.argv.slice(2)) {
     function requireUiCurrent(deadline) {
       requireFirstUnlockUiCurrent({ aborted: controller.signal.aborted, cancelled: result.cancelled,
         cleanupIncomplete: result.cleanupIncomplete, deviceOperationMayContinue: result.deviceOperationMayContinue,
-        commandIndex, commandLimit }, deadline, Date.now());
+        commandIndex: evidenceRunner.commandIndex, commandLimit }, deadline, Date.now());
     }
     async function mutate(argv, timeout = 30_000, limit, uiDumpPath = null, deadline = null, uiCapturedAt = null) {
       await guard();
@@ -489,7 +486,7 @@ export async function main(args = process.argv.slice(2)) {
     await phase('start'); await normalLaunch(); await observe('explicit-restart-ready', true, false);
     // Only after ALL original scenarios completed may the separately bounded
     // disposable first-unlock extension configure its public synthetic fixture.
-    const extensionStart = commandIndex, extensionLimits = extensionCommandLimits(extensionStart);
+    const extensionStart = evidenceRunner.commandIndex, extensionLimits = extensionCommandLimits(extensionStart);
     commandLimit = extensionLimits.operational; diagnosticCommandLimit = extensionLimits.diagnostics;
     firstUnlockDeviceRequired = true;
     const first = { scope: 'DISPOSABLE_API36_X86_64_FIRST_UNLOCK', nonce: randomBytes(16).toString('hex'),

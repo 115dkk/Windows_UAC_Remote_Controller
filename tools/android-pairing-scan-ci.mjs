@@ -5,8 +5,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBoundedEvidenceRunner } from './android-bounded-evidence-runner.mjs';
 import { runProver } from './prover-process.mjs';
-import { PACKAGE, TEST_PACKAGE, SERIAL, SOURCE_ROOTS, requireCi, requireDevice, requireSameBoot, requireSameSource, commandEvidenceComplete } from './android-lifecycle-ci.mjs';
+import { PACKAGE, TEST_PACKAGE, SERIAL, SOURCE_ROOTS, requireCi, requireDevice, requireSameBoot, requireSameSource } from './android-lifecycle-ci.mjs';
 import { frameworkUserState, requireFirstUnlockDevice, requireFirstUnlockEvidence } from './android-first-unlock.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -145,26 +146,29 @@ export async function main(args = process.argv.slice(2)) {
     bootId: boot, syntheticLockFromOriginalLifecycle: true, cameraGrantCommandCompleted: false, pregrantedCameraPermission: false,
     physicalCameraVerified: false, userPermissionFlowVerified: false, qrEnrollmentVerified: false,
     commands: [], cases: [], images: [], devices: [], cancelled: false, cleanupIncomplete: false, deviceOperationMayContinue: false };
-  let index = 0;
   const deadline = performance.now() + 600_000;
+  const evidenceRunner = createBoundedEvidenceRunner({
+    root: ROOT,
+    directory,
+    result,
+    signal: cancellation.signal,
+    commandLimit: () => SCANNER_COMMAND_BUDGET,
+    maximumCommandLimit: SCANNER_COMMAND_BUDGET,
+    deadline,
+    stoppedMessage: 'Stopped or exhausted scanner CI cannot continue.',
+    incompleteMessage: 'Scanner command or its original transcript did not complete.',
+  });
   const command = async (binary, argv, timeoutMs = 15000, mutates = false, maximum = 512 * 1024, pngName = null) => {
-    const remaining = deadline - performance.now();
-    requireThat(!cancellation.signal.aborted && !result.deviceOperationMayContinue && index < SCANNER_COMMAND_BUDGET && remaining > 0,
-      'Stopped or exhausted scanner CI cannot continue.');
-    const name = pngName ?? `${String(index + 1).padStart(3, '0')}.log`; index += 1;
-    const path = join(directory, name);
-    const value = await runProver(binary, argv, { cwd: ROOT, logPath: path, timeoutMs: Math.min(timeoutMs, Math.floor(remaining)),
-      maxOutputBytes: maximum, signal: cancellation.signal });
-    const record = await fingerprint(path, maximum, true).catch(() => ({ logUnavailable: true }));
-    result.commands.push({ log: name, command: relative(ROOT, binary), args: argv, status: value.status, signal: value.signal,
-      failed: Boolean(value.error), cancelled: value.cancelled, cleanupIncomplete: value.cleanupIncomplete, ...record });
-    result.cancelled ||= value.cancelled; result.cleanupIncomplete ||= value.cleanupIncomplete;
-    if (mutates && (value.error || value.cancelled || value.cleanupIncomplete || value.status !== 0)) result.deviceOperationMayContinue = true;
-    requireThat(commandEvidenceComplete(value, record), 'Scanner command or its original transcript did not complete.');
+    const { value, transcript, name } = await evidenceRunner.run(binary, argv, {
+      timeoutMs,
+      mutatesDevice: mutates,
+      maxOutputBytes: maximum,
+      logName: pngName,
+    });
     if (pngName !== null) {
       requireThat(value.stderr === '', 'Native PNG stream contains a diagnostic.');
-      checkScannerPng(readFileSync(path));
-      result.images.push({ name, ...record, width: 390, height: 844, scope: 'OWNED_NATIVE_VIEW_DUMMY_NO_CAMERA_NO_QR' });
+      checkScannerPng(readFileSync(join(directory, name)));
+      result.images.push({ name, ...transcript, width: 390, height: 844, scope: 'OWNED_NATIVE_VIEW_DUMMY_NO_CAMERA_NO_QR' });
     }
     return value.stdout;
   };
