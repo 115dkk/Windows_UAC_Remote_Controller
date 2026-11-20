@@ -16,6 +16,7 @@ const REPLY_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub(super) enum ManagementProgress {
     Idle,
+    ListenerCreationFailed(PairingPeerError),
     Request {
         class: ManagementClientClass,
         request: ManagementRequest,
@@ -49,6 +50,7 @@ pub(super) struct ServiceManagement {
     state: State,
     first_failure: Option<PairingPeerError>,
     cleanup_failure: Option<PairingPeerError>,
+    listener_failure_reported: bool,
     stopping: bool,
     delay_next_arm: bool,
     #[cfg(test)]
@@ -61,6 +63,7 @@ impl ServiceManagement {
             state: State::Dormant,
             first_failure: None,
             cleanup_failure: None,
+            listener_failure_reported: false,
             stopping: false,
             delay_next_arm: false,
             #[cfg(test)]
@@ -72,7 +75,13 @@ impl ServiceManagement {
         if !matches!(self.state, State::Dormant) || self.stopping || self.first_failure.is_some() {
             return Err(PairingPeerError::InvalidPhase);
         }
-        self.listen(Instant::now())
+        let result = self.listen(Instant::now());
+        if result.is_err() {
+            // Activation returns this failure directly to its owner. Retries in
+            // the same outage must not report it again through poll.
+            self.listener_failure_reported = true;
+        }
+        result
     }
 
     fn create_listener(&mut self) -> Result<ManagementListener, PairingPeerError> {
@@ -121,6 +130,7 @@ impl ServiceManagement {
         }
         self.state = State::Listening(listener);
         self.delay_next_arm = false;
+        self.listener_failure_reported = false;
         Ok(())
     }
 
@@ -162,6 +172,21 @@ impl ServiceManagement {
         }
     }
 
+    fn listener_creation_failure(
+        &mut self,
+        error: PairingPeerError,
+    ) -> Result<ManagementProgress, PairingPeerError> {
+        if error == PairingPeerError::CleanupUnconfirmed {
+            return self.connection_failure(error);
+        }
+        if self.listener_failure_reported {
+            Ok(ManagementProgress::Idle)
+        } else {
+            self.listener_failure_reported = true;
+            Ok(ManagementProgress::ListenerCreationFailed(error))
+        }
+    }
+
     fn rearm_after_drain(&mut self, now: Instant) -> Result<ManagementProgress, PairingPeerError> {
         if self.stopping || self.cleanup_failure.is_some() {
             self.state = State::Stopped;
@@ -173,7 +198,7 @@ impl ServiceManagement {
         }
         match self.listen(now) {
             Ok(()) => Ok(ManagementProgress::Idle),
-            Err(error) => self.connection_failure(error),
+            Err(error) => self.listener_creation_failure(error),
         }
     }
 
@@ -321,7 +346,7 @@ impl ServiceManagement {
                     // Initial activation reports once to its caller; retries
                     // retain that diagnostic without retiring the core service.
                     // Every attempt repeats the native context/first-instance checks.
-                    return self.connection_failure(error);
+                    return self.listener_creation_failure(error);
                 }
                 Ok(ManagementProgress::Idle)
             }
@@ -501,6 +526,48 @@ mod tests {
     }
 
     #[test]
+    fn recreation_failure_reports_once_per_episode_and_again_after_success() {
+        let first = creation_failure();
+        let repeated = PairingPeerError::Busy;
+        let next_episode = PairingPeerError::Native {
+            stage: crate::PairingPeerStage::CreateEvent,
+            hresult: 0x8007_0008_u32 as i32,
+        };
+        let mut management = ServiceManagement::dormant();
+        management.create_results =
+            Some([Err(first), Err(repeated), Ok(()), Err(next_episode)].into());
+        management.state = State::Closing(ManagementPipe::empty_owner_for_test());
+        let now = Instant::now();
+
+        assert!(matches!(
+            management.poll_at(now),
+            Ok(ManagementProgress::ListenerCreationFailed(error)) if error == first
+        ));
+        let retry = rearm_at(&management);
+        assert!(matches!(
+            management.poll_at(retry),
+            Ok(ManagementProgress::Idle)
+        ));
+        let recovery = rearm_at(&management);
+        assert!(matches!(
+            management.poll_at(recovery),
+            Ok(ManagementProgress::Idle)
+        ));
+        assert!(matches!(management.state, State::Listening(_)));
+
+        assert!(matches!(
+            management.poll_at(recovery),
+            Ok(ManagementProgress::Idle)
+        ));
+        assert!(matches!(management.state, State::FailedListener(_)));
+        assert!(matches!(
+            management.poll_at(recovery),
+            Ok(ManagementProgress::ListenerCreationFailed(error)) if error == next_episode
+        ));
+        assert!(management.drain());
+    }
+
+    #[test]
     fn single_creation_failure_recovers_and_diagnostic_does_not_block_later_rearm() {
         let mut management = ServiceManagement::dormant();
         management.create_results = Some([Err(creation_failure()), Ok(()), Ok(())].into());
@@ -548,21 +615,33 @@ mod tests {
     fn repeated_client_failures_retain_owner_until_drain_without_poisoning_stop() {
         let mut management = ServiceManagement::dormant();
         management.create_results = Some(vec![Err(creation_failure()); 6].into());
-        for error in [
+        for (index, error) in [
             PairingPeerError::EndOfStream,
             PairingPeerError::Cancelled,
             PairingPeerError::InvalidMessage,
             PairingPeerError::DeadlineElapsed,
             PairingPeerError::Rejected,
             PairingPeerError::Closed,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert!(matches!(
                 management.fail_pipe(ManagementPipe::empty_owner_for_test(), error),
                 Ok(ManagementProgress::Idle)
             ));
             assert_eq!(management.remaining_owners(), 1);
             assert!(!management.failed());
-            assert!(matches!(management.poll(), Ok(ManagementProgress::Idle)));
+            let progress = management.poll().unwrap();
+            if index == 0 {
+                assert!(matches!(
+                    progress,
+                    ManagementProgress::ListenerCreationFailed(error)
+                        if error == creation_failure()
+                ));
+            } else {
+                assert!(matches!(progress, ManagementProgress::Idle));
+            }
             assert_eq!(management.remaining_owners(), 0);
             assert!(matches!(management.state, State::Rearming { .. }));
         }
