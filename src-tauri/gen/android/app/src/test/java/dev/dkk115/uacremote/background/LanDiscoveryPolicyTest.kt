@@ -46,4 +46,30 @@ class LanDiscoveryPolicyTest {
         assertFalse(LanDiscoveryPolicy.matches("uacremote-0123456789abcdefabcg"))
         assertFalse(LanDiscoveryPolicy.matches("uacremote-0123456789abcdefabcd.local"))
     }
+
+    @Test fun callbackWaitingForReleaseStillOccupiesTheRegistrationCap() {
+        val accounting = LanRegistrationAccounting(2)
+        val first = requireNotNull(accounting.acquire())
+        assertTrue(accounting.acquire() != null)
+        assertEquals(2, accounting.occupied())
+
+        first.beginRelease()
+        assertEquals(2, accounting.occupied())
+        assertNull(accounting.acquire())
+
+        first.released()
+        assertEquals(1, accounting.occupied())
+        assertTrue(accounting.acquire() != null)
+    }
+
+    @Test fun confirmedRegistrationAbsenceReturnsExactlyOneSlot() {
+        val accounting = LanRegistrationAccounting(1)
+        val lease = requireNotNull(accounting.acquire())
+        lease.registrationAbsent()
+        lease.registrationAbsent()
+        lease.released()
+
+        assertEquals(0, accounting.occupied())
+        assertTrue(accounting.acquire() != null)
+    }
 }

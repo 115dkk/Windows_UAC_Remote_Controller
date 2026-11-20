@@ -11,6 +11,41 @@ import android.os.Looper
 import java.net.InetAddress
 import java.util.concurrent.Executor
 
+/** Counts registered callbacks until Android confirms release or absence. */
+internal class LanRegistrationAccounting(private val limit: Int) {
+    init { require(limit > 0) }
+    private var occupied = 0
+
+    internal inner class Lease internal constructor() {
+        private var complete = false
+
+        /** Release was requested, but the callback still occupies its slot. */
+        fun beginRelease() = Unit
+
+        fun released() = finish()
+        fun registrationAbsent() = finish()
+
+        @Synchronized private fun finish() {
+            if (complete) return
+            complete = true
+            releaseOne()
+        }
+    }
+
+    @Synchronized fun acquire(): Lease? {
+        if (occupied >= limit) return null
+        occupied++
+        return Lease()
+    }
+
+    @Synchronized fun occupied(): Int = occupied
+
+    @Synchronized private fun releaseOne() {
+        check(occupied > 0)
+        occupied--
+    }
+}
+
 /** Main-thread-owned, bounded DNS-SD routing hints. Native pinned TLS still authenticates every dial. */
 internal class LanServiceDiscovery(context: Context, private val main: Handler,
     private val onSeen: (String, List<String>, Int) -> Unit,
@@ -23,6 +58,7 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
     // API 31-33 cannot cancel a resolve. Retain its slot across stop/start until its terminal callback.
     private var resolving: Entry? = null
     private val queue = ArrayDeque<Entry>()
+    private val registrations = LanRegistrationAccounting(MAX_SERVICES)
 
     fun setWanted(value: Boolean) {
         check(Looper.myLooper() == main.looper)
@@ -42,7 +78,11 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
         setWanted(false)
     }
 
-    private inner class Entry(val owner: Session, val info: NsdServiceInfo) {
+    private inner class Entry(
+        val owner: Session,
+        val info: NsdServiceInfo,
+        val registration: LanRegistrationAccounting.Lease?,
+    ) {
         val instance: String = info.serviceName
         var unregister: (() -> Unit)? = null
         fun current(): Boolean = owner.active() && owner.entries[instance] === this
@@ -106,9 +146,14 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             main.post {
                 val name = serviceInfo.serviceName ?: return@post
-                if (!active() || !LanDiscoveryPolicy.matches(name) || entries.containsKey(name) ||
-                    entries.size >= MAX_SERVICES) return@post
-                val entry = Entry(this, serviceInfo)
+                if (!active() || !LanDiscoveryPolicy.matches(name) || entries.containsKey(name)) return@post
+                val registration = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    registrations.acquire() ?: return@post
+                } else {
+                    if (entries.size >= MAX_SERVICES) return@post
+                    null
+                }
+                val entry = Entry(this, serviceInfo, registration)
                 entries[name] = entry
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) watch(entry)
                 else { queue.addLast(entry); resolveNext() }
@@ -149,13 +194,17 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
                 try {
                     manager?.unregisterServiceInfoCallback(this)
                     unregistering = true
-                } catch (_: IllegalArgumentException) { registered = false }
-                catch (_: Exception) { main.postDelayed(retry, CLEANUP_RETRY_MILLIS) }
+                    entry.registration?.beginRelease()
+                } catch (_: IllegalArgumentException) {
+                    registered = false
+                    entry.registration?.registrationAbsent()
+                } catch (_: Exception) { main.postDelayed(retry, CLEANUP_RETRY_MILLIS) }
             }
             override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
                 main.post {
                     registered = false
                     main.removeCallbacks(retry)
+                    entry.registration?.registrationAbsent()
                     if (entry.current()) entry.owner.entries.remove(entry.instance)
                 }
             }
@@ -164,7 +213,11 @@ internal class LanServiceDiscovery(context: Context, private val main: Handler,
             }
             override fun onServiceLost() { main.post { lost(entry) } }
             override fun onServiceInfoCallbackUnregistered() {
-                main.post { registered = false; main.removeCallbacks(retry) }
+                main.post {
+                    registered = false
+                    main.removeCallbacks(retry)
+                    entry.registration?.released()
+                }
             }
         }
         entry.unregister = callback::unregister
