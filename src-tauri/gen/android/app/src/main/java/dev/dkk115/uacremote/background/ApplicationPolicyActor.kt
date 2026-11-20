@@ -483,17 +483,11 @@ internal class ApplicationPolicyActor(private val application: Application) {
         }
     }
 
-    private fun enqueueRequest(action: () -> Unit): Boolean = try {
-        worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
-        true
-    } catch (_: RejectedExecutionException) { false }
+    private fun enqueueRequest(action: () -> Unit): Boolean = enqueueJob(action)
+    private fun enqueueApproval(action: () -> Unit): Boolean = enqueueJob(action)
+    private fun enqueueDenial(action: () -> Unit): Boolean = enqueueJob(action)
 
-    private fun enqueueApproval(action: () -> Unit): Boolean = try {
-        worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
-        true
-    } catch (_: RejectedExecutionException) { false }
-
-    private fun enqueueDenial(action: () -> Unit): Boolean = try {
+    private fun enqueueJob(action: () -> Unit): Boolean = try {
         worker.execute { try { action() } finally { resumeQueuedWork(); cleanupIfStopped() } }
         true
     } catch (_: RejectedExecutionException) { false }
