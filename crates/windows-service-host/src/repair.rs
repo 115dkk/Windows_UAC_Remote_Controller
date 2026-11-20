@@ -31,6 +31,41 @@ const fn should_restart_after_failure(
         )
 }
 
+pub(crate) struct PreparedTargets<T> {
+    staged: T,
+    restore: Vec<RepairFileName>,
+    before: Vec<(RepairFileName, TargetAfterFailure)>,
+}
+
+pub(crate) fn prepare_targets<T>(
+    files: [RepairFileName; 2],
+    mut observe: impl FnMut(RepairFileName) -> Result<Option<bool>, ServiceError>,
+    prepare: impl FnOnce(&[RepairFileName]) -> Result<T, ServiceError>,
+) -> Result<PreparedTargets<T>, ServiceError> {
+    let mut restore = Vec::new();
+    let mut before = Vec::new();
+    for name in files {
+        let matches = observe(name).map_err(|_| ServiceError::UntrustedInstallation)?;
+        if matches != Some(true) {
+            restore.push(name);
+        }
+        before.push((
+            name,
+            if matches == Some(true) {
+                TargetAfterFailure::Unchanged
+            } else {
+                TargetAfterFailure::DamagedReplacement
+            },
+        ));
+    }
+    let staged = prepare(&restore)?;
+    Ok(PreparedTargets {
+        staged,
+        restore,
+        before,
+    })
+}
+
 pub(crate) fn run() -> Result<crate::RepairOutcome, ServiceError> {
     ffi::harden_repair_dll_search()?;
     ffi::require_elevated()?;
@@ -53,28 +88,18 @@ fn run_locked(
 ) -> Result<crate::RepairOutcome, ServiceError> {
     let sources = ffi::open_repair_source(installation, maintenance)?;
     sources.verify_running_image()?;
-    let files = sources.files();
-    let mut restore = Vec::new();
-    let mut before = Vec::new();
-    for name in files {
-        let matches = ffi::open_optional_repair_target(&sources, name)
-            .map_err(|_| ServiceError::UntrustedInstallation)?;
-        if matches != Some(true) {
-            restore.push(name);
-        }
-        before.push((
-            name,
-            if matches == Some(true) {
-                TargetAfterFailure::Unchanged
-            } else {
-                TargetAfterFailure::DamagedReplacement
-            },
-        ));
-    }
-
     // Prepare and verify every replacement before stopping the service. This runs
     // even for a missing registration and therefore leaves no stop-before-write gap.
-    let staged = ffi::create_repair_target(&sources, &restore)?;
+    let prepared = prepare_targets(
+        sources.files(),
+        |name| ffi::open_optional_repair_target(&sources, name),
+        |restore| ffi::create_repair_target(&sources, restore),
+    )?;
+    let PreparedTargets {
+        staged,
+        restore,
+        before,
+    } = prepared;
     let executable = installation.service_executable();
     let was_running = crate::native::service_running_for_repair(executable)?;
     let stop_needed = !restore.is_empty();

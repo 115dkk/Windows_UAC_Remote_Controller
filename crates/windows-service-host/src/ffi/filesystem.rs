@@ -327,6 +327,16 @@ impl<B: RepairIo> RepairFiles<B> {
         self.matches(RepairLeaf::Target(expected.name()), expected)
     }
 
+    fn target_matches_name(&self, name: RepairFileName) -> Result<Option<bool>, ServiceError> {
+        let expected = self
+            .sources
+            .iter()
+            .find(|source| source.manifest.name() == name)
+            .ok_or(ServiceError::UnexpectedState)?
+            .manifest;
+        self.target_matches(expected)
+    }
+
     fn verify(&self, leaf: RepairLeaf, expected: RepairFile) -> Result<(), ServiceError> {
         if self.matches(leaf, expected)? == Some(true) {
             Ok(())
@@ -465,14 +475,7 @@ pub(crate) fn open_optional_repair_target(
     sources: &RepairSources<'_>,
     name: RepairFileName,
 ) -> Result<Option<bool>, ServiceError> {
-    let expected = sources
-        .files
-        .sources
-        .iter()
-        .find(|source| source.manifest.name() == name)
-        .ok_or(ServiceError::UnexpectedState)?
-        .manifest;
-    sources.files.target_matches(expected)
+    sources.files.target_matches_name(name)
 }
 
 pub(crate) fn create_repair_target<'a, 'i>(
@@ -1406,6 +1409,87 @@ mod repair_interface_tests {
                 .files
                 .retain(|(leaf, _)| *leaf != RepairLeaf::Staging(name));
             Ok(())
+        }
+    }
+
+    fn run_target_policy(files: &RepairFiles<FakeIo>) -> Result<(), ServiceError> {
+        crate::repair::prepare_targets(
+            REPAIR_NAMES,
+            |name| files.target_matches_name(name),
+            |restore| files.prepare(restore)?.install(),
+        )
+        .map(|_| ())
+    }
+
+    fn assert_no_staging_after(events: &[String], failed: &str) {
+        let failed = events.iter().position(|event| event == failed).unwrap();
+        assert!(
+            !events[failed + 1..]
+                .iter()
+                .any(|event| event.starts_with("create:") || event.starts_with("rename:"))
+        );
+    }
+
+    #[test]
+    fn repair_interface_target_open_failure_aborts_before_staging() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        io.0.borrow_mut().events.clear();
+        io.0.borrow_mut().fail = Some("open:Target(Service)".into());
+
+        assert_eq!(
+            run_target_policy(&files),
+            Err(ServiceError::UntrustedInstallation)
+        );
+        assert_no_staging_after(&io.0.borrow().events, "open:Target(Service)");
+    }
+
+    #[test]
+    fn repair_interface_target_recheck_failure_aborts_before_staging() {
+        let io = FakeIo::fixture();
+        let files = RepairFiles::load(io.clone()).unwrap();
+        io.put(
+            RepairLeaf::Target(RepairFileName::Service),
+            io.bytes(RepairLeaf::Source(RepairFileName::Service))
+                .unwrap(),
+        );
+        io.0.borrow_mut().events.clear();
+        io.0.borrow_mut().fail = Some("recheck:Target(Service)".into());
+
+        assert_eq!(
+            run_target_policy(&files),
+            Err(ServiceError::UntrustedInstallation)
+        );
+        assert_no_staging_after(&io.0.borrow().events, "recheck:Target(Service)");
+    }
+
+    #[test]
+    fn repair_interface_target_policy_skips_matching_and_restores_missing_or_mismatched() {
+        for mismatched in [false, true] {
+            let io = FakeIo::fixture();
+            let files = RepairFiles::load(io.clone()).unwrap();
+            io.put(
+                RepairLeaf::Target(RepairFileName::Service),
+                io.bytes(RepairLeaf::Source(RepairFileName::Service))
+                    .unwrap(),
+            );
+            if mismatched {
+                io.put(RepairLeaf::Target(RepairFileName::Probe), vec![0; 72]);
+            }
+            io.0.borrow_mut().events.clear();
+
+            run_target_policy(&files).unwrap();
+
+            let events = &io.0.borrow().events;
+            assert!(!events.iter().any(|event| {
+                event == "create:Staging(Service)" || event == "rename:Staging(Service)"
+            }));
+            assert!(events.iter().any(|event| event == "create:Staging(Probe)"));
+            assert!(events.iter().any(|event| event == "rename:Staging(Probe)"));
+            assert_eq!(
+                io.bytes(RepairLeaf::Target(RepairFileName::Probe)),
+                io.bytes(RepairLeaf::Source(RepairFileName::Probe))
+            );
         }
     }
 
