@@ -23,9 +23,11 @@ native Windows QR/denial, installer geometry, UI and packages. This explicit
 dispatch is necessary because `GITHUB_TOKEN` pushes do not trigger workflows.
 
 Only a green exact-SHA set creates a new stable tag and starts **Release**.
-Release independently checks the same gates, builds signed Android and Windows
-assets and publishes without `--prerelease`. Explicit hyphenated tags remain
-prereleases. Existing published assets/tags are never overwritten.
+Release independently checks the same gates, builds a signed Android APK and
+unsigned Windows assets, and publishes without `--prerelease`. Windows packaging
+checks the installer payload and records hashes; these checks are not publisher
+signatures. Explicit hyphenated tags remain prereleases. Existing published
+assets/tags are never overwritten.
 
 Publication is serialized across tags. Inside that critical section, semantic
 version comparison over all published releases decides the Latest marker. An
