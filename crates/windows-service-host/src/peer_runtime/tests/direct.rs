@@ -16,7 +16,7 @@ fn install_route(session: &mut ServiceSession<'_>, registry: &Rc<RefCell<Registr
         .insert(device(1), (relay, route()));
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
-        session.relay = Some(relay);
+        session.network.install_route_fixture(relay);
     }
     let _ = session;
 }
@@ -285,59 +285,6 @@ fn routing_mode_withdrawal_retires_output_guards_and_status_contains_no_coordina
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 #[test]
-fn listener_read_is_medium_client_diagnostic_and_clears_on_mode_change_or_close() {
-    use crate::{
-        ffi::ManagementClientClass,
-        management_protocol::{ListenerFault, ManagementRequest, ManagementResponse},
-    };
-    exercise(|session, _, _, _| {
-        session.embedded_mode = true;
-        // Supply a deterministic cached owner rather than relying on this PC's 7443.
-        let now = Instant::now();
-        session.relay_owner_lookup = Some((
-            now,
-            Some(windows_port_owner::ListenerOwner {
-                pid: 1234,
-                image_name: Some("veraport.exe".into()),
-            }),
-        ));
-        session.observe_listener_failure(&std::io::Error::from_raw_os_error(10048), now);
-        assert_eq!(
-            session
-                .handle_management(
-                    ManagementClientClass::GuiMedium,
-                    ManagementRequest::QueryListener
-                )
-                .unwrap(),
-            Some(ManagementResponse::ListenerStatus {
-                port: 7443,
-                fault: Some(ListenerFault::InUse {
-                    pid: 1234,
-                    program: Some("veraport.exe".into())
-                }),
-            })
-        );
-        session
-            .configure_relay_after_ready(Some("127.0.0.1:9443".parse().unwrap()))
-            .unwrap();
-        assert!(session.relay_listener_fault.is_none());
-        assert!(session.relay_owner_lookup.is_none());
-        assert_eq!(
-            session.listener_status(),
-            ManagementResponse::ListenerStatus {
-                port: 7443,
-                fault: None
-            }
-        );
-        session.relay_listener_fault = Some(ListenerFault::Reserved);
-        session.begin_shutdown();
-        assert!(session.relay_listener_fault.is_none());
-        assert!(session.relay_owner_lookup.is_none());
-    });
-}
-
-#[cfg(all(windows, target_pointer_width = "64"))]
-#[test]
 fn watcher_read_is_a_medium_client_query_of_current_health() {
     use crate::{
         ffi::ManagementClientClass,
@@ -456,97 +403,8 @@ fn external_read_is_a_gui_query_and_its_mutation_is_elevated_cli_only() {
                 .unwrap(),
             Some(ManagementResponse::Refused(_))
         ));
-        assert_eq!(session.external_access, forward);
-        assert_eq!(session.external_forward_origin, None);
-    });
-}
-
-#[cfg(all(windows, target_pointer_width = "64"))]
-#[test]
-fn a_changed_external_access_replaces_the_owner_like_a_changed_endpoint() {
-    use crate::{ffi::ManagementClientClass, management_protocol::ManagementResponse};
-    use direct_network::{CandidateSource, ExternalAccess};
-    exercise(|session, _, _, _| {
-        // TEST-NET internal address: not this host's route, so the owner does
-        // no router or STUN traffic; Fixed never does any in the first place.
-        let internal: std::net::SocketAddr = "192.0.2.77:7443".parse().unwrap();
-        let first = ExternalAccess::Fixed {
-            address: "93.184.216.34:7443".parse().unwrap(),
-        };
-        let second = ExternalAccess::Fixed {
-            address: "[2606:4700::1111]:8443".parse().unwrap(),
-        };
-        session.embedded_mode = true;
-        session.embedded_relay =
-            Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
-        session.use_external_access(crate::external_access::ExternalAccessSetting {
-            access: first,
-            forward_origin: None,
-        });
-        session.poll_direct_gateway(Some(internal));
-        assert_eq!(
-            session
-                .direct_gateway
-                .as_ref()
-                .map(direct_network::DirectGatewayOwner::access),
-            Some(first)
-        );
-        assert_eq!(session.direct_internal, Some(internal));
-        // Same mode and endpoint: the owner is kept.
-        session.poll_direct_gateway(Some(internal));
-        assert_eq!(
-            session
-                .direct_gateway
-                .as_ref()
-                .map(direct_network::DirectGatewayOwner::access),
-            Some(first)
-        );
-
-        session.use_external_access(crate::external_access::ExternalAccessSetting {
-            access: second,
-            forward_origin: None,
-        });
-        // The old owner's observation is not reported under the new mode.
-        let ManagementResponse::ExternalStatus {
-            access,
-            external,
-            source,
-            ..
-        } = external_status(session, ManagementClientClass::GuiMedium)
-        else {
-            panic!("external status expected");
-        };
-        assert_eq!((access, external, source), (second, None, None));
-        let end = Instant::now() + TEST_LIMIT;
-        while session
-            .direct_gateway
-            .as_ref()
-            .is_none_or(|gateway| gateway.access() != second)
-        {
-            assert!(Instant::now() < end, "the owner was not replaced");
-            session.poll_direct_gateway(Some(internal));
-            thread::yield_now();
-        }
-        assert_eq!(session.direct_internal, Some(internal));
-        let status = external_status(session, ManagementClientClass::GuiMedium);
-        let ManagementResponse::ExternalStatus {
-            access,
-            external,
-            source,
-            lan,
-            ..
-        } = status.clone()
-        else {
-            panic!("external status expected");
-        };
-        assert_eq!(access, second);
-        assert_eq!(lan, Some(internal));
-        assert!(
-            external.is_none() && source.is_none()
-                || (external == Some("[2606:4700::1111]:8443".parse().unwrap())
-                    && source == Some(CandidateSource::Fixed))
-        );
-        crate::management_protocol::encode_response(&status).unwrap();
+        assert_eq!(session.network.observe().access, forward);
+        assert_eq!(session.network.observe().forward_origin, None);
     });
 }
 
@@ -564,8 +422,8 @@ fn reading(
     state: direct_network::DirectGatewayState,
     candidates: &[&str],
     external: Option<&str>,
-) -> crate::peer_runtime::direct::GatewayReading {
-    crate::peer_runtime::direct::GatewayReading {
+) -> crate::peer_runtime::network::GatewayReading {
+    crate::peer_runtime::network::GatewayReading {
         access: direct_network::ExternalAccess::Automatic,
         state,
         candidates: candidates
@@ -574,16 +432,18 @@ fn reading(
             .collect(),
         validity_seconds: if candidates.is_empty() { 0 } else { 60 },
         external: external.map(|value| value.parse().unwrap()),
+        source: None,
+        failure: None,
     }
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-fn lan_only() -> crate::peer_runtime::direct::GatewayReading {
+fn lan_only() -> crate::peer_runtime::network::GatewayReading {
     reading(direct_network::DirectGatewayState::LanOnly, &[LAN], None)
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-fn mapped() -> crate::peer_runtime::direct::GatewayReading {
+fn mapped() -> crate::peer_runtime::network::GatewayReading {
     reading(
         direct_network::DirectGatewayState::MappedCandidate,
         &[LAN, EXTERNAL],
@@ -592,7 +452,7 @@ fn mapped() -> crate::peer_runtime::direct::GatewayReading {
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-fn discovering() -> crate::peer_runtime::direct::GatewayReading {
+fn discovering() -> crate::peer_runtime::network::GatewayReading {
     reading(direct_network::DirectGatewayState::Discovering, &[], None)
 }
 
@@ -602,20 +462,14 @@ fn discovering() -> crate::peer_runtime::direct::GatewayReading {
 fn embed(
     session: &mut ServiceSession<'_>,
     registry: &Rc<RefCell<RegistryFixture>>,
-    reading: crate::peer_runtime::direct::GatewayReading,
+    reading: crate::peer_runtime::network::GatewayReading,
 ) {
     let lan: std::net::SocketAddr = LAN.parse().unwrap();
     registry
         .borrow_mut()
         .routes
         .insert(device(1), (lan, route()));
-    session.embedded_mode = true;
-    session.embedded_relay =
-        Some(relay_service::HostedRelay::start("127.0.0.1:0".parse().unwrap()).unwrap());
-    session.relay_retry_at = Instant::now() + Duration::from_secs(3_600);
-    session.relay = Some(lan);
-    session.direct_internal = Some(lan);
-    session.gateway_fixture = Some(reading);
+    session.network.embed_fixture(lan, reading);
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
@@ -744,7 +598,7 @@ fn a_phone_told_only_the_lan_address_is_ended_once_an_external_address_appears()
         assert_eq!(session.peers[0].advertised, Some(vec![lan]));
         let state = Arc::clone(&session.peers[0].state);
 
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         // The first ten seconds after the clock exchange belong to the
         // connection's own query.
         at(clock, 9);
@@ -800,7 +654,7 @@ fn a_lapsed_query_is_refreshed_after_the_grace_and_at_most_once_per_interval() {
         let commands = ready(session, key, clients);
         lapse(session, &commands);
         let state = Arc::clone(&session.peers[0].state);
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         at(clock, 9);
         let now = session.now().unwrap();
         assert!(session.refresh_stale_hints(now).is_empty());
@@ -817,11 +671,11 @@ fn a_lapsed_query_is_refreshed_after_the_grace_and_at_most_once_per_interval() {
         // The redialled connection lapses too (the owner went back to
         // discovering), then the owner settles again. Its device was
         // refreshed at 10 s: nothing until 130 s, then once.
-        session.gateway_fixture = Some(discovering());
+        session.network.publish_fixture(discovering());
         let commands = ready(session, key, clients);
         lapse(session, &commands);
         let state = Arc::clone(&session.peers[0].state);
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         for seconds in [25, 60, 129] {
             at(clock, seconds);
             let now = session.now().unwrap();
@@ -855,7 +709,7 @@ fn a_query_met_while_discovering_is_answered_once_the_owner_settles() {
         assert!(session.peers[0].deferred_query.is_some());
         assert!(session.peers[0].advertised.is_none());
 
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         at(clock, 4);
         let lan: std::net::SocketAddr = LAN.parse().unwrap();
         let external: std::net::SocketAddr = EXTERNAL.parse().unwrap();
@@ -883,7 +737,7 @@ fn peer_retired_during_deferred_address_signature_is_skipped_without_closing_ses
             retire_during_signature.retire();
         }));
 
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         at(clock, 4);
         let now = session.now().unwrap();
         assert_eq!(session.answer_deferred_queries(now), Ok(()));
@@ -901,7 +755,7 @@ fn a_kept_query_gets_whatever_the_owner_settles_on() {
         embed(session, &registry, discovering());
         let commands = ready(session, key, clients);
         lapse(session, &commands);
-        session.gateway_fixture = Some(lan_only());
+        session.network.publish_fixture(lan_only());
         at(clock, 1);
         let lan: std::net::SocketAddr = LAN.parse().unwrap();
         assert_eq!(told(session, key, &clients[0]), vec![lan]);
@@ -921,7 +775,7 @@ fn a_query_kept_past_its_window_is_left_to_the_hint_refresh() {
         // The owner settles only once the phone no longer holds its query:
         // an answer now would end the connection on the phone.
         at(clock, 6);
-        session.gateway_fixture = Some(mapped());
+        session.network.publish_fixture(mapped());
         spin(session);
         assert!(session.peers[0].deferred_query.is_none());
         assert!(session.peers[0].advertised.is_none());
@@ -956,24 +810,24 @@ fn without_a_settled_external_address_no_connection_is_ended() {
         // An owner that has not settled, or that runs another mode.
         let mut unsettled = mapped();
         unsettled.state = DirectGatewayState::Discovering;
-        session.gateway_fixture = Some(unsettled);
+        session.network.publish_fixture(unsettled);
         kept(session, &state);
         let mut other_mode = mapped();
         other_mode.access = ExternalAccess::RouterForward {
             external_port: 7443,
         };
-        session.gateway_fixture = Some(other_mode);
+        session.network.publish_fixture(other_mode);
         kept(session, &state);
         // An external address this relay would not publish.
         let mut expired = mapped();
         expired.validity_seconds = 0;
-        session.gateway_fixture = Some(expired);
+        session.network.publish_fixture(expired);
         kept(session, &state);
         // Not the embedded relay.
-        session.gateway_fixture = Some(mapped());
-        session.embedded_mode = false;
+        session.network.publish_fixture(mapped());
+        session.network.embedded_fixture(false);
         kept(session, &state);
-        session.embedded_mode = true;
+        session.network.embedded_fixture(true);
         assert!(session.hint_refreshes.is_empty());
     });
 }

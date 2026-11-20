@@ -3,12 +3,10 @@
 //! A discovered address still requires the phone's existing pinned TLS checks.
 use std::{
     collections::BTreeSet,
-    net::{SocketAddr, SocketAddrV4},
+    net::SocketAddrV4,
     time::{Duration, Instant},
 };
 use windows_dns_sd::{AnnounceError, AnnouncementState, ServiceAnnouncement};
-
-use super::ServiceSession;
 
 const RETRY: Duration = Duration::from_secs(60);
 
@@ -77,51 +75,28 @@ fn error_code(error: AnnounceError) -> u32 {
     }
 }
 
-fn desired_endpoint(
-    relay: Option<SocketAddr>,
-    embedded: bool,
-    closing: bool,
-    running: bool,
-) -> Option<SocketAddrV4> {
-    if !embedded || closing || !running {
-        return None;
-    }
-    match relay? {
-        SocketAddr::V4(address) if address.ip().is_private() => Some(address),
-        _ => None,
-    }
-}
-
-impl ServiceSession<'_> {
-    pub(super) fn drop_lan_announcement(&mut self) {
-        self.lan_announcement.active = None;
+impl LanAnnouncement {
+    pub(super) fn withdraw(&mut self) {
+        self.active = None;
     }
 
-    pub(super) fn poll_lan_announcement(&mut self, now: Instant) {
-        let desired = desired_endpoint(
-            self.relay,
-            self.embedded_mode,
-            self.closing,
-            self.embedded_relay
-                .as_ref()
-                .is_some_and(relay_service::HostedRelay::is_running),
-        );
-        let label = service_protocol::lan_instance_label(&self.engine.pc_identity());
-        if let Some(code) =
-            self.lan_announcement
-                .poll(desired, now, ServiceAnnouncement::state, |endpoint| {
-                    // direct-network uses ipconfig 0.3.4, which exposes only
-                    // Ipv6IfIndex, not the owning adapter's IPv4 IfIndex. Do not
-                    // substitute that other index: 0 asks DNSAPI to consider all.
-                    ServiceAnnouncement::start(
-                        &label,
-                        service_protocol::LAN_SERVICE_TYPE,
-                        *endpoint.ip(),
-                        endpoint.port(),
-                        0,
-                    )
-                })
-        {
+    pub(super) fn poll_endpoint(
+        &mut self,
+        label: &str,
+        desired: Option<SocketAddrV4>,
+        now: Instant,
+    ) {
+        if let Some(code) = self.poll(desired, now, ServiceAnnouncement::state, |endpoint| {
+            // ipconfig exposes Ipv6IfIndex, not IPv4 IfIndex; 0 asks DNSAPI to
+            // consider all adapters rather than substituting the wrong index.
+            ServiceAnnouncement::start(
+                label,
+                service_protocol::LAN_SERVICE_TYPE,
+                *endpoint.ip(),
+                endpoint.port(),
+                0,
+            )
+        }) {
             crate::public_diagnostics::record(
                 crate::public_diagnostics::Event::LanAnnounceFailed { code },
             );
@@ -145,31 +120,6 @@ mod tests {
     }
     fn endpoint(last: u8) -> SocketAddrV4 {
         SocketAddrV4::new(std::net::Ipv4Addr::new(192, 168, 1, last), 7443)
-    }
-
-    #[test]
-    fn only_running_embedded_private_ipv4_is_announced() {
-        let address = Some(SocketAddr::V4(endpoint(2)));
-        assert_eq!(
-            desired_endpoint(address, true, false, true),
-            Some(endpoint(2))
-        );
-        for flags in [
-            (false, false, true),
-            (true, true, true),
-            (true, false, false),
-        ] {
-            assert_eq!(desired_endpoint(address, flags.0, flags.1, flags.2), None);
-        }
-        for address in [
-            None,
-            Some("127.0.0.1:7443".parse().unwrap()),
-            Some("169.254.1.2:7443".parse().unwrap()),
-            Some("203.0.113.2:7443".parse().unwrap()),
-            Some("[fd00::1]:7443".parse().unwrap()),
-        ] {
-            assert_eq!(desired_endpoint(address, true, false, true), None);
-        }
     }
 
     #[test]

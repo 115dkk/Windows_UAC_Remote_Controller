@@ -62,6 +62,10 @@ mod listener;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod management;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod network;
+#[cfg(all(windows, target_pointer_width = "64", test))]
+mod network_tests;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod pairing;
 pub(crate) mod prompt;
 
@@ -314,18 +318,22 @@ struct PeerSlot {
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-struct PendingRelayReplacement {
-    address: Option<std::net::SocketAddr>,
-    old_dialer: Option<dialer::DeviceDialer>,
-}
-
-#[cfg(all(windows, target_pointer_width = "64"))]
-impl fmt::Debug for PendingRelayReplacement {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PendingRelayReplacement")
-            .field("old_dialer_owned", &self.old_dialer.is_some())
-            .finish_non_exhaustive()
+fn invalidate_network(
+    peers: &[PeerSlot],
+    pairing: &mut pairing::ServicePairing,
+    action: network::Invalidation,
+) {
+    match action {
+        network::Invalidation::Peers => {
+            for peer in peers {
+                peer.state.retire();
+            }
+        }
+        network::Invalidation::Ceremony => {
+            if !pairing.enrollment_is_absent() {
+                pairing.reject_enrollment_start(pairing::Failure::RelayUnconfigured);
+            }
+        }
     }
 }
 
@@ -618,47 +626,12 @@ pub struct ServiceSession<'key> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     activity: Option<(Instant, Vec<activity_journal::ActivityRecord>)>,
     #[cfg(all(windows, target_pointer_width = "64"))]
-    dialer: Option<dialer::DeviceDialer>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    embedded_relay: Option<relay_service::HostedRelay>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    direct_gateway: Option<direct_network::DirectGatewayOwner>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    direct_internal: Option<std::net::SocketAddr>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    lan_announcement: lan_announce::LanAnnouncement,
-    /// The configured mode. A gateway owner of another mode is drained and
-    /// replaced by `poll_direct_gateway`; an owner never changes mode.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    external_access: direct_network::ExternalAccess,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    external_forward_origin: Option<std::net::Ipv4Addr>,
-    /// The earliest time an automatic forward-origin write may be retried after
-    /// a failure. `None` means adoption has not failed and may run immediately.
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    forward_origin_retry_at: Option<Instant>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    embedded_mode: bool,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    relay_retry_at: Instant,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    relay_listener_fault: Option<crate::management_protocol::ListenerFault>,
+    network: network::Network,
     watcher_health: crate::management_protocol::WatcherHealth,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    relay_owner_lookup: Option<(Instant, Option<windows_port_owner::ListenerOwner>)>,
-    // The embedded relay's abuse counters as last written to diagnostics.
-    relay_abuse_reported: Option<(Instant, relay_service::RelayAbuseCounters)>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    relay: Option<std::net::SocketAddr>,
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    pending_relay: Option<PendingRelayReplacement>,
     /// Devices whose connection was ended to refresh stale routing hints, and
     /// when. Entries leave after the refresh interval.
     #[cfg(all(windows, target_pointer_width = "64"))]
     hint_refreshes: std::collections::BTreeMap<DeviceId, Instant>,
-    /// Test-only stand-in for the gateway owner's publication.
-    #[cfg(all(windows, target_pointer_width = "64", test))]
-    gateway_fixture: Option<direct::GatewayReading>,
     registry: Option<RegistryOwner<'key>>,
     engine: ApprovalEngine,
     key: SessionKey<'key>,
@@ -770,39 +743,10 @@ impl<'key> ServiceSession<'key> {
             #[cfg(all(windows, target_pointer_width = "64"))]
             activity: None,
             #[cfg(all(windows, target_pointer_width = "64"))]
-            dialer: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            embedded_relay: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            direct_gateway: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            direct_internal: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            lan_announcement: lan_announce::LanAnnouncement::default(),
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            external_access: direct_network::ExternalAccess::Automatic,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            external_forward_origin: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            forward_origin_retry_at: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            embedded_mode: false,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            relay_retry_at: epoch_start,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            relay_listener_fault: None,
+            network: network::Network::new(network::Native::new(pc), epoch_start),
             watcher_health: crate::management_protocol::WatcherHealth::Starting,
             #[cfg(all(windows, target_pointer_width = "64"))]
-            relay_owner_lookup: None,
-            relay_abuse_reported: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            relay: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
-            pending_relay: None,
-            #[cfg(all(windows, target_pointer_width = "64"))]
             hint_refreshes: std::collections::BTreeMap::new(),
-            #[cfg(all(windows, target_pointer_width = "64", test))]
-            gateway_fixture: None,
             registry: Some(registry),
             engine,
             key,
@@ -870,9 +814,7 @@ impl<'key> ServiceSession<'key> {
         &mut self,
         setting: crate::external_access::ExternalAccessSetting,
     ) {
-        self.external_access = setting.access;
-        self.external_forward_origin = setting.forward_origin;
-        self.forward_origin_retry_at = None;
+        self.network.use_external_access(setting);
     }
 
     /// Updates the service worker's current watcher observation for read-only
@@ -1015,126 +957,21 @@ impl<'key> ServiceSession<'key> {
         &mut self,
         relay: Option<std::net::SocketAddr>,
     ) -> Result<(), PeerRuntimeError> {
-        if self.closing {
-            return Err(PeerRuntimeError::Closed);
-        }
-        self.embedded_mode = relay.is_none();
-        self.relay = relay;
-        if self.embedded_mode {
-            self.poll_embedded_relay(Instant::now())?;
-        } else {
-            self.clear_listener_fault();
-            self.dialer = relay.map(dialer::DeviceDialer::new).transpose()?;
-        }
-        Ok(())
+        let peers = &self.peers;
+        let pairing = &mut self.pairing;
+        self.network
+            .configure_after_ready(relay, Instant::now(), &mut |action| {
+                invalidate_network(peers, pairing, action);
+            })
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
+    #[cfg(test)]
     fn withdraw_relay(&mut self) {
-        // Readiness, the dialer and the active invitation describe one endpoint.
-        // Withdraw them together; callers retain every worker until drained.
-        self.relay = None;
-        self.cancel_direct_gateway();
-        self.drop_lan_announcement();
-        // Retire the output guards as part of the same mode/source transition:
-        // queued signed routing hints may not cross into the replacement mode.
-        for peer in &self.peers {
-            peer.state.retire();
-        }
-        if let Some(dialer) = self.dialer.as_mut() {
-            dialer.cancel();
-        }
-        if !self.pairing.enrollment_is_absent() {
-            self.pairing
-                .reject_enrollment_start(pairing::Failure::RelayUnconfigured);
-        }
-    }
-
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    fn poll_embedded_relay(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
-        if !self.embedded_mode
-            || self.pending_relay.is_some()
-            || self.closing
-            || now < self.relay_retry_at
-        {
-            return Ok(());
-        }
-        self.relay_retry_at = now + Duration::from_secs(5);
-        if self
-            .embedded_relay
-            .as_ref()
-            .is_some_and(|host| !host.is_running())
-        {
-            self.withdraw_relay();
-            if !self
-                .embedded_relay
-                .as_mut()
-                .is_some_and(relay_service::HostedRelay::drain)
-            {
-                return Ok(());
-            }
-            self.observe_relay_exit();
-            self.embedded_relay = None;
-            self.withdraw_relay();
-        }
-        if self.embedded_relay.is_none() {
-            // A port collision or offline network disables connection readiness,
-            // not TPM/service startup. Retry is bounded and never kills an owner.
-            match relay_service::HostedRelay::start_embedded(relay_service::EMBEDDED_RELAY_PORT) {
-                Ok(host) => {
-                    self.embedded_relay = Some(host);
-                    self.clear_listener_fault();
-                }
-                Err(error) => self.observe_listener_failure(&error, now),
-            }
-            if self.embedded_relay.is_none() {
-                // Phones redial within a second of a service restart; a port
-                // the previous process only just released gets the same pace.
-                self.relay_retry_at = now + Duration::from_secs(1);
-            }
-        }
-        let endpoint = if self
-            .embedded_relay
-            .as_ref()
-            .is_some_and(relay_service::HostedRelay::is_running)
-        {
-            direct_network::local_endpoint(relay_service::EMBEDDED_RELAY_PORT)
-                .ok()
-                .filter(|address| {
-                    address.is_ipv4()
-                        || self
-                            .embedded_relay
-                            .as_ref()
-                            .is_some_and(relay_service::HostedRelay::supports_ipv6)
-                })
-        } else {
-            None
-        };
-        if self.relay.is_some() && self.relay != endpoint {
-            self.withdraw_relay();
-        }
-        if self
-            .embedded_relay
-            .as_ref()
-            .is_some_and(relay_service::HostedRelay::is_running)
-            && self.relay.is_none()
-        {
-            if let Some(dialer) = self.dialer.as_mut() {
-                if !dialer.drain() {
-                    return Ok(());
-                }
-                self.dialer = None;
-            }
-            if let Some(endpoint) = endpoint {
-                self.dialer = Some(dialer::DeviceDialer::new_embedded()?);
-                self.relay = Some(endpoint);
-            }
-        }
-        self.poll_direct_gateway(endpoint);
-        self.adopt_forward_origin(now);
-        self.poll_lan_announcement(now);
-        self.observe_relay_abuse(now);
-        Ok(())
+        let peers = &self.peers;
+        let pairing = &mut self.pairing;
+        self.network
+            .withdraw(&mut |action| invalidate_network(peers, pairing, action));
     }
 
     pub(crate) fn handle_watch_event(
@@ -1702,7 +1539,7 @@ impl<'key> ServiceSession<'key> {
             // A deferred mutation owns its original AwaitingReply connection.
             // Do not admit/rearm another caller until the persisted relay
             // configuration has been applied, even if this requester exits.
-            if self.pending_relay.is_none() {
+            if !self.network.replacement_pending() {
                 let progress = self.management.poll().map_err(|_| PeerRuntimeError::Io)?;
                 match progress {
                     management::ManagementProgress::ListenerCreationFailed(error) => {
@@ -1722,19 +1559,15 @@ impl<'key> ServiceSession<'key> {
                     | management::ManagementProgress::Replied => {}
                 }
             }
-            if self.pending_relay.is_some() {
+            if self.network.replacement_pending() {
                 self.poll_pending_relay()?;
             }
             let now = self.now()?;
-            if !self
-                .embedded_relay
-                .as_ref()
-                .is_some_and(relay_service::HostedRelay::is_running)
-            {
-                self.poll_direct_gateway(None);
-                self.adopt_forward_origin(now);
-            }
-            self.poll_embedded_relay(now)?;
+            let peers = &self.peers;
+            let pairing = &mut self.pairing;
+            self.network.poll(now, &mut |action| {
+                invalidate_network(peers, pairing, action)
+            })?;
             self.answer_deferred_queries(now)?;
             self.refresh_stale_hints(now);
             self.pairing.poll(self.engine.boot_epoch(), now);
@@ -1764,32 +1597,16 @@ impl<'key> ServiceSession<'key> {
                         .ok_or(pairing::Failure::Enrollment)?
                         .relay_endpoint()
                         .map_err(|_| pairing::Failure::Enrollment)?;
-                    let relay = self.relay.ok_or(pairing::Failure::RelayUnconfigured)?;
-                    if configured.is_some_and(|configured| configured != relay)
-                        || (configured.is_none()
-                            && !self
-                                .embedded_relay
-                                .as_ref()
-                                .is_some_and(relay_service::HostedRelay::is_running))
-                    {
-                        return Err(pairing::Failure::Protocol);
-                    }
+                    let addresses = self.network.observe().invitation_addresses(configured)?;
                     if crate::ANDROID_SIGNER_SHA256.is_empty() {
                         return Err(pairing::Failure::SignerPolicyUnavailable);
                     }
                     let policy = trusted_android_policy()
                         .map_err(|_| pairing::Failure::SignerPolicyUnavailable)?;
-                    let alternatives = self
-                        .current_direct_candidates()
-                        .0
-                        .into_iter()
-                        .filter(|candidate| *candidate != relay)
-                        .take(service_protocol::MAX_ADDRESS_CANDIDATES - 1)
-                        .collect();
                     self.pairing.begin_enrollment(
-                        relay,
-                        alternatives,
-                        self.embedded_mode,
+                        addresses.relay,
+                        addresses.alternatives,
+                        addresses.embedded,
                         policy,
                         Arc::clone(&self.signer),
                         self.pc_key.clone(),
@@ -2000,15 +1817,15 @@ impl<'key> ServiceSession<'key> {
     fn poll_dialer(&mut self, now: Instant) -> Result<(), PeerRuntimeError> {
         // Keep the worker owned by the session across fallible registry reads.
         // An error must leave it counted for the normal cancellation/drain path.
-        let Some(dialer) = self.dialer.as_mut() else {
+        if !self.network.has_dialer() {
             return Ok(());
-        };
+        }
         let routes = self
             .registry
             .as_mut()
             .ok_or(PeerRuntimeError::Closed)?
             .routes()?;
-        let carriers = dialer.poll(&routes, now);
+        let carriers = self.network.poll_dialer(&routes, now);
         for carrier in carriers {
             let device = carrier.device;
             if self
@@ -2018,10 +1835,8 @@ impl<'key> ServiceSession<'key> {
             {
                 continue;
             }
-            if self.attach_carrier(carrier).is_err()
-                && let Some(dialer) = self.dialer.as_mut()
-            {
-                dialer.release(device);
+            if self.attach_carrier(carrier).is_err() {
+                self.network.release(device);
             }
         }
         Ok(())
@@ -2029,32 +1844,18 @@ impl<'key> ServiceSession<'key> {
 
     #[cfg(all(windows, target_pointer_width = "64"))]
     fn poll_pending_relay(&mut self) -> Result<(), PeerRuntimeError> {
-        let Some(mut pending) = self.pending_relay.take() else {
+        let peers = &self.peers;
+        let pairing = &mut self.pairing;
+        let Some(result) = self
+            .network
+            .poll_replacement(Instant::now(), &mut |action| {
+                invalidate_network(peers, pairing, action);
+            })?
+        else {
             return Ok(());
         };
-        if let Some(old_dialer) = pending.old_dialer.as_mut()
-            && !old_dialer.drain()
-        {
-            self.pending_relay = Some(pending);
-            return Ok(());
-        }
-        pending.old_dialer = None;
-        if !self.drain_direct_gateway() {
-            self.pending_relay = Some(pending);
-            return Ok(());
-        }
-        if let Some(host) = self.embedded_relay.as_mut() {
-            if !host.drain() {
-                self.pending_relay = Some(pending);
-                return Ok(());
-            }
-            self.observe_relay_exit();
-        }
-        self.embedded_relay = None;
-        self.relay_retry_at = Instant::now();
-        self.configure_relay_after_ready(pending.address)?;
         self.management
-            .reply(if self.relay.is_some() { crate::management_protocol::ManagementResponse::Done }
+            .reply(if result == network::ConfigurationResult::Ready { crate::management_protocol::ManagementResponse::Done }
                 else { crate::management_protocol::ManagementResponse::Refused("이 PC의 중계를 준비하지 못했어요. 네트워크 연결과 7443 포트를 확인한 뒤 다시 시도해 주세요.".into()) })
             .map_err(|_| PeerRuntimeError::Io)
     }
@@ -2080,41 +1881,20 @@ impl<'key> ServiceSession<'key> {
             )));
         }
         match request {
-            ManagementRequest::QueryDirect => Ok(Some(self.direct_status())),
-            ManagementRequest::QueryExternal => Ok(Some(self.external_status())),
-            ManagementRequest::QueryListener => Ok(Some(self.listener_status())),
+            ManagementRequest::QueryDirect => Ok(Some(self.network.observe().direct_status())),
+            ManagementRequest::QueryExternal => Ok(Some(self.network.observe().external_status())),
+            ManagementRequest::QueryListener => Ok(Some(self.network.listener_status())),
             ManagementRequest::QueryWatcher => Ok(Some(ManagementResponse::WatcherStatus {
                 health: self.watcher_health,
             })),
             ManagementRequest::SetExternalAccess { access } => {
-                let forward_origin = match (access, self.direct_internal) {
-                    (
-                        direct_network::ExternalAccess::RouterForward { .. },
-                        Some(std::net::SocketAddr::V4(internal)),
-                    ) if crate::external_access::usable_forward_origin(*internal.ip()) => {
-                        Some(*internal.ip())
-                    }
-                    _ => None,
-                };
-                let setting = crate::external_access::ExternalAccessSetting {
-                    access,
-                    forward_origin,
-                };
-                // Persist first, on this worker, through the same protected
-                // owner as the relay choice; a failed write changes nothing.
-                if crate::native::configure_external_access_for_running_service(setting).is_err() {
+                if self.network.set_external(access, Instant::now())
+                    == network::ConfigurationResult::Unavailable
+                {
                     return Ok(Some(ManagementResponse::Refused(
                         "외부 연결 설정을 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.".into(),
                     )));
                 }
-                // Always update both values, even when the mode and port stayed
-                // unchanged: saving again acknowledges the current LAN address.
-                self.external_access = access;
-                self.external_forward_origin = forward_origin;
-                self.forward_origin_retry_at = None;
-                // The next gateway poll drains an owner of another mode and
-                // starts one with this mode; do not wait for the relay retry.
-                self.relay_retry_at = Instant::now();
                 Ok(Some(ManagementResponse::Done))
             }
             ManagementRequest::Query => {
@@ -2142,23 +1922,12 @@ impl<'key> ServiceSession<'key> {
                         enrolled_unix_secs: None,
                     })
                     .collect();
+                let (embedded_relay, relay_listening, relay) =
+                    self.network.observe().management_snapshot();
                 Ok(Some(ManagementResponse::Snapshot {
-                    embedded_relay: self.embedded_mode,
-                    relay_listening: self.embedded_mode
-                        && self
-                            .embedded_relay
-                            .as_ref()
-                            .is_some_and(relay_service::HostedRelay::is_running),
-                    relay: if self.embedded_mode
-                        && !self
-                            .embedded_relay
-                            .as_ref()
-                            .is_some_and(relay_service::HostedRelay::is_running)
-                    {
-                        None
-                    } else {
-                        self.relay
-                    },
+                    embedded_relay,
+                    relay_listening,
+                    relay,
                     identity_provider: crate::contract::IDENTITY_PROVIDER_PROFILE.into(),
                     android_signer_digests: crate::ANDROID_SIGNER_SHA256.to_vec(),
                     devices,
@@ -2193,9 +1962,7 @@ impl<'key> ServiceSession<'key> {
                         peer.state.retire();
                     }
                 }
-                if let Some(dialer) = self.dialer.as_mut() {
-                    dialer.release(device);
-                }
+                self.network.release(device);
                 Ok(Some(ManagementResponse::Done))
             }
             ManagementRequest::SetRelay { .. } | ManagementRequest::UseEmbeddedRelay => {
@@ -2203,25 +1970,11 @@ impl<'key> ServiceSession<'key> {
                     ManagementRequest::SetRelay { address } => Some(address),
                     _ => None,
                 };
-                if self.pending_relay.is_some() {
-                    return Err(PeerRuntimeError::Protocol);
-                }
-                // The writer can replace the stored setting and then fail while
-                // reading it back, so a failure here does not show which relay
-                // the next start will use. Continuing on the old one would let
-                // the running service and the stored setting disagree; only an
-                // elevated client reaches this, so the session stops instead.
-                crate::native::configure_relay_for_running_service(address)
-                    .map_err(|_| PeerRuntimeError::Registry)?;
-                self.withdraw_relay();
-                let old_dialer = self.dialer.take();
-                if let Some(host) = self.embedded_relay.as_ref() {
-                    host.cancel();
-                }
-                self.pending_relay = Some(PendingRelayReplacement {
-                    address,
-                    old_dialer,
-                });
+                let peers = &self.peers;
+                let pairing = &mut self.pairing;
+                self.network.request_relay(address, &mut |action| {
+                    invalidate_network(peers, pairing, action);
+                })?;
                 Ok(None)
             }
         }
@@ -2730,9 +2483,7 @@ impl<'key> ServiceSession<'key> {
                     *count = count.saturating_add(1);
                 }
                 #[cfg(all(windows, target_pointer_width = "64"))]
-                if let Some(dialer) = self.dialer.as_mut() {
-                    dialer.release(device);
-                }
+                self.network.release(device);
                 count += 1;
             } else {
                 index += 1;
@@ -2747,24 +2498,10 @@ impl<'key> ServiceSession<'key> {
         self.closing = true;
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            self.clear_listener_fault();
+            self.network.prepare_shutdown();
             self.pairing.shutdown();
             self.management.shutdown();
-            self.cancel_direct_gateway();
-            self.drop_lan_announcement();
-            if let Some(host) = self.embedded_relay.as_ref() {
-                host.cancel();
-            }
-            if let Some(dialer) = self.dialer.as_mut() {
-                dialer.cancel();
-            }
-            if let Some(dialer) = self
-                .pending_relay
-                .as_mut()
-                .and_then(|pending| pending.old_dialer.as_mut())
-            {
-                dialer.cancel();
-            }
+            self.network.begin_shutdown();
         }
         for peer in &self.peers {
             peer.state.retire();
@@ -2794,32 +2531,7 @@ impl<'key> ServiceSession<'key> {
             self.io_failed |= self.pairing.cleanup_failed();
             self.management.drain();
             self.io_failed |= self.management.failed();
-            self.drain_direct_gateway();
-            if self
-                .embedded_relay
-                .as_mut()
-                .is_some_and(relay_service::HostedRelay::drain)
-            {
-                self.observe_relay_exit();
-            }
-            if let Some(dialer) = self.dialer.as_mut() {
-                dialer.drain();
-            }
-            if let Some(dialer) = self
-                .pending_relay
-                .as_mut()
-                .and_then(|pending| pending.old_dialer.as_mut())
-            {
-                dialer.drain();
-            }
-            if self.pending_relay.as_ref().is_some_and(|pending| {
-                pending
-                    .old_dialer
-                    .as_ref()
-                    .is_none_or(|dialer| dialer.remaining_owners() == 0)
-            }) {
-                self.pending_relay = None;
-            }
+            self.network.drain_shutdown();
         }
         let owners = self.peers.len()
             + self.pairing_owners()
@@ -2872,22 +2584,7 @@ impl<'key> ServiceSession<'key> {
     fn dialer_owners(&self) -> usize {
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
-            self.embedded_relay
-                .as_ref()
-                .map_or(0, relay_service::HostedRelay::remaining_owners)
-                + self
-                    .direct_gateway
-                    .as_ref()
-                    .map_or(0, direct_network::DirectGatewayOwner::remaining_owners)
-                + self
-                    .dialer
-                    .as_ref()
-                    .map_or(0, dialer::DeviceDialer::remaining_owners)
-                + self
-                    .pending_relay
-                    .as_ref()
-                    .and_then(|pending| pending.old_dialer.as_ref())
-                    .map_or(0, dialer::DeviceDialer::remaining_owners)
+            self.network.remaining_owners()
         }
         #[cfg(not(all(windows, target_pointer_width = "64")))]
         {
@@ -2905,32 +2602,7 @@ impl Drop for ServiceSession<'_> {
         {
             self.pairing.poll_shutdown();
             self.management.drain();
-            self.drain_direct_gateway();
-            if self
-                .embedded_relay
-                .as_mut()
-                .is_some_and(relay_service::HostedRelay::drain)
-            {
-                self.observe_relay_exit();
-            }
-            if let Some(dialer) = self.dialer.as_mut() {
-                dialer.drain();
-            }
-            if let Some(dialer) = self
-                .pending_relay
-                .as_mut()
-                .and_then(|pending| pending.old_dialer.as_mut())
-            {
-                dialer.drain();
-            }
-            if self.pending_relay.as_ref().is_some_and(|pending| {
-                pending
-                    .old_dialer
-                    .as_ref()
-                    .is_none_or(|dialer| dialer.remaining_owners() == 0)
-            }) {
-                self.pending_relay = None;
-            }
+            self.network.drain_shutdown();
         }
         if !self.peers.is_empty()
             || self.pairing_owners() != 0

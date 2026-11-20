@@ -726,6 +726,60 @@ fn exercise(
     }
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn network_relay_exit_is_recorded_once_by_actual_shutdown_poll_and_session_drop() {
+    for drop_only in [false, true] {
+        let key = Identity::new();
+        let mut session = ServiceSession::new(
+            RegistryOwner::Fixture(registry(), PhantomData),
+            SessionKey::Fixture(&key),
+            Instant::now(),
+            Arc::new(ServiceClock),
+        )
+        .unwrap();
+        session.network.embed_fixture(
+            "192.168.1.50:7443".parse().unwrap(),
+            network::GatewayReading {
+                access: direct_network::ExternalAccess::Automatic,
+                state: direct_network::DirectGatewayState::Discovering,
+                candidates: Vec::new(),
+                validity_seconds: 0,
+                external: None,
+                source: None,
+                failure: None,
+            },
+        );
+        let rows = session.network.record_fixture();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if drop_only {
+                let end = Instant::now() + TEST_LIMIT;
+                while !session.network.finish_relay_fixture() {
+                    assert!(Instant::now() < end, "relay did not finish before Drop");
+                    thread::yield_now();
+                }
+                assert!(rows.borrow().is_empty());
+            } else {
+                drain(&mut session);
+                session.poll_shutdown();
+                assert_eq!(rows.borrow().len(), 1);
+            }
+        }));
+        if result.is_err() {
+            drain(&mut session);
+        }
+        drop(session);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        let rows = rows.borrow();
+        assert_eq!(rows.len(), 1, "drop_only={drop_only}");
+        let row = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(row["kind"], "relay_worker_stopped");
+        assert_eq!(row["outcome"]["status"], "clean");
+    }
+}
+
 fn finished_peer_worker(
     session: &mut ServiceSession<'_>,
     task: impl FnOnce() -> Result<PeerExitCause, PeerExitCause> + Send + 'static,

@@ -2,7 +2,7 @@
 //! Diagnostic-only listener state. No owner is stopped or granted authority.
 
 use super::ServiceSession;
-use crate::management_protocol::{ListenerFault, ManagementResponse};
+use crate::management_protocol::ListenerFault;
 use std::{
     io,
     time::{Duration, Instant},
@@ -15,7 +15,7 @@ const PEER_WORKER_EXIT_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Whether the embedded relay's counters are due for a diagnostics row: they
 /// moved since the last row, and that row is at least a minute old.
-fn relay_abuse_due(
+pub(super) fn relay_abuse_due(
     current: relay_service::RelayAbuseCounters,
     reported: Option<(Instant, relay_service::RelayAbuseCounters)>,
     now: Instant,
@@ -26,18 +26,6 @@ fn relay_abuse_due(
             current != last && now.saturating_duration_since(at) >= RELAY_ABUSE_REPORT_INTERVAL
         }
     }
-}
-
-fn observe_relay_exit_with(
-    relay: &mut relay_service::HostedRelay,
-    mut record: impl FnMut(crate::public_diagnostics::Event),
-) {
-    let Some(exit) = relay.take_exit() else {
-        return;
-    };
-    record(crate::public_diagnostics::Event::RelayWorkerStopped {
-        outcome: exit.into(),
-    });
 }
 
 fn observe_peer_worker_exits_with(
@@ -77,7 +65,7 @@ fn observe_peer_worker_exits_with(
     }
 }
 
-fn fault_for_failure(
+pub(super) fn fault_for_failure(
     error: &io::Error,
     now: Instant,
     cache: &mut Option<(Instant, Option<ListenerOwner>)>,
@@ -108,28 +96,6 @@ fn fault_for_failure(
 }
 
 impl ServiceSession<'_> {
-    pub(super) fn observe_listener_failure(&mut self, error: &io::Error, now: Instant) {
-        let fault = fault_for_failure(error, now, &mut self.relay_owner_lookup, || {
-            windows_port_owner::listener_owner(relay_service::EMBEDDED_RELAY_PORT)
-                .ok()
-                .flatten()
-        });
-        self.set_listener_fault(fault);
-    }
-
-    fn set_listener_fault(&mut self, fault: Option<ListenerFault>) {
-        if self.relay_listener_fault != fault {
-            crate::public_diagnostics::record(
-                crate::public_diagnostics::Event::RelayListenerChanged {
-                    fault: fault.clone(),
-                },
-            );
-            self.relay_listener_fault = fault;
-        }
-    }
-
-    /// Accumulates joined peer exits and emits only closed cause/count rows.
-    /// `flush` is reserved for the last quiescent shutdown poll.
     pub(super) fn observe_peer_worker_exits(&mut self, now: Instant, flush: bool) {
         let exits = self.take_peer_worker_exits();
         observe_peer_worker_exits_with(
@@ -141,102 +107,11 @@ impl ServiceSession<'_> {
             crate::public_diagnostics::record,
         );
     }
-
-    /// Records a finished relay worker once. `take_exit` makes repeated drain
-    /// polls harmless while retaining the original joined result.
-    pub(super) fn observe_relay_exit(&mut self) {
-        if let Some(relay) = self.embedded_relay.as_mut() {
-            observe_relay_exit_with(relay, crate::public_diagnostics::record);
-        }
-    }
-
-    /// Makes route abuse at the embedded relay visible in public diagnostics.
-    /// A restarted relay counts from zero again, which also reads as a change.
-    pub(super) fn observe_relay_abuse(&mut self, now: Instant) {
-        let Some(current) = self
-            .embedded_relay
-            .as_ref()
-            .map(relay_service::HostedRelay::abuse_counters)
-        else {
-            return;
-        };
-        if !relay_abuse_due(current, self.relay_abuse_reported, now) {
-            return;
-        }
-        crate::public_diagnostics::record(crate::public_diagnostics::Event::RelayAbuse {
-            evicted_pairs: current.evicted_pairs,
-            rejected_duplicates: current.rejected_duplicates,
-            rejected_pc_sources: current.rejected_pc_sources,
-            rejected_evictions: current.rejected_evictions,
-        });
-        self.relay_abuse_reported = Some((now, current));
-    }
-
-    pub(super) fn clear_listener_fault(&mut self) {
-        self.set_listener_fault(None);
-        self.relay_owner_lookup = None;
-    }
-
-    pub(super) fn listener_status(&self) -> ManagementResponse {
-        ManagementResponse::ListenerStatus {
-            port: relay_service::EMBEDDED_RELAY_PORT,
-            fault: if self.embedded_mode && !self.closing && self.pending_relay.is_none() {
-                self.relay_listener_fault.clone()
-            } else {
-                None
-            },
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn finished_relay_worker_emits_exactly_one_diagnostic_at_listener_seam() {
-        let mut relay =
-            relay_service::HostedRelay::start((std::net::Ipv4Addr::LOCALHOST, 0).into()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !relay.drain() {
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        }
-
-        let mut rows = Vec::new();
-        observe_relay_exit_with(&mut relay, |event| rows.push(event));
-        observe_relay_exit_with(&mut relay, |event| rows.push(event));
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&rows[0]).unwrap(),
-            serde_json::json!({
-                "kind": "relay_worker_stopped",
-                "outcome": {
-                    "status": "clean",
-                    "report": {
-                        "accepted": 0,
-                        "accept_failures": 0,
-                        "rejected_capacity": 0,
-                        "rejected_waiting_rooms": 0,
-                        "paired": 0,
-                        "invalid_registrations": 0,
-                        "header_timeouts": 0,
-                        "waiting_timeouts": 0,
-                        "rendezvous_timeouts": 0,
-                        "idle_timeouts": 0,
-                        "absolute_timeouts": 0,
-                        "disconnected": 0,
-                        "io_failures": 0,
-                        "cancelled": 0,
-                        "task_failures": 0,
-                        "peak_connections": 0,
-                        "peak_waiting_rooms": 0,
-                        "remaining_connections": 0,
-                    },
-                },
-            })
-        );
-    }
 
     #[test]
     fn peer_worker_exit_rows_accumulate_until_due_and_flush_at_shutdown() {
