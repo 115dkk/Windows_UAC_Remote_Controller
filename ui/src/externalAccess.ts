@@ -133,6 +133,15 @@ export function parseFixedAddress(text: string): string | null {
   return 'address' in result ? result.address : null;
 }
 
+/** Compare the saved endpoint, not its spelling. Validation still belongs to
+ * the native owner; URL serialization is used only after the existing parser. */
+export function sameFixedAddress(left: string, right: string): boolean {
+  if (left.trim() === right.trim()) return true;
+  const a = parseFixedAddress(left);
+  const b = parseFixedAddress(right);
+  return a !== null && b !== null && new URL(`http://${a}/`).host === new URL(`http://${b}/`).host;
+}
+
 export interface ExternalAccessDraft {
   readonly mode: ExternalAccessMode | null;
   readonly port: string;
@@ -153,7 +162,7 @@ export function draftChanged(draft: ExternalAccessDraft, view: ExternalAccessVie
   if (draft.mode === null) return false;
   if (!view || draft.mode !== view.mode) return true;
   if (draft.mode === 'router_forward') return draft.port.trim() !== String(view.externalPort ?? '');
-  if (draft.mode === 'fixed') return draft.address.trim() !== (view.fixedAddress ?? '');
+  if (draft.mode === 'fixed') return !sameFixedAddress(draft.address, view.fixedAddress ?? '');
   return false;
 }
 
