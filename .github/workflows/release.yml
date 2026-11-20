@@ -128,14 +128,7 @@ jobs:
         run: |
           sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           export NDK_HOME="$sdk/ndk/28.2.13676358"
-          # This job restores no cache (docs/CI.md). The Gradle repositories have answered "not found"
-          # for artifacts that exist, which failed a publish; the build is repeatable, so it is tried
-          # again after a pause before the release is given up. The gates already built this commit.
-          for attempt in 1 2 3; do
-            if npm run tauri -- android build --target aarch64 --apk --ci; then exit 0; fi
-            if [[ "$attempt" != 3 ]]; then echo "::warning::Android build attempt $attempt failed; retrying in 90 s"; sleep 90; fi
-          done
-          exit 1
+          npm run tauri -- android build --target aarch64 --apk --ci
       - name: Sign with the persistent keystore (ephemeral allowed only for prereleases)
         id: sign
         shell: bash

@@ -1,6 +1,11 @@
 buildscript {
     repositories {
         google()
+        // Maven Central answers 429 to CI runners; this mirror holds the same artifacts.
+        maven {
+            name = "MavenCentralGoogleMirror"
+            url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        }
         mavenCentral()
     }
     dependencies {
@@ -12,6 +17,11 @@ buildscript {
 allprojects {
     repositories {
         google()
+        // Maven Central answers 429 to CI runners; this mirror holds the same artifacts.
+        maven {
+            name = "MavenCentralGoogleMirror"
+            url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        }
         mavenCentral()
     }
 }
