@@ -1009,10 +1009,11 @@ impl<'key> ServiceSession<'key> {
             if !self
                 .embedded_relay
                 .as_mut()
-                .is_none_or(relay_service::HostedRelay::drain)
+                .is_some_and(relay_service::HostedRelay::drain)
             {
                 return Ok(());
             }
+            self.observe_relay_exit();
             self.embedded_relay = None;
             self.withdraw_relay();
         }
@@ -1975,11 +1976,12 @@ impl<'key> ServiceSession<'key> {
             self.pending_relay = Some(pending);
             return Ok(());
         }
-        if let Some(host) = self.embedded_relay.as_mut()
-            && !host.drain()
-        {
-            self.pending_relay = Some(pending);
-            return Ok(());
+        if let Some(host) = self.embedded_relay.as_mut() {
+            if !host.drain() {
+                self.pending_relay = Some(pending);
+                return Ok(());
+            }
+            self.observe_relay_exit();
         }
         self.embedded_relay = None;
         self.relay_retry_at = Instant::now();
@@ -2714,8 +2716,12 @@ impl<'key> ServiceSession<'key> {
             self.management.drain();
             self.io_failed |= self.management.failed();
             self.drain_direct_gateway();
-            if let Some(host) = self.embedded_relay.as_mut() {
-                host.drain();
+            if self
+                .embedded_relay
+                .as_mut()
+                .is_some_and(relay_service::HostedRelay::drain)
+            {
+                self.observe_relay_exit();
             }
             if let Some(dialer) = self.dialer.as_mut() {
                 dialer.drain();
@@ -2817,8 +2823,12 @@ impl Drop for ServiceSession<'_> {
             self.pairing.poll_shutdown();
             self.management.drain();
             self.drain_direct_gateway();
-            if let Some(host) = self.embedded_relay.as_mut() {
-                host.drain();
+            if self
+                .embedded_relay
+                .as_mut()
+                .is_some_and(relay_service::HostedRelay::drain)
+            {
+                self.observe_relay_exit();
             }
             if let Some(dialer) = self.dialer.as_mut() {
                 dialer.drain();

@@ -35,6 +35,9 @@ Explorer or relaunch the app without administrator elevation.
   registrations are recorded as `relay_abuse` when a count has moved, at most
   once a minute, without any address or route
   ([ADR0054](adr/0054-the-embedded-relay-limits-what-a-known-route-can-do.md)).
+  Each embedded relay worker exit is recorded once as `relay_worker_stopped`,
+  with a fixed clean, error or panic status. A clean exit includes aggregate
+  connection and timeout counts; the four abuse counts remain in `relay_abuse`.
 - Schema/version, process ID and timestamp (or null if unavailable).
 - No program names, request bodies, full command lines, device identities,
   public/private keys, credentials, signatures, QR contents or arbitrary errors.

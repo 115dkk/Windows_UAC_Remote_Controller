@@ -72,6 +72,11 @@ pub(crate) enum Event {
         rejected_pc_sources: u64,
         rejected_evictions: u64,
     },
+    // One embedded relay worker finished. Its report omits the four counters in
+    // `relay_abuse`; all fields are aggregate counts with no address or route.
+    RelayWorkerStopped {
+        outcome: RelayWorkerOutcome,
+    },
     // A connected phone's routing hints lacked the external address the PC now
     // publishes, so its connection was ended for it to reconnect and ask again.
     HintsRefreshed {
@@ -98,6 +103,96 @@ pub(crate) enum Event {
     DecisionRejected {
         reason: DecisionRejectionReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum RelayWorkerOutcome {
+    Clean { report: RelayWorkerReport },
+    Error { error: RelayWorkerError },
+    Panicked,
+}
+
+impl From<relay_service::HostedRelayExit> for RelayWorkerOutcome {
+    fn from(exit: relay_service::HostedRelayExit) -> Self {
+        match exit {
+            relay_service::HostedRelayExit::Clean(report) => Self::Clean {
+                report: report.into(),
+            },
+            relay_service::HostedRelayExit::Error(error) => Self::Error {
+                error: error.into(),
+            },
+            relay_service::HostedRelayExit::Panicked => Self::Panicked,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RelayWorkerError {
+    AcceptFailed,
+    TaskFailed,
+    IdentifierExhausted,
+    ShutdownIncomplete,
+}
+
+impl From<relay_service::RelayError> for RelayWorkerError {
+    fn from(error: relay_service::RelayError) -> Self {
+        match error {
+            relay_service::RelayError::AcceptFailed => Self::AcceptFailed,
+            relay_service::RelayError::TaskFailed => Self::TaskFailed,
+            relay_service::RelayError::IdentifierExhausted => Self::IdentifierExhausted,
+            relay_service::RelayError::ShutdownIncomplete => Self::ShutdownIncomplete,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct RelayWorkerReport {
+    pub(crate) accepted: u64,
+    pub(crate) accept_failures: u64,
+    pub(crate) rejected_capacity: u64,
+    pub(crate) rejected_waiting_rooms: u64,
+    pub(crate) paired: u64,
+    pub(crate) invalid_registrations: u64,
+    pub(crate) header_timeouts: u64,
+    pub(crate) waiting_timeouts: u64,
+    pub(crate) rendezvous_timeouts: u64,
+    pub(crate) idle_timeouts: u64,
+    pub(crate) absolute_timeouts: u64,
+    pub(crate) disconnected: u64,
+    pub(crate) io_failures: u64,
+    pub(crate) cancelled: u64,
+    pub(crate) task_failures: u64,
+    pub(crate) peak_connections: usize,
+    pub(crate) peak_waiting_rooms: usize,
+    pub(crate) remaining_connections: usize,
+}
+
+impl From<relay_service::RelayReport> for RelayWorkerReport {
+    fn from(report: relay_service::RelayReport) -> Self {
+        Self {
+            accepted: report.accepted,
+            accept_failures: report.accept_failures,
+            rejected_capacity: report.rejected_capacity,
+            rejected_waiting_rooms: report.rejected_waiting_rooms,
+            paired: report.paired,
+            invalid_registrations: report.invalid_registrations,
+            header_timeouts: report.header_timeouts,
+            waiting_timeouts: report.waiting_timeouts,
+            rendezvous_timeouts: report.rendezvous_timeouts,
+            idle_timeouts: report.idle_timeouts,
+            absolute_timeouts: report.absolute_timeouts,
+            disconnected: report.disconnected,
+            io_failures: report.io_failures,
+            cancelled: report.cancelled,
+            task_failures: report.task_failures,
+            peak_connections: report.peak_connections,
+            peak_waiting_rooms: report.peak_waiting_rooms,
+            remaining_connections: report.remaining_connections,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -394,6 +489,9 @@ mod tests {
                 rejected_pc_sources: 1,
                 rejected_evictions: 4,
             },
+            Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Panicked,
+            },
             Event::HintsRefreshed {
                 reason: HintRefresh::QueryLapsed,
             },
@@ -447,10 +545,108 @@ mod tests {
                     "rejected_duplicates",
                     "rejected_pc_sources",
                     "rejected_evictions",
+                    "outcome",
                 ]
                 .contains(&key.as_str())
             }));
         }
+    }
+
+    #[test]
+    fn relay_worker_outcomes_have_closed_fixed_schema() {
+        let report = RelayWorkerReport {
+            accepted: 1,
+            accept_failures: 2,
+            rejected_capacity: 3,
+            rejected_waiting_rooms: 4,
+            paired: 5,
+            invalid_registrations: 6,
+            header_timeouts: 7,
+            waiting_timeouts: 8,
+            rendezvous_timeouts: 9,
+            idle_timeouts: 10,
+            absolute_timeouts: 11,
+            disconnected: 12,
+            io_failures: 13,
+            cancelled: 14,
+            task_failures: 15,
+            peak_connections: 16,
+            peak_waiting_rooms: 17,
+            remaining_connections: 18,
+        };
+        assert_eq!(
+            serde_json::to_value(row(Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Clean { report },
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "relay_worker_stopped",
+                "outcome": {
+                    "status": "clean",
+                    "report": {
+                        "accepted": 1,
+                        "accept_failures": 2,
+                        "rejected_capacity": 3,
+                        "rejected_waiting_rooms": 4,
+                        "paired": 5,
+                        "invalid_registrations": 6,
+                        "header_timeouts": 7,
+                        "waiting_timeouts": 8,
+                        "rendezvous_timeouts": 9,
+                        "idle_timeouts": 10,
+                        "absolute_timeouts": 11,
+                        "disconnected": 12,
+                        "io_failures": 13,
+                        "cancelled": 14,
+                        "task_failures": 15,
+                        "peak_connections": 16,
+                        "peak_waiting_rooms": 17,
+                        "remaining_connections": 18,
+                    },
+                },
+            })
+        );
+
+        for (error, name) in [
+            (RelayWorkerError::AcceptFailed, "accept_failed"),
+            (RelayWorkerError::TaskFailed, "task_failed"),
+            (RelayWorkerError::IdentifierExhausted, "identifier_exhausted"),
+            (RelayWorkerError::ShutdownIncomplete, "shutdown_incomplete"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::RelayWorkerStopped {
+                    outcome: RelayWorkerOutcome::Error { error },
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "relay_worker_stopped",
+                    "outcome": {"status": "error", "error": name},
+                })
+            );
+        }
+
+        assert_eq!(
+            serde_json::to_value(row(Event::RelayWorkerStopped {
+                outcome: RelayWorkerOutcome::Panicked,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "relay_worker_stopped",
+                "outcome": {"status": "panicked"},
+            })
+        );
     }
 
     #[test]

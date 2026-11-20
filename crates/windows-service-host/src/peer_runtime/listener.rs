@@ -27,6 +27,18 @@ fn relay_abuse_due(
     }
 }
 
+fn observe_relay_exit_with(
+    relay: &mut relay_service::HostedRelay,
+    mut record: impl FnMut(crate::public_diagnostics::Event),
+) {
+    let Some(exit) = relay.take_exit() else {
+        return;
+    };
+    record(crate::public_diagnostics::Event::RelayWorkerStopped {
+        outcome: exit.into(),
+    });
+}
+
 fn fault_for_failure(
     error: &io::Error,
     now: Instant,
@@ -78,6 +90,14 @@ impl ServiceSession<'_> {
         }
     }
 
+    /// Records a finished relay worker once. `take_exit` makes repeated drain
+    /// polls harmless while retaining the original joined result.
+    pub(super) fn observe_relay_exit(&mut self) {
+        if let Some(relay) = self.embedded_relay.as_mut() {
+            observe_relay_exit_with(relay, crate::public_diagnostics::record);
+        }
+    }
+
     /// Makes route abuse at the embedded relay visible in public diagnostics.
     /// A restarted relay counts from zero again, which also reads as a change.
     pub(super) fn observe_relay_abuse(&mut self, now: Instant) {
@@ -120,6 +140,51 @@ impl ServiceSession<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_relay_worker_emits_exactly_one_diagnostic_at_listener_seam() {
+        let mut relay = relay_service::HostedRelay::start((std::net::Ipv4Addr::LOCALHOST, 0).into())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !relay.drain() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+
+        let mut rows = Vec::new();
+        observe_relay_exit_with(&mut relay, |event| rows.push(event));
+        observe_relay_exit_with(&mut relay, |event| rows.push(event));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap(),
+            serde_json::json!({
+                "kind": "relay_worker_stopped",
+                "outcome": {
+                    "status": "clean",
+                    "report": {
+                        "accepted": 0,
+                        "accept_failures": 0,
+                        "rejected_capacity": 0,
+                        "rejected_waiting_rooms": 0,
+                        "paired": 0,
+                        "invalid_registrations": 0,
+                        "header_timeouts": 0,
+                        "waiting_timeouts": 0,
+                        "rendezvous_timeouts": 0,
+                        "idle_timeouts": 0,
+                        "absolute_timeouts": 0,
+                        "disconnected": 0,
+                        "io_failures": 0,
+                        "cancelled": 0,
+                        "task_failures": 0,
+                        "peak_connections": 0,
+                        "peak_waiting_rooms": 0,
+                        "remaining_connections": 0,
+                    },
+                },
+            })
+        );
+    }
 
     #[test]
     fn relay_abuse_is_reported_on_change_and_at_most_once_a_minute() {
