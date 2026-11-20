@@ -134,6 +134,8 @@ pub(crate) enum ManagementListenerFailure {
     Native { stage: u8, code: u32 },
 }
 
+// Native peer types exist only on 64-bit Windows; the diagnostic schema is portable.
+#[cfg(all(windows, target_pointer_width = "64"))]
 impl From<crate::PairingPeerError> for ManagementListenerFailure {
     fn from(error: crate::PairingPeerError) -> Self {
         match error {
@@ -159,6 +161,7 @@ impl From<crate::PairingPeerError> for ManagementListenerFailure {
     }
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
 const fn pairing_peer_stage_code(stage: crate::PairingPeerStage) -> u8 {
     match stage {
         crate::PairingPeerStage::CreateEndpoint => 1,
@@ -194,6 +197,8 @@ pub(crate) enum RelayWorkerOutcome {
     Panicked,
 }
 
+// Only the 64-bit Windows listener converts the embedded worker's joined result.
+#[cfg(all(windows, target_pointer_width = "64"))]
 impl From<relay_service::HostedRelayExit> for RelayWorkerOutcome {
     fn from(exit: relay_service::HostedRelayExit) -> Self {
         match exit {
@@ -217,6 +222,7 @@ pub(crate) enum RelayWorkerError {
     ShutdownIncomplete,
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
 impl From<relay_service::RelayError> for RelayWorkerError {
     fn from(error: relay_service::RelayError) -> Self {
         match error {
@@ -251,6 +257,7 @@ pub(crate) struct RelayWorkerReport {
     pub(crate) remaining_connections: usize,
 }
 
+#[cfg(all(windows, target_pointer_width = "64"))]
 impl From<relay_service::RelayReport> for RelayWorkerReport {
     fn from(report: relay_service::RelayReport) -> Self {
         Self {
@@ -643,6 +650,81 @@ mod tests {
 
     #[test]
     fn management_listener_failures_have_closed_fixed_schema() {
+        for (error, expected) in [
+            (
+                ManagementListenerFailure::Busy,
+                serde_json::json!({"kind": "busy"}),
+            ),
+            (
+                ManagementListenerFailure::Closed,
+                serde_json::json!({"kind": "closed"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidPhase,
+                serde_json::json!({"kind": "invalid_phase"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidMessage,
+                serde_json::json!({"kind": "invalid_message"}),
+            ),
+            (
+                ManagementListenerFailure::InvalidDeadline,
+                serde_json::json!({"kind": "invalid_deadline"}),
+            ),
+            (
+                ManagementListenerFailure::DeadlineElapsed,
+                serde_json::json!({"kind": "deadline_elapsed"}),
+            ),
+            (
+                ManagementListenerFailure::Cancelled,
+                serde_json::json!({"kind": "cancelled"}),
+            ),
+            (
+                ManagementListenerFailure::EndOfStream,
+                serde_json::json!({"kind": "end_of_stream"}),
+            ),
+            (
+                ManagementListenerFailure::Rejected,
+                serde_json::json!({"kind": "rejected"}),
+            ),
+            (
+                ManagementListenerFailure::Malformed,
+                serde_json::json!({"kind": "malformed"}),
+            ),
+            (
+                ManagementListenerFailure::CleanupUnconfirmed,
+                serde_json::json!({"kind": "cleanup_unconfirmed"}),
+            ),
+            (
+                ManagementListenerFailure::Service { code: 6 },
+                serde_json::json!({"kind": "service", "code": 6}),
+            ),
+            (
+                ManagementListenerFailure::Native {
+                    stage: 1,
+                    code: 0x8007_0005,
+                },
+                serde_json::json!({"kind": "native", "stage": 1, "code": 0x8007_0005_u32}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::ManagementListenerCreationFailed { error }))
+                    .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "management_listener_creation_failed",
+                    "error": expected,
+                })
+            );
+        }
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[test]
+    fn management_listener_native_errors_have_closed_fixed_schema() {
         for (error, name) in [
             (crate::PairingPeerError::Busy, "busy"),
             (crate::PairingPeerError::Closed, "closed"),
@@ -914,6 +996,46 @@ mod tests {
                     "pid": 7,
                     "kind": "decision_rejected",
                     "reason": name,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_failure_causes_have_distinct_closed_names() {
+        for (cause, name) in [
+            (RuntimeFailureCause::Service, "service"),
+            (RuntimeFailureCause::SessionClosed, "session_closed"),
+            (RuntimeFailureCause::Registry, "registry"),
+            (RuntimeFailureCause::PeerChanged, "peer_changed"),
+            (RuntimeFailureCause::Identity, "identity"),
+            (RuntimeFailureCause::Clock, "clock"),
+            (RuntimeFailureCause::Capacity, "capacity"),
+            (RuntimeFailureCause::Protocol, "protocol"),
+            (RuntimeFailureCause::Io, "io"),
+            (RuntimeFailureCause::Panicked, "panicked"),
+            (RuntimeFailureCause::CleanupPending, "cleanup_pending"),
+            (RuntimeFailureCause::Signing, "signing"),
+            (RuntimeFailureCause::Watcher, "watcher"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(row(Event::RuntimeFailure {
+                    step: 5,
+                    cause,
+                    panicked: cause == RuntimeFailureCause::Panicked,
+                    code: 0,
+                }))
+                .unwrap(),
+                serde_json::json!({
+                    "schema": 1,
+                    "version": "test",
+                    "unix_millis": 123,
+                    "pid": 7,
+                    "kind": "runtime_failure",
+                    "step": 5,
+                    "cause": name,
+                    "panicked": cause == RuntimeFailureCause::Panicked,
+                    "code": 0,
                 })
             );
         }
