@@ -12,6 +12,10 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+#[path = "../android_signer_config.rs"]
+mod android_signer_config;
+
 /// Fixed public invitation transport in a separate unelevated child only.
 pub fn run_usb_bootstrap() -> Result<(), ServiceError> {
     #[cfg(all(windows, target_pointer_width = "64"))]

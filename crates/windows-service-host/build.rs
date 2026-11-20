@@ -1,40 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-use std::{env, fs, path::PathBuf};
+mod android_signer_config;
 
-fn parse_signers(value: Option<&str>) -> Result<Vec<[u8; 32]>, String> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    if value.is_empty() {
-        return Err("UAC_ANDROID_SIGNER_SHA256 must not be empty when set".into());
-    }
-    value
-        .split(',')
-        .map(|digest| {
-            if digest.len() != 64
-                || !digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err(
-                    "UAC_ANDROID_SIGNER_SHA256 requires comma-separated lowercase SHA-256 hex"
-                        .into(),
-                );
-            }
-            let mut bytes = [0_u8; 32];
-            for (output, pair) in bytes.iter_mut().zip(digest.as_bytes().as_chunks::<2>().0) {
-                let nibble = |byte: u8| match byte {
-                    b'0'..=b'9' => byte - b'0',
-                    b'a'..=b'f' => byte - b'a' + 10,
-                    _ => unreachable!(),
-                };
-                *output = nibble(pair[0]) * 16 + nibble(pair[1]);
-            }
-            Ok(bytes)
-        })
-        .collect()
-}
+use android_signer_config::parse_signers;
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=UAC_ANDROID_SIGNER_SHA256");
@@ -54,24 +23,4 @@ fn main() {
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
         .join("android_signers.rs");
     fs::write(output, generated).expect("write generated Android signer policy");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_signers;
-
-    #[test]
-    fn missing_is_empty_and_lowercase_digests_parse() {
-        assert!(parse_signers(None).unwrap().is_empty());
-        let parsed =
-            parse_signers(Some(&format!("{},{}", "01".repeat(32), "ab".repeat(32)))).unwrap();
-        assert_eq!(parsed, vec![[1; 32], [0xab; 32]]);
-    }
-
-    #[test]
-    fn malformed_values_reject() {
-        for value in ["", "00", &"A0".repeat(32), &format!("{},", "00".repeat(32))] {
-            assert!(parse_signers(Some(value)).is_err());
-        }
-    }
 }
