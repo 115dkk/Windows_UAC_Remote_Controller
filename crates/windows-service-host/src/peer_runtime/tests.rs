@@ -833,13 +833,13 @@ fn reap_preserves_tls_failure_without_closing_the_session() {
             assert!(Instant::now() < end, "peer worker did not finish");
             thread::yield_now();
         }
-        let exits = session.take_peer_worker_exits();
+        assert!(
+            session.peer_worker_exit_reported_at[PeerExitCause::TlsFailure as usize].is_some(),
+            "the poll seam did not report the peer worker's TLS failure"
+        );
         assert_eq!(
-            exits
-                .iter()
-                .find(|(cause, _)| *cause == PeerExitCause::TlsFailure),
-            Some(&(PeerExitCause::TlsFailure, 1)),
-            "the reap seam discarded the peer worker's TLS failure"
+            session.peer_worker_exit_pending[PeerExitCause::TlsFailure as usize],
+            0
         );
         assert!(!session.closing);
         assert!(!session.io_failed);

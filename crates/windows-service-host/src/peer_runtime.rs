@@ -926,6 +926,36 @@ impl<'key> ServiceSession<'key> {
         encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)
     }
 
+    fn enqueue_peer_response(
+        &mut self,
+        index: usize,
+        state: &Arc<PeerState>,
+        bytes: Vec<u8>,
+        deadline: Instant,
+        kind: ResponseKind,
+    ) -> Result<bool, PeerRuntimeError> {
+        let id = self.next_response;
+        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
+        if self.peers[index]
+            .responses
+            .try_send(Response {
+                source: Arc::clone(state),
+                id,
+                bytes,
+                deadline,
+                kind,
+            })
+            .is_err()
+        {
+            state.retire();
+            return Ok(false);
+        }
+        self.peers[index]
+            .responses_in_flight
+            .push_back((id, deadline, kind));
+        Ok(true)
+    }
+
     fn queue_signed_notice(
         &mut self,
         index: usize,
@@ -948,26 +978,13 @@ impl<'key> ServiceSession<'key> {
             return Ok(false);
         }
         self.check_peer(&state)?;
-        let id = self.next_response;
-        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        if self.peers[index]
-            .responses
-            .try_send(Response {
-                source: Arc::clone(&state),
-                id,
-                bytes: bytes.to_vec(),
-                deadline,
-                kind: ResponseKind::Notice,
-            })
-            .is_err()
-        {
-            state.retire();
-            return Ok(false);
-        }
-        self.peers[index]
-            .responses_in_flight
-            .push_back((id, deadline, ResponseKind::Notice));
-        Ok(true)
+        self.enqueue_peer_response(
+            index,
+            &state,
+            bytes.to_vec(),
+            deadline,
+            ResponseKind::Notice,
+        )
     }
 
     #[cfg(all(windows, target_pointer_width = "64"))]
@@ -1460,22 +1477,15 @@ impl<'key> ServiceSession<'key> {
             return Ok(false);
         }
         self.check_peer(&state)?;
-        let id = self.next_response;
-        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        let response = Response {
-            source: Arc::clone(&state),
-            id,
-            bytes: bytes.to_vec(),
+        if !self.enqueue_peer_response(
+            index,
+            &state,
+            bytes.to_vec(),
             deadline,
-            kind: ResponseKind::Prompt,
-        };
-        if self.peers[index].responses.try_send(response).is_err() {
-            state.retire();
+            ResponseKind::Prompt,
+        )? {
             return Ok(false);
         }
-        self.peers[index]
-            .responses_in_flight
-            .push_back((id, deadline, ResponseKind::Prompt));
         if let Some(request_id) = opened {
             self.peers[index].opened_sent = Some(request_id);
         }
@@ -2557,25 +2567,9 @@ impl<'key> ServiceSession<'key> {
             state.retire();
             return Ok(SessionProgress::PeerRejected);
         }
-        let id = self.next_response;
-        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        if self.peers[index]
-            .responses
-            .try_send(Response {
-                source: Arc::clone(&state),
-                id,
-                bytes,
-                deadline,
-                kind: ResponseKind::Clock,
-            })
-            .is_err()
-        {
-            state.retire();
+        if !self.enqueue_peer_response(index, &state, bytes, deadline, ResponseKind::Clock)? {
             return Ok(SessionProgress::PeerRejected);
         }
-        self.peers[index]
-            .responses_in_flight
-            .push_back((id, deadline, ResponseKind::Clock));
         Ok(SessionProgress::ClockQueued)
     }
     fn now(&mut self) -> Result<Instant, PeerRuntimeError> {

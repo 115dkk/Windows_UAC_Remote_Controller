@@ -242,25 +242,10 @@ impl ServiceSession<'_> {
             return Ok(SessionProgress::PeerRejected);
         }
         let bytes = encode_frame(&signed.to_wire()).map_err(|_| PeerRuntimeError::Protocol)?;
-        let id = self.next_response;
-        self.next_response = id.checked_add(1).ok_or(PeerRuntimeError::Capacity)?;
-        if self.peers[index]
-            .responses
-            .try_send(Response {
-                source: Arc::clone(&state),
-                id,
-                bytes,
-                deadline,
-                kind: ResponseKind::Addresses,
-            })
-            .is_err()
-        {
-            state.retire();
+        if !self.enqueue_peer_response(index, &state, bytes, deadline, ResponseKind::Addresses)? {
             return Ok(SessionProgress::PeerRejected);
         }
         let slot = &mut self.peers[index];
-        slot.responses_in_flight
-            .push_back((id, deadline, ResponseKind::Addresses));
         slot.advertised = Some(endpoints);
         slot.query_lapsed = false;
         Ok(SessionProgress::Idle)
