@@ -157,6 +157,8 @@ pub(crate) enum JournalFault {
     EncodingFailed,
     /// An append timestamp preceded the persisted clock observation.
     ClockRollback,
+    /// The bounded journal-worker queue was full; this operation was dropped.
+    QueueFull,
     /// A filesystem operation failed.
     Io,
 }
@@ -607,6 +609,20 @@ mod tests {
                 "pid": 7,
                 "kind": "journal_append_failed",
                 "fault": "missing_storage"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(row(Event::JournalAppendFailed {
+                fault: JournalFault::QueueFull,
+            }))
+            .unwrap(),
+            serde_json::json!({
+                "schema": 1,
+                "version": "test",
+                "unix_millis": 123,
+                "pid": 7,
+                "kind": "journal_append_failed",
+                "fault": "queue_full"
             })
         );
         assert_eq!(

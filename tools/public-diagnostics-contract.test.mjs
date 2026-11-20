@@ -12,10 +12,12 @@ test('public output remains a fixed privileged-write path separate from the orig
   assert.match(ffi, /FILE_FLAG_OPEN_REPARSE_POINT/u);
   assert.doesNotMatch(ffi, /CREATE_ALWAYS|TRUNCATE_EXISTING|FILE_SHARE_DELETE/u);
   const runtime = read('crates/windows-service-host/src/runtime.rs');
-  // The public copy of an activity row is written only after the original
-  // journal accepted it (ADR 0052: a refused append is no longer fatal, so the
-  // order is expressed by the Ok arm instead of a `?`).
-  assert.match(runtime, /match journal\.append\(now\(\)\?, event\) \{\s+Ok\(_\) => \{\s+crate::public_diagnostics::record\(crate::public_diagnostics::Event::Activity/u);
+  // The public copy of an activity row is written only after the journal worker's
+  // original append succeeded (ADR 0052: a refused append remains nonfatal).
+  const appendMatch = runtime.indexOf('match journal.append(now, event)');
+  const publicCopy = runtime.indexOf('Event::Activity', appendMatch);
+  const appendFailure = runtime.indexOf('Err(error)', appendMatch);
+  assert.ok(appendMatch >= 0 && publicCopy > appendMatch && publicCopy < appendFailure);
 });
 test('folder handoff has no renderer-selected path, URL, executable or elevation', () => {
   const ffi = read('crates/windows-service-host/src/ffi/public_diagnostics.rs');

@@ -18,12 +18,16 @@ use crate::{
 };
 use crate::{ServiceError, ServiceRegistry, ffi};
 use activity_journal::{
-    ActivityEvent, Decision, FailureKind, Journal, JournalError, Limits, RequestOutcome,
-    ServiceOutcome, UnixMillis,
+    ActivityEvent, ActivityRecord, Decision, FailureKind, Journal, JournalError, Limits,
+    PurgeReport, RequestOutcome, ServiceOutcome, UnixMillis,
 };
 use approval_core::DecisionError;
 use std::{
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+        mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -115,6 +119,262 @@ fn now() -> Result<UnixMillis, ServiceError> {
 
 const JOURNAL_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 const DECISION_REJECTION_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const JOURNAL_COMMAND_CAPACITY: usize = 64;
+const JOURNAL_APPEND_DROPPED: u8 = 1;
+const JOURNAL_PURGE_DROPPED: u8 = 2;
+
+trait JournalStore: Send + 'static {
+    fn limits(&self) -> Limits;
+    fn append(
+        &mut self,
+        now: UnixMillis,
+        event: ActivityEvent,
+    ) -> Result<PurgeReport, JournalError>;
+    fn recent(
+        &mut self,
+        now: UnixMillis,
+        limit: usize,
+    ) -> Result<Vec<ActivityRecord>, JournalError>;
+    fn purge(&mut self, now: UnixMillis) -> Result<PurgeReport, JournalError>;
+}
+
+impl JournalStore for Journal {
+    fn limits(&self) -> Limits {
+        self.limits()
+    }
+
+    fn append(
+        &mut self,
+        now: UnixMillis,
+        event: ActivityEvent,
+    ) -> Result<PurgeReport, JournalError> {
+        self.append(now, event)
+    }
+
+    fn recent(
+        &mut self,
+        now: UnixMillis,
+        limit: usize,
+    ) -> Result<Vec<ActivityRecord>, JournalError> {
+        self.recent(now, limit)
+    }
+
+    fn purge(&mut self, now: UnixMillis) -> Result<PurgeReport, JournalError> {
+        self.purge(now)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JournalCommand {
+    Append {
+        now: UnixMillis,
+        event: ActivityEvent,
+    },
+    Purge {
+        now: UnixMillis,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Default)]
+struct PublishedActivity {
+    generation: u64,
+    records: Option<Vec<ActivityRecord>>,
+}
+
+struct RuntimeJournal {
+    commands: SyncSender<JournalCommand>,
+    queue_faults: Arc<AtomicU8>,
+    published: Arc<Mutex<PublishedActivity>>,
+    observed_generation: u64,
+    cached: Option<Vec<ActivityRecord>>,
+    limits: Limits,
+    clock_floor: UnixMillis,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl RuntimeJournal {
+    fn spawn(journal: Journal, opened_at: UnixMillis) -> Result<Self, ServiceError> {
+        Self::spawn_store(journal, opened_at)
+    }
+
+    fn spawn_store<S: JournalStore>(
+        journal: S,
+        opened_at: UnixMillis,
+    ) -> Result<Self, ServiceError> {
+        let limits = journal.limits();
+        let (commands, receiver) = mpsc::sync_channel(JOURNAL_COMMAND_CAPACITY);
+        let queue_faults = Arc::new(AtomicU8::new(0));
+        let published = Arc::new(Mutex::new(PublishedActivity::default()));
+        let worker_faults = queue_faults.clone();
+        let worker_published = published.clone();
+        let (initialized, initialized_rx) = mpsc::sync_channel(0);
+        let thread = thread::Builder::new()
+            .name("activity-journal".into())
+            .spawn(move || {
+                run_journal_worker(
+                    journal,
+                    receiver,
+                    worker_faults,
+                    worker_published,
+                    opened_at,
+                    initialized,
+                );
+            })
+            .map_err(|_| ServiceError::WorkerFailed)?;
+        if initialized_rx.recv().is_err() {
+            let _ = thread.join();
+            return Err(ServiceError::WorkerFailed);
+        }
+        Ok(Self {
+            commands,
+            queue_faults,
+            published,
+            observed_generation: 0,
+            cached: None,
+            limits,
+            clock_floor: opened_at,
+            thread: Some(thread),
+        })
+    }
+
+    fn append_at(&self, now: UnixMillis, event: ActivityEvent) {
+        self.try_send(
+            JournalCommand::Append { now, event },
+            JOURNAL_APPEND_DROPPED,
+        );
+    }
+
+    fn purge_at(&self, now: UnixMillis) {
+        self.try_send(JournalCommand::Purge { now }, JOURNAL_PURGE_DROPPED);
+    }
+
+    fn try_send(&self, command: JournalCommand, fault: u8) {
+        match self.commands.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                self.queue_faults.fetch_or(fault, Ordering::Release);
+            }
+        }
+    }
+
+    fn cached_recent(&mut self, now: UnixMillis, limit: usize) -> Option<Vec<ActivityRecord>> {
+        self.clock_floor = self.clock_floor.max(now);
+        if let Ok(published) = self.published.try_lock()
+            && published.generation != self.observed_generation
+        {
+            self.observed_generation = published.generation;
+            self.cached.clone_from(&published.records);
+        }
+        let cutoff = self
+            .clock_floor
+            .get()
+            .saturating_sub(self.limits.max_age_ms());
+        self.cached.as_ref().map(|records| {
+            records
+                .iter()
+                .copied()
+                .filter(|record| record.timestamp().get() >= cutoff)
+                .take(limit.min(self.limits.max_records()))
+                .collect()
+        })
+    }
+
+    fn finish(mut self) -> Result<(), ServiceError> {
+        self.shutdown()
+    }
+
+    fn shutdown(&mut self) -> Result<(), ServiceError> {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        let sent = self.commands.send(JournalCommand::Shutdown).is_ok();
+        let joined = thread.join().is_ok();
+        if sent && joined {
+            Ok(())
+        } else {
+            Err(ServiceError::WorkerFailed)
+        }
+    }
+}
+
+impl Drop for RuntimeJournal {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn run_journal_worker<S: JournalStore>(
+    mut journal: S,
+    commands: Receiver<JournalCommand>,
+    queue_faults: Arc<AtomicU8>,
+    published: Arc<Mutex<PublishedActivity>>,
+    opened_at: UnixMillis,
+    initialized: SyncSender<()>,
+) {
+    let mut failures = JournalFailureReports::default();
+    publish_recent(&mut journal, opened_at, &published);
+    let _ = initialized.send(());
+    loop {
+        report_journal_queue_faults(&mut failures, &queue_faults);
+        match commands.recv() {
+            Ok(JournalCommand::Append { now, event }) => match journal.append(now, event) {
+                Ok(_) => {
+                    crate::public_diagnostics::record(crate::public_diagnostics::Event::Activity {
+                        event,
+                    });
+                    publish_recent(&mut journal, now, &published);
+                }
+                Err(error) => failures.record(JournalOperation::Append, &error, Instant::now()),
+            },
+            Ok(JournalCommand::Purge { now }) => match journal.purge(now) {
+                Ok(_) => publish_recent(&mut journal, now, &published),
+                Err(error) => failures.record(JournalOperation::Purge, &error, Instant::now()),
+            },
+            Ok(JournalCommand::Shutdown) => {
+                report_journal_queue_faults(&mut failures, &queue_faults);
+                break;
+            }
+            Err(_) => {
+                report_journal_queue_faults(&mut failures, &queue_faults);
+                break;
+            }
+        }
+    }
+}
+
+fn publish_recent<S: JournalStore>(
+    journal: &mut S,
+    now: UnixMillis,
+    published: &Mutex<PublishedActivity>,
+) {
+    let records = journal
+        .recent(now, crate::management_protocol::MAX_ACTIVITY_RECORDS)
+        .ok();
+    if let Ok(mut published) = published.lock() {
+        published.generation = published.generation.wrapping_add(1);
+        published.records = records;
+    }
+}
+
+fn report_journal_queue_faults(failures: &mut JournalFailureReports, queue_faults: &AtomicU8) {
+    let faults = queue_faults.swap(0, Ordering::AcqRel);
+    let at = Instant::now();
+    if faults & JOURNAL_APPEND_DROPPED != 0 {
+        failures.record_fault(
+            JournalOperation::Append,
+            crate::public_diagnostics::JournalFault::QueueFull,
+            at,
+        );
+    }
+    if faults & JOURNAL_PURGE_DROPPED != 0 {
+        failures.record_fault(
+            JournalOperation::Purge,
+            crate::public_diagnostics::JournalFault::QueueFull,
+            at,
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct DecisionRejectionReport {
@@ -191,7 +451,19 @@ struct JournalFailureReports {
 
 impl JournalFailureReports {
     fn record(&mut self, operation: JournalOperation, error: &JournalError, at: Instant) {
-        let fault = crate::public_diagnostics::JournalFault::from(error);
+        self.record_fault(
+            operation,
+            crate::public_diagnostics::JournalFault::from(error),
+            at,
+        );
+    }
+
+    fn record_fault(
+        &mut self,
+        operation: JournalOperation,
+        fault: crate::public_diagnostics::JournalFault,
+        at: Instant,
+    ) {
         if let Some(previous) = self
             .rows
             .iter_mut()
@@ -220,27 +492,13 @@ impl JournalFailureReports {
     }
 }
 
-fn append(
-    journal: &mut Journal,
-    failures: &mut JournalFailureReports,
-    event: ActivityEvent,
-) -> Result<(), ServiceError> {
-    match journal.append(now()?, event) {
-        Ok(_) => {
-            crate::public_diagnostics::record(crate::public_diagnostics::Event::Activity { event });
-        }
-        Err(error) => failures.record(JournalOperation::Append, &error, Instant::now()),
-    }
+fn append(journal: &RuntimeJournal, event: ActivityEvent) -> Result<(), ServiceError> {
+    journal.append_at(now()?, event);
     Ok(())
 }
 
-fn purge_journal(
-    journal: &mut Journal,
-    failures: &mut JournalFailureReports,
-) -> Result<(), ServiceError> {
-    if let Err(error) = journal.purge(now()?) {
-        failures.record(JournalOperation::Purge, &error, Instant::now());
-    }
+fn purge_journal(journal: &RuntimeJournal) -> Result<(), ServiceError> {
+    journal.purge_at(now()?);
     Ok(())
 }
 
@@ -269,7 +527,7 @@ fn run(
     }
     let directory = ffi::open_activity_directory().map_err(|error| error.at_startup(2))?;
     let opened_at = now().map_err(|error| error.at_startup(3))?;
-    let mut journal = crate::journal_recovery::open(
+    let journal = crate::journal_recovery::open(
         directory.path(),
         Limits::default(),
         opened_at,
@@ -282,6 +540,8 @@ fn run(
     if cancellation_requested(stop) {
         return Ok(());
     }
+    let mut journal =
+        RuntimeJournal::spawn(journal, opened_at).map_err(|error| error.at_startup(3))?;
     // Key work stays on the service worker, never the SCM entry callback or
     // a WebView/IPC thread. Only genuine absence permits initial creation.
     // Capture the fixed identity-context cause before the trust-store adapter's
@@ -377,7 +637,6 @@ fn run(
     let mut supervisor = None;
     let mut supervisor_initialization_failed = None;
     let mut watch = None;
-    let mut journal_failures = JournalFailureReports::default();
     let mut decision_rejections = DecisionRejectionReports::default();
     // The fixed step a failure after Ready came from, for public diagnostics.
     let mut step = RuntimeStep::Ready;
@@ -405,11 +664,7 @@ fn run(
             if cancellation_requested(stop) {
                 return Ok(());
             }
-            append(
-                &mut journal,
-                &mut journal_failures,
-                ActivityEvent::Service(ServiceOutcome::Started),
-            )?;
+            append(&journal, ActivityEvent::Service(ServiceOutcome::Started))?;
             step = RuntimeStep::Pairing;
             if let Some(reason) = session
                 .activate_pairing(ready)
@@ -417,8 +672,7 @@ fn run(
             {
                 // Fixed kind only; the reason itself stays out of the journal.
                 append(
-                    &mut journal,
-                    &mut journal_failures,
+                    &journal,
                     ActivityEvent::Service(ServiceOutcome::ManagementUnavailable),
                 )?;
                 #[cfg(feature = "lab-software-identity")]
@@ -438,8 +692,7 @@ fn run(
             let mut watch_retry = WatchRetry::new(Instant::now());
             let mut watcher_health_heartbeats = 0;
             watch = start_watch(
-                &mut journal,
-                &mut journal_failures,
+                &journal,
                 &mut watch_retry,
                 &mut session,
                 &mut watcher_health_heartbeats,
@@ -459,8 +712,7 @@ fn run(
                 let iteration_now = Instant::now();
                 if watch.is_none() && watch_retry.due(iteration_now) {
                     watch = start_watch(
-                        &mut journal,
-                        &mut journal_failures,
+                        &journal,
                         &mut watch_retry,
                         &mut session,
                         &mut watcher_health_heartbeats,
@@ -473,9 +725,10 @@ fn run(
                     let records = diagnostic_time()
                         .and_then(|now| UnixMillis::new(now).ok())
                         .and_then(|now| {
-                            journal
-                                .recent(now, crate::management_protocol::MAX_ACTIVITY_RECORDS)
-                                .ok()
+                            journal.cached_recent(
+                                now,
+                                crate::management_protocol::MAX_ACTIVITY_RECORDS,
+                            )
                         });
                     session.observe_activity(records);
                     last_activity_read = Some(Instant::now());
@@ -489,8 +742,7 @@ fn run(
                 for event in events {
                     if let crate::WatchEvent::ParkedChanged { count } = &event {
                         append(
-                            &mut journal,
-                            &mut journal_failures,
+                            &journal,
                             ActivityEvent::Request(if *count > 0 {
                                 RequestOutcome::ParkedOnTaskbar { count: *count }
                             } else {
@@ -510,8 +762,7 @@ fn run(
                             watcher_health_heartbeats = current_watch_heartbeats(&watch);
                             session.set_watcher_health(WatcherHealth::Starting);
                             append(
-                                &mut journal,
-                                &mut journal_failures,
+                                &journal,
                                 ActivityEvent::Service(ServiceOutcome::WatcherRestarted),
                             )?;
                         }
@@ -523,8 +774,7 @@ fn run(
                                 WatcherRefusal::HelperFailed,
                             ));
                             append(
-                                &mut journal,
-                                &mut journal_failures,
+                                &journal,
                                 ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
                             )?;
                         }
@@ -533,7 +783,7 @@ fn run(
                     let progress = session
                         .handle_watch_event(event, iteration_now)
                         .map_err(runtime_session_failure)?;
-                    journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
+                    journal_prompt_progress(&journal, progress)?;
                 }
                 let current_heartbeats = current_watch_heartbeats(&watch);
                 if current_heartbeats > watcher_health_heartbeats {
@@ -543,8 +793,7 @@ fn run(
                 if !watcher_alive_journaled && current_heartbeats > 0 {
                     watcher_alive_journaled = true;
                     append(
-                        &mut journal,
-                        &mut journal_failures,
+                        &journal,
                         ActivityEvent::Service(ServiceOutcome::WatcherAlive),
                     )?;
                 }
@@ -552,7 +801,7 @@ fn run(
                     .prompt_deadline_step(iteration_now)
                     .map_err(runtime_session_failure)?
                 {
-                    journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
+                    journal_prompt_progress(&journal, progress)?;
                 }
                 let processed = match watch.as_mut() {
                     Some(watcher) => session.process_one_with_watch(watcher),
@@ -573,35 +822,28 @@ fn run(
                                 FailureKind::RequestValidationFailed
                             }
                         };
-                        append(
-                            &mut journal,
-                            &mut journal_failures,
-                            ActivityEvent::Failure(failure),
-                        )?;
+                        append(&journal, ActivityEvent::Failure(failure))?;
                     }
                     SessionProgress::ApplyRequested { purpose, .. } => {
                         let decision = journal_decision(purpose);
                         append(
-                            &mut journal,
-                            &mut journal_failures,
+                            &journal,
                             ActivityEvent::Request(RequestOutcome::PhoneDecisionVerified {
                                 decision,
                             }),
                         )?;
                         append(
-                            &mut journal,
-                            &mut journal_failures,
+                            &journal,
                             ActivityEvent::Request(RequestOutcome::DecisionSentToWindows {
                                 decision,
                             }),
                         )?;
                     }
                     SessionProgress::Prompt(progress) => {
-                        journal_prompt_progress(&mut journal, &mut journal_failures, progress)?;
+                        journal_prompt_progress(&journal, progress)?;
                     }
                     SessionProgress::PairingFailed => append(
-                        &mut journal,
-                        &mut journal_failures,
+                        &journal,
                         ActivityEvent::Failure(FailureKind::TransportUnavailable),
                     )?,
                     SessionProgress::Enrolled(_device) => {
@@ -642,15 +884,11 @@ fn run(
                     }
                 }
                 if last_purge.elapsed() >= Duration::from_secs(3_600) {
-                    purge_journal(&mut journal, &mut journal_failures)?;
+                    purge_journal(&journal)?;
                     last_purge = Instant::now();
                 }
             }
-            append(
-                &mut journal,
-                &mut journal_failures,
-                ActivityEvent::Service(ServiceOutcome::Stopping),
-            )?;
+            append(&journal, ActivityEvent::Service(ServiceOutcome::Stopping))?;
             Ok(())
         },
     ));
@@ -689,14 +927,18 @@ fn run(
     let closed = session.finish_shutdown().map_err(session_error);
     drop(session);
     let identity_closed = identity.close().map_err(ServiceError::from_identity);
-    // Journal drops before the directory/installation pins, never the reverse.
-    drop(journal);
+    // The journal worker drains before the directory/installation pins, never the reverse.
+    let journal_closed = journal.finish();
     drop(directory);
-    outcome.and(closed).and(identity_closed).and(if io_failed {
-        Err(ServiceError::WorkerFailed)
-    } else {
-        Ok(())
-    })
+    outcome
+        .and(closed)
+        .and(identity_closed)
+        .and(journal_closed)
+        .and(if io_failed {
+            Err(ServiceError::WorkerFailed)
+        } else {
+            Ok(())
+        })
 }
 
 /// Fixed public-diagnostics stage of the optional external-access read.
@@ -753,8 +995,7 @@ fn journal_decision(purpose: approval_protocol::DecisionPurpose) -> Decision {
 }
 
 fn journal_prompt_progress(
-    journal: &mut Journal,
-    failures: &mut JournalFailureReports,
+    journal: &RuntimeJournal,
     progress: crate::peer_runtime::prompt::PromptProgress,
 ) -> Result<(), ServiceError> {
     if let Some(result) = progress.result() {
@@ -774,28 +1015,19 @@ fn journal_prompt_progress(
                 RequestOutcome::WindowsOutcomeUnknown
             }
         };
-        append(journal, failures, ActivityEvent::Request(outcome))?;
+        append(journal, ActivityEvent::Request(outcome))?;
     }
     if progress.observed() {
-        append(
-            journal,
-            failures,
-            ActivityEvent::Request(RequestOutcome::Observed),
-        )?;
+        append(journal, ActivityEvent::Request(RequestOutcome::Observed))?;
         if progress.delivery_failed() {
             // This specific observed request reached no eligible connected
             // phone. Do not emit this on periodic clocks/renewals/idle polls.
-            append(
-                journal,
-                failures,
-                ActivityEvent::Failure(FailureKind::DeliveryFailed),
-            )?;
+            append(journal, ActivityEvent::Failure(FailureKind::DeliveryFailed))?;
         }
     }
     if progress.queued_opened() != 0 {
         append(
             journal,
-            failures,
             ActivityEvent::Request(RequestOutcome::NotificationSent),
         )?;
     }
@@ -1011,8 +1243,7 @@ impl WatchRetry {
 /// Starts the watcher once. A refusal is recorded and retried later; activity
 /// journal write failures are reported separately and do not stop the worker.
 fn start_watch(
-    journal: &mut Journal,
-    failures: &mut JournalFailureReports,
+    journal: &RuntimeJournal,
     retry: &mut WatchRetry,
     session: &mut ServiceSession<'_>,
     health_heartbeats: &mut u32,
@@ -1024,7 +1255,6 @@ fn start_watch(
             session.set_watcher_health(WatcherHealth::Starting);
             append(
                 journal,
-                failures,
                 ActivityEvent::Service(ServiceOutcome::WatcherStarted),
             )?;
             Ok(Some(watch))
@@ -1040,7 +1270,6 @@ fn start_watch(
             if first {
                 append(
                     journal,
-                    failures,
                     ActivityEvent::Service(ServiceOutcome::WatcherUnavailable),
                 )?;
             }
@@ -1075,6 +1304,144 @@ fn registry_error(error: crate::RegistryError) -> ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use activity_journal::{ActivityRecord, PurgeReport};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct JournalIoCounts {
+        appends: AtomicUsize,
+        reads: AtomicUsize,
+        purges: AtomicUsize,
+    }
+
+    struct JournalDouble {
+        counts: Arc<JournalIoCounts>,
+        initialized: Option<mpsc::SyncSender<()>>,
+        append_started: Option<mpsc::SyncSender<()>>,
+        append_release: Option<mpsc::Receiver<()>>,
+    }
+
+    impl JournalStore for JournalDouble {
+        fn limits(&self) -> Limits {
+            Limits::default()
+        }
+
+        fn append(
+            &mut self,
+            _now: UnixMillis,
+            _event: ActivityEvent,
+        ) -> Result<PurgeReport, JournalError> {
+            self.counts.appends.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = &self.append_started {
+                let _ = started.try_send(());
+            }
+            if let Some(release) = self.append_release.take() {
+                let _ = release.recv();
+            }
+            Ok(PurgeReport::default())
+        }
+
+        fn recent(
+            &mut self,
+            _now: UnixMillis,
+            _limit: usize,
+        ) -> Result<Vec<ActivityRecord>, JournalError> {
+            self.counts.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(initialized) = self.initialized.take() {
+                let _ = initialized.send(());
+            }
+            Ok(Vec::new())
+        }
+
+        fn purge(&mut self, _now: UnixMillis) -> Result<PurgeReport, JournalError> {
+            self.counts.purges.fetch_add(1, Ordering::SeqCst);
+            Ok(PurgeReport::default())
+        }
+    }
+
+    #[test]
+    fn idle_activity_ticks_use_cached_records_without_journal_io() {
+        let counts = Arc::new(JournalIoCounts::default());
+        let (initialized, initialized_rx) = mpsc::sync_channel(1);
+        let store = JournalDouble {
+            counts: counts.clone(),
+            initialized: Some(initialized),
+            append_started: None,
+            append_release: None,
+        };
+        let opened_at = UnixMillis::new(1_000).unwrap();
+        let mut journal = RuntimeJournal::spawn_store(store, opened_at).unwrap();
+        initialized_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let before = (
+            counts.appends.load(Ordering::SeqCst),
+            counts.reads.load(Ordering::SeqCst),
+            counts.purges.load(Ordering::SeqCst),
+        );
+
+        for tick in 1..=10 {
+            assert_eq!(
+                journal.cached_recent(
+                    UnixMillis::new(1_000 + tick).unwrap(),
+                    crate::management_protocol::MAX_ACTIVITY_RECORDS,
+                ),
+                Some(Vec::new())
+            );
+        }
+
+        assert_eq!(
+            (
+                counts.appends.load(Ordering::SeqCst),
+                counts.reads.load(Ordering::SeqCst),
+                counts.purges.load(Ordering::SeqCst),
+            ),
+            before
+        );
+        assert_eq!(journal.finish(), Ok(()));
+    }
+
+    #[test]
+    fn approval_thread_never_waits_for_delayed_or_saturated_journal_io() {
+        let counts = Arc::new(JournalIoCounts::default());
+        let (initialized, initialized_rx) = mpsc::sync_channel(1);
+        let (append_started, append_started_rx) = mpsc::sync_channel(1);
+        let (append_release, append_release_rx) = mpsc::sync_channel(1);
+        let store = JournalDouble {
+            counts: counts.clone(),
+            initialized: Some(initialized),
+            append_started: Some(append_started),
+            append_release: Some(append_release_rx),
+        };
+        let now = UnixMillis::new(1_000).unwrap();
+        let journal = RuntimeJournal::spawn_store(store, now).unwrap();
+        initialized_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        journal.append_at(now, ActivityEvent::Service(ServiceOutcome::Started));
+        append_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        for _ in 0..JOURNAL_COMMAND_CAPACITY {
+            journal.append_at(now, ActivityEvent::Service(ServiceOutcome::Started));
+        }
+
+        let (returned, returned_rx) = mpsc::sync_channel(1);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                journal.append_at(now, ActivityEvent::Service(ServiceOutcome::Started));
+                returned.send(()).unwrap();
+            });
+            let result = returned_rx.recv_timeout(Duration::from_millis(250));
+            append_release.send(()).unwrap();
+            assert_eq!(result, Ok(()));
+        });
+
+        assert_eq!(journal.finish(), Ok(()));
+        assert_eq!(
+            counts.appends.load(Ordering::SeqCst),
+            JOURNAL_COMMAND_CAPACITY + 1
+        );
+    }
 
     #[test]
     fn startup_cancellation_detects_stop_and_owner_disconnection() {
@@ -1320,30 +1687,15 @@ mod tests {
     }
 
     #[test]
-    fn append_and_purge_storage_errors_do_not_escape_the_runtime_helpers() {
+    fn append_and_purge_storage_errors_do_not_escape_the_journal_worker() {
         let directory = tempfile::tempdir().unwrap();
-        let mut journal =
-            Journal::open(directory.path(), Limits::default(), now().unwrap()).unwrap();
+        let opened_at = now().unwrap();
+        let journal = Journal::open(directory.path(), Limits::default(), opened_at).unwrap();
         std::fs::remove_file(directory.path().join("activity.jsonl")).unwrap();
-        let mut reports = JournalFailureReports::default();
+        let journal = RuntimeJournal::spawn_store(journal, opened_at).unwrap();
 
-        assert_eq!(
-            append(
-                &mut journal,
-                &mut reports,
-                ActivityEvent::Service(ServiceOutcome::Started),
-            ),
-            Ok(())
-        );
-        assert_eq!(purge_journal(&mut journal, &mut reports), Ok(()));
-        assert_eq!(reports.rows.len(), 2);
-        assert!(reports.rows.iter().any(|row| {
-            row.operation == JournalOperation::Append
-                && row.fault == crate::public_diagnostics::JournalFault::MissingStorage
-        }));
-        assert!(reports.rows.iter().any(|row| {
-            row.operation == JournalOperation::Purge
-                && row.fault == crate::public_diagnostics::JournalFault::MissingStorage
-        }));
+        journal.append_at(opened_at, ActivityEvent::Service(ServiceOutcome::Started));
+        journal.purge_at(opened_at);
+        assert_eq!(journal.finish(), Ok(()));
     }
 }
