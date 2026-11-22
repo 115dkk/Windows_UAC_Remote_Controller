@@ -1,6 +1,6 @@
 {
   "name": "windows-uac-remote-controller",
-  "version": "1.14.4",
+  "version": "1.14.5",
   "private": true,
   "type": "module",
   "license": "GPL-2.0-or-later",
